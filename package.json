@@ -1,0 +1,42 @@
+{
+  "name": "libchelonia",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "okTurtles Foundation Inc.",
+  "license": "UNLICENSED",
+  "description": "",
+  "dependencies": {
+    "@chelonia/crypto": "^1.0.0",
+    "@chelonia/serdes": "^1.0.0",
+    "@sbp/okturtles.data": "^0.1.6",
+    "@sbp/okturtles.eventqueue": "^1.2.1",
+    "@sbp/okturtles.events": "^1.0.1",
+    "@sbp/sbp": "^2.4.1",
+    "turtledash": "^1.0.2"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.26.0",
+    "eslint-config-standard": "^17.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.2"
+  },
+  "eslintConfig": {
+    "root": true,
+    "parser": "@typescript-eslint/parser",
+    "plugins": [
+      "@typescript-eslint"
+    ],
+    "extends": [
+      "plugin:@typescript-eslint/recommended",
+      "standard"
+    ]
+  },
+  "eslintIgnore": [
+    "dist/*",
+    "node_modules/*",
+    "**/*.md"
+  ]
+}
