@@ -25,6 +25,7 @@
   },
   "homepage": "https://github.com/okTurtles/libcheloniajs#readme",
   "dependencies": {
+    "@apeleghq/rfc8188": "^1.0.7",
     "@chelonia/crypto": "^1.0.0",
     "@chelonia/serdes": "^1.0.0",
     "@sbp/okturtles.data": "^0.1.6",
