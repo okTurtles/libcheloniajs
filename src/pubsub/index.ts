@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-this-alias */
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
+import type { JSONObject, JSONType } from '../types.js'
 
 // ====== Enums ====== //
 
@@ -8,6 +9,7 @@ export const NOTIFICATION_TYPE = Object.freeze({
   ENTRY: 'entry',
   DELETION: 'deletion',
   KV: 'kv',
+  KV_FILTER: 'kv_filter',
   PING: 'ping',
   PONG: 'pong',
   PUB: 'pub',
@@ -20,7 +22,8 @@ export const REQUEST_TYPE = Object.freeze({
   PUB: 'pub',
   SUB: 'sub',
   UNSUB: 'unsub',
-  PUSH_ACTION: 'push_action'
+  PUSH_ACTION: 'push_action',
+  KV_FILTER: 'kv_filter'
 })
 
 export const RESPONSE_TYPE = Object.freeze({
@@ -39,12 +42,9 @@ export type NotificationTypeEnum = typeof NOTIFICATION_TYPE[keyof typeof NOTIFIC
 export type RequestTypeEnum = typeof REQUEST_TYPE[keyof typeof REQUEST_TYPE]
 export type ResponseTypeEnum = typeof RESPONSE_TYPE[keyof typeof RESPONSE_TYPE]
 
-// eslint-disable-next-line no-use-before-define
-export type JSONType = string | number | boolean | null | JSONObject | JSONArray;
-export type JSONObject = { [key:string]: JSONType };
-export type JSONArray = Array<JSONType>;
+// ====== Types ====== //
 
-// ====== End Enums ====== //
+type TimeoutID = ReturnType<typeof setTimeout>
 
 type Options = {
   logPingMessages: boolean;
@@ -63,33 +63,6 @@ type Options = {
   // eslint-disable-next-line no-use-before-define
   messageHandlers?: Partial<MessageHandlers>;
 }
-
-// TODO: verify these are good defaults
-const defaultOptions: Options = {
-  logPingMessages: process.env.NODE_ENV === 'development' && !process.env.CI,
-  pingTimeout: 45000,
-  maxReconnectionDelay: 60000,
-  maxRetries: 10,
-  minReconnectionDelay: 500,
-  reconnectOnDisconnection: true,
-  reconnectOnOnline: true,
-  // Defaults to false to avoid reconnection attempts in case the server doesn't
-  // respond because of a failed authentication.
-  reconnectOnTimeout: false,
-  reconnectionDelayGrowFactor: 2,
-  timeout: 60000
-}
-
-// ====== Event name constants ====== //
-
-export const PUBSUB_ERROR = 'pubsub-error'
-export const PUBSUB_RECONNECTION_ATTEMPT = 'pubsub-reconnection-attempt'
-export const PUBSUB_RECONNECTION_FAILED = 'pubsub-reconnection-failed'
-export const PUBSUB_RECONNECTION_SCHEDULED = 'pubsub-reconnection-scheduled'
-export const PUBSUB_RECONNECTION_SUCCEEDED = 'pubsub-reconnection-succeeded'
-export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded'
-
-type TimeoutID = ReturnType<typeof setTimeout>
 
 export type Message = {
   [key: string]: JSONType,
@@ -116,6 +89,7 @@ export type PubSubClient = {
   shouldReconnect: boolean,
   socket: WebSocket | null,
   subscriptionSet: Set<string>,
+  kvFilter: Map<string, string[]>,
   url: string,
   // Methods
   clearAllTimers(this: PubSubClient): void,
@@ -163,13 +137,38 @@ export type SubMessage = {
   [key: string]: JSONType,
   type: 'sub',
   channelID: string
-}
+} & { kvFilter?: Array<string> }
 
 export type UnsubMessage = {
   [key: string]: JSONType,
   type: 'unsub',
   channelID: string
 }
+
+// TODO: verify these are good defaults
+const defaultOptions: Options = {
+  logPingMessages: process.env.NODE_ENV === 'development' && !process.env.CI,
+  pingTimeout: 45000,
+  maxReconnectionDelay: 60000,
+  maxRetries: 10,
+  minReconnectionDelay: 500,
+  reconnectOnDisconnection: true,
+  reconnectOnOnline: true,
+  // Defaults to false to avoid reconnection attempts in case the server doesn't
+  // respond because of a failed authentication.
+  reconnectOnTimeout: false,
+  reconnectionDelayGrowFactor: 2,
+  timeout: 60000
+}
+
+// ====== Event name constants ====== //
+
+export const PUBSUB_ERROR = 'pubsub-error'
+export const PUBSUB_RECONNECTION_ATTEMPT = 'pubsub-reconnection-attempt'
+export const PUBSUB_RECONNECTION_FAILED = 'pubsub-reconnection-failed'
+export const PUBSUB_RECONNECTION_SCHEDULED = 'pubsub-reconnection-scheduled'
+export const PUBSUB_RECONNECTION_SUCCEEDED = 'pubsub-reconnection-succeeded'
+export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded'
 
 // ====== API ====== //
 
@@ -213,6 +212,7 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
     // A new one is necessary for every connection or reconnection attempt.
     socket: null,
     subscriptionSet: new Set(),
+    kvFilter: new Map(),
     connectionTimeoutID: undefined,
     url: url.replace(/^http/, 'ws'),
     ...publicMethods
@@ -347,7 +347,7 @@ const defaultClientEventHandlers: ClientEventHandlers = {
   // Emitted when a message is received.
   // The connection will be terminated if the message is malformed or has an
   // unexpected data type (e.g. binary instead of text).
-  message (event) {
+  message (event: MessageEvent) {
     const client = this
     const { data } = event
 
@@ -421,7 +421,8 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     }
     // Send any pending subscription request.
     client.pendingSubscriptionSet.forEach((channelID) => {
-      client.socket?.send(createRequest(REQUEST_TYPE.SUB, { channelID }))
+      const kvFilter = this.kvFilter.get(channelID)
+      client.socket?.send(createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }))
     })
     // There should be no pending unsubscription since we just got connected.
   },
@@ -534,6 +535,11 @@ const defaultMessageHandlers: MessageHandlers = {
         console.debug(`[pubsub] Unsubscribed from ${channelID}`)
         client.pendingUnsubscriptionSet.delete(channelID)
         client.subscriptionSet.delete(channelID)
+        client.kvFilter.delete(channelID)
+        break
+      }
+      case REQUEST_TYPE.KV_FILTER: {
+        console.debug(`[pubsub] Set KV filter for ${channelID}`)
         break
       }
       default: {
@@ -543,8 +549,8 @@ const defaultMessageHandlers: MessageHandlers = {
   }
 }
 
-const globalEventNames: ['offline', 'online'] = ['offline', 'online']
-const socketEventNames: ['close', 'error', 'message', 'open'] = ['close', 'error', 'message', 'open']
+const globalEventNames = ['offline', 'online'] as const
+const socketEventNames = ['close', 'error', 'message', 'open'] as const
 // eslint-disable-next-line func-call-spacing
 const globalEventMap = new Map<string, (ev: Event) => void>()
 
@@ -588,6 +594,7 @@ const publicMethods: {
   pub(this: PubSubClient, channelID: string, data: JSONType): void,
   scheduleConnectionAttempt(this: PubSubClient): void,
   sub(this: PubSubClient, channelID: string): void,
+  setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void,
   unsub(this: PubSubClient, channelID: string): void,
   getNextRandomDelay(this: PubSubClient): number
 } = {
@@ -761,6 +768,27 @@ const publicMethods: {
   },
 
   /**
+   * Sends a KV_FILTER request to the server as soon as possible.
+   */
+  setKvFilter (channelID: string, kvFilter?: string[]) {
+    const client = this
+    const { socket } = this
+
+    if (kvFilter) {
+      client.kvFilter.set(channelID, kvFilter)
+    } else {
+      client.kvFilter.delete(channelID)
+    }
+
+    if (client.subscriptionSet.has(channelID)) {
+      if (socket?.readyState === WebSocket.OPEN) {
+        // $FlowFixMe[incompatible-call]
+        socket.send(createRequest(REQUEST_TYPE.KV_FILTER, kvFilter ? { channelID, kvFilter } : { channelID }))
+      }
+    }
+  },
+
+  /**
    * Sends an UNSUB request to the server as soon as possible.
    *
    * - The given channel ID will be cached until we get a relevant server
@@ -786,7 +814,7 @@ const publicMethods: {
 
 // Register custom SBP event listeners before the first connection.
 for (const name of Object.keys(defaultClientEventHandlers)) {
-  if (name === 'error' || !(socketEventNames as string[]).includes(name)) {
+  if (name === 'error' || !(socketEventNames as readonly string[]).includes(name)) {
     sbp('okTurtles.events/on', `pubsub-${name}`, (target: PubSubClient, detail?: object) => {
       const ev = new CustomEvent(name, { detail })
       ;(target.listeners[name as keyof ClientEventHandlers] as (this: typeof target, e: typeof ev) => void).call(target, ev)

@@ -1,15 +1,15 @@
 // This file provides utility functions that are local regardless of whether
 // Chelonia is running in a different context and calls are being forwarded
 // using `chelonia/*`
-import { cloneDeep } from 'turtledash'
 import sbp from '@sbp/sbp'
+import { cloneDeep } from 'turtledash'
 import { CONTRACTS_MODIFIED, CONTRACTS_MODIFIED_READY, EVENT_HANDLED, EVENT_HANDLED_READY } from '../events.js'
 
 type Context = {
   stateSelector: string;
 }
 
-export default (sbp('sbp/selectors/register', {
+export default sbp('sbp/selectors/register', {
   // This selector sets up event listeners on EVENT_HANDLED and CONTRACTS_MODIFIED
   // to keep Chelonia state in sync with some external state (e.g., Vuex).
   // This needs to be called from the context that owns this external state
@@ -68,7 +68,7 @@ export default (sbp('sbp/selectors/register', {
       })
     })
 
-    sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (subscriptionSet: never, { added, removed }: { added: Array<string>, removed: Array<string> }) => {
+    sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (subscriptionSet: never, { added, removed, permanent }: { added: Array<string>, removed: Array<string>, permanent: boolean }) => {
       sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
         const states = added.length
           ? await sbp('chelonia/contract/fullState', added)
@@ -80,7 +80,11 @@ export default (sbp('sbp/selectors/register', {
         }
 
         removed.forEach((contractID: string) => {
-          reactiveDel(vuexState.contracts, contractID)
+          if (permanent) {
+            reactiveSet(vuexState.contracts, contractID, null)
+          } else {
+            reactiveDel(vuexState.contracts, contractID)
+          }
           reactiveDel(vuexState, contractID)
         })
         for (const contractID of added) {
@@ -106,7 +110,7 @@ export default (sbp('sbp/selectors/register', {
     // If the current 'local' state has a height higher than or equal to the
     // Chelonia height, we've processed all events and don't need to wait any
     // longer.
-    if (cheloniaState.height <= localState.contracts[contractID]?.height) return
+    if (!cheloniaState || cheloniaState.height <= localState.contracts[contractID]?.height) return
 
     // Otherwise, listen for `EVENT_HANDLED_READY` events till we have reached
     // the necessary height.
@@ -122,4 +126,4 @@ export default (sbp('sbp/selectors/register', {
       })
     })
   }
-}) as string[])
+}) as string[]

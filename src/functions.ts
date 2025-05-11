@@ -1,8 +1,9 @@
-import type { Digest } from '@chelonia/multiformats'
 import { base58btc } from '@chelonia/multiformats/bases/base58'
 import { blake2b256 } from '@chelonia/multiformats/blake2b'
 import { blake2b256stream } from '@chelonia/multiformats/blake2bstream'
 import { CID } from '@chelonia/multiformats/cid'
+// Use 'buffer' instead of 'node:buffer' to polyfill in the browser
+import { Buffer } from 'buffer'
 import { has } from 'turtledash'
 
 // Values from https://github.com/multiformats/multicodec/blob/master/table.csv
@@ -16,7 +17,7 @@ export const multicodes: { [x: string]: number } = {
   SHELTER_FILE_CHUNK: 0x511e04
 }
 
-export const parseCID = (cid: string): CID => {
+export const parseCID = (cid: string): Object => {
   if (!cid || cid.length < 52 || cid.length > 64) {
     throw new RangeError('CID length too short or too long')
   }
@@ -32,40 +33,38 @@ export const parseCID = (cid: string): CID => {
   return parsed
 }
 
-export const maybeParseCID = (cid: string): CID | null => {
+export const maybeParseCID = (cid: string): Object | null => {
   try {
     return parseCID(cid)
-  } catch {
+  } catch (e) {
     // Ignore errors if the CID couldn't be parsed
     return null
   }
 }
 
 // Makes the `Buffer` global available in the browser if needed.
+// $FlowFixMe[cannot-resolve-name]
 if (typeof globalThis === 'object' && !has(globalThis, 'Buffer')) {
-  // Only import `Buffer` to hopefully help treeshaking.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { Buffer } = require('buffer')
   globalThis.Buffer = Buffer
 }
 
 export async function createCIDfromStream (data: string | Uint8Array | ReadableStream, multicode: number = multicodes.RAW): Promise<string> {
   const uint8array = typeof data === 'string' ? new TextEncoder().encode(data) : data
   const digest = await blake2b256stream.digest(uint8array)
-  return CID.create(1, multicode, digest).toString(base58btc)
+  return CID.create(1, multicode, digest).toString(base58btc.encoder)
 }
 
 // TODO: implement a streaming hashing function for large files.
 // Note: in fact this returns a serialized CID, not a CID object.
 export function createCID (data: string | Uint8Array, multicode: number = multicodes.RAW): string {
   const uint8array = typeof data === 'string' ? new TextEncoder().encode(data) : data
-  const digest = blake2b256.digest(uint8array) as Digest
-  return CID.create(1, multicode, digest).toString(base58btc)
+  const digest = blake2b256.digest(uint8array)
+  return CID.create(1, multicode, digest).toString(base58btc.encoder)
 }
 
 export function blake32Hash (data: string | Uint8Array): string {
   const uint8array = typeof data === 'string' ? new TextEncoder().encode(data) : data
-  const digest = blake2b256.digest(uint8array) as Digest
+  const digest = blake2b256.digest(uint8array)
   // While `digest.digest` is only 32 bytes long in this case,
   // `digest.bytes` is 36 bytes because it includes a multiformat prefix.
   return base58btc.encode(digest.bytes)
@@ -85,14 +84,13 @@ export const strToB64 = (str: string): string => strToBuf(str).toString('base64'
 export const bytesToB64 = (ary: Uint8Array): string => Buffer.from(ary).toString('base64')
 
 // Generate an UUID from a `PushSubscription'
-// eslint-disable-next-line no-undef
-export const getSubscriptionId = async (subscriptionInfo: PushSubscriptionJSON): Promise<string> => {
+export const getSubscriptionId = async (subscriptionInfo: Object): Promise<string> => {
   const textEncoder = new TextEncoder()
   // <https://w3c.github.io/push-api/#pushsubscription-interface>
   const endpoint = textEncoder.encode(subscriptionInfo.endpoint)
   // <https://w3c.github.io/push-api/#pushencryptionkeyname-enumeration>
-  const p256dh = textEncoder.encode(subscriptionInfo.keys?.p256dh)
-  const auth = textEncoder.encode(subscriptionInfo.keys?.auth)
+  const p256dh = textEncoder.encode(subscriptionInfo.keys.p256dh)
+  const auth = textEncoder.encode(subscriptionInfo.keys.auth)
 
   const canonicalForm = new ArrayBuffer(
     8 +
@@ -128,10 +126,10 @@ export const getSubscriptionId = async (subscriptionInfo: PushSubscriptionJSON):
   id[8] = 0x80 | (id[8] & 0x3F)
 
   return [
-    id.subarray(0, 4),
-    id.subarray(4, 6),
-    id.subarray(6, 8),
-    id.subarray(8, 10),
-    id.subarray(10, 16)
+    id.slice(0, 4),
+    id.slice(4, 6),
+    id.slice(6, 8),
+    id.slice(8, 10),
+    id.slice(10, 16)
   ].map((p) => p.toString('hex')).join('-')
 }
