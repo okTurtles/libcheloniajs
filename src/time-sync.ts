@@ -1,4 +1,5 @@
 import sbp from '@sbp/sbp'
+import type { CheloniaContext } from './types.js'
 
 // `wallBase` is the base used to calculate wall time (i.e., time elapsed as one
 // would get from, e.g., looking a clock hanging from a wall).
@@ -17,7 +18,7 @@ let monotonicBase = performance.now()
 let resyncTimeout: ReturnType<typeof setTimeout> | null | undefined
 let watchdog: ReturnType<typeof setInterval> | null | undefined
 
-const syncServerTime = async function (this: unknown) {
+const syncServerTime = async function (this: CheloniaContext) {
   // Get our current monotonic time
   const startTime = performance.now()
   // Now, ask the server for the time
@@ -45,7 +46,7 @@ const syncServerTime = async function (this: unknown) {
 }
 
 export default sbp('sbp/selectors/register', {
-  'chelonia/private/startClockSync': function () {
+  'chelonia/private/startClockSync': function (this: CheloniaContext) {
     if (resyncTimeout !== undefined) {
       throw new Error('chelonia/private/startClockSync has already been called')
     }

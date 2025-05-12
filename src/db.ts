@@ -3,6 +3,7 @@ import '@sbp/okturtles.eventqueue'
 import sbp from '@sbp/sbp'
 import { SPMessage } from './SPMessage.js'
 import { ChelErrorDBBadPreviousHEAD, ChelErrorDBConnection } from './errors.js'
+import type { CheloniaContext } from './types.js'
 
 const headPrefix = 'head='
 
@@ -125,13 +126,13 @@ export default sbp('sbp/selectors/register', {
   'chelonia/db/deleteLatestHEADinfo': (contractID: string): Promise<void> => {
     return sbp('chelonia.db/set', getLogHead(contractID), '')
   },
-  'chelonia/db/getEntry': async function (hash: string): Promise<SPMessage> {
+  'chelonia/db/getEntry': async function (this: CheloniaContext, hash: string): Promise<SPMessage> {
     try {
       const value: string = await sbp('chelonia.db/get', hash)
       if (!value) throw new Error(`no entry for ${hash}!`)
       return SPMessage.deserialize(value, this.transientSecretKeys)
     } catch (e) {
-      throw new ChelErrorDBConnection(`${e.name} during getEntry: ${e.message}`)
+      throw new ChelErrorDBConnection(`${(e as Error).name} during getEntry: ${(e as Error).message}`)
     }
   },
   'chelonia/db/addEntry': function (entry: SPMessage): Promise<string> {
@@ -195,10 +196,10 @@ export default sbp('sbp/selectors/register', {
       })
       return entry.hash()
     } catch (e) {
-      if (e.name.includes('ErrorDB')) {
+      if ((e as Error).name.includes('ErrorDB')) {
         throw e // throw the specific type of ErrorDB instance
       }
-      throw new ChelErrorDBConnection(`${e.name} during addEntry: ${e.message}`)
+      throw new ChelErrorDBConnection(`${(e as Error).name} during addEntry: ${(e as Error).message}`)
     }
   },
   'chelonia/db/lastEntry': async function (contractID: string): Promise<SPMessage> {
@@ -207,7 +208,7 @@ export default sbp('sbp/selectors/register', {
       if (!latestHEADinfo) throw new Error(`contract ${contractID} has no latest hash!`)
       return sbp('chelonia/db/getEntry', latestHEADinfo.HEAD)
     } catch (e) {
-      throw new ChelErrorDBConnection(`${e.name} during lastEntry: ${e.message}`)
+      throw new ChelErrorDBConnection(`${(e as Error).name} during lastEntry: ${(e as Error).message}`)
     }
   }
 }) as string[]

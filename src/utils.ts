@@ -13,7 +13,7 @@ import { b64ToStr } from './functions.js'
 import type { SignedData } from './signedData.js'
 import { isSignedData } from './signedData.js'
 
-const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER, 10) || Infinity
+const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10) || Infinity
 
 export const findKeyIdByName = (state: Object, name: string): ?string => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys: any)): any): SPKey[]).find((k) => k.name === name && k._notAfterHeight == null)?.id
 

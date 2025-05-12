@@ -4,6 +4,7 @@ import sbp from '@sbp/sbp'
 import { has } from 'turtledash'
 import { ChelErrorSignatureError, ChelErrorSignatureKeyNotFound, ChelErrorSignatureKeyUnauthorized } from './errors.js'
 import { blake32Hash } from './functions.js'
+import type { ChelContractState } from './types.js'
 
 const rootStateFn = () => sbp('chelonia/rootState')
 
@@ -54,10 +55,10 @@ export const isSignedData = <T, U extends object>(o: unknown): o is SignedData<T
 
 // TODO: Check for permissions and allowedActions; this requires passing some
 // additional context
-const signData = function <T, U extends object> (stateOrContractID: string | object, sKeyId: string, data: T, extraFields: U, additionalKeys: Record<string, Key | string>, additionalData: string): U & {
+const signData = function <T, U extends object> (stateOrContractID: string | ChelContractState, sKeyId: string, data: T, extraFields: U, additionalKeys: Record<string, Key | string>, additionalData: string): U & {
   _signedData: [string, string, string]
 } {
-  const state = typeof stateOrContractID === 'string' ? rootStateFn()[stateOrContractID] : stateOrContractID
+  const state = typeof stateOrContractID === 'string' ? rootStateFn()[stateOrContractID] as ChelContractState : stateOrContractID
   if (!additionalData) {
     throw new ChelErrorSignatureError('Signature additional data must be provided')
   }
@@ -113,7 +114,7 @@ const signData = function <T, U extends object> (stateOrContractID: string | obj
 
 // TODO: Check for permissions and allowedActions; this requires passing the
 // entire SPMessage
-const verifySignatureData = function <T, U extends object> (state: object, height: number, data: U & { _signedData: [string, string, string] }, additionalData: string): [string, T] {
+const verifySignatureData = function <T, U extends object> (state: ChelContractState, height: number, data: U & { _signedData: [string, string, string] }, additionalData: string): [string, T] {
   if (!state) {
     throw new ChelErrorSignatureError('Missing contract state')
   }
@@ -129,7 +130,7 @@ const verifySignatureData = function <T, U extends object> (state: object, heigh
   const [serializedMessage, sKeyId, signature] = data._signedData
   const designatedKey = state._vm?.authorizedKeys?.[sKeyId]
 
-  if (!designatedKey || (height > designatedKey._notAfterHeight) || (height < designatedKey._notBeforeHeight) || !designatedKey.purpose.includes(
+  if (!designatedKey || (height > designatedKey._notAfterHeight!) || (height < designatedKey._notBeforeHeight) || !designatedKey.purpose.includes(
     'sig'
   )) {
     // These errors (ChelErrorSignatureKeyUnauthorized) are serious and
@@ -159,11 +160,11 @@ const verifySignatureData = function <T, U extends object> (state: object, heigh
 
     return [sKeyId, message]
   } catch (e) {
-    throw new ChelErrorSignatureError(e?.message || e)
+    throw new ChelErrorSignatureError((e as Error)?.message || e as string)
   }
 }
 
-export const signedOutgoingData = <T, U extends object>(stateOrContractID: string | object, sKeyId: string, data: T, additionalKeys?: Record<string, Key | string>): SignedData<T, U> => {
+export const signedOutgoingData = <T, U extends object>(stateOrContractID: string | ChelContractState, sKeyId: string, data: T, additionalKeys?: Record<string, Key | string>): SignedData<T, U> => {
   if (!stateOrContractID || data === undefined || !sKeyId) throw new TypeError('Invalid invocation')
 
   if (!additionalKeys) {
@@ -203,7 +204,8 @@ export const signedOutgoingData = <T, U extends object>(stateOrContractID: strin
 }
 
 // Used for OP_CONTRACT as a state does not yet exist
-export const signedOutgoingDataWithRawKey = <T, U extends object>(key: Key, data: T, height?: number): SignedData<T, U> => {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export const signedOutgoingDataWithRawKey = <T, U extends object>(key: Key, data: T, _height?: number): SignedData<T, U> => {
   const sKeyId = keyId(key)
   const state = {
     _vm: {
@@ -216,7 +218,7 @@ export const signedOutgoingDataWithRawKey = <T, U extends object>(key: Key, data
         }
       }
     }
-  }
+  } as ChelContractState
 
   const extraFields = Object.create(null)
 

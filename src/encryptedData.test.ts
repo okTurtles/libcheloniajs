@@ -1,7 +1,8 @@
 import { CURVE25519XSALSA20POLY1305, keygen, keyId, serializeKey } from '@chelonia/crypto'
-import should from 'should'
-import 'should-sinon'
+import * as assert from 'node:assert'
+import { describe, it } from 'node:test'
 import { encryptedIncomingData, encryptedOutgoingData, encryptedOutgoingDataWithRawKey } from './encryptedData.js'
+import type { ChelContractState } from './types.js'
 
 describe('Encrypted data API', () => {
   it('should encrypt outgoing data and decrypt incoming data when using a key from the state', () => {
@@ -17,30 +18,30 @@ describe('Encrypted data API', () => {
           }
         }
       }
-    }
+    } as ChelContractState
 
     const encryptedData = encryptedOutgoingData(state, id, 'foo')
-    should(encryptedData).type('object')
-    should(encryptedData.toString).type('function')
-    should(encryptedData.serialize).type('function')
-    should(encryptedData.valueOf).type('function')
-    should(encryptedData.valueOf()).equal('foo')
+    assert.ok(typeof encryptedData === 'object')
+    assert.ok(typeof encryptedData.toString === 'function')
+    assert.ok(typeof encryptedData.serialize === 'function')
+    assert.ok(typeof encryptedData.valueOf === 'function')
+    assert.equal(encryptedData.valueOf(), 'foo')
 
     const stringifiedEncryptedData = encryptedData.toString('')
-    should(stringifiedEncryptedData).not.equal('foo')
-    should(encryptedData.serialize('')).not.equal('foo')
+    assert.notEqual(stringifiedEncryptedData, 'foo')
+    assert.notEqual(encryptedData.serialize(''), 'foo')
 
     const incoming = encryptedIncomingData('', state, JSON.parse(stringifiedEncryptedData), 0, {
       [id]: key
     })
 
-    should(incoming).type('object')
-    should(incoming.toString).type('function')
-    should(incoming.toJSON).type('function')
-    should(incoming.valueOf).type('function')
-    should(incoming.toJSON()).deepEqual(JSON.parse(stringifiedEncryptedData))
-    should(incoming.toString()).equal(stringifiedEncryptedData)
-    should(incoming.valueOf()).equal('foo')
+    assert.ok(typeof incoming === 'object')
+    assert.ok(typeof incoming.toString === 'function')
+    assert.ok(typeof incoming.serialize === 'function')
+    assert.ok(typeof incoming.valueOf === 'function')
+    assert.deepEqual(incoming.toJSON!(), JSON.parse(stringifiedEncryptedData))
+    assert.equal(incoming.toString(), stringifiedEncryptedData)
+    assert.equal(incoming.valueOf(), 'foo')
   })
 
   it('should encrypt outgoing data and decrypt incoming data when using a raw key', () => {
@@ -48,15 +49,14 @@ describe('Encrypted data API', () => {
     const id = keyId(key)
 
     const encryptedData = encryptedOutgoingDataWithRawKey(key, 'foo')
-    should(encryptedData).type('object')
-    should(encryptedData.toString).type('function')
-    should(encryptedData.serialize).type('function')
-    should(encryptedData.valueOf).type('function')
-    should(encryptedData.valueOf()).equal('foo')
+    assert.ok(typeof encryptedData === 'object')
+    assert.ok(typeof encryptedData.toString === 'function')
+    assert.ok(typeof encryptedData.serialize === 'function')
+    assert.ok(typeof encryptedData.valueOf === 'function')
+    assert.equal(encryptedData.valueOf(), 'foo')
 
     const serializedEncryptedData = encryptedData.serialize()
-    should(serializedEncryptedData).not.equal('foo')
-    should(encryptedData.serialize()).not.equal('foo')
+    assert.notEqual(serializedEncryptedData, 'foo')
 
     const incoming = encryptedIncomingData('', {
       _vm: {
@@ -66,14 +66,14 @@ describe('Encrypted data API', () => {
           }
         }
       }
-    }, serializedEncryptedData, 0, { [id]: key })
+    } as ChelContractState, serializedEncryptedData, 0, { [id]: key })
 
-    should(incoming).type('object')
-    should(incoming.toString).type('function')
-    should(incoming.toJSON).type('function')
-    should(incoming.valueOf).type('function')
-    should(incoming.valueOf()).equal('foo')
-    should(incoming.toJSON()).equal(serializedEncryptedData)
-    should(incoming.toString()).equal(JSON.stringify(serializedEncryptedData))
+    assert.ok(typeof incoming === 'object')
+    assert.ok(typeof incoming.toString === 'function')
+    assert.ok(typeof incoming.serialize === 'function')
+    assert.ok(typeof incoming.valueOf === 'function')
+    assert.equal(incoming.valueOf(), 'foo')
+    assert.deepEqual(incoming.toJSON!(), serializedEncryptedData)
+    assert.equal(incoming.toString(), JSON.stringify(serializedEncryptedData))
   })
 })

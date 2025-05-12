@@ -1,59 +1,47 @@
-/* eslint-env mocha */
-
-// Can run directly with:
-// ./node_modules/.bin/mocha --require Gruntfile.js --require @babel/register shared/domains/chelonia/persistent-actions.test.js
-
 // FIXME: `Error: unsafe must be called before registering selector` when Mocha reloads the file.
 
-import assert from 'node:assert'
-import crypto from 'node:crypto'
 import sbp from '@sbp/sbp'
-import sinon from 'sinon'
+import assert from 'node:assert'
+import { test, it } from 'node:test'
 
-import '~/shared/domains/chelonia/db.js'
+import './db.js'
 
+import { PERSISTENT_ACTION_FAILURE, PERSISTENT_ACTION_SUCCESS, PERSISTENT_ACTION_TOTAL_FAILURE } from './events.js'
 import './persistent-actions.js'
-import { PERSISTENT_ACTION_FAILURE, PERSISTENT_ACTION_TOTAL_FAILURE, PERSISTENT_ACTION_SUCCESS } from './events.js'
+import type { PersistentActionSbpStatus } from './persistent-actions.js'
 
-// Provides the 'crypto' global in the Nodejs environment.
-if (!globalThis.crypto) {
-  Object.defineProperty(globalThis, 'crypto', { value: crypto })
-}
 // Necessary to avoid 'JSON.stringify' errors since Node timeouts are circular objects, whereas browser timeouts are just integers.
 setTimeout(() => {}).constructor.prototype.toJSON = () => undefined
 
 sbp('sbp/selectors/register', {
-  call (fn, ...args) {
+  call <A, R, T extends (...args: A[]) => R>(fn: T, ...args: A[]) {
     return fn(...args)
   },
-  log (msg) {
+  log <T> (msg: T) {
     console.log(msg)
   },
-  rejectAfter100ms (arg) {
-    return new Promise((resolve, reject) => {
+  rejectAfter100ms <T> (arg: T) {
+    return new Promise<never>((resolve, reject) => {
       setTimeout(() => reject(arg), 100)
     })
   },
-  resolveAfter100ms (arg) {
-    return new Promise((resolve, reject) => {
+  resolveAfter100ms <T> (arg: T) {
+    return new Promise<T>((resolve) => {
       setTimeout(() => resolve(arg), 100)
     })
   },
-  returnImmediately (arg) {
+  returnImmediately <T> (arg: T) {
     return arg
   },
-  throwImmediately (arg) {
+  throwImmediately <T> (arg: T) {
     throw arg
   }
 })
 
 const createRandomError = () => new Error(`Bad number: ${String(Math.random())}`)
-const getActionStatus = (id) => sbp('chelonia.persistentActions/status').find(obj => obj.id === id)
-const isActionRemoved = (id) => !sbp('chelonia.persistentActions/status').find(obj => obj.id === id)
+const getActionStatus = (id: string): PersistentActionSbpStatus => sbp('chelonia.persistentActions/status').find((obj: PersistentActionSbpStatus) => obj.id === id)
+const isActionRemoved = (id: string) => !sbp('chelonia.persistentActions/status').find((obj: PersistentActionSbpStatus) => obj.id === id)
 
-const spies = {
-  returnImmediately: sinon.spy(sbp('sbp/selectors/fn', 'returnImmediately'))
-}
 // Custom `configure` options for tests.
 // Mocha has a default 2000ms test timeout, therefore we'll use short delays.
 const testOptions = {
@@ -61,7 +49,11 @@ const testOptions = {
   retrySeconds: 0.5
 }
 
-describe('Test persistent actions', function () {
+test('Test persistent actions', function (t) {
+  const spies = {
+    returnImmediately: t.mock.fn(sbp('sbp/selectors/fn', 'returnImmediately'))
+  }
+
   it('should configure', function () {
     sbp('chelonia.persistentActions/configure', {
       databaseKey: 'test-key',
@@ -96,7 +88,7 @@ describe('Test persistent actions', function () {
       const arg = args[index]
       const status = getActionStatus(id)
       assert.strictEqual(status.id, id)
-      assert.deepEqual(status.invocation, arg.invocation ?? arg)
+      assert.deepEqual(status.invocation, Array.isArray(arg) ? arg : arg.invocation)
       assert.strictEqual(status.attempting, false)
       assert.strictEqual(status.failedAttemptsSoFar, 0)
       assert.strictEqual(status.lastError, '')
@@ -104,10 +96,10 @@ describe('Test persistent actions', function () {
       assert.strictEqual(status.resolved, false)
     })
     // Check the actions have NOT been tried yet.
-    assert.strictEqual(spies.returnImmediately.called, false)
+    assert.strictEqual(spies.returnImmediately.mock.callCount(), 0)
   })
 
-  it('should emit a success event and remove the action', function () {
+  it('should emit a success event and remove the action', async () => {
     // Prepare actions using both sync and async invocations.
     // TODO: maybe the async case is enough, which would make the code simpler.
     const randomNumbers = [Math.random(), Math.random()]
@@ -116,7 +108,7 @@ describe('Test persistent actions', function () {
       ['returnImmediately', randomNumbers[1]]
     ]
     const ids = sbp('chelonia.persistentActions/enqueue', ...invocations)
-    return Promise.all(ids.map((id, index) => new Promise((resolve, reject) => {
+    await Promise.all(ids.map((id, index) => new Promise<void>((resolve, reject) => {
       // Registers a success handler for each received id.
       sbp('okTurtles.events/on', PERSISTENT_ACTION_SUCCESS, function handler (details) {
         if (details.id !== id) return
@@ -151,7 +143,7 @@ describe('Test persistent actions', function () {
           assert.strictEqual(status.lastError, ourError.message)
           assert.strictEqual(status.resolved, false)
           // Check a retry has been scheduled.
-          assert(new Date(status.nextRetry) - Date.now() <= testOptions.retrySeconds * 1e3)
+          assert(new Date(status.nextRetry).getTime() - Date.now() <= testOptions.retrySeconds * 1e3)
           resolve()
         } catch (err) {
           reject(err)
@@ -160,51 +152,51 @@ describe('Test persistent actions', function () {
     })
   })
 
-  it('should emit N failure events, then a total failure event and remove the action (sync)', function () {
+  it('should emit N failure events, then a total failure event and remove the action (sync)', () => {
     const ourError = createRandomError()
     const invocation = ['throwImmediately', ourError]
     return e2eFailureTest(invocation, ourError)
   })
 
-  it('should emit N failure events, then a total failure event and remove the action (async)', function () {
+  it('should emit N failure events, then a total failure event and remove the action (async)', () => {
     const ourError = createRandomError()
     const invocation = ['rejectAfter100ms', ourError]
     return e2eFailureTest(invocation, ourError)
   })
 
-  it('should handle non-Error failures gracefully', function () {
+  it('should handle non-Error failures gracefully', () => {
     const ourError = 'not a real error'
     const invocation = ['rejectAfter100ms', ourError]
     return e2eFailureTest(invocation, ourError)
   })
 
-  function e2eFailureTest (invocation, ourError) {
-    const errorInvocationSpy = sinon.spy()
+  function e2eFailureTest (invocation: unknown, ourError: unknown) {
+    const errorInvocationSpy = t.mock.fn()
     const errorInvocation = ['call', errorInvocationSpy]
 
     const [id] = sbp('chelonia.persistentActions/enqueue', { invocation, errorInvocation })
 
-    return new Promise((resolve, reject) => {
+    return new Promise<void>((resolve, reject) => {
       let failureEventCounter = 0
-      sbp('okTurtles.events/on', PERSISTENT_ACTION_FAILURE, (details) => {
+      sbp('okTurtles.events/on', PERSISTENT_ACTION_FAILURE, (details: { error: Error, id: string }) => {
         if (details.id !== id) return
         failureEventCounter++
         try {
-          assert(failureEventCounter <= testOptions.maxAttempts, 1)
+          assert(failureEventCounter <= testOptions.maxAttempts, '1')
           // Check the event handler was called before the corresponding SBP invocation.
-          assert.strictEqual(failureEventCounter, errorInvocationSpy.callCount + 1, 2)
-          assert.strictEqual(details.error.message, ourError?.message ?? ourError, 3)
+          assert.strictEqual(failureEventCounter, errorInvocationSpy.mock.callCount() + 1, '2')
+          assert.strictEqual(details.error.message, (ourError as Error)?.message ?? ourError, '3')
         } catch (err) {
           reject(err)
         }
       })
-      sbp('okTurtles.events/on', PERSISTENT_ACTION_TOTAL_FAILURE, (details) => {
+      sbp('okTurtles.events/on', PERSISTENT_ACTION_TOTAL_FAILURE, (details: { error: Error, id: string }) => {
         if (details.id !== id) return
         try {
-          assert.strictEqual(failureEventCounter, testOptions.maxAttempts, 3)
-          assert.strictEqual(errorInvocationSpy.callCount, testOptions.maxAttempts, 4)
-          assert.strictEqual(details.error.message, ourError?.message ?? ourError, 5)
-          assert(isActionRemoved(id), 6)
+          assert.strictEqual(failureEventCounter, testOptions.maxAttempts, '3')
+          assert.strictEqual(errorInvocationSpy.mock.callCount(), testOptions.maxAttempts, '4')
+          assert.strictEqual(details.error.message, (ourError as Error)?.message ?? ourError, '5')
+          assert(isActionRemoved(id), '6')
           resolve()
         } catch (err) {
           reject(err)

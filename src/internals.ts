@@ -2,7 +2,7 @@
 
 import sbp, { domainFromSelector } from '@sbp/sbp'
 import { handleFetchResult } from '~/frontend/controller/utils/misc.js'
-import { multicodes } from '~/shared/functions.js'
+import { multicodes } from './functions.js'
 import { cloneDeep, debounce, delay, has, pick, randomIntFromRange } from 'turtledash'
 import type { SPKey, SPOpActionEncrypted, SPOpActionUnencrypted, SPOpAtomic, SPOpContract, SPOpKeyAdd, SPOpKeyDel, SPOpKeyRequest, SPOpKeyRequestSeen, SPOpKeyShare, SPOpKeyUpdate, SPOpPropSet, SPOpType, ProtoSPOpKeyRequestSeen, ProtoSPOpKeyShare } from './SPMessage.js'
 import { SPMessage } from './SPMessage.js'

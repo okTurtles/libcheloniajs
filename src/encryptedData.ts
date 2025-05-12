@@ -4,6 +4,7 @@ import sbp from '@sbp/sbp'
 import { has } from 'turtledash'
 import { ChelErrorDecryptionError, ChelErrorDecryptionKeyNotFound, ChelErrorUnexpected } from './errors.js'
 import { isRawSignedData, signedIncomingData } from './signedData.js'
+import type { ChelContractState } from './types.js'
 
 const rootStateFn = () => sbp('chelonia/rootState')
 
@@ -45,8 +46,8 @@ export const isEncryptedData = <T>(o: unknown): o is EncryptedData<T> => {
 
 // TODO: Check for permissions and allowedActions; this requires passing some
 // additional context
-const encryptData = function <T> (stateOrContractID: string | object, eKeyId: string, data: T, additionalData: string): [string, string] {
-  const state = typeof stateOrContractID === 'string' ? rootStateFn()[stateOrContractID] : stateOrContractID
+const encryptData = function <T> (stateOrContractID: string | ChelContractState, eKeyId: string, data: T, additionalData: string): [string, string] {
+  const state = typeof stateOrContractID === 'string' ? rootStateFn()[stateOrContractID] as ChelContractState : stateOrContractID
 
   // Has the key been revoked? If so, attempt to find an authorized key by the same name
   // $FlowFixMe
@@ -92,7 +93,7 @@ const encryptData = function <T> (stateOrContractID: string | object, eKeyId: st
 
 // TODO: Check for permissions and allowedActions; this requires passing the
 // entire SPMessage
-const decryptData = function <T> (state: object, height: number, data: [string, string], additionalKeys: Record<string, Key | string>, additionalData: string, validatorFn?: (v: T, id: string) => void): T {
+const decryptData = function <T> (state: ChelContractState, height: number, data: [string, string], additionalKeys: Record<string, Key | string>, additionalData: string, validatorFn?: (v: T, id: string) => void): T {
   if (!state) {
     throw new ChelErrorDecryptionError('Missing contract state')
   }
@@ -137,7 +138,7 @@ const decryptData = function <T> (state: object, height: number, data: [string, 
   // any new attack vectors or venues that were not already available using
   // different means.
   const designatedKey = state._vm?.authorizedKeys?.[eKeyId]
-  if (!designatedKey || (height > designatedKey._notAfterHeight) || (height < designatedKey._notBeforeHeight) || !designatedKey.purpose.includes(
+  if (!designatedKey || (height > designatedKey._notAfterHeight!) || (height < designatedKey._notBeforeHeight) || !designatedKey.purpose.includes(
     'enc'
   )) {
     throw new ChelErrorUnexpected(
@@ -152,11 +153,11 @@ const decryptData = function <T> (state: object, height: number, data: [string, 
     if (typeof validatorFn === 'function') validatorFn(result, eKeyId)
     return result
   } catch (e) {
-    throw new ChelErrorDecryptionError(e?.message || e)
+    throw new ChelErrorDecryptionError((e as Error)?.message || e as string)
   }
 }
 
-export const encryptedOutgoingData = <T>(stateOrContractID: string | object, eKeyId: string, data: T): EncryptedData<T> => {
+export const encryptedOutgoingData = <T>(stateOrContractID: string | ChelContractState, eKeyId: string, data: T): EncryptedData<T> => {
   if (!stateOrContractID || data === undefined || !eKeyId) throw new TypeError('Invalid invocation')
 
   const boundStringValueFn = encryptData.bind(null, stateOrContractID, eKeyId, data)
@@ -193,7 +194,7 @@ export const encryptedOutgoingDataWithRawKey = <T>(key: Key, data: T): Encrypted
         }
       }
     }
-  }
+  } as ChelContractState
   const boundStringValueFn = encryptData.bind(null, state, eKeyId, data)
 
   return wrapper({
@@ -212,7 +213,7 @@ export const encryptedOutgoingDataWithRawKey = <T>(key: Key, data: T): Encrypted
   })
 }
 
-export const encryptedIncomingData = <T>(contractID: string, state: object, data: [string, string], height: number, additionalKeys?: Record<string, Key | string>, additionalData?: string, validatorFn?: (v: T, id: string) => void): EncryptedData<T> => {
+export const encryptedIncomingData = <T>(contractID: string, state: ChelContractState, data: [string, string], height: number, additionalKeys?: Record<string, Key | string>, additionalData?: string, validatorFn?: (v: T, id: string) => void): EncryptedData<T> => {
   let decryptedValue: T
   const decryptedValueFn = (): T => {
     if (decryptedValue) {
@@ -308,7 +309,7 @@ export const encryptedIncomingDataWithRawKey = <T>(key: Key, data: [string, stri
           }
         }
       }
-    }
+    } as ChelContractState
     decryptedValue = decryptData(state, NaN, data, { [eKeyId]: key }, additionalData || '')
 
     return decryptedValue
@@ -371,7 +372,7 @@ export const unwrapMaybeEncryptedData = (data: unknown): { encryptionKeyId: stri
   }
 }
 
-export const maybeEncryptedIncomingData = <T>(contractID: string, state: object, data: T | [string, string], height: number, additionalKeys?: Record<string, Key | string>, additionalData?: string, validatorFn?: (v: T, id: string) => void): T | EncryptedData<T> => {
+export const maybeEncryptedIncomingData = <T>(contractID: string, state: ChelContractState, data: T | [string, string], height: number, additionalKeys?: Record<string, Key | string>, additionalData?: string, validatorFn?: (v: T, id: string) => void): T | EncryptedData<T> => {
   if (isRawEncryptedData(data)) {
     return encryptedIncomingData(contractID, state, data, height, additionalKeys, additionalData, validatorFn)
   } else {
