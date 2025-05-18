@@ -350,7 +350,7 @@ export const isRawEncryptedData = (data: unknown): data is [string, string] => {
   return true
 }
 
-export const unwrapMaybeEncryptedData = (data: unknown): { encryptionKeyId: string | null, data: unknown } | void => {
+export const unwrapMaybeEncryptedData = <T> (data: T | EncryptedData<T>): { encryptionKeyId: string | null, data: T } | void => {
   if (isEncryptedData(data)) {
     // If not running on a browser, we don't decrypt data to avoid filling the
     // logs with unable to decrypt messages.

@@ -2,6 +2,8 @@
 
 import type { Key } from '@chelonia/crypto'
 import type sbp from '@sbp/sbp'
+import { PubSubClient } from './pubsub/index.js'
+import { SPMessage } from './SPMessage.js'
 
 export type JSONType =
     | string
@@ -58,13 +60,13 @@ export type CheloniaConfig = {
     reconnectOnTimeout: boolean,
   },
   hooks: {
-    preHandleEvent: null, // async (message: SPMessage) => {}
-    postHandleEvent: null, // async (message: SPMessage) => {}
-    processError: null, // (e: Error, message: SPMessage) => {}
-    sideEffectError: null, // (e: Error, message: SPMessage) => {}
-    handleEventError: null, // (e: Error, message: SPMessage) => {}
-    syncContractError: null, // (e: Error, contractID: string) => {}
-    pubsubError: null // (e:Error, socket: Socket)
+    preHandleEvent?: { (message: SPMessage): Promise<void> } | null,
+    postHandleEvent?: { (message: SPMessage): Promise<void> } | null,
+    processError?: { (e: unknown, message: SPMessage): void } | null,
+    sideEffectError?: { (e: unknown, message: SPMessage): void } | null,
+    handleEventError?: { (e: unknown, message: SPMessage): void } | null,
+    syncContractError?: { (e: unknown, contractID: string): void } | null,
+    pubsubError?: { (e: unknown, socket: PubSubClient): void } | null
   }
 }
 export type CheloniaContext = {
@@ -76,7 +78,7 @@ export type CheloniaContext = {
     pending: string[],
     [x: string]: unknown
   },
-  manifestToContract: Record<string, string>,
+  manifestToContract: Record<string, { contract: object }>,
   whitelistedActions: Record<string, string>,
   currentSyncs: Record<string, { firstSync: boolean }>,
   postSyncOperations: Record<string, Record<string, Parameters<typeof sbp>>>,
@@ -86,7 +88,9 @@ export type CheloniaContext = {
   transientSecretKeys: Record<string, Key>,
   ephemeralReferenceCount: Record<string, number>,
   subscriptionSet: Set<string>,
-  pending: string[]
+  pending: string[],
+  pubsub: import('./pubsub/index.js').PubSubClient,
+  contractsModifiedListener: (contracts: Set<string>, { added, removed }: { added: string[], removed: string[] }) => void
 }
 
 export type ChelFileManifest = {
@@ -110,6 +114,8 @@ export type ChelContractKey = {
   allowedActions?: '*' | string[],
   _notBeforeHeight: number,
   _notAfterHeight?: number | undefined,
+  _private?: boolean,
+  foreignKey?: string,
   meta?: {
     quantity?: number,
     expires?: number,
@@ -117,7 +123,12 @@ export type ChelContractKey = {
       transient?: boolean,
       content?: string,
       shareable?: boolean,
-      oldKeys?: string
+      oldKeys?: string,
+    },
+    keyRequest?: {
+      contractID: string,
+      reference: string,
+      responded: boolean
     }
   }
   data: string
@@ -125,7 +136,40 @@ export type ChelContractKey = {
 
 export type ChelContractState = {
   _vm: {
-    authorizedKeys: Record<string, ChelContractKey>
+    authorizedKeys: Record<string, ChelContractKey>,
+    invites?: Record<string, {
+      status: string,
+      initialQuantity: number,
+      quantity: number,
+      expires: number,
+      inviteSecret: string,
+      responses: string[]
+    }>,
+    type: string,
+    pendingWatch?: Record<string, [fkName: string, fkId: string][]>,
+    keyshares?: Record<string, { success: boolean, contractID: string, height: number, hash: string }>,
+    sharedKeyIds?: { id: string }[]
+  },
+  _volatile?: {
+    pendingKeyRequests?: {
+      contractID: string,
+      hash: string,
+      name: string,
+      reference?: string
+    }[],
+    watch?: [fkName: string, fkId: string][],
+    dirty?: boolean,
+    resyncing?: boolean,
+  }
+}
+
+export type ChelRootState = {
+  [x: string]: ChelContractState
+} & {
+  contracts: {
+    HEAD: string,
+    height: number,
+    previousKeyOp: string
   }
 }
 
@@ -135,5 +179,5 @@ export type Response = {
   data?: JSONType
 }
 export type ChelKvOnConflictCallback = (
-  args: { contractID: string, key: string, failedData: JSONType, status: number, etag: string | null | undefined, currentData: JSONType, currentValue: JSONType }
+  args: { contractID: string, key: string, failedData?: JSONType, status: number, etag: string | null | undefined, currentData: JSONType, currentValue: JSONType }
 ) => Promise<[JSONType, string]>

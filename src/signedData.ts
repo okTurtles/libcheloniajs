@@ -49,13 +49,13 @@ const wrapper = <T>(o: T): T => {
 // `isSignedData` will return true for objects created by the various
 // `signed*Data` functions. It's meant to implement functionality equivalent
 // to `o instanceof SignedData`
-export const isSignedData = <T, U extends object>(o: unknown): o is SignedData<T, U> => {
+export const isSignedData = <T, U extends object = object>(o: unknown): o is SignedData<T, U> => {
   return !!o && !!Object.getPrototypeOf(o)?._isSignedData
 }
 
 // TODO: Check for permissions and allowedActions; this requires passing some
 // additional context
-const signData = function <T, U extends object> (stateOrContractID: string | ChelContractState, sKeyId: string, data: T, extraFields: U, additionalKeys: Record<string, Key | string>, additionalData: string): U & {
+const signData = function <T, U extends object = object> (stateOrContractID: string | ChelContractState, sKeyId: string, data: T, extraFields: U, additionalKeys: Record<string, Key | string>, additionalData: string): U & {
   _signedData: [string, string, string]
 } {
   const state = typeof stateOrContractID === 'string' ? rootStateFn()[stateOrContractID] as ChelContractState : stateOrContractID
@@ -114,7 +114,7 @@ const signData = function <T, U extends object> (stateOrContractID: string | Che
 
 // TODO: Check for permissions and allowedActions; this requires passing the
 // entire SPMessage
-const verifySignatureData = function <T, U extends object> (state: ChelContractState, height: number, data: U & { _signedData: [string, string, string] }, additionalData: string): [string, T] {
+const verifySignatureData = function <T, U extends object = object> (state: ChelContractState, height: number, data: U & { _signedData: [string, string, string] }, additionalData: string): [string, T] {
   if (!state) {
     throw new ChelErrorSignatureError('Missing contract state')
   }
@@ -164,7 +164,7 @@ const verifySignatureData = function <T, U extends object> (state: ChelContractS
   }
 }
 
-export const signedOutgoingData = <T, U extends object>(stateOrContractID: string | ChelContractState, sKeyId: string, data: T, additionalKeys?: Record<string, Key | string>): SignedData<T, U> => {
+export const signedOutgoingData = <T, U extends object = object>(stateOrContractID: string | ChelContractState, sKeyId: string, data: T, additionalKeys?: Record<string, Key | string>): SignedData<T, U> => {
   if (!stateOrContractID || data === undefined || !sKeyId) throw new TypeError('Invalid invocation')
 
   if (!additionalKeys) {
@@ -205,7 +205,7 @@ export const signedOutgoingData = <T, U extends object>(stateOrContractID: strin
 
 // Used for OP_CONTRACT as a state does not yet exist
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-export const signedOutgoingDataWithRawKey = <T, U extends object>(key: Key, data: T, _height?: number): SignedData<T, U> => {
+export const signedOutgoingDataWithRawKey = <T, U extends object = object>(key: Key, data: T, _height?: number): SignedData<T, U> => {
   const sKeyId = keyId(key)
   const state = {
     _vm: {
@@ -252,7 +252,7 @@ export const signedOutgoingDataWithRawKey = <T, U extends object>(key: Key, data
   })
 }
 
-export const signedIncomingData = <T, U extends object>(contractID: string, state: object | null | undefined, data: U & { _signedData: [string, string, string] }, height: number, additionalData: string, mapperFn?: (value: unknown) => T): SignedData<T, U> => {
+export const signedIncomingData = <T, V = T, U extends object = object>(contractID: string, state: object | null | undefined, data: U & { _signedData: [string, string, string] }, height: number, additionalData: string, mapperFn?: (value: V) => T): SignedData<T, U> => {
   const stringValueFn = () => data
   let verifySignedValue: [string, T]
   const verifySignedValueFn = () => {
@@ -260,7 +260,7 @@ export const signedIncomingData = <T, U extends object>(contractID: string, stat
       return verifySignedValue[1]
     }
     verifySignedValue = verifySignatureData(state || rootStateFn()[contractID], height, data, additionalData) as [string, T]
-    if (mapperFn) verifySignedValue[1] = mapperFn(verifySignedValue[1])
+    if (mapperFn) verifySignedValue[1] = mapperFn(verifySignedValue[1] as unknown as V)
     return verifySignedValue[1]
   }
 
@@ -307,7 +307,7 @@ export const isRawSignedData = (data: unknown): data is { _signedData: [string, 
 }
 
 // WARNING: The following function (rawSignedIncomingData) will not check signatures
-export const rawSignedIncomingData = <T, U extends object>(data: U & { _signedData: [string, string, string] }): SignedData<T, U> => {
+export const rawSignedIncomingData = <T, U extends object = object>(data: U & { _signedData: [string, string, string] }): SignedData<T, U> => {
   if (!isRawSignedData(data)) {
     throw new ChelErrorSignatureError('Invalid message format')
   }

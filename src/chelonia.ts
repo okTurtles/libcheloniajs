@@ -1,13 +1,11 @@
-'use strict'
-
 import '@sbp/okturtles.eventqueue'
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
 import { handleFetchResult } from '~/frontend/controller/utils/misc.js'
 import { cloneDeep, delay, difference, has, intersection, merge, randomHexString, randomIntFromRange } from 'turtledash'
-import { createCID, parseCID } from '~/shared/functions.js'
-import { NOTIFICATION_TYPE, createClient } from '~/shared/pubsub.js'
-import type { SPKey, SPOpActionUnencrypted, SPOpContract, SPOpKeyAdd, SPOpKeyDel, SPOpKeyRequest, SPOpKeyRequestSeen, SPOpKeyShare, SPOpKeyUpdate } from './SPMessage.js'
+import { createCID, parseCID } from './functions.js'
+import { NOTIFICATION_TYPE, createClient } from './pubsub/index.js'
+import type { SPKey, SPKeyPurpose, SPOpActionUnencrypted, SPOpContract, SPOpKeyAdd, SPOpKeyDel, SPOpKeyRequest, SPOpKeyRequestSeen, SPOpKeyShare, SPOpKeyUpdate, SPOpValue } from './SPMessage.js'
 import type { Key } from '@chelonia/crypto'
 import { EDWARDS25519SHA512BATCH, deserializeKey, keyId, keygen, serializeKey } from '@chelonia/crypto'
 import { ChelErrorResourceGone, ChelErrorUnexpected, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable } from './errors.js'
@@ -20,48 +18,50 @@ import type { EncryptedData } from './encryptedData.js'
 import { encryptedOutgoingData, encryptedOutgoingDataWithRawKey, isEncryptedData, maybeEncryptedIncomingData } from './encryptedData.js'
 import './files.js'
 import './internals.js'
-import { isSignedData, signedIncomingData, signedOutgoingData, signedOutgoingDataWithRawKey } from './signedData.js'
+import { SignedData, isSignedData, signedIncomingData, signedOutgoingData, signedOutgoingDataWithRawKey } from './signedData.js'
 import './time-sync.js'
 import { buildShelterAuthorizationHeader, checkCanBeGarbageCollected, clearObject, collectEventStream, eventsAfter, findForeignKeysByContractID, findKeyIdByName, findRevokedKeyIdsByName, findSuitableSecretKeyId, getContractIDfromKeyId, reactiveClearObject } from './utils.js'
+import { ChelContractKey, ChelContractState, ChelKvOnConflictCallback, ChelRootState, CheloniaConfig, CheloniaContext, JSONType } from './types.js'
+import type { Options as PubSubOptions, PubSubClient } from './pubsub/index.js'
 
 // TODO: define ChelContractType for /defineContract
 
 export type ChelRegParams = {
   contractName: string;
   server?: string; // TODO: implement!
-  data: Object;
+  data: object;
   signingKeyId: string;
   actionSigningKeyId: string;
-  actionEncryptionKeyId: ?string;
+  actionEncryptionKeyId?: string | null | undefined;
   keys: (SPKey | EncryptedData<SPKey>)[];
-  namespaceRegistration: ?string;
+  namespaceRegistration?: string | null | undefined;
   hooks?: {
-    prepublishContract?: (SPMessage) => void;
-    postpublishContract?: (SPMessage) => void;
-    preSendCheck?: (SPMessage, Object) => void;
-    beforeRequest?: (SPMessage, SPMessage) => Promise<void>;
-    prepublish?: (SPMessage) => Promise<void>;
-    postpublish?: (SPMessage) => Promise<void>;
-    onprocessed?: (SPMessage) => Promise<void>;
+    prepublishContract?: (msg: SPMessage) => void;
+    postpublishContract?: (msg: SPMessage) => void;
+    preSendCheck?: (msg: SPMessage, state: ChelContractState) => void;
+    beforeRequest?: (msg1: SPMessage, msg2: SPMessage) => Promise<void> | void;
+    prepublish?: (msg: SPMessage) => Promise<void> | void;
+    postpublish?: (msg: SPMessage) => Promise<void> | void;
+    onprocessed?: (msg: SPMessage) => Promise<void> | void;
   };
-  publishOptions?: { headers: ?Object, billableContractID: ?string, maxAttempts: number };
+  publishOptions?: { headers?: Record<string, string> | null | undefined, billableContractID?: string | null | undefined, maxAttempts?: number | null | undefined };
 }
 
 export type ChelActionParams = {
   action: string;
   server?: string; // TODO: implement!
   contractID: string;
-  data: Object;
+  data: object;
   signingKeyId: string;
   innerSigningKeyId: string;
-  encryptionKeyId: ?string;
-  encryptionKey: ?Key,
+  encryptionKeyId?: string | null | undefined;
+  encryptionKey?: Key | null | undefined,
   hooks?: {
-    prepublishContract?: (SPMessage) => void;
-    prepublish?: (SPMessage) => Promise<void>;
-    postpublish?: (SPMessage) => Promise<void>;
+    prepublishContract?: (msg: SPMessage) => void;
+    prepublish?: (msg: SPMessage) => Promise<void> | void;
+    postpublish?: (msg: SPMessage) => Promise<void> | void;
   };
-  publishOptions?: { maxAttempts: number };
+  publishOptions?: { maxAttempts?: number };
   atomic: boolean;
 }
 
@@ -71,11 +71,11 @@ export type ChelKeyAddParams = {
   data: SPOpKeyAdd;
   signingKeyId: string;
   hooks?: {
-    prepublishContract?: (SPMessage) => void;
-    prepublish?: (SPMessage) => Promise<void>;
-    postpublish?: (SPMessage) => Promise<void>;
+    prepublishContract?: (msg: SPMessage) => void;
+    prepublish?: (msg: SPMessage) => Promise<void> | void;
+    postpublish?: (msg: SPMessage) => Promise<void> | void;
   };
-  publishOptions?: { maxAttempts: number };
+  publishOptions?: { maxAttempts?: number };
   atomic: boolean;
 }
 
@@ -85,11 +85,11 @@ export type ChelKeyDelParams = {
   data: SPOpKeyDel;
   signingKeyId: string;
   hooks?: {
-    prepublishContract?: (SPMessage) => void;
-    prepublish?: (SPMessage) => Promise<void>;
-    postpublish?: (SPMessage) => Promise<void>;
+    prepublishContract?: (msg: SPMessage) => void;
+    prepublish?: (msg: SPMessage) => Promise<void>;
+    postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts: number };
+  publishOptions?: { maxAttempts?: number };
   atomic: boolean;
 }
 
@@ -99,11 +99,11 @@ export type ChelKeyUpdateParams = {
   data: SPOpKeyUpdate;
   signingKeyId: string;
   hooks?: {
-    prepublishContract?: (SPMessage) => void;
-    prepublish?: (SPMessage) => Promise<void>;
-    postpublish?: (SPMessage) => Promise<void>;
+    prepublishContract?: (msg: SPMessage) => void;
+    prepublish?: (msg: SPMessage) => Promise<void>;
+    postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts: number };
+  publishOptions?: { maxAttempts?: number };
   atomic: boolean;
 }
 
@@ -116,9 +116,9 @@ export type ChelKeyShareParams = {
   signingKeyId?: string;
   signingKey?: Key;
   hooks?: {
-    prepublishContract?: (SPMessage) => void;
-    prepublish?: (SPMessage) => Promise<void>;
-    postpublish?: (SPMessage) => Promise<void>;
+    prepublishContract?: (msg: SPMessage) => void;
+    prepublish?: (msg: SPMessage) => Promise<void>;
+    postpublish?: (msg: SPMessage) => Promise<void>;
   };
   publishOptions?: { maxAttempts: number };
   atomic: boolean;
@@ -140,11 +140,11 @@ export type ChelKeyRequestParams = {
   // of the user-initiated action that triggered this key request)
   reference?: string;
   hooks?: {
-    prepublishContract?: (SPMessage) => void;
-    prepublish?: (SPMessage) => Promise<void>;
-    postpublish?: (SPMessage) => Promise<void>;
+    prepublishContract?: (msg: SPMessage) => void;
+    prepublish?: (msg: SPMessage) => Promise<void>;
+    postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts: number };
+  publishOptions?: { maxAttempts?: number };
   atomic: boolean;
 }
 
@@ -154,11 +154,11 @@ export type ChelKeyRequestResponseParams = {
   data: SPOpKeyRequestSeen;
   signingKeyId: string;
   hooks?: {
-    prepublishContract?: (SPMessage) => void;
-    prepublish?: (SPMessage) => Promise<void>;
-    postpublish?: (SPMessage) => Promise<void>;
+    prepublishContract?: (msg: SPMessage) => void;
+    prepublish?: (msg: SPMessage) => Promise<void>;
+    postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts: number };
+  publishOptions?: { maxAttempts?: number };
   atomic: boolean;
 }
 
@@ -168,13 +168,13 @@ export type ChelAtomicParams = {
   contractName: string;
   contractID: string;
   signingKeyId: string;
-  data: [string, Object][];
+  data: [string, SPOpValue][];
   hooks?: {
-    prepublishContract?: (SPMessage) => void;
-    prepublish?: (SPMessage) => Promise<void>;
-    postpublish?: (SPMessage) => Promise<void>;
+    prepublishContract?: (msg: SPMessage) => void;
+    prepublish?: (msg: SPMessage) => Promise<void>;
+    postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts: number };
+  publishOptions?: { maxAttempts?: number };
 }
 
 export { SPMessage }
@@ -188,15 +188,15 @@ export const ACTION_REGEX: RegExp = /^((([\w.]+)\/([^/]+))(?:\/(?:([^/]+)\/)?)?)
 // 4 => 'group'
 // 5 => 'payment'
 
-export default (sbp('sbp/selectors/register', {
+export default sbp('sbp/selectors/register', {
   // https://www.wordnik.com/words/chelonia
   // https://gitlab.okturtles.org/okturtles/group-income/-/wikis/E2E-Protocol/Framework.md#alt-names
-  'chelonia/_init': function () {
+  'chelonia/_init': function (this: CheloniaContext) {
     this.config = {
       // TODO: handle connecting to multiple servers for federation
       get connectionURL () { throw new Error('Invalid use of connectionURL before initialization') },
       // override!
-      set connectionURL (value) { Object.defineProperty(this, 'connectionURL', { value, writable: true }) },
+      set connectionURL (value: string) { Object.defineProperty(this, 'connectionURL', { value, writable: true }) },
       stateSelector: 'chelonia/private/state', // override to integrate with, for example, vuex
       contracts: {
         defaults: {
@@ -251,8 +251,8 @@ export default (sbp('sbp/selectors/register', {
     this.whitelistedActions = {}
     this.currentSyncs = Object.create(null)
     this.postSyncOperations = Object.create(null)
-    this.sideEffectStacks = Object.create(null) // [contractID]: Array<*>
-    this.sideEffectStack = (contractID: string): Array<*> => {
+    this.sideEffectStacks = Object.create(null) // [contractID]: Array<unknown>
+    this.sideEffectStack = (contractID: string) => {
       let stack = this.sideEffectStacks[contractID]
       if (!stack) {
         this.sideEffectStacks[contractID] = stack = []
@@ -269,11 +269,11 @@ export default (sbp('sbp/selectors/register', {
     // The operations defined here will be executed:
     //   (1) After a call to /sync or /syncContract; or
     //   (2) After an event has been handled, if it was received on a web socket
-    this.setPostSyncOp = (contractID: string, key: string, op: Array<*>) => {
+    this.setPostSyncOp = (contractID: string, key: string, op: Parameters<typeof sbp>) => {
       this.postSyncOperations[contractID] = this.postSyncOperations[contractID] || Object.create(null)
       this.postSyncOperations[contractID][key] = op
     }
-    const secretKeyGetter = (o, p) => {
+    const secretKeyGetter = (o: Record<string, Key>, p: string) => {
       if (has(o, p)) return o[p]
       const rootState = sbp(this.config.stateSelector)
       if (rootState?.secretKeys && has(rootState.secretKeys, p)) {
@@ -282,7 +282,7 @@ export default (sbp('sbp/selectors/register', {
         return key
       }
     }
-    const secretKeyList = (o) => {
+    const secretKeyList = (o: Record<string, Key>) => {
       const rootState = sbp(this.config.stateSelector)
       const stateKeys = Object.keys(rootState?.secretKeys || {})
       return Array.from(new Set([...Object.keys(o), ...stateKeys]))
@@ -316,7 +316,7 @@ export default (sbp('sbp/selectors/register', {
     // first time, they are removed from pending and added to subscriptionSet
     this.pending = []
   },
-  'chelonia/config': function () {
+  'chelonia/config': function (this: CheloniaContext) {
     return {
       ...cloneDeep(this.config),
       fetch: this.config.fetch,
@@ -324,7 +324,7 @@ export default (sbp('sbp/selectors/register', {
       reactiveDel: this.config.reactiveDel
     }
   },
-  'chelonia/configure': async function (config: Object) {
+  'chelonia/configure': async function (this: CheloniaContext, config: CheloniaConfig) {
     merge(this.config, config)
     // merge will strip the hooks off of config.hooks when merging from the root of the object
     // because they are functions and cloneDeep doesn't clone functions
@@ -339,7 +339,7 @@ export default (sbp('sbp/selectors/register', {
       }
     }
   },
-  'chelonia/reset': async function (newState, postCleanupFn) {
+  'chelonia/reset': async function (this: CheloniaContext, newState: ChelRootState | undefined, postCleanupFn?: () => Promise<void> | void) {
     // Allow optional newState OR postCleanupFn
     if (typeof newState === 'function' && typeof postCleanupFn === 'undefined') {
       postCleanupFn = newState
@@ -391,7 +391,7 @@ export default (sbp('sbp/selectors/register', {
     }
     return result
   },
-  'chelonia/storeSecretKeys': function (wkeys: Secret<{key: Key | string, transient?: boolean}[]>) {
+  'chelonia/storeSecretKeys': function (this: CheloniaContext, wkeys: Secret<{key: Key | string, transient?: boolean}[]>) {
     const rootState = sbp(this.config.stateSelector)
     if (!rootState.secretKeys) this.config.reactiveSet(rootState, 'secretKeys', Object.create(null))
     let keys = wkeys.valueOf()
@@ -414,7 +414,7 @@ export default (sbp('sbp/selectors/register', {
       }
     })
   },
-  'chelonia/clearTransientSecretKeys': function (ids?: string[]) {
+  'chelonia/clearTransientSecretKeys': function (this: CheloniaContext, ids?: string[]) {
     if (Array.isArray(ids)) {
       ids.forEach((id) => {
         delete this.transientSecretKeys[id]
@@ -425,36 +425,35 @@ export default (sbp('sbp/selectors/register', {
       })
     }
   },
-  'chelonia/haveSecretKey': function (keyId: string, persistent?: boolean) {
+  'chelonia/haveSecretKey': function (this: CheloniaContext, keyId: string, persistent?: boolean) {
     if (!persistent && has(this.transientSecretKeys, keyId)) return true
     const rootState = sbp(this.config.stateSelector)
     return !!rootState?.secretKeys && has(rootState.secretKeys, keyId)
   },
-  'chelonia/contract/isResyncing': function (contractIDOrState: string | Object) {
+  'chelonia/contract/isResyncing': function (this: CheloniaContext, contractIDOrState: string | ChelContractState) {
     if (typeof contractIDOrState === 'string') {
       const rootState = sbp(this.config.stateSelector)
       contractIDOrState = rootState[contractIDOrState]
     }
-    return !!contractIDOrState?._volatile?.dirty || !!contractIDOrState?._volatile?.resyncing
+    return !!(contractIDOrState as ChelContractState)?._volatile?.dirty || !!(contractIDOrState as ChelContractState)?._volatile?.resyncing
   },
-  'chelonia/contract/hasKeyShareBeenRespondedBy': function (contractIDOrState?: string | Object, requestedToContractID: string, reference?: string): boolean {
+  'chelonia/contract/hasKeyShareBeenRespondedBy': function (this: CheloniaContext, contractIDOrState: string | ChelContractState | null | undefined, requestedToContractID: string, reference?: string): boolean {
     if (typeof contractIDOrState === 'string') {
       const rootState = sbp(this.config.stateSelector)
       contractIDOrState = rootState[contractIDOrState]
     }
-    const result = Object.values(contractIDOrState?._vm.authorizedKeys || {}).some((r) => {
-      // $FlowFixMe[incompatible-use]
+    const result = Object.values((contractIDOrState as ChelContractState)?._vm.authorizedKeys || {}).some((r) => {
       return r?.meta?.keyRequest?.responded && r.meta.keyRequest.contractID === requestedToContractID && (!reference || r.meta.keyRequest.reference === reference)
     })
 
     return result
   },
-  'chelonia/contract/waitingForKeyShareTo': function (contractIDOrState: string | Object, requestingContractID?: string, reference?: string): null | string[] {
+  'chelonia/contract/waitingForKeyShareTo': function (this: CheloniaContext, contractIDOrState: string | ChelContractState, requestingContractID?: string, reference?: string): null | string[] {
     if (typeof contractIDOrState === 'string') {
       const rootState = sbp(this.config.stateSelector)
       contractIDOrState = rootState[contractIDOrState]
     }
-    const result = contractIDOrState._volatile?.pendingKeyRequests
+    const result = (contractIDOrState as ChelContractState)._volatile?.pendingKeyRequests
       ?.filter((r) => {
         return r && (!requestingContractID || r.contractID === requestingContractID) && (!reference || r.reference === reference)
       })
@@ -463,16 +462,15 @@ export default (sbp('sbp/selectors/register', {
     if (!result?.length) return null
     return result
   },
-  'chelonia/contract/successfulKeySharesByContractID': function (contractIDOrState: string | Object, requestingContractID?: string) {
+  'chelonia/contract/successfulKeySharesByContractID': function (this: CheloniaContext, contractIDOrState: string | ChelContractState, requestingContractID?: string) {
     if (typeof contractIDOrState === 'string') {
       const rootState = sbp(this.config.stateSelector)
       contractIDOrState = rootState[contractIDOrState]
     }
-    const keyShares = Object.values(contractIDOrState._vm.keyshares || {})
+    const keyShares = Object.values((contractIDOrState as ChelContractState)._vm.keyshares || {})
     if (!keyShares?.length) return
-    const result = Object.create(null)
-    // $FlowFixMe[incompatible-call]
-    keyShares.forEach((kS: { success: boolean, contractID: string, height: number, hash: string }) => {
+    const result = Object.create(null) as Record<string, {height: number, hash: string}[]>
+    keyShares.forEach((kS) => {
       if (!kS.success) return
       if (requestingContractID && kS.contractID !== requestingContractID) return
       if (!result[kS.contractID]) result[kS.contractID] = []
@@ -485,17 +483,17 @@ export default (sbp('sbp/selectors/register', {
     })
     return result
   },
-  'chelonia/contract/hasKeysToPerformOperation': function (contractIDOrState: string | Object, operation: string) {
+  'chelonia/contract/hasKeysToPerformOperation': function (this: CheloniaContext, contractIDOrState: string | ChelContractState, operation: string) {
     if (typeof contractIDOrState === 'string') {
       const rootState = sbp(this.config.stateSelector)
       contractIDOrState = rootState[contractIDOrState]
     }
     const op = (operation !== '*') ? [operation] : operation
-    return !!findSuitableSecretKeyId(contractIDOrState, op, ['sig'])
+    return !!findSuitableSecretKeyId((contractIDOrState as ChelContractState), op, ['sig'])
   },
   // Did sourceContractIDOrState receive an OP_KEY_SHARE to perform the given
   // operation on contractIDOrState?
-  'chelonia/contract/receivedKeysToPerformOperation': function (sourceContractIDOrState: string | Object, contractIDOrState: string | Object, operation: string) {
+  'chelonia/contract/receivedKeysToPerformOperation': function (this: CheloniaContext, sourceContractIDOrState: string | ChelContractState, contractIDOrState: string | ChelContractState, operation: string) {
     const rootState = sbp(this.config.stateSelector)
     if (typeof sourceContractIDOrState === 'string') {
       sourceContractIDOrState = rootState[sourceContractIDOrState]
@@ -504,46 +502,46 @@ export default (sbp('sbp/selectors/register', {
       contractIDOrState = rootState[contractIDOrState]
     }
     const op = (operation !== '*') ? [operation] : operation
-    const keyId = findSuitableSecretKeyId(contractIDOrState, op, ['sig'])
+    const keyId = findSuitableSecretKeyId(contractIDOrState as ChelContractState, op, ['sig'])
 
-    return sourceContractIDOrState?._vm?.sharedKeyIds?.some((sK) => sK.id === keyId)
+    return (sourceContractIDOrState as ChelContractState)?._vm?.sharedKeyIds?.some((sK) => sK.id === keyId)
   },
-  'chelonia/contract/currentKeyIdByName': function (contractIDOrState: string | Object, name: string, requireSecretKey?: boolean) {
+  'chelonia/contract/currentKeyIdByName': function (this: CheloniaContext, contractIDOrState: string | ChelContractState, name: string, requireSecretKey?: boolean) {
     if (typeof contractIDOrState === 'string') {
       const rootState = sbp(this.config.stateSelector)
       contractIDOrState = rootState[contractIDOrState]
     }
-    const currentKeyId = findKeyIdByName(contractIDOrState, name)
+    const currentKeyId = findKeyIdByName(contractIDOrState as ChelContractState, name)
     if (requireSecretKey && !sbp('chelonia/haveSecretKey', currentKeyId)) {
       return
     }
     return currentKeyId
   },
-  'chelonia/contract/foreignKeysByContractID': function (contractIDOrState: string | Object, foreignContractID: string) {
+  'chelonia/contract/foreignKeysByContractID': function (this: CheloniaContext, contractIDOrState: string | ChelContractState, foreignContractID: string) {
     if (typeof contractIDOrState === 'string') {
       const rootState = sbp(this.config.stateSelector)
       contractIDOrState = rootState[contractIDOrState]
     }
-    return findForeignKeysByContractID(contractIDOrState, foreignContractID)
+    return findForeignKeysByContractID(contractIDOrState as ChelContractState, foreignContractID)
   },
-  'chelonia/contract/historicalKeyIdsByName': function (contractIDOrState: string | Object, name: string) {
+  'chelonia/contract/historicalKeyIdsByName': function (this: CheloniaContext, contractIDOrState: string | ChelContractState, name: string) {
     if (typeof contractIDOrState === 'string') {
       const rootState = sbp(this.config.stateSelector)
       contractIDOrState = rootState[contractIDOrState]
     }
-    const currentKeyId = findKeyIdByName(contractIDOrState, name)
-    const revokedKeyIds = findRevokedKeyIdsByName(contractIDOrState, name)
+    const currentKeyId = findKeyIdByName(contractIDOrState as ChelContractState, name)
+    const revokedKeyIds = findRevokedKeyIdsByName(contractIDOrState as ChelContractState, name)
     return currentKeyId ? [currentKeyId, ...revokedKeyIds] : revokedKeyIds
   },
-  'chelonia/contract/suitableSigningKey': function (contractIDOrState: string | Object, permissions, purposes, ringLevel, allowedActions) {
+  'chelonia/contract/suitableSigningKey': function (this: CheloniaContext, contractIDOrState: string | ChelContractState, permissions: '*' | string[], purposes: SPKeyPurpose[], ringLevel?: number, allowedActions?: '*' | string[]) {
     if (typeof contractIDOrState === 'string') {
       const rootState = sbp(this.config.stateSelector)
       contractIDOrState = rootState[contractIDOrState]
     }
-    const keyId = findSuitableSecretKeyId(contractIDOrState, permissions, purposes, ringLevel, allowedActions)
+    const keyId = findSuitableSecretKeyId(contractIDOrState as ChelContractState, permissions, purposes, ringLevel, allowedActions)
     return keyId
   },
-  'chelonia/contract/setPendingKeyRevocation': function (contractID: string, names: string[]) {
+  'chelonia/contract/setPendingKeyRevocation': function (this: CheloniaContext, contractID: string, names: string[]) {
     const rootState = sbp(this.config.stateSelector)
     const state = rootState[contractID]
 
@@ -559,7 +557,7 @@ export default (sbp('sbp/selectors/register', {
       }
     }
   },
-  'chelonia/shelterAuthorizationHeader' (contractID: string) {
+  'chelonia/shelterAuthorizationHeader' (this: CheloniaContext, contractID: string) {
     return buildShelterAuthorizationHeader.call(this, contractID)
   },
   // The purpose of the 'chelonia/crypto/*' selectors is so that they can be called
@@ -571,7 +569,7 @@ export default (sbp('sbp/selectors/register', {
     return keyId(inKey.valueOf())
   },
   // TODO: allow connecting to multiple servers at once
-  'chelonia/connect': function (options = {}): Object {
+  'chelonia/connect': function (this: CheloniaContext, options: Partial<PubSubOptions> = {}): PubSubClient {
     if (!this.config.connectionURL) throw new Error('config.connectionURL missing')
     if (!this.config.connectionOptions) throw new Error('config.connectionOptions missing')
     if (this.pubsub) {
@@ -593,7 +591,7 @@ export default (sbp('sbp/selectors/register', {
         ...options.handlers,
         // Every time we get a REQUEST_TYPE.SUB response, which happens for
         // 'new' subscriptions as well as every time the connection is reset
-        'subscription-succeeded': (event) => {
+        'subscription-succeeded': function (event: CustomEvent<{channelID: string}>) {
           const { channelID } = event.detail
           // The check below is needed because we could have unsubscribed since
           // requesting a subscription from the server. In that case, we don't
@@ -603,11 +601,11 @@ export default (sbp('sbp/selectors/register', {
             // between the time the subscription was requested and it was
             // actually set up. In these cases, force sync contracts to get them
             // updated.
-            sbp('chelonia/private/out/sync', channelID, { force: true }).catch(err => {
+            sbp('chelonia/private/out/sync', channelID, { force: true }).catch((err: Error) => {
               console.warn(`[chelonia] Syncing contract ${channelID} failed: ${err.message}`)
             })
           }
-          options.handlers?.['subscription-succeeded']?.(event)
+          options.handlers?.['subscription-succeeded']?.call(this, event)
         }
       },
       // Map message handlers to transparently handle encryption and signatures
@@ -616,7 +614,7 @@ export default (sbp('sbp/selectors/register', {
           Object.entries(options.messageHandlers || {}).map(([k, v]) => {
             switch (k) {
               case NOTIFICATION_TYPE.PUB:
-                return [k, (msg) => {
+                return [k, (msg: { channelID: string }) => {
                   if (!msg.channelID) {
                     console.info('[chelonia] Discarding pub event without channelID')
                     return
@@ -626,16 +624,16 @@ export default (sbp('sbp/selectors/register', {
                     return
                   }
                   sbp('chelonia/queueInvocation', msg.channelID, () => {
-                    (v: Function)(parseEncryptedOrUnencryptedMessage.call(this, {
+                    (v)(parseEncryptedOrUnencryptedMessage.call(this, {
                       contractID: msg.channelID,
                       serializedData: msg.data
                     }))
-                  }).catch(e => {
+                  }).catch((e: Error) => {
                     console.error(`[chelonia] Error processing pub event for ${msg.channelID}`, e)
                   })
                 }]
               case NOTIFICATION_TYPE.KV:
-                return [k, (msg) => {
+                return [k, (msg: { channelID: string, key: string }) => {
                   if (!msg.channelID || !msg.key) {
                     console.info('[chelonia] Discarding kv event without channelID or key')
                     return
@@ -645,7 +643,7 @@ export default (sbp('sbp/selectors/register', {
                     return
                   }
                   sbp('chelonia/queueInvocation', msg.channelID, () => {
-                    (v: Function)([msg.key, parseEncryptedOrUnencryptedMessage.call(this, {
+                    v([msg.key, parseEncryptedOrUnencryptedMessage.call(this, {
                       contractID: msg.channelID,
                       meta: msg.key,
                       serializedData: JSON.parse(Buffer.from(msg.data).toString())
@@ -655,7 +653,7 @@ export default (sbp('sbp/selectors/register', {
                   })
                 }]
               case NOTIFICATION_TYPE.DELETION:
-                return [k, (msg) => (v: Function)(msg.data)]
+                return [k, (msg: { data: unknown }) => v(msg.data)]
               default:
                 return [k, v]
             }
@@ -682,11 +680,11 @@ export default (sbp('sbp/selectors/register', {
   // although it can be used as a general-purpose API to process events received
   // from other external sources that are not managed by Chelonia itself (i.e. sources
   // other than the Chelonia-managed websocket connection and RESTful API).
-  'chelonia/handleEvent': async function (event: string) {
+  'chelonia/handleEvent': async (event: string) => {
     const { contractID } = SPMessage.deserializeHEAD(event)
     return await sbp('chelonia/private/in/enqueueHandleEvent', contractID, event)
   },
-  'chelonia/defineContract': function (contract: Object) {
+  'chelonia/defineContract': function (this: CheloniaContext, contract: object) {
     if (!ACTION_REGEX.exec(contract.name)) throw new Error(`bad contract name: ${contract.name}`)
     if (!contract.metadata) contract.metadata = { validate () {}, create: () => ({}) }
     if (!contract.getters) contract.getters = {}
@@ -700,7 +698,7 @@ export default (sbp('sbp/selectors/register', {
       [`${contract.manifest}/${contract.name}/getters`]: () => contract.getters,
       // 2 ways to cause sideEffects to happen: by defining a sideEffect function in the
       // contract, or by calling /pushSideEffect w/async SBP call. Can also do both.
-      [`${contract.manifest}/${contract.name}/pushSideEffect`]: (contractID: string, asyncSbpCall: Array<*>) => {
+      [`${contract.manifest}/${contract.name}/pushSideEffect`]: (contractID: string, asyncSbpCall: Array<unknown>) => {
         // if this version of the contract is pushing a sideEffect to a function defined by the
         // contract itself, make sure that it calls the same version of the sideEffect
         const [sel] = asyncSbpCall
@@ -720,7 +718,7 @@ export default (sbp('sbp/selectors/register', {
       //       - whatever keys should be passed in as well
       //       base it off of the design of encryptedAction()
       this.defContractSelectors.push(...sbp('sbp/selectors/register', {
-        [`${contract.manifest}/${action}/process`]: async (message: Object, state: Object) => {
+        [`${contract.manifest}/${action}/process`]: async (message: object, state: object) => {
           const { meta, data, contractID } = message
           // TODO: optimize so that you're creating a proxy object only when needed
           // TODO: Note: when sandboxing contracts, contracts may not have
@@ -743,7 +741,7 @@ export default (sbp('sbp/selectors/register', {
           await contract.actions[action].process(message, { state, ...gProxy })
         },
         // 'mutation' is an object that's similar to 'message', but not identical
-        [`${contract.manifest}/${action}/sideEffect`]: async (mutation: Object, state: ?Object) => {
+        [`${contract.manifest}/${action}/sideEffect`]: async (mutation: unknown, state: ChelContractState) => {
           if (contract.actions[action].sideEffect) {
             state = state || contract.state(mutation.contractID)
             if (!state) {
@@ -780,7 +778,8 @@ export default (sbp('sbp/selectors/register', {
     }
     sbp('okTurtles.events/emit', CONTRACT_REGISTERED, contract)
   },
-  'chelonia/queueInvocation': (contractID, sbpInvocation) => {
+  'chelonia/queueInvocation': (contractID: string, sbpInvocation:
+    Parameters<typeof sbp>) => {
     // We maintain two queues, contractID, used for internal events (i.e.,
     // from chelonia) and public:contractID, used for operations that need to
     // be done after all the current internal events (if any) have
@@ -811,14 +810,14 @@ export default (sbp('sbp/selectors/register', {
     //    }
     return sbp('chelonia/private/queueEvent', contractID, ['chelonia/private/noop']).then(() => sbp('chelonia/private/queueEvent', 'public:' + contractID, sbpInvocation))
   },
-  'chelonia/begin': async (...invocations) => {
+  'chelonia/begin': async (...invocations: Parameters<typeof sbp>[]) => {
     for (const invocation of invocations) {
       await sbp(...invocation)
     }
   },
   // call this manually to resubscribe/unsubscribe from contracts as needed
   // if you are using a custom stateSelector and reload the state (e.g. upon login)
-  'chelonia/pubsub/update': function () {
+  'chelonia/pubsub/update': function (this: CheloniaContext) {
     const client = this.pubsub
     const subscribedIDs = [...client.subscriptionSet]
     const currentIDs = Array.from(this.subscriptionSet)
@@ -834,12 +833,12 @@ export default (sbp('sbp/selectors/register', {
         client.sub(contractID)
       }
     } catch (e) {
-      console.error(`[chelonia] pubsub/update: error ${e.name}: ${e.message}`, { toUnsubscribe, toSubscribe }, e)
+      console.error(`[chelonia] pubsub/update: error ${(e as Error).name}: ${(e as Error).message}`, { toUnsubscribe, toSubscribe }, e)
       this.config.hooks.pubsubError?.(e, client)
     }
   },
   // resolves when all pending actions for these contractID(s) finish
-  'chelonia/contract/wait': function (contractIDs?: string | string[]): Promise<*> {
+  'chelonia/contract/wait': function (this: CheloniaContext, contractIDs?: string | string[]): Promise<unknown> {
     const listOfIds = contractIDs
       ? (typeof contractIDs === 'string' ? [contractIDs] : contractIDs)
       : Object.keys(sbp(this.config.stateSelector).contracts)
@@ -848,7 +847,7 @@ export default (sbp('sbp/selectors/register', {
     }))
   },
   // resolves when all pending *writes* for these contractID(s) finish
-  'chelonia/contract/waitPublish': function (contractIDs?: string | string[]): Promise<*> {
+  'chelonia/contract/waitPublish': function (this: CheloniaContext, contractIDs?: string | string[]): Promise<unknown> {
     const listOfIds = contractIDs
       ? (typeof contractIDs === 'string' ? [contractIDs] : contractIDs)
       : Object.keys(sbp(this.config.stateSelector).contracts)
@@ -859,7 +858,7 @@ export default (sbp('sbp/selectors/register', {
   // 'chelonia/contract' - selectors related to injecting remote data and monitoring contracts
   // TODO: add an optional parameter to "retain" the contract (see #828)
   // eslint-disable-next-line require-await
-  'chelonia/contract/sync': async function (contractIDs: string | string[], params?: { resync?: boolean }): Promise<*> {
+  'chelonia/contract/sync': async function (this: CheloniaContext, contractIDs: string | string[], params?: { resync?: boolean }): Promise<void> {
     // The exposed `chelonia/contract/sync` selector is meant for users of
     // Chelonia and not for internal use within Chelonia.
     // It should only be called after `/retain` where needed (for example, when
@@ -879,13 +878,13 @@ export default (sbp('sbp/selectors/register', {
     // besides internally is only needed to force sync a contract
     return sbp('chelonia/private/out/sync', listOfIds, { ...params, force: true })
   },
-  'chelonia/contract/isSyncing': function (contractID: string, { firstSync = false } = {}): boolean {
+  'chelonia/contract/isSyncing': function (this: CheloniaContext, contractID: string, { firstSync = false } = {}): boolean {
     const isSyncing = !!this.currentSyncs[contractID]
     return firstSync
       ? isSyncing && this.currentSyncs[contractID].firstSync
       : isSyncing
   },
-  'chelonia/contract/currentSyncs': function () {
+  'chelonia/contract/currentSyncs': function (this: CheloniaContext) {
     return Object.keys(this.currentSyncs)
   },
   // Because `/remove` is done asynchronously and a contract might be removed
@@ -894,12 +893,13 @@ export default (sbp('sbp/selectors/register', {
   // part of the `/release` mechanism to prevent removing contracts that have
   // acquired new references since the call to `/remove`.
   'chelonia/contract/remove': function (
+    this: CheloniaContext,
     contractIDs: string | string[],
     { confirmRemovalCallback, permanent }: {
       confirmRemovalCallback?: (contractID: string) => boolean,
-      permanent: boolean
+      permanent?: boolean
     } = {}
-  ): Promise<*> {
+  ): Promise<void | void[]> {
     const rootState = sbp(this.config.stateSelector)
     const listOfIds = typeof contractIDs === 'string' ? [contractIDs] : contractIDs
     return Promise.all(listOfIds.map(contractID => {
@@ -917,11 +917,11 @@ export default (sbp('sbp/selectors/register', {
           return
         }
         const rootState = sbp(this.config.stateSelector)
-        const fkContractIDs = Array.from(new Set(Object.values(rootState[contractID]?._vm?.authorizedKeys ?? {}).filter((k) => {
-          return !!(k: any).foreignKey
+        const fkContractIDs = Array.from(new Set(Object.values((rootState[contractID] as ChelContractState)?._vm?.authorizedKeys ?? {}).filter((k) => {
+          return !!k.foreignKey
         }).map((k) => {
           try {
-            const fkUrl = new URL((k: any).foreignKey)
+            const fkUrl = new URL(k.foreignKey!)
             return fkUrl.pathname
           } catch {
             return undefined
@@ -933,18 +933,18 @@ export default (sbp('sbp/selectors/register', {
         if (fkContractIDs.length) {
           // Attempt to release all contracts that are being monitored for
           // foreign keys
-          sbp('chelonia/contract/release', fkContractIDs, { try: true }).catch((e) => {
+          sbp('chelonia/contract/release', fkContractIDs, { try: true }).catch((e: unknown) => {
             console.error('[chelonia] Error attempting to release foreign key contracts', e)
           })
         }
       })
     }))
   },
-  'chelonia/contract/retain': async function (contractIDs: string | string[], params?: { ephemeral?: boolean}): Promise<*> {
+  'chelonia/contract/retain': async function (this: CheloniaContext, contractIDs: string | string[], params?: { ephemeral?: boolean}): Promise<void> {
     const listOfIds = typeof contractIDs === 'string' ? [contractIDs] : contractIDs
     const rootState = sbp(this.config.stateSelector)
     if (listOfIds.length === 0) return Promise.resolve()
-    const checkIfDeleted = (id) => {
+    const checkIfDeleted = (id: string) => {
       // Contract has been permanently deleted
       if (rootState.contracts[id] === null) {
         console.error('[chelonia/contract/retain] Called /retain on permanently deleted contract.', id)
@@ -977,7 +977,7 @@ export default (sbp('sbp/selectors/register', {
   // is meant mostly for internal chelonia use, so that removing or releasing
   // a contract can also remove other contracts that this first contract
   // was monitoring.
-  'chelonia/contract/release': async function (contractIDs: string | string[], params?: { ephemeral?: boolean, try?: boolean }): Promise<*> {
+  'chelonia/contract/release': async function (this: CheloniaContext, contractIDs: string | string[], params?: { ephemeral?: boolean, try?: boolean }): Promise<unknown> {
     const listOfIds = typeof contractIDs === 'string' ? [contractIDs] : contractIDs
     const rootState = sbp(this.config.stateSelector)
     if (!params?.try) {
@@ -1045,14 +1045,14 @@ export default (sbp('sbp/selectors/register', {
     const idsToRemove = listOfIds.filter(boundCheckCanBeGarbageCollected)
     return idsToRemove.length ? await sbp('chelonia/contract/remove', idsToRemove, { confirmRemovalCallback: boundCheckCanBeGarbageCollected }) : undefined
   },
-  'chelonia/contract/disconnect': async function (contractID, contractIDToDisconnect) {
+  'chelonia/contract/disconnect': async function (this: CheloniaContext, contractID: string, contractIDToDisconnect: string) {
     const state = sbp(this.config.stateSelector)
-    const contractState = state[contractID]
+    const contractState = state[contractID] as ChelContractState
 
     const keyIds = Object.values(contractState._vm.authorizedKeys).filter((k) => {
       // $FlowFixMe
       return k._notAfterHeight == null && k.meta?.keyRequest?.contractID === contractIDToDisconnect
-    }).map(k => (k: any).id)
+    }).map(k => k.id)
 
     if (!keyIds.length) return
 
@@ -1063,15 +1063,15 @@ export default (sbp('sbp/selectors/register', {
       signingKeyId: findSuitableSecretKeyId(contractState, [SPMessage.OP_KEY_DEL], ['sig'])
     })
   },
-  'chelonia/in/processMessage': function (messageOrRawMessage: SPMessage | string, state: Object) {
+  'chelonia/in/processMessage': function (this: CheloniaContext, messageOrRawMessage: SPMessage | string, state: ChelContractState) {
     const stateCopy = cloneDeep(state)
     const message = typeof messageOrRawMessage === 'string' ? SPMessage.deserialize(messageOrRawMessage, this.transientSecretKeys, stateCopy) : messageOrRawMessage
-    return sbp('chelonia/private/in/processMessage', message, stateCopy).then(() => stateCopy).catch((e) => {
+    return sbp('chelonia/private/in/processMessage', message, stateCopy).then(() => stateCopy).catch((e: unknown) => {
       console.warn(`chelonia/in/processMessage: reverting mutation ${message.description()}: ${message.serialize()}`, e)
       return state
     })
   },
-  'chelonia/out/fetchResource': async function (cid: string, { code }: { code?: number } = {}) {
+  'chelonia/out/fetchResource': async function (this: CheloniaContext, cid: string, { code }: { code?: number } = {}) {
     const parsedCID = parseCID(cid)
     if (code != null) {
       if (parsedCID.code !== code) {
@@ -1084,7 +1084,7 @@ export default (sbp('sbp/selectors/register', {
     // We don't verify the CID because it's already been verified when it was set
     if (local != null) return local
     const url = `${this.config.connectionURL}/file/${cid}`
-    const data = await this.config.fetch(url, { signal: this.abortController.signal }).then(handleFetchResult('text'))
+    const data = await this.config.fetch(url, { signal: this.abortController.signal }).then(handleFetchResult('text')) as unknown as string
     const ourHash = createCID(data, parsedCID.code)
     if (ourHash !== cid) {
       throw new Error(`expected hash ${cid}. Got: ${ourHash}`)
@@ -1092,14 +1092,14 @@ export default (sbp('sbp/selectors/register', {
     await sbp('chelonia.db/set', cid, data)
     return data
   },
-  'chelonia/out/latestHEADInfo': function (contractID: string) {
+  'chelonia/out/latestHEADInfo': function (this: CheloniaContext, contractID: string) {
     return this.config.fetch(`${this.config.connectionURL}/latestHEADinfo/${contractID}`, {
       cache: 'no-store',
       signal: this.abortController.signal
     }).then(handleFetchResult('json'))
   },
   'chelonia/out/eventsAfter': eventsAfter,
-  'chelonia/out/eventsBefore': function (contractID: string, beforeHeight: number, limit: number, options) {
+  'chelonia/out/eventsBefore': function (this: CheloniaContext, contractID: string, beforeHeight: number, limit: number, options: { stream: boolean }) {
     if (limit <= 0) {
       console.error('[chelonia] invalid params error: "limit" needs to be positive integer')
     }
@@ -1107,15 +1107,15 @@ export default (sbp('sbp/selectors/register', {
     const eventsAfterLimit = Math.min(beforeHeight + 1, limit)
     return sbp('chelonia/out/eventsAfter', contractID, offset, eventsAfterLimit, undefined, options)
   },
-  'chelonia/out/eventsBetween': function (contractID: string, startHash: string, endHeight: number, offset: number = 0, { stream } = { stream: true }) {
+  'chelonia/out/eventsBetween': function (this: CheloniaContext, contractID: string, startHash: string, endHeight: number, offset: number = 0, { stream } = { stream: true }) {
     if (offset < 0) {
       console.error('[chelonia] invalid params error: "offset" needs to be positive integer or zero')
       return
     }
-    let reader: ReadableStreamReader
+    let reader: ReadableStreamDefaultReader<string>
     const s = new ReadableStream({
       start: async (controller) => {
-        const first = await this.config.fetch(`${this.config.connectionURL}/file/${startHash}`, { signal: this.abortController.signal }).then(handleFetchResult('text'))
+        const first = await this.config.fetch(`${this.config.connectionURL}/file/${startHash}`, { signal: this.abortController.signal }).then(handleFetchResult('text')) as unknown as string
         const deserializedHEAD = SPMessage.deserializeHEAD(first)
         if (deserializedHEAD.contractID !== contractID) {
           controller.error(new Error('chelonia/out/eventsBetween: Mismatched contract ID'))
@@ -1143,8 +1143,8 @@ export default (sbp('sbp/selectors/register', {
     // Workaround for <https://bugs.webkit.org/show_bug.cgi?id=215485>
     return collectEventStream(s)
   },
-  'chelonia/rootState': function () { return sbp(this.config.stateSelector) },
-  'chelonia/latestContractState': async function (contractID: string, options = { forceSync: false }) {
+  'chelonia/rootState': function (this: CheloniaContext) { return sbp(this.config.stateSelector) },
+  'chelonia/latestContractState': async function (this: CheloniaContext, contractID: string, options = { forceSync: false }) {
     const rootState = sbp(this.config.stateSelector)
     // return a copy of the state if we already have it, unless the only key that's in it is _volatile,
     // in which case it means we should sync the contract to get more info.
@@ -1169,13 +1169,13 @@ export default (sbp('sbp/selectors/register', {
           contractName = state._vm.type
         }
       } catch (e) {
-        console.warn(`[chelonia] latestContractState: '${e.name}': ${e.message} processing:`, event, e.stack)
+        console.warn(`[chelonia] latestContractState: '${(e as Error).name}': ${(e as Error).message} processing:`, event, (e as Error).stack)
         if (e instanceof ChelErrorUnrecoverable) throw e
         state = stateCopy
       }
     }
   },
-  'chelonia/contract/state': function (contractID: string, height: ?number) {
+  'chelonia/contract/state': function (this: CheloniaContext, contractID: string, height?: number | null | undefined) {
     const state = sbp(this.config.stateSelector)[contractID]
     const stateCopy = state && cloneDeep(state)
     if (stateCopy?._vm && height != null) {
@@ -1188,7 +1188,7 @@ export default (sbp('sbp/selectors/register', {
     }
     return stateCopy
   },
-  'chelonia/contract/fullState': function (contractID: string | string[]) {
+  'chelonia/contract/fullState': function (this: CheloniaContext, contractID: string | string[]) {
     const rootState = sbp(this.config.stateSelector)
     if (Array.isArray(contractID)) {
       return Object.fromEntries(contractID.map(contractID => {
@@ -1207,23 +1207,23 @@ export default (sbp('sbp/selectors/register', {
     }
   },
   // 'chelonia/out' - selectors that send data out to the server
-  'chelonia/out/registerContract': async function (params: ChelRegParams) {
+  'chelonia/out/registerContract': async function (this: CheloniaContext, params: ChelRegParams) {
     const { contractName, keys, hooks, publishOptions, signingKeyId, actionSigningKeyId, actionEncryptionKeyId } = params
     const manifestHash = this.config.contracts.manifests[contractName]
     const contractInfo = this.manifestToContract[manifestHash]
     if (!contractInfo) throw new Error(`contract not defined: ${contractName}`)
     const signingKey = this.transientSecretKeys[signingKeyId]
     if (!signingKey) throw new Error(`Signing key ${signingKeyId} is not defined`)
-    const payload = ({
+    const payload = {
       type: contractName,
-      keys: keys
-    }: SPOpContract)
+      keys
+    } as SPOpContract
     const contractMsg = SPMessage.createV1_0({
       contractID: null,
       height: 0,
       op: [
         SPMessage.OP_CONTRACT,
-        signedOutgoingDataWithRawKey(signingKey, payload)
+        signedOutgoingDataWithRawKey<SPOpValue, object>(signingKey, payload)
       ],
       manifest: manifestHash
     })
@@ -1254,7 +1254,7 @@ export default (sbp('sbp/selectors/register', {
     })
     return msg
   },
-  'chelonia/out/ownResources': async function (contractID: string) {
+  'chelonia/out/ownResources': async function (this: CheloniaContext, contractID: string) {
     if (!contractID) {
       throw new TypeError('A contract ID must be provided')
     }
@@ -1277,9 +1277,10 @@ export default (sbp('sbp/selectors/register', {
     return response.json()
   },
   'chelonia/out/deleteContract': async function (
+    this: CheloniaContext,
     contractID: string | string[],
     credentials: {
-      [contractID: string]: { token: ?string, billableContractID: ?string }
+      [contractID: string]: { token?: string, billableContractID?: string }
     } = {}
   ) {
     if (!contractID) {
@@ -1300,10 +1301,7 @@ export default (sbp('sbp/selectors/register', {
         headers: new Headers([
           ['authorization',
             hasToken
-              // $FlowFixMe[incompatible-type]
-              ? `bearer ${(credentials[cid].token: any).valueOf()}`
-              // $FlowFixMe[incompatible-type]
-              // $FlowFixMe[incompatible-call]
+              ? `bearer ${credentials[cid].token.valueOf()}`
               : buildShelterAuthorizationHeader.call(this, credentials[cid].billableContractID)]
         ])
       })
@@ -1319,15 +1317,15 @@ export default (sbp('sbp/selectors/register', {
   },
   // all of these functions will do both the creation of the SPMessage
   // and the sending of it via 'chelonia/private/out/publishEvent'
-  'chelonia/out/actionEncrypted': function (params: ChelActionParams): Promise<SPMessage> {
+  'chelonia/out/actionEncrypted': function (this: CheloniaContext, params: ChelActionParams): Promise<SPMessage> {
     return outEncryptedOrUnencryptedAction.call(this, SPMessage.OP_ACTION_ENCRYPTED, params)
   },
-  'chelonia/out/actionUnencrypted': function (params: ChelActionParams): Promise<SPMessage> {
+  'chelonia/out/actionUnencrypted': function (this: CheloniaContext, params: ChelActionParams): Promise<SPMessage> {
     return outEncryptedOrUnencryptedAction.call(this, SPMessage.OP_ACTION_UNENCRYPTED, params)
   },
-  'chelonia/out/keyShare': async function (params: ChelKeyShareParams): Promise<SPMessage> {
+  'chelonia/out/keyShare': async function (this: CheloniaContext, params: ChelKeyShareParams): Promise<SPMessage> {
     const { atomic, originatingContractName, originatingContractID, contractName, contractID, data, hooks, publishOptions } = params
-    const originatingManifestHash = this.config.contracts.manifests[originatingContractName]
+    const originatingManifestHash = this.config.contracts.manifests[originatingContractName!]
     const destinationManifestHash = this.config.contracts.manifests[contractName]
     const originatingContract = originatingContractID ? this.manifestToContract[originatingManifestHash]?.contract : undefined
     const destinationContract = this.manifestToContract[destinationManifestHash]?.contract
@@ -1336,7 +1334,7 @@ export default (sbp('sbp/selectors/register', {
       throw new Error('Contract name not found')
     }
 
-    const payload = (data: SPOpKeyShare)
+    const payload = data as SPOpKeyShare
 
     if (!params.signingKeyId && !params.signingKey) {
       throw new TypeError('Either signingKeyId or signingKey must be specified')
@@ -1347,9 +1345,8 @@ export default (sbp('sbp/selectors/register', {
       op: [
         SPMessage.OP_KEY_SHARE,
         params.signingKeyId
-          ? signedOutgoingData(contractID, params.signingKeyId, payload, this.transientSecretKeys)
-          // $FlowFixMe
-          : signedOutgoingDataWithRawKey(params.signingKey, payload)
+          ? signedOutgoingData<SPOpValue>(contractID, params.signingKeyId, payload, this.transientSecretKeys)
+          : signedOutgoingDataWithRawKey<SPOpValue>(params.signingKey!, payload)
       ],
       manifest: destinationManifestHash
     })
@@ -1358,7 +1355,7 @@ export default (sbp('sbp/selectors/register', {
     }
     return msg
   },
-  'chelonia/out/keyAdd': async function (params: ChelKeyAddParams): Promise<SPMessage | void> {
+  'chelonia/out/keyAdd': async function (this: CheloniaContext, params: ChelKeyAddParams): Promise<SPMessage | void> {
     // TODO: For foreign keys, recalculate the key id
     // TODO: Make this a noop if the key already exsits with the given permissions
     const { atomic, contractID, contractName, data, hooks, publishOptions } = params
@@ -1369,8 +1366,8 @@ export default (sbp('sbp/selectors/register', {
     }
     const state = contract.state(contractID)
 
-    const payload = (data: SPOpKeyAdd).filter((wk) => {
-      const k = (((isEncryptedData(wk) ? wk.valueOf() : wk): any): SPKey)
+    const payload = (data as SPOpKeyAdd).filter((wk) => {
+      const k = ((isEncryptedData(wk) ? wk.valueOf() : wk) as SPKey)
       if (has(state._vm.authorizedKeys, k.id)) {
         if (state._vm.authorizedKeys[k.id]._notAfterHeight == null) {
           // Can't add a key that exists
@@ -1385,7 +1382,7 @@ export default (sbp('sbp/selectors/register', {
       contractID,
       op: [
         SPMessage.OP_KEY_ADD,
-        signedOutgoingData(contractID, params.signingKeyId, payload, this.transientSecretKeys)
+        signedOutgoingData<SPOpValue>(contractID, params.signingKeyId, payload, this.transientSecretKeys)
       ],
       manifest: manifestHash
     })
@@ -1394,7 +1391,7 @@ export default (sbp('sbp/selectors/register', {
     }
     return msg
   },
-  'chelonia/out/keyDel': async function (params: ChelKeyDelParams): Promise<SPMessage> {
+  'chelonia/out/keyDel': async function (this: CheloniaContext, params: ChelKeyDelParams): Promise<SPMessage> {
     const { atomic, contractID, contractName, data, hooks, publishOptions } = params
     const manifestHash = this.config.contracts.manifests[contractName]
     const contract = this.manifestToContract[manifestHash]?.contract
@@ -1402,7 +1399,7 @@ export default (sbp('sbp/selectors/register', {
       throw new Error('Contract name not found')
     }
     const state = contract.state(contractID)
-    const payload = (data: SPOpKeyDel).map((keyId) => {
+    const payload = (data as SPOpKeyDel).map((keyId) => {
       if (isEncryptedData(keyId)) return keyId
       // $FlowFixMe
       if (!has(state._vm.authorizedKeys, keyId) || state._vm.authorizedKeys[keyId]._notAfterHeight != null) return undefined
@@ -1416,7 +1413,7 @@ export default (sbp('sbp/selectors/register', {
       contractID,
       op: [
         SPMessage.OP_KEY_DEL,
-        signedOutgoingData(contractID, params.signingKeyId, (payload: any), this.transientSecretKeys)
+        signedOutgoingData<SPOpValue>(contractID, params.signingKeyId, payload, this.transientSecretKeys)
       ],
       manifest: manifestHash
     })
@@ -1425,7 +1422,7 @@ export default (sbp('sbp/selectors/register', {
     }
     return msg
   },
-  'chelonia/out/keyUpdate': async function (params: ChelKeyUpdateParams): Promise<SPMessage> {
+  'chelonia/out/keyUpdate': async function (this: CheloniaContext, params: ChelKeyUpdateParams): Promise<SPMessage> {
     const { atomic, contractID, contractName, data, hooks, publishOptions } = params
     const manifestHash = this.config.contracts.manifests[contractName]
     const contract = this.manifestToContract[manifestHash]?.contract
@@ -1433,7 +1430,7 @@ export default (sbp('sbp/selectors/register', {
       throw new Error('Contract name not found')
     }
     const state = contract.state(contractID)
-    const payload = (data: SPOpKeyUpdate).map((key) => {
+    const payload = (data as SPOpKeyUpdate).map((key) => {
       if (isEncryptedData(key)) return key
       // $FlowFixMe
       const { oldKeyId } = key
@@ -1447,7 +1444,7 @@ export default (sbp('sbp/selectors/register', {
       contractID,
       op: [
         SPMessage.OP_KEY_UPDATE,
-        signedOutgoingData(contractID, params.signingKeyId, (payload: any), this.transientSecretKeys)
+        signedOutgoingData<SPOpValue>(contractID, params.signingKeyId, payload, this.transientSecretKeys)
       ],
       manifest: manifestHash
     })
@@ -1456,7 +1453,7 @@ export default (sbp('sbp/selectors/register', {
     }
     return msg
   },
-  'chelonia/out/keyRequest': async function (params: ChelKeyRequestParams): Promise<?SPMessage> {
+  'chelonia/out/keyRequest': async function (this: CheloniaContext, params: ChelKeyRequestParams): Promise<SPMessage | null | undefined> {
     const { originatingContractID, originatingContractName, contractID, contractName, hooks, publishOptions, innerSigningKeyId, encryptionKeyId, innerEncryptionKeyId, encryptKeyRequestMetadata, reference } = params
     // `encryptKeyRequestMetadata` is optional because it could be desirable
     // sometimes to allow anyone to audit OP_KEY_REQUEST and OP_KEY_SHARE
@@ -1475,8 +1472,7 @@ export default (sbp('sbp/selectors/register', {
       const state = contract.state(contractID)
       const originatingState = originatingContract.state(originatingContractID)
 
-      const havePendingKeyRequest = Object.values(originatingState._vm.authorizedKeys).findIndex((k) => {
-      // $FlowFixMe
+      const havePendingKeyRequest = Object.values(originatingState._vm.authorizedKeys).findIndex((k: ChelContractKey) => {
         return k._notAfterHeight == null && k.meta?.keyRequest?.contractID === contractID && state?._volatile?.pendingKeyRequests?.includes(k.name)
       }) !== -1
 
@@ -1521,7 +1517,7 @@ export default (sbp('sbp/selectors/register', {
           data: keyRequestReplyKeyP
         }],
         signingKeyId
-      }).catch(e => {
+      }).catch((e: Error) => {
         console.error(`[chelonia] Error sending OP_KEY_ADD for ${originatingContractID} during key request to ${contractID}`, e)
         throw e
       })
@@ -1533,15 +1529,16 @@ export default (sbp('sbp/selectors/register', {
           responseKey: encryptedOutgoingData(contractID, innerEncryptionKeyId, keyRequestReplyKeyS)
         }, this.transientSecretKeys),
         request: '*'
-      }: SPOpKeyRequest)
+      } as SPOpKeyRequest)
       let msg = SPMessage.createV1_0({
         contractID,
         op: [
           SPMessage.OP_KEY_REQUEST,
-          signedOutgoingData(contractID, params.signingKeyId,
+          signedOutgoingData<SPOpValue>(contractID, params.signingKeyId,
             encryptKeyRequestMetadata
-              ? (encryptedOutgoingData(contractID, innerEncryptionKeyId, payload): any)
-              : payload, this.transientSecretKeys
+              ? encryptedOutgoingData(contractID, innerEncryptionKeyId, payload) as SPOpValue
+              : payload,
+            this.transientSecretKeys
           )
         ],
         manifest: manifestHash
@@ -1549,7 +1546,7 @@ export default (sbp('sbp/selectors/register', {
       msg = await sbp('chelonia/private/out/publishEvent', msg, publishOptions, {
         ...hooks,
         // We ensure that both messages are placed into the publish queue
-        prepublish: (...args) => {
+        prepublish: (...args: unknown[]) => {
           return keyAddOp().then(() => hooks?.prepublish?.(...args))
         }
       })
@@ -1558,19 +1555,19 @@ export default (sbp('sbp/selectors/register', {
       await sbp('chelonia/contract/release', contractID, { ephemeral: true })
     }
   },
-  'chelonia/out/keyRequestResponse': async function (params: ChelKeyRequestResponseParams): Promise<SPMessage> {
+  'chelonia/out/keyRequestResponse': async function (this: CheloniaContext, params: ChelKeyRequestResponseParams): Promise<SPMessage> {
     const { atomic, contractID, contractName, data, hooks, publishOptions } = params
     const manifestHash = this.config.contracts.manifests[contractName]
     const contract = this.manifestToContract[manifestHash]?.contract
     if (!contract) {
       throw new Error('Contract name not found')
     }
-    const payload = (data: SPOpKeyRequestSeen)
+    const payload = data
     let message = SPMessage.createV1_0({
       contractID,
       op: [
         SPMessage.OP_KEY_REQUEST_SEEN,
-        signedOutgoingData(contractID, params.signingKeyId, payload, this.transientSecretKeys)
+        signedOutgoingData<SPOpValue>(contractID, params.signingKeyId, payload, this.transientSecretKeys)
       ],
       manifest: manifestHash
     })
@@ -1579,7 +1576,7 @@ export default (sbp('sbp/selectors/register', {
     }
     return message
   },
-  'chelonia/out/atomic': async function (params: ChelAtomicParams): Promise<SPMessage> {
+  'chelonia/out/atomic': async function (this: CheloniaContext, params: ChelAtomicParams): Promise<SPMessage> {
     const { contractID, contractName, data, hooks, publishOptions } = params
     const manifestHash = this.config.contracts.manifests[contractName]
     const contract = this.manifestToContract[manifestHash]?.contract
@@ -1598,7 +1595,7 @@ export default (sbp('sbp/selectors/register', {
       contractID,
       op: [
         SPMessage.OP_ATOMIC,
-        signedOutgoingData(contractID, params.signingKeyId, (payload: any), this.transientSecretKeys)
+        signedOutgoingData<SPOpValue>(contractID, params.signingKeyId, payload, this.transientSecretKeys)
       ],
       manifest: manifestHash
     })
@@ -1614,7 +1611,7 @@ export default (sbp('sbp/selectors/register', {
   'chelonia/out/propDel': async function () {
 
   },
-  'chelonia/out/encryptedOrUnencryptedPubMessage': function ({
+  'chelonia/out/encryptedOrUnencryptedPubMessage': function (this: CheloniaContext, {
     contractID,
     innerSigningKeyId,
     encryptionKeyId,
@@ -1625,7 +1622,7 @@ export default (sbp('sbp/selectors/register', {
     innerSigningKeyId: ?string,
     encryptionKeyId: ?string,
     signingKeyId: string,
-    data: Object
+    data: object
   }) {
     const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
       contractID,
@@ -1646,7 +1643,7 @@ export default (sbp('sbp/selectors/register', {
   // this case, see if `chelonia/kv/queuedSet` covers your needs.
   // `data` is allowed to be falsy, in which case a fetch will occur first and
   // the `onconflict` handler will be called.
-  'chelonia/kv/set': async function (contractID: string, key: string, data?: ?Object, {
+  'chelonia/kv/set': async function (this: CheloniaContext, contractID: string, key: string, data: JSONType | undefined, {
     ifMatch,
     innerSigningKeyId,
     encryptionKeyId,
@@ -1655,11 +1652,11 @@ export default (sbp('sbp/selectors/register', {
     onconflict
   }: {
     ifMatch?: string,
-    innerSigningKeyId: ?string,
-    encryptionKeyId: ?string,
+    innerSigningKeyId?: string | null | undefined,
+    encryptionKeyId?: string | null | undefined,
     signingKeyId: string,
-    maxAttempts: ?number,
-    onconflict: ?ChelKvOnConflictCallback,
+    maxAttempts?: number | null | undefined,
+    onconflict?: ChelKvOnConflictCallback | null | undefined,
   }) {
     maxAttempts = maxAttempts ?? 3
     const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`
@@ -1671,7 +1668,7 @@ export default (sbp('sbp/selectors/register', {
     // and new data. The return value indicates whether there should be a new
     // attempt at storing updated data (if `true`) or not (if `false`)
     const resolveData = async () => {
-      let currentValue
+      let currentValue: JSONType | EncryptedData<JSONType>
       // Rationale:
       //  * response.ok could be the result of `GET` (no initial data)
       //  * 409 indicates a conflict because the height used is too old
@@ -1691,7 +1688,7 @@ export default (sbp('sbp/selectors/register', {
       } else if (response.status !== 404 && response.status !== 410) {
         throw new ChelErrorUnexpectedHttpResponseCode('[kv/set] Invalid response code: ' + response.status)
       }
-      const result = await (onconflict: Function)({
+      const result = await onconflict({
         contractID,
         key,
         failedData: data,
@@ -1720,7 +1717,7 @@ export default (sbp('sbp/selectors/register', {
           innerSigningKeyId,
           encryptionKeyId,
           signingKeyId,
-          data,
+          data: data!,
           meta: key
         })
         response = await this.config.fetch(url, {
@@ -1780,7 +1777,7 @@ export default (sbp('sbp/selectors/register', {
       break
     }
   },
-  'chelonia/kv/get': async function (contractID: string, key: string) {
+  'chelonia/kv/get': async function (this: CheloniaContext, contractID: string, key: string) {
     const response = await this.config.fetch(`${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`, {
       headers: new Headers([[
         'authorization', buildShelterAuthorizationHeader.call(this, contractID)
@@ -1808,17 +1805,17 @@ export default (sbp('sbp/selectors/register', {
   // The last call takes precedence, so, for example, calling with filter
   // set to `['foo', 'bar']` and then with `['baz']` means that KV updates will
   // be received for `baz` only, not for `foo`, `bar` or any other keys.
-  'chelonia/kv/setFilter': function (contractID: string, filter?: string[]) {
+  'chelonia/kv/setFilter': function (this: CheloniaContext, contractID: string, filter?: string[]) {
     this.pubsub.setKvFilter(contractID, filter)
   },
-  'chelonia/parseEncryptedOrUnencryptedDetachedMessage': function ({ contractID, serializedData, meta }: { contractID: string, serializedData: Object, meta?: ?string }) {
+  'chelonia/parseEncryptedOrUnencryptedDetachedMessage': function (this: CheloniaContext, { contractID, serializedData, meta }: { contractID: string, serializedData: { height: string, _signedData: [string, string, string] }, meta?: string | null | undefined }) {
     return parseEncryptedOrUnencryptedMessage.call(this, {
       contractID,
       serializedData,
       meta
     })
   }
-}): string[])
+}) as string[]
 
 function contractNameFromAction (action: string): string {
   const regexResult = ACTION_REGEX.exec(action)
@@ -1827,7 +1824,7 @@ function contractNameFromAction (action: string): string {
   return contractName
 }
 
-function outputEncryptedOrUnencryptedMessage ({
+function outputEncryptedOrUnencryptedMessage (this: CheloniaContext, {
   contractID,
   innerSigningKeyId,
   encryptionKeyId,
@@ -1836,36 +1833,36 @@ function outputEncryptedOrUnencryptedMessage ({
   meta
 }: {
   contractID: string,
-  innerSigningKeyId: ?string,
-  encryptionKeyId: ?string,
+  innerSigningKeyId?: string | null | undefined,
+  encryptionKeyId?: string | null | undefined,
   signingKeyId: string,
-  data: Object,
-  meta?: ?string
+  data: JSONType,
+  meta: string | null | undefined
 }) {
   const state = sbp(this.config.stateSelector)[contractID]
   const signedMessage = innerSigningKeyId
     ? (state._vm.authorizedKeys[innerSigningKeyId] && state._vm.authorizedKeys[innerSigningKeyId]?._notAfterHeight == null)
-        ? signedOutgoingData(contractID, innerSigningKeyId, (data: any), this.transientSecretKeys)
-        : signedOutgoingDataWithRawKey(this.transientSecretKeys[innerSigningKeyId], (data: any), this.transientSecretKeys)
+        ? signedOutgoingData(contractID, innerSigningKeyId, data, this.transientSecretKeys)
+        : signedOutgoingDataWithRawKey(this.transientSecretKeys[innerSigningKeyId], data)
     : data
   const payload = !encryptionKeyId
     ? signedMessage
     : encryptedOutgoingData(contractID, encryptionKeyId, signedMessage)
-  const message = signedOutgoingData(contractID, signingKeyId, (payload: any), this.transientSecretKeys)
+  const message = signedOutgoingData(contractID, signingKeyId, payload, this.transientSecretKeys)
   const rootState = sbp(this.config.stateSelector)
   const height = String(rootState.contracts[contractID].height)
   const serializedData = { ...message.serialize((meta ?? '') + height), height }
   return serializedData
 }
 
-function parseEncryptedOrUnencryptedMessage ({
+function parseEncryptedOrUnencryptedMessage (this: CheloniaContext, {
   contractID,
   serializedData,
   meta
 }: {
   contractID: string,
-  serializedData: Object,
-  meta?: ?string
+  serializedData: { height: string, _signedData: [string, string, string] },
+  meta?: string | null | undefined
 }) {
   if (!serializedData) {
     throw new TypeError('[chelonia] parseEncryptedOrUnencryptedMessage: serializedData is required')
@@ -1886,15 +1883,15 @@ function parseEncryptedOrUnencryptedMessage ({
   })
 
   // Cached values
-  let encryptionKeyId
-  let innerSigningKeyId
+  let encryptionKeyId: string | null
+  let innerSigningKeyId: string | null
 
   // Lazy unwrap function
   // We don't use `unwrapMaybeEncryptedData`, which would almost do the same,
   // because it swallows decryption errors, which we want to propagate to
   // consumers of the KV API.
   const unwrap = (() => {
-    let result
+    let result: [unknown] | [undefined, unknown]
 
     return () => {
       if (!result) {
@@ -1976,6 +1973,7 @@ function parseEncryptedOrUnencryptedMessage ({
 }
 
 async function outEncryptedOrUnencryptedAction (
+  this: CheloniaContext,
   opType: 'ae' | 'au',
   params: ChelActionParams
 ) {
@@ -1985,11 +1983,11 @@ async function outEncryptedOrUnencryptedAction (
   const { contract } = this.manifestToContract[manifestHash]
   const state = contract.state(contractID)
   const meta = await contract.metadata.create()
-  const unencMessage = ({ action, data, meta }: SPOpActionUnencrypted)
+  const unencMessage = ({ action, data, meta } as SPOpActionUnencrypted)
   const signedMessage = params.innerSigningKeyId
     ? (state._vm.authorizedKeys[params.innerSigningKeyId] && state._vm.authorizedKeys[params.innerSigningKeyId]?._notAfterHeight == null)
-        ? signedOutgoingData(contractID, params.innerSigningKeyId, (unencMessage: any), this.transientSecretKeys)
-        : signedOutgoingDataWithRawKey(this.transientSecretKeys[params.innerSigningKeyId], (unencMessage: any), this.transientSecretKeys)
+        ? signedOutgoingData(contractID, params.innerSigningKeyId, unencMessage, this.transientSecretKeys)
+        : signedOutgoingDataWithRawKey(this.transientSecretKeys[params.innerSigningKeyId], unencMessage)
     : unencMessage
   if (opType === SPMessage.OP_ACTION_ENCRYPTED && !params.encryptionKeyId) {
     throw new Error('OP_ACTION_ENCRYPTED requires an encryption key ID be given')
@@ -2003,13 +2001,13 @@ async function outEncryptedOrUnencryptedAction (
   const payload = opType === SPMessage.OP_ACTION_UNENCRYPTED
     ? signedMessage
     : params.encryptionKey
-      ? encryptedOutgoingDataWithRawKey(((params.encryptionKey: any): Key), signedMessage)
-      : encryptedOutgoingData(contractID, ((params.encryptionKeyId: any): string), signedMessage)
+      ? encryptedOutgoingDataWithRawKey(params.encryptionKey, signedMessage)
+      : encryptedOutgoingData(contractID, params.encryptionKeyId!, signedMessage)
   let message = SPMessage.createV1_0({
     contractID,
     op: [
       opType,
-      signedOutgoingData(contractID, params.signingKeyId, (payload: any), this.transientSecretKeys)
+      signedOutgoingData(contractID, params.signingKeyId, payload as SPOpValue, this.transientSecretKeys)
     ],
     manifest: manifestHash
   })
@@ -2035,10 +2033,10 @@ async function outEncryptedOrUnencryptedAction (
 //     getters.currentMailboxState.messages.slice(-1).pop()
 // }
 // ```
-function gettersProxy (state: Object, getters: Object) {
-  const proxyGetters = new Proxy({}, {
-    get (target, prop) {
-      return getters[prop](state, proxyGetters)
+function gettersProxy <T extends object> (state: ChelContractState, getters: Record<keyof T, (state: ChelContractState, obj: T) => T[keyof T]>) {
+  const proxyGetters: T = new Proxy<T>({} as unknown as T, {
+    get (_target, prop) {
+      return getters[prop as keyof T](state, proxyGetters)
     }
   })
   return { getters: proxyGetters }

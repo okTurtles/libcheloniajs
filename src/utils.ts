@@ -1,7 +1,8 @@
+import type { Key } from '@chelonia/crypto'
 import { deserializeKey, serializeKey, sign, verifySignature } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import { has } from 'turtledash'
-import type { ProtoSPOpActionUnencrypted, SPKey, SPKeyPurpose, SPKeyUpdate, SPOpActionUnencrypted, SPOpAtomic, SPOpKeyAdd, SPOpKeyUpdate, SPOpValue } from './SPMessage.js'
+import type { ProtoSPOpActionUnencrypted, SPKey, SPKeyPurpose, SPKeyUpdate, SPOpActionUnencrypted, SPOpAtomic, SPOpKeyAdd, SPOpKeyDel, SPOpKeyUpdate, SPOpRaw, SPOpValue } from './SPMessage.js'
 import { SPMessage } from './SPMessage.js'
 import { Secret } from './Secret.js'
 import { INVITE_STATUS } from './constants.js'
@@ -12,18 +13,19 @@ import { CONTRACT_IS_PENDING_KEY_REQUESTS } from './events.js'
 import { b64ToStr } from './functions.js'
 import type { SignedData } from './signedData.js'
 import { isSignedData } from './signedData.js'
+import { ChelContractKey, ChelContractState, ChelRootState, CheloniaConfig, CheloniaContext } from './types.js'
 
 const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10) || Infinity
 
-export const findKeyIdByName = (state: Object, name: string): ?string => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys: any)): any): SPKey[]).find((k) => k.name === name && k._notAfterHeight == null)?.id
+export const findKeyIdByName = (state: ChelContractState, name: string): string | null | undefined => state._vm?.authorizedKeys && Object.values((state._vm.authorizedKeys)).find((k) => k.name === name && k._notAfterHeight == null)?.id
 
-export const findForeignKeysByContractID = (state: Object, contractID: string): ?string[] => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys: any)): any): SPKey[]).filter((k) => k._notAfterHeight == null && k.foreignKey?.includes(contractID)).map(k => k.id)
+export const findForeignKeysByContractID = (state: ChelContractState, contractID: string): string[] | undefined => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys)))).filter((k) => k._notAfterHeight == null && k.foreignKey?.includes(contractID)).map(k => k.id)
 
-export const findRevokedKeyIdsByName = (state: Object, name: string): string[] => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys: any) || {}): any): SPKey[]).filter((k) => k.name === name && k._notAfterHeight != null).map(k => k.id)
+export const findRevokedKeyIdsByName = (state: ChelContractState, name: string): string[] => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys) || {}))).filter((k) => k.name === name && k._notAfterHeight != null).map(k => k.id)
 
-export const findSuitableSecretKeyId = (state: Object, permissions: '*' | string[], purposes: SPKeyPurpose[], ringLevel?: number, allowedActions?: '*' | string[]): ?string => {
+export const findSuitableSecretKeyId = (state: ChelContractState, permissions: '*' | string[], purposes: SPKeyPurpose[], ringLevel?: number, allowedActions?: '*' | string[]): string | null | undefined => {
   return state._vm?.authorizedKeys &&
-    ((Object.values((state._vm.authorizedKeys: any)): any): SPKey[])
+    Object.values((state._vm.authorizedKeys))
       .filter((k) => {
         return k._notAfterHeight == null &&
         (k.ringLevel <= (ringLevel ?? Number.POSITIVE_INFINITY)) &&
@@ -37,7 +39,7 @@ export const findSuitableSecretKeyId = (state: Object, permissions: '*' | string
       purposes.reduce((acc, purpose) => acc && k.purpose.includes(purpose), true) &&
       (Array.isArray(allowedActions)
         ? allowedActions.reduce((acc, action) =>
-          acc && (k.allowedActions === '*' || k.allowedActions?.includes(action)), true
+          acc && (k.allowedActions === '*' || !!k.allowedActions?.includes(action)), true
         )
         : allowedActions ? allowedActions === k.allowedActions : true
       )
@@ -45,19 +47,19 @@ export const findSuitableSecretKeyId = (state: Object, permissions: '*' | string
       .sort((a, b) => b.ringLevel - a.ringLevel)[0]?.id
 }
 
-export const findContractIDByForeignKeyId = (state: Object, keyId: string): ?string => {
+export const findContractIDByForeignKeyId = (state: ChelContractState, keyId: string): string | null | undefined => {
   if (!keyId || !state?._vm?.authorizedKeys?.[keyId]?.foreignKey) return
 
   try {
-    const fkUrl = new URL(state._vm?.authorizedKeys?.[keyId]?.foreignKey)
+    const fkUrl = new URL(state._vm.authorizedKeys[keyId].foreignKey!)
     return fkUrl.pathname
   } catch {}
 }
 
 // TODO: Resolve inviteKey being added (doesn't have krs permission)
-export const findSuitablePublicKeyIds = (state: Object, permissions: '*' | string[], purposes: SPKeyPurpose[], ringLevel?: number): ?string[] => {
+export const findSuitablePublicKeyIds = (state: ChelContractState, permissions: '*' | string[], purposes: SPKeyPurpose[], ringLevel?: number): string[] | null | undefined => {
   return state._vm?.authorizedKeys &&
-    ((Object.values((state._vm.authorizedKeys: any)): any): SPKey[]).filter((k) =>
+    Object.values((state._vm.authorizedKeys)).filter((k) =>
       (k._notAfterHeight == null) &&
       (k.ringLevel <= (ringLevel ?? Number.POSITIVE_INFINITY)) &&
       (Array.isArray(permissions)
@@ -69,10 +71,10 @@ export const findSuitablePublicKeyIds = (state: Object, permissions: '*' | strin
       .map((k) => k.id)
 }
 
-const validateActionPermissions = (msg: SPMessage, signingKey: SPKey, state: Object, opT: string, opV: SPOpActionUnencrypted) => {
-  const data: ProtoSPOpActionUnencrypted = isSignedData(opV)
-    ? (opV: any).valueOf()
-    : (opV: any)
+const validateActionPermissions = (msg: SPMessage, signingKey: SPKey | ChelContractKey, state: ChelContractState, opT: string, opV: SPOpActionUnencrypted) => {
+  const data = isSignedData(opV)
+    ? opV.valueOf() as ProtoSPOpActionUnencrypted
+    : opV as ProtoSPOpActionUnencrypted
 
   if (
     signingKey.allowedActions !== '*' && (
@@ -85,7 +87,7 @@ const validateActionPermissions = (msg: SPMessage, signingKey: SPKey, state: Obj
   }
 
   if (isSignedData(opV)) {
-    const s = ((opV: any): SignedData<void>)
+    const s = opV as SignedData<void>
     const innerSigningKey = state._vm?.authorizedKeys?.[s.signingKeyId]
 
     // For outgoing messages, we may be using an inner signing key that isn't
@@ -123,7 +125,7 @@ const validateActionPermissions = (msg: SPMessage, signingKey: SPKey, state: Obj
   return true
 }
 
-export const validateKeyPermissions = (msg: SPMessage, config: Object, state: Object, signingKeyId: string, opT: string, opV: SPOpValue): boolean => {
+export const validateKeyPermissions = (msg: SPMessage, config: CheloniaConfig, state: ChelContractState, signingKeyId: string, opT: string, opV: SPOpValue): boolean => {
   const signingKey = state._vm?.authorizedKeys?.[signingKeyId]
   if (
     !signingKey ||
@@ -142,7 +144,7 @@ export const validateKeyPermissions = (msg: SPMessage, config: Object, state: Ob
 
   if (
     opT === SPMessage.OP_ACTION_UNENCRYPTED &&
-    !validateActionPermissions(msg, signingKey, state, opT, (opV: any))
+    !validateActionPermissions(msg, signingKey, state, opT, opV as SPOpActionUnencrypted)
   ) {
     return false
   }
@@ -150,7 +152,7 @@ export const validateKeyPermissions = (msg: SPMessage, config: Object, state: Ob
   if (
     !config.skipActionProcessing &&
     opT === SPMessage.OP_ACTION_ENCRYPTED &&
-    !validateActionPermissions(msg, signingKey, state, opT, (opV: any).valueOf())
+    !validateActionPermissions(msg, signingKey, state, opT, opV.valueOf() as SPOpActionUnencrypted)
   ) {
     return false
   }
@@ -158,7 +160,7 @@ export const validateKeyPermissions = (msg: SPMessage, config: Object, state: Ob
   return true
 }
 
-export const validateKeyAddPermissions = (contractID: string, signingKey: SPKey, state: Object, v: (SPKey | EncryptedData<SPKey>)[], skipPrivateCheck?: boolean) => {
+export const validateKeyAddPermissions = (contractID: string, signingKey: SPKey, state: ChelContractState, v: (SPKey | EncryptedData<SPKey>)[], skipPrivateCheck?: boolean) => {
   const signingKeyPermissions = Array.isArray(signingKey.permissions) ? new Set(signingKey.permissions) : signingKey.permissions
   const signingKeyAllowedActions = Array.isArray(signingKey.allowedActions) ? new Set(signingKey.allowedActions) : signingKey.allowedActions
   if (!state._vm?.authorizedKeys?.[signingKey.id]) throw new Error('Singing key for OP_KEY_ADD or OP_KEY_UPDATE must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id)
@@ -166,7 +168,7 @@ export const validateKeyAddPermissions = (contractID: string, signingKey: SPKey,
   v.forEach(wk => {
     const data = unwrapMaybeEncryptedData(wk)
     if (!data) return
-    const k = (data.data: SPKey)
+    const k = data.data as SPKey
     if (!skipPrivateCheck && signingKey._private && !data.encryptionKeyId) {
       throw new Error('Signing key is private but it tried adding a public key')
     }
@@ -186,12 +188,12 @@ export const validateKeyAddPermissions = (contractID: string, signingKey: SPKey,
   })
 }
 
-export const validateKeyDelPermissions = (contractID: string, signingKey: SPKey, state: Object, v: (string | EncryptedData<string>)[]) => {
+export const validateKeyDelPermissions = (contractID: string, signingKey: SPKey, state: ChelContractState, v: (string | EncryptedData<string>)[]) => {
   if (!state._vm?.authorizedKeys?.[signingKey.id]) throw new Error('Singing key for OP_KEY_DEL must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id)
   const localSigningKey = state._vm.authorizedKeys[signingKey.id]
   v
     .forEach((wid) => {
-      const data = unwrapMaybeEncryptedData(wid)
+      const data = unwrapMaybeEncryptedData<string>(wid)
       if (!data) return
       const id = data.data
       const k = state._vm.authorizedKeys[id]
@@ -210,12 +212,12 @@ export const validateKeyDelPermissions = (contractID: string, signingKey: SPKey,
     })
 }
 
-export const validateKeyUpdatePermissions = (contractID: string, signingKey: SPKey, state: Object, v: (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]): [SPKey[], { [k: string]: string }] => {
-  const updatedMap = ((Object.create(null): any): { [k: string]: string })
-  const keys = v.map((wuk): SPKey | void => {
+export const validateKeyUpdatePermissions = (contractID: string, signingKey: SPKey, state: ChelContractState, v: (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]): [SPKey[], Record<string, string>] => {
+  const updatedMap = Object.create(null) as Record<string, string>
+  const keys = v.map((wuk): SPKey | undefined => {
     const data = unwrapMaybeEncryptedData(wuk)
     if (!data) return undefined
-    const uk = (data.data: SPKeyUpdate)
+    const uk = data.data
 
     const existingKey = state._vm.authorizedKeys[uk.oldKeyId]
     if (!existingKey) {
@@ -236,7 +238,7 @@ export const validateKeyUpdatePermissions = (contractID: string, signingKey: SPK
     if (uk.id && uk.id !== uk.oldKeyId) {
       updatedMap[uk.id] = uk.oldKeyId
     }
-    const updatedKey = { ...existingKey }
+    const updatedKey = { ...existingKey } as SPKey
     // Set the corresponding updated attributes
     if (uk.permissions) {
       updatedKey.permissions = uk.permissions
@@ -245,7 +247,7 @@ export const validateKeyUpdatePermissions = (contractID: string, signingKey: SPK
       updatedKey.allowedActions = uk.allowedActions
     }
     if (uk.purpose) {
-      updatedKey.purpose = uk.purpose
+      updatedKey.purpose = uk.purpose as SPKeyPurpose[]
     }
     if (uk.meta) {
       updatedKey.meta = uk.meta
@@ -257,18 +259,19 @@ export const validateKeyUpdatePermissions = (contractID: string, signingKey: SPK
       updatedKey.data = uk.data
     }
     return updatedKey
-  }).filter(Boolean)
+  // eslint-disable-next-line no-use-before-define
+  }).filter(Boolean as unknown as (key: unknown) => key is SPKey)
   validateKeyAddPermissions(contractID, signingKey, state, keys, true)
-  return [((keys: any): SPKey[]), updatedMap]
+  return [keys, updatedMap]
 }
 
-export const keyAdditionProcessor = function (msg: SPMessage, hash: string, keys: (SPKey | EncryptedData<SPKey>)[], state: Object, contractID: string, signingKey: SPKey, internalSideEffectStack?: Function[]) {
+export const keyAdditionProcessor = function (this: CheloniaContext, msg: SPMessage, hash: string, keys: (SPKey | EncryptedData<SPKey>)[], state: ChelContractState, contractID: string, signingKey: SPKey, internalSideEffectStack?: (() => void)[]) {
   const decryptedKeys = []
-  const keysToPersist = []
+  const keysToPersist: { key: Key, transient: boolean }[] = []
 
-  const storeSecretKey = (key, decryptedKey) => {
+  const storeSecretKey = (key: SPKey, decryptedKey: string) => {
     const decryptedDeserializedKey = deserializeKey(decryptedKey)
-    const transient = !!key.meta.private.transient
+    const transient = !!key.meta?.private?.transient
     sbp('chelonia/storeSecretKeys', new Secret([{
       key: decryptedDeserializedKey,
       // We always set this to true because this could be done from
@@ -284,7 +287,7 @@ export const keyAdditionProcessor = function (msg: SPMessage, hash: string, keys
     const data = unwrapMaybeEncryptedData(wkey)
     if (!data) continue
     const key = data.data
-    let decryptedKey: ?string
+    let decryptedKey: string | null | undefined
     // Does the key have key.meta?.private? If so, attempt to decrypt it
     if (key.meta?.private && key.meta.private.content) {
       if (
@@ -331,12 +334,12 @@ export const keyAdditionProcessor = function (msg: SPMessage, hash: string, keys
           ? serializeKey(this.transientSecretKeys[key.id], true)
           : undefined
       )
-      this.config.reactiveSet(state._vm.invites, key.id, {
+      this.config.reactiveSet(state._vm.invites!, key.id, {
         status: INVITE_STATUS.VALID,
-        initialQuantity: key.meta.quantity,
-        quantity: key.meta.quantity,
-        expires: key.meta.expires,
-        inviteSecret,
+        initialQuantity: key.meta!.quantity!,
+        quantity: key.meta!.quantity!,
+        expires: key.meta!.expires!,
+        inviteSecret: inviteSecret!,
         responses: []
       })
     }
@@ -360,7 +363,7 @@ export const keyAdditionProcessor = function (msg: SPMessage, hash: string, keys
           sbp('chelonia/private/queueEvent', keyRequestContractID, () => {
             const rootState = sbp(this.config.stateSelector)
 
-            const originatingContractState = rootState[contractID]
+            const originatingContractState = rootState[contractID] as ChelContractState
             if (sbp('chelonia/contract/hasKeyShareBeenRespondedBy', originatingContractState, keyRequestContractID, reference)) {
             // In the meantime, our key request has been responded, so we
             // don't need to set pendingKeyRequests.
@@ -368,16 +371,16 @@ export const keyAdditionProcessor = function (msg: SPMessage, hash: string, keys
             }
 
             if (!has(rootState, keyRequestContractID)) this.config.reactiveSet(rootState, keyRequestContractID, Object.create(null))
-            const targetState = rootState[keyRequestContractID]
+            const targetState = rootState[keyRequestContractID] as ChelContractState
 
             if (!targetState._volatile) {
               this.config.reactiveSet(targetState, '_volatile', Object.create(null))
             }
-            if (!targetState._volatile.pendingKeyRequests) {
+            if (!targetState._volatile!.pendingKeyRequests) {
               this.config.reactiveSet(rootState[keyRequestContractID]._volatile, 'pendingKeyRequests', [])
             }
 
-            if (targetState._volatile.pendingKeyRequests.some((pkr) => {
+            if (targetState._volatile!.pendingKeyRequests!.some((pkr) => {
               return pkr && pkr.contractID === contractID && pkr.hash === hash
             })) {
             // This pending key request has already been registered.
@@ -388,10 +391,10 @@ export const keyAdditionProcessor = function (msg: SPMessage, hash: string, keys
             // Mark the contract for which keys were requested as pending keys
             // The hash (of the current message) is added to this dictionary
             // for cross-referencing puposes.
-            targetState._volatile.pendingKeyRequests.push({ contractID, name: key.name, hash, reference: reference?.data })
+            targetState._volatile!.pendingKeyRequests!.push({ contractID, name: key.name, hash, reference: reference?.data })
 
             this.setPostSyncOp(contractID, 'pending-keys-for-' + keyRequestContractID, ['okTurtles.events/emit', CONTRACT_IS_PENDING_KEY_REQUESTS, { contractID: keyRequestContractID }])
-          }).catch((e) => {
+          }).catch((e: unknown) => {
             // Using console.error instead of logEvtError because this
             // is a side-effect and not relevant for outgoing messages
             console.error('Error while setting or updating pendingKeyRequests', { contractID, keyRequestContractID, reference }, e)
@@ -410,10 +413,10 @@ export const keyAdditionProcessor = function (msg: SPMessage, hash: string, keys
   internalSideEffectStack?.push(() => subscribeToForeignKeyContracts.call(this, contractID, state))
 }
 
-export const subscribeToForeignKeyContracts = function (contractID: string, state: Object) {
+export const subscribeToForeignKeyContracts = function (this: CheloniaContext, contractID: string, state: ChelContractState) {
   try {
     // $FlowFixMe[incompatible-call]
-    Object.values((state._vm.authorizedKeys: { [x: string]: SPKey })).filter((key) => !!((key: any): SPKey).foreignKey && findKeyIdByName(state, ((key: any): SPKey).name) != null).forEach((key: SPKey) => {
+    Object.values(state._vm.authorizedKeys).filter((key) => !!((key)).foreignKey && findKeyIdByName(state, ((key)).name) != null).forEach((key) => {
       const foreignKey = String(key.foreignKey)
       const fkUrl = new URL(foreignKey)
       const foreignContract = fkUrl.pathname
@@ -434,21 +437,21 @@ export const subscribeToForeignKeyContracts = function (contractID: string, stat
 
       // If the key is already being watched, do nothing
       if (Array.isArray(rootState?.[foreignContract]?._volatile?.watch)) {
-        if (rootState[foreignContract]._volatile.watch.find((v) =>
+        if ((rootState[foreignContract] as ChelContractState)._volatile!.watch!.find((v) =>
           v[0] === key.name && v[1] === contractID
         )) return
       }
 
       if (!has(state._vm, 'pendingWatch')) this.config.reactiveSet(state._vm, 'pendingWatch', Object.create(null))
-      if (!has(state._vm.pendingWatch, foreignContract)) this.config.reactiveSet(state._vm.pendingWatch, foreignContract, [])
-      if (!state._vm.pendingWatch[foreignContract].includes(foreignKeyName)) {
-        state._vm.pendingWatch[foreignContract].push([foreignKeyName, key.id])
+      if (!has(state._vm.pendingWatch, foreignContract)) this.config.reactiveSet(state._vm.pendingWatch!, foreignContract, [])
+      if (!state._vm.pendingWatch![foreignContract].find(([n]) => n === foreignKeyName)) {
+        state._vm.pendingWatch![foreignContract].push([foreignKeyName, key.id])
       }
 
       this.setPostSyncOp(contractID, `watchForeignKeys-${contractID}`, ['chelonia/private/watchForeignKeys', contractID])
     })
-  } catch (e) {
-    console.warn('Error at subscribeToForeignKeyContracts: ' + (e.message || e))
+  } catch (e: unknown) {
+    console.warn('Error at subscribeToForeignKeyContracts: ' + ((e as Error).message || e))
   }
 }
 
@@ -462,7 +465,7 @@ export const subscribeToForeignKeyContracts = function (contractID: string, stat
 // duplicate operations. For operations involving keys, the payload will be
 // rewritten to eliminate no-longer-relevant keys. In most cases, this would
 // result in an empty payload, in which case the message is omitted entirely.
-export const recreateEvent = (entry: SPMessage, state: Object, contractsState: Object): typeof undefined | SPMessage => {
+export const recreateEvent = (entry: SPMessage, state: ChelContractState, contractsState: ChelRootState['contracts']): undefined | SPMessage => {
   const { HEAD: previousHEAD, height: previousHeight, previousKeyOp } = contractsState || {}
   if (!previousHEAD) {
     throw new Error('recreateEvent: Giving up because the contract has been removed')
@@ -477,8 +480,8 @@ export const recreateEvent = (entry: SPMessage, state: Object, contractsState: O
       let newOpV: SPOpValue
       if (opT === SPMessage.OP_KEY_ADD) {
         if (!Array.isArray(opV)) throw new Error('Invalid message format')
-        newOpV = ((opV: any): SPOpKeyAdd).filter((k) => {
-          const kId = (k.valueOf(): any).id
+        newOpV = (opV as SPOpKeyAdd).filter((k) => {
+          const kId = (k.valueOf() as SPKey).id
           return !has(state._vm.authorizedKeys, kId) || state._vm.authorizedKeys[kId]._notAfterHeight != null
         })
         // Has this key already been added? (i.e., present in authorizedKeys)
@@ -490,8 +493,8 @@ export const recreateEvent = (entry: SPMessage, state: Object, contractsState: O
       } else if (opT === SPMessage.OP_KEY_DEL) {
         if (!Array.isArray(opV)) throw new Error('Invalid message format')
         // Has this key already been removed? (i.e., no longer in authorizedKeys)
-        newOpV = opV.filter((keyId) => {
-          const kId = (Object(keyId).valueOf(): any)
+        newOpV = (opV as SPOpKeyDel).filter((keyId) => {
+          const kId = Object(keyId).valueOf()
           return has(state._vm.authorizedKeys, kId) && state._vm.authorizedKeys[kId]._notAfterHeight == null
         })
         if (newOpV.length === 0) {
@@ -502,9 +505,9 @@ export const recreateEvent = (entry: SPMessage, state: Object, contractsState: O
       } else if (opT === SPMessage.OP_KEY_UPDATE) {
         if (!Array.isArray(opV)) throw new Error('Invalid message format')
         // Has this key already been replaced? (i.e., no longer in authorizedKeys)
-        newOpV = ((opV: any): SPOpKeyUpdate).filter((k) => {
-          const oKId = (k.valueOf(): any).oldKeyId
-          const nKId = (k.valueOf(): any).id
+        newOpV = (opV as SPOpKeyUpdate).filter((k) => {
+          const oKId = (k.valueOf() as SPKeyUpdate).oldKeyId
+          const nKId = (k.valueOf() as SPKeyUpdate).id
           return nKId == null || (has(state._vm.authorizedKeys, oKId) && state._vm.authorizedKeys[oKId]._notAfterHeight == null)
         })
         if (newOpV.length === 0) {
@@ -514,10 +517,10 @@ export const recreateEvent = (entry: SPMessage, state: Object, contractsState: O
         }
       } else if (opT === SPMessage.OP_ATOMIC) {
         if (!Array.isArray(opV)) throw new Error('Invalid message format')
-        newOpV = ((((opV: any): SPOpAtomic).map(([t, v]) => [t, recreateOperationInternal(t, v)]).filter(([, v]) => !!v): any): SPOpAtomic)
-        if (newOpV.length === 0) {
+        newOpV = (opV as SPOpAtomic).map(([t, v]) => [t, recreateOperationInternal(t, v)]).filter(([, v]) => !!v) as SPOpAtomic
+        if ((newOpV as SPOpAtomic).length === 0) {
           console.info('Omitting empty OP_ATOMIC', { head })
-        } else if (newOpV.length === opV.length && newOpV.reduce((acc, cv, i) => acc && cv === opV[i], true)) {
+        } else if ((newOpV as SPOpAtomic).length === opV.length && (newOpV as SPOpAtomic).reduce((acc, cv, i) => acc && cv === opV[i], true)) {
           return opV
         } else {
           return newOpV
@@ -549,26 +552,26 @@ export const recreateEvent = (entry: SPMessage, state: Object, contractsState: O
   const newOp = [opT, newRawOpV]
 
   entry = SPMessage.cloneWith(
-    head, newOp, { previousKeyOp, previousHEAD, height: previousHeight + 1 }
+    head, newOp as SPOpRaw, { previousKeyOp, previousHEAD, height: previousHeight + 1 }
   )
 
   return entry
 }
 
-export const getContractIDfromKeyId = (contractID: string, signingKeyId: ?string, state: Object): ?string => {
+export const getContractIDfromKeyId = (contractID: string, signingKeyId: string | null | undefined, state: ChelContractState): string | null | undefined => {
   if (!signingKeyId) return
   return signingKeyId && state._vm?.authorizedKeys?.[signingKeyId]?.foreignKey
-    ? new URL(state._vm.authorizedKeys[signingKeyId].foreignKey).pathname
+    ? new URL(state._vm.authorizedKeys[signingKeyId].foreignKey!).pathname
     : contractID
 }
 
-export function eventsAfter (contractID: string, sinceHeight: number, limit?: number, sinceHash?: string, { stream }: { stream: boolean } = { stream: true }): ReadableStream | Promise<any[]> {
+export function eventsAfter (this: CheloniaContext, contractID: string, sinceHeight: number, limit?: number, sinceHash?: string, { stream }: { stream: boolean } = { stream: true }): ReadableStream<string> | Promise<string[]> {
   if (!contractID) {
     // Avoid making a network roundtrip to tell us what we already know
     throw new Error('Missing contract ID')
   }
 
-  let lastUrl
+  let lastUrl: string
   const fetchEventsStreamReader = async () => {
     requestLimit = Math.min(limit ?? MAX_EVENTS_AFTER, remainingEvents)
     lastUrl = `${this.config.connectionURL}/eventsAfter/${contractID}/${sinceHeight}${Number.isInteger(requestLimit) ? `/${requestLimit}` : ''}`
@@ -579,7 +582,7 @@ export function eventsAfter (contractID: string, sinceHeight: number, limit?: nu
       throw new ChelErrorUnexpectedHttpResponseCode(msg)
     }
     if (!eventsResponse.body) throw new Error('Missing body')
-    latestHeight = parseInt(eventsResponse.headers.get('shelter-headinfo-height'), 10)
+    latestHeight = parseInt(eventsResponse.headers.get('shelter-headinfo-height')!, 10)
     if (!Number.isSafeInteger(latestHeight)) throw new Error('Invalid latest height')
     requestCount++
     // $FlowFixMe[incompatible-use]
@@ -591,15 +594,15 @@ export function eventsAfter (contractID: string, sinceHeight: number, limit?: nu
   const signal = this.abortController.signal
   let requestCount = 0
   let remainingEvents = limit ?? Number.POSITIVE_INFINITY
-  let eventsStreamReader
-  let latestHeight
+  let eventsStreamReader: ReadableStreamDefaultReader<Uint8Array>
+  let latestHeight: number
   let state: 'fetch' | 'read-eos' | 'read-new-response' | 'read' | 'events' | 'eod' = 'fetch'
   let requestLimit: number
   let count: number
   let buffer: string = ''
   let currentEvent: string
   // return ReadableStream with a custom pull function to handle streamed data
-  const s = new ReadableStream({
+  const s = new ReadableStream<string>({
     // The pull function is called whenever the internal buffer of the stream
     // becomes empty and needs more data.
     async pull (controller) {
@@ -769,9 +772,9 @@ export function eventsAfter (contractID: string, sinceHeight: number, limit?: nu
   return collectEventStream(s)
 }
 
-export function buildShelterAuthorizationHeader (contractID: string, state?: Object): string {
+export function buildShelterAuthorizationHeader (this: CheloniaContext, contractID: string, state?: ChelContractState): string {
   if (!state) state = sbp(this.config.stateSelector)[contractID]
-  const SAKid = findKeyIdByName(state, '#sak')
+  const SAKid = findKeyIdByName(state!, '#sak')
   if (!SAKid) {
     throw new Error(`Missing #sak in ${contractID}`)
   }
@@ -792,7 +795,7 @@ export function buildShelterAuthorizationHeader (contractID: string, state?: Obj
   return `shelter ${data}.${sign(deserializedSAK, data)}`
 }
 
-export function verifyShelterAuthorizationHeader (authorization: string, rootState?: Object): string {
+export function verifyShelterAuthorizationHeader (authorization: string, rootState?: object): string {
   const regex = /^shelter (([a-zA-Z0-9]+) ([0-9]+)\.([a-zA-Z0-9+/=]{20}))\.([a-zA-Z0-9+/=]+)$/i
   if (authorization.length > 1024) {
     throw new Error('Authorization header too long')
@@ -810,11 +813,11 @@ export function verifyShelterAuthorizationHeader (authorization: string, rootSta
   if (!has(rootState, contractID)) {
     throw new Error(`Contract ${contractID} from shelter authorization header not found`)
   }
-  const SAKid = findKeyIdByName(rootState[contractID], '#sak')
+  const SAKid = findKeyIdByName(rootState![contractID] as ChelContractState, '#sak')
   if (!SAKid) {
     throw new Error(`Missing #sak in ${contractID}`)
   }
-  const SAK = rootState[contractID]._vm.authorizedKeys[SAKid].data
+  const SAK = (rootState![contractID] as ChelContractState)._vm.authorizedKeys[SAKid].data
   if (!SAK) {
     throw new Error(`Missing secret #sak (${SAKid}) in ${contractID}`)
   }
@@ -825,15 +828,15 @@ export function verifyShelterAuthorizationHeader (authorization: string, rootSta
   return contractID
 }
 
-export const clearObject = (o: Object) => {
-  Object.keys(o).forEach((k) => delete o[k])
+export const clearObject = (o: object) => {
+  Object.keys(o).forEach((k) => delete o[k as keyof typeof o])
 }
 
-export const reactiveClearObject = (o: Object, fn: (o: Object, k: string | number) => any) => {
-  Object.keys(o).forEach((k) => fn(o, k))
+export const reactiveClearObject = <T extends object>(o: T, fn: (o: T, k: keyof T) => void) => {
+  Object.keys(o).forEach((k) => fn(o, k as keyof T))
 }
 
-export const checkCanBeGarbageCollected = function (id: string): boolean {
+export const checkCanBeGarbageCollected = function (this: CheloniaContext, id: string): boolean {
   const rootState = sbp(this.config.stateSelector)
   return (
     // Check persistent references
@@ -841,10 +844,10 @@ export const checkCanBeGarbageCollected = function (id: string): boolean {
     // Check ephemeral references
     !has(this.ephemeralReferenceCount, id)) &&
     // Check foreign keys (i.e., that no keys from this contract are being watched)
-    (!has(rootState, id) || !has(rootState[id], '_volatile') || !has(rootState[id]._volatile, 'watch') || rootState[id]._volatile.watch.length === 0 || rootState[id]._volatile.watch.filter(([, cID]) => this.subscriptionSet.has(cID)).length === 0)
+    (!has(rootState, id) || !has(rootState[id], '_volatile') || !has(rootState[id]._volatile, 'watch') || rootState[id]._volatile.watch.length === 0 || (rootState[id] as ChelContractState)._volatile!.watch!.filter(([, cID]) => this.subscriptionSet.has(cID)).length === 0)
 }
 
-export const collectEventStream = async (s: ReadableStream): Promise<any[]> => {
+export const collectEventStream = async <T> (s: ReadableStream<T>): Promise<T[]> => {
   const reader = s.getReader()
   const r = []
   for (;;) {
@@ -857,7 +860,7 @@ export const collectEventStream = async (s: ReadableStream): Promise<any[]> => {
 
 // Used inside processing functions for displaying errors at the 'warn' level
 // for outgoing messages to increase the signal-to-noise error. See issue #2773.
-export const logEvtError = (msg: SPMessage, ...args: any[]) => {
+export const logEvtError = (msg: SPMessage, ...args: unknown[]) => {
   if (msg._direction === 'outgoing') {
     console.warn(...args)
   } else {

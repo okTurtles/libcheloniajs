@@ -46,7 +46,7 @@ export type ResponseTypeEnum = typeof RESPONSE_TYPE[keyof typeof RESPONSE_TYPE]
 
 type TimeoutID = ReturnType<typeof setTimeout>
 
-type Options = {
+export type Options = {
   logPingMessages: boolean;
   pingTimeout: number;
   maxReconnectionDelay: number;
@@ -99,7 +99,8 @@ export type PubSubClient = {
   scheduleConnectionAttempt(this: PubSubClient): void,
   sub(this: PubSubClient, channelID: string): void,
   unsub(this: PubSubClient, channelID: string): void,
-  getNextRandomDelay(this: PubSubClient): number
+  getNextRandomDelay(this: PubSubClient): number,
+  setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void
 }
 
 type ClientEventHandlers = {

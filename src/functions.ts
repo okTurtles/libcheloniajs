@@ -17,7 +17,7 @@ export const multicodes: { [x: string]: number } = {
   SHELTER_FILE_CHUNK: 0x511e04
 }
 
-export const parseCID = (cid: string): Object => {
+export const parseCID = (cid: string): CID => {
   if (!cid || cid.length < 52 || cid.length > 64) {
     throw new RangeError('CID length too short or too long')
   }
@@ -33,10 +33,10 @@ export const parseCID = (cid: string): Object => {
   return parsed
 }
 
-export const maybeParseCID = (cid: string): Object | null => {
+export const maybeParseCID = (cid: string): CID | null => {
   try {
     return parseCID(cid)
-  } catch (e) {
+  } catch {
     // Ignore errors if the CID couldn't be parsed
     return null
   }
@@ -84,7 +84,7 @@ export const strToB64 = (str: string): string => strToBuf(str).toString('base64'
 export const bytesToB64 = (ary: Uint8Array): string => Buffer.from(ary).toString('base64')
 
 // Generate an UUID from a `PushSubscription'
-export const getSubscriptionId = async (subscriptionInfo: Object): Promise<string> => {
+export const getSubscriptionId = async (subscriptionInfo: PushSubscriptionJSON): Promise<string> => {
   const textEncoder = new TextEncoder()
   // <https://w3c.github.io/push-api/#pushsubscription-interface>
   const endpoint = textEncoder.encode(subscriptionInfo.endpoint)

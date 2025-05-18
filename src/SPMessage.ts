@@ -7,11 +7,11 @@ import { encryptedIncomingData, encryptedIncomingForeignData, maybeEncryptedInco
 import { createCID, multicodes } from './functions.js'
 import type { SignedData } from './signedData.js'
 import { isRawSignedData, isSignedData, rawSignedIncomingData, signedIncomingData } from './signedData.js'
-import type { JSONObject, JSONType } from './types.js'
+import type { ChelContractState, JSONObject, JSONType } from './types.js'
 
 export type SPKeyType = typeof EDWARDS25519SHA512BATCH | typeof CURVE25519XSALSA20POLY1305 | typeof XSALSA20POLY1305
 
-export type SPKeyPurpose = 'enc' | 'sig'
+export type SPKeyPurpose = 'enc' | 'sig' | 'sak'
 
 export type SPKey = {
   id: string;
@@ -20,7 +20,20 @@ export type SPKey = {
   ringLevel: number;
   permissions: '*' | string[];
   allowedActions?: '*' | string[];
-  meta: object;
+  meta?: {
+    quantity?: number;
+    expires?: number;
+    private?: {
+      transient?: boolean;
+      content?: string;
+      shareable?: boolean;
+      oldKeys?: string;
+    },
+    keyRequest?: {
+      contractID: string,
+      reference?: EncryptedData<string>,
+    }
+  },
   data: string;
   foreignKey?: string;
   _notBeforeHeight: number;
@@ -59,7 +72,16 @@ export type SPKeyUpdate = {
   purpose?: string[];
   permissions?: string[];
   allowedActions?: '*' | string[];
-  meta?: Object;
+  meta?: {
+    quantity?: number;
+    expires?: number;
+    private?: {
+      transient?: boolean;
+      content?: string;
+      shareable?: boolean;
+      oldKeys?: string;
+    }
+  }
 }
 export type SPOpKeyUpdate = (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]
 
@@ -76,7 +98,7 @@ type SPMsgParams = { direction: SPMsgDirection, mapping: { key: string, value: s
 
 // Takes a raw message and processes it so that EncryptedData and SignedData
 // attributes are defined
-const decryptedAndVerifiedDeserializedMessage = (head: SPHead, headJSON: string, contractID: string, parsedMessage: SPOpValue, additionalKeys?: Record<string, Key | string>, state: Object): SPOpValue => {
+const decryptedAndVerifiedDeserializedMessage = (head: SPHead, headJSON: string, contractID: string, parsedMessage: SPOpValue, additionalKeys: Record<string, Key | string> | undefined, state: ChelContractState): SPOpValue => {
   const op = head.op
   const height = head.height
 
@@ -89,7 +111,7 @@ const decryptedAndVerifiedDeserializedMessage = (head: SPHead, headJSON: string,
   // extract encrypted data from key.meta?.private?.content
   if (([SPMessage.OP_KEY_ADD, SPMessage.OP_KEY_UPDATE] as SPOpType[]).includes(op as SPOpType)) {
     return (message as SPOpKeyAdd | SPOpKeyUpdate).map((key) => {
-      return maybeEncryptedIncomingData(contractID, state, key, height, additionalKeys, headJSON, (key, eKeyId) => {
+      return maybeEncryptedIncomingData(contractID, state, key, height, additionalKeys, headJSON, (key) => {
         if (key.meta?.private?.content) {
           key.meta.private.content = encryptedIncomingData<string>(contractID, state, key.meta.private.content, height, additionalKeys, headJSON, (value) => {
           // Validator function to verify the key matches its expected ID
@@ -131,7 +153,7 @@ const decryptedAndVerifiedDeserializedMessage = (head: SPHead, headJSON: string,
         if (!key.meta?.private?.content) return
         const decryptionFn = key.meta.private.foreignContractID ? encryptedIncomingForeignData : encryptedIncomingData
         const decryptionContract = key.meta.private.foreignContractID ? key.meta.private.foreignContractID : contractID
-        key.meta.private.content = decryptionFn<string>(decryptionContract, state, key.meta.private.content, height, additionalKeys, headJSON, (value) => {
+        key.meta.private.content = decryptionFn<string>(decryptionContract, state as never, key.meta.private.content, height as never, additionalKeys, headJSON, (value) => {
           const computedKeyId = keyId(value)
           if (computedKeyId !== key.id) {
             throw new Error(`Key ID mismatch. Expected to decrypt key ID ${key.id} but got ${computedKeyId}`)
@@ -266,15 +288,15 @@ export class SPMessage {
   // SPMessage.cloneWith could be used when make a SPMessage object having the same id()
   // https://github.com/okTurtles/group-income/issues/1503
   static cloneWith (
-    targetHead: Partial<SPHead>,
+    targetHead: SPHead,
     targetOp: SPOpRaw,
-    sources: SPHead
+    sources: Partial<SPHead>
   ): SPMessage {
     const head = Object.assign({}, targetHead, sources)
     return new this(messageToParams(head, targetOp[1]))
   }
 
-  static deserialize (value: string, additionalKeys?: Object, state?: Object): SPMessage {
+  static deserialize (value: string, additionalKeys?: Record<string, Key | string>, state?: ChelContractState): SPMessage {
     if (!value) throw new Error(`deserialize bad value: ${value}`)
     const { head: headJSON, ...parsedValue } = JSON.parse(value)
     const head = JSON.parse(headJSON)
@@ -283,18 +305,19 @@ export class SPMessage {
     // Special case for OP_CONTRACT, since the keys are not yet present in the
     // state
     if (!state?._vm?.authorizedKeys && head.op === SPMessage.OP_CONTRACT) {
-      const value = rawSignedIncomingData(parsedValue)
+      const value = rawSignedIncomingData<SPOpContract>(parsedValue)
       const authorizedKeys = Object.fromEntries(value.valueOf()?.keys.map(k => [k.id, k]))
       state = {
         _vm: {
+          type: head.type,
           authorizedKeys
         }
       }
     }
 
-    const signedMessageData = signedIncomingData(
+    const signedMessageData = signedIncomingData<SPOpValue>(
       contractID, state, parsedValue, head.height, headJSON,
-      (message) => decryptedAndVerifiedDeserializedMessage(head, headJSON, contractID, message, additionalKeys, state)
+      (message) => decryptedAndVerifiedDeserializedMessage(head, headJSON, contractID, message, additionalKeys, state!)
     )
 
     return new this({
