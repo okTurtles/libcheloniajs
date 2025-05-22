@@ -3,9 +3,10 @@
 import type { Key } from '@chelonia/crypto'
 import type sbp from '@sbp/sbp'
 import { PubSubClient } from './pubsub/index.js'
-import { SPMessage } from './SPMessage.js'
+import { SPMessage, SPMsgDirection } from './SPMessage.js'
 
 export type JSONType =
+    | null
     | string
     | number
     | boolean
@@ -70,6 +71,50 @@ export type CheloniaConfig = {
     pubsubError?: { (e: unknown, socket: PubSubClient): void } | null
   }
 }
+
+export type ChelContractProcessMessageObject = Readonly<{
+  data: object,
+  meta: object,
+  hash: string,
+  height: number,
+  contractID: string,
+  direction: SPMsgDirection,
+  signingKeyId: string,
+  signingContractID: string,
+  innerSigningKeyId?: string | null | undefined,
+  innerSigningContractID?: string | null | undefined
+}>
+export type ChelContractSideeffectMutationObject = Readonly<{
+  data: object,
+  meta: object,
+  hash: string,
+  height: number,
+  contractID: string,
+  description: string,
+  direction: SPMsgDirection,
+  signingKeyId: string,
+  signingContractID: string,
+  innerSigningKeyId?: string | null | undefined,
+  innerSigningContractID?: string | null | undefined
+}>
+
+export type CheloniaContractCtx = {
+  getters: Record<string, <T extends object, K extends keyof T> (state: ChelContractState, obj: T) => T[K]>,
+  name: string,
+  manifest: string,
+  metadata: {
+    create: () => object | Promise<object>
+    validate: (meta: object, { state, contractID, ...gProxy }: { state: ChelContractState, contractID: string }) => void | Promise<void>,
+  }
+  sbp: typeof sbp
+  state: (contractID: string) => ChelContractState,
+  actions: Record<string, {
+    validate: (data: object, { state, meta, message, contractID, ...gProxy }: { state: ChelContractState, meta: object, message: ChelContractProcessMessageObject, contractID: string }) => void | Promise<void>
+    process: (message: ChelContractProcessMessageObject, { state, ...gProxy }: { state: ChelContractState }) => void | Promise<void>
+    sideEffect?: (mutation: ChelContractSideeffectMutationObject, { state, ...gProxy }: { state: ChelContractState }) => void | Promise<void>
+  }>,
+  methods: Record<string, string>
+}
 export type CheloniaContext = {
   config: CheloniaConfig,
   _instance: object,
@@ -79,13 +124,8 @@ export type CheloniaContext = {
     pending: string[],
     [x: string]: unknown
   },
-  manifestToContract: Record<string, { slim: boolean, info: string, contract: {
-    metadata: {
-      create: () => object | Promise<object>
-    }
-    state: (contractID: string) => ChelContractState
-  } }>,
-  whitelistedActions: Record<string, string>,
+  manifestToContract: Record<string, { slim: boolean, info: string, contract: CheloniaContractCtx }>,
+  whitelistedActions: Record<string, true>,
   currentSyncs: Record<string, { firstSync: boolean }>,
   postSyncOperations: Record<string, Record<string, Parameters<typeof sbp>>>,
   sideEffectStacks: Record<string, Parameters<typeof sbp>[]>,
@@ -97,7 +137,10 @@ export type CheloniaContext = {
   pending: { contractID: string }[],
   pubsub: import('./pubsub/index.js').PubSubClient,
   contractsModifiedListener: (contracts: Set<string>, { added, removed }: { added: string[], removed: string[] }) => void,
-  defContractSelectors: string[]
+  defContractSelectors: string[],
+  defContractManifest: string,
+  defContractSBP: typeof sbp,
+  defContract: CheloniaContractCtx
 }
 
 export type ChelFileManifest = {
@@ -190,6 +233,17 @@ export type Response = {
   err?: string;
   data?: JSONType
 }
+
+export type ParsedEncryptedOrUnencryptedMessage<T> = Readonly<{
+  contractID: string,
+  innerSigningKeyId?: string | null | undefined,
+  encryptionKeyId?: string | null | undefined,
+  signingKeyId: string,
+  data: T,
+  signingContractID?: string | null | undefined,
+  innerSigningContractID?: string | null | undefined,
+}>
+
 export type ChelKvOnConflictCallback = (
-  args: { contractID: string, key: string, failedData?: JSONType, status: number, etag: string | null | undefined, currentData: JSONType, currentValue: JSONType }
+  args: { contractID: string, key: string, failedData?: JSONType, status: number, etag: string | null | undefined, currentData: JSONType | undefined, currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined }
 ) => Promise<[JSONType, string]>

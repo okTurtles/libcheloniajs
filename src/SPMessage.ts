@@ -103,7 +103,6 @@ const decryptedAndVerifiedDeserializedMessage = (head: SPHead, headJSON: string,
   const height = head.height
 
   const message: SPOpValue = op === SPMessage.OP_ACTION_ENCRYPTED
-    // $FlowFixMe
     ? encryptedIncomingData<SPOpActionUnencrypted>(contractID, state, parsedMessage as [string, string], height, additionalKeys, headJSON, undefined)
     : parsedMessage
 

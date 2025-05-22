@@ -44,7 +44,6 @@ export const maybeParseCID = (cid: string): CID | null => {
 }
 
 // Makes the `Buffer` global available in the browser if needed.
-// $FlowFixMe[cannot-resolve-name]
 if (typeof globalThis === 'object' && !has(globalThis, 'Buffer')) {
   globalThis.Buffer = Buffer
 }

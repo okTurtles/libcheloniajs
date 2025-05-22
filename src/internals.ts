@@ -15,7 +15,7 @@ import { ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnrecoverabl
 import { CONTRACTS_MODIFIED, CONTRACT_HAS_RECEIVED_KEYS, CONTRACT_IS_SYNCING, EVENT_HANDLED, EVENT_PUBLISHED, EVENT_PUBLISHING_ERROR } from './events.js'
 import { buildShelterAuthorizationHeader, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, validateKeyPermissions, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyUpdatePermissions } from './utils.js'
 import { isSignedData, signedIncomingData } from './signedData.js'
-import { ChelContractKey, ChelContractState, ChelRootState, CheloniaConfig, CheloniaContext } from './types.js'
+import { ChelContractKey, ChelContractProcessMessageObject, ChelContractSideeffectMutationObject, ChelContractState, ChelRootState, CheloniaConfig, CheloniaContext } from './types.js'
 // import 'ses'
 
 // Used for temporarily storing the missing decryption key IDs in a given
@@ -793,7 +793,7 @@ export default sbp('sbp/selectors/register', {
               get innerSigningContractID () {
                 return getContractIDfromKeyId(contractID, innerSigningKeyId, state)
               }
-            },
+            } as ChelContractProcessMessageObject,
             state
           )
         }
@@ -1698,7 +1698,7 @@ export default sbp('sbp/selectors/register', {
     // 2. Verify 'data'
     const { encryptionKeyId } = v
 
-    const responseKey = encryptedIncomingData(contractID, contractState, v.responseKey, height, this.secretKeys, headJSON).valueOf()
+    const responseKey = encryptedIncomingData(contractID, contractState, v.responseKey, height, this.transientSecretKeys, headJSON).valueOf()
 
     const deserializedResponseKey = deserializeKey(responseKey)
     const responseKeyId = keyId(deserializedResponseKey)
@@ -2125,7 +2125,7 @@ const handleEvent = {
         get innerSigningContractID () {
           return getContractIDfromKeyId(contractID, innerSigningKeyId, state)
         }
-      }
+      } as ChelContractSideeffectMutationObject
       return await sbp(`${manifestHash}/${action}/sideEffect`, mutation, state)
     }
     const msg = Object(message.message())

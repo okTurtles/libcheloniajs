@@ -50,7 +50,6 @@ const encryptData = function <T> (stateOrContractID: string | ChelContractState,
   const state = typeof stateOrContractID === 'string' ? rootStateFn()[stateOrContractID] as ChelContractState : stateOrContractID
 
   // Has the key been revoked? If so, attempt to find an authorized key by the same name
-  // $FlowFixMe
   const designatedKey = state?._vm?.authorizedKeys?.[eKeyId]
   if (!designatedKey?.purpose.includes(
     'enc'
@@ -109,7 +108,6 @@ const decryptData = function <T> (state: ChelContractState, height: number, data
   const key = additionalKeys[eKeyId]
 
   if (!key) {
-    // $FlowFixMe[extra-arg]
     throw new ChelErrorDecryptionKeyNotFound(`Key ${eKeyId} not found`, { cause: eKeyId })
   }
 

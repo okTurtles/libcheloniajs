@@ -63,7 +63,6 @@ const signData = function <T, U extends object = object> (stateOrContractID: str
     throw new ChelErrorSignatureError('Signature additional data must be provided')
   }
   // Has the key been revoked? If so, attempt to find an authorized key by the same name
-  // $FlowFixMe
   const designatedKey = state?._vm?.authorizedKeys?.[sKeyId]
   if (!designatedKey?.purpose.includes(
     'sig'

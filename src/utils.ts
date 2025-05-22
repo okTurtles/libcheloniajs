@@ -415,7 +415,6 @@ export const keyAdditionProcessor = function (this: CheloniaContext, msg: SPMess
 
 export const subscribeToForeignKeyContracts = function (this: CheloniaContext, contractID: string, state: ChelContractState) {
   try {
-    // $FlowFixMe[incompatible-call]
     Object.values(state._vm.authorizedKeys).filter((key) => !!((key)).foreignKey && findKeyIdByName(state, ((key)).name) != null).forEach((key) => {
       const foreignKey = String(key.foreignKey)
       const fkUrl = new URL(foreignKey)
@@ -585,7 +584,6 @@ export function eventsAfter (this: CheloniaContext, contractID: string, sinceHei
     latestHeight = parseInt(eventsResponse.headers.get('shelter-headinfo-height')!, 10)
     if (!Number.isSafeInteger(latestHeight)) throw new Error('Invalid latest height')
     requestCount++
-    // $FlowFixMe[incompatible-use]
     return eventsResponse.body.getReader()
   }
   if (!Number.isSafeInteger(sinceHeight) || sinceHeight < 0) {
@@ -759,7 +757,6 @@ export function eventsAfter (this: CheloniaContext, contractID: string, sinceHei
         }
       } catch (e) {
         console.error('[eventsAfter] Error', { lastUrl }, e)
-        // $FlowFixMe[incompatible-use]
         eventsStreamReader?.cancel('Error during pull').catch(e2 => {
           console.error('Error canceling underlying event stream reader on error', e, e2)
         })
@@ -785,7 +782,6 @@ export function buildShelterAuthorizationHeader (this: CheloniaContext, contract
   const deserializedSAK = typeof SAK === 'string' ? deserializeKey(SAK) : SAK
 
   const nonceBytes = new Uint8Array(15)
-  // $FlowFixMe[cannot-resolve-name]
   globalThis.crypto.getRandomValues(nonceBytes)
 
   // <contractID> <UNIX ms time>.<nonce>

@@ -783,7 +783,6 @@ const publicMethods: {
 
     if (client.subscriptionSet.has(channelID)) {
       if (socket?.readyState === WebSocket.OPEN) {
-        // $FlowFixMe[incompatible-call]
         socket.send(createRequest(REQUEST_TYPE.KV_FILTER, kvFilter ? { channelID, kvFilter } : { channelID }))
       }
     }

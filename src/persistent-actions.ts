@@ -56,7 +56,6 @@ export class PersistentAction {
   [timer]?: ReturnType<typeof setTimeout>
 
   constructor (invocation: SbpInvocation, options: Partial<PersistentActionOptions> = {}) {
-    // $FlowFixMe: Cannot resolve name `crypto`.
     this.id = crypto.randomUUID()
     this.invocation = invocation
     this.options = { ...defaultOptions, ...options }
@@ -114,7 +113,6 @@ export class PersistentAction {
     // Schedule a retry if appropriate.
     if (status.nextRetry) {
       // Note: there should be no older active timeout to clear.
-      // $FlowFixMe[prop-missing]
       this[timer] = setTimeout(() => {
         this.attempt().catch((e) => {
           console.error('Error attempting persistent action', id, e)
