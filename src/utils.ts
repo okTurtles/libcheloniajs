@@ -13,7 +13,7 @@ import { CONTRACT_IS_PENDING_KEY_REQUESTS } from './events.js'
 import { b64ToStr } from './functions.js'
 import type { SignedData } from './signedData.js'
 import { isSignedData } from './signedData.js'
-import { ChelContractKey, ChelContractState, ChelRootState, CheloniaConfig, CheloniaContext } from './types.js'
+import { ChelContractKey, ChelContractState, ChelRootState, CheloniaConfig, CheloniaContext, JSONType } from './types.js'
 
 const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10) || Infinity
 
@@ -265,7 +265,7 @@ export const validateKeyUpdatePermissions = (contractID: string, signingKey: SPK
   return [keys, updatedMap]
 }
 
-export const keyAdditionProcessor = function (this: CheloniaContext, msg: SPMessage, hash: string, keys: (SPKey | EncryptedData<SPKey>)[], state: ChelContractState, contractID: string, signingKey: SPKey, internalSideEffectStack?: (() => void)[]) {
+export const keyAdditionProcessor = function (this: CheloniaContext, msg: SPMessage, hash: string, keys: (SPKey | EncryptedData<SPKey>)[], state: ChelContractState, contractID: string, signingKey: SPKey, internalSideEffectStack?: (({ state, message }: { state: ChelContractState, message: SPMessage }) => void)[]) {
   const decryptedKeys = []
   const keysToPersist: { key: Key, transient: boolean }[] = []
 
@@ -465,7 +465,7 @@ export const subscribeToForeignKeyContracts = function (this: CheloniaContext, c
 // duplicate operations. For operations involving keys, the payload will be
 // rewritten to eliminate no-longer-relevant keys. In most cases, this would
 // result in an empty payload, in which case the message is omitted entirely.
-export const recreateEvent = (entry: SPMessage, state: ChelContractState, contractsState: ChelRootState['contracts']): undefined | SPMessage => {
+export const recreateEvent = (entry: SPMessage, state: ChelContractState, contractsState: ChelRootState['contracts'][string]): undefined | SPMessage => {
   const { HEAD: previousHEAD, height: previousHeight, previousKeyOp } = contractsState || {}
   if (!previousHEAD) {
     throw new Error('recreateEvent: Giving up because the contract has been removed')
@@ -578,8 +578,8 @@ export function eventsAfter (this: CheloniaContext, contractID: string, sinceHei
     const eventsResponse = await this.config.fetch(lastUrl, { signal })
     if (!eventsResponse.ok) {
       const msg = `${eventsResponse.status}: ${eventsResponse.statusText}`
-      if (eventsResponse.status === 410) throw new ChelErrorResourceGone(msg)
-      throw new ChelErrorUnexpectedHttpResponseCode(msg)
+      if (eventsResponse.status === 404 || eventsResponse.status === 410) throw new ChelErrorResourceGone(msg, { cause: eventsResponse.status })
+      throw new ChelErrorUnexpectedHttpResponseCode(msg, { cause: eventsResponse.status })
     }
     if (!eventsResponse.body) throw new Error('Missing body')
     latestHeight = parseInt(eventsResponse.headers.get('shelter-headinfo-height')!, 10)
@@ -865,5 +865,18 @@ export const logEvtError = (msg: SPMessage, ...args: unknown[]) => {
     console.warn(...args)
   } else {
     console.error(...args)
+  }
+}
+
+export const handleFetchResult = (type: 'text' | 'json' | 'blob'): ((r: Response) => Promise<string | JSONType | Blob>) => {
+  return function (r: Response) {
+    if (!r.ok) {
+      const msg = `${r.status}: ${r.statusText}`
+      // 410 is sometimes special (for example, it can mean that a contract or
+      // a file been deleted)
+      if (r.status === 404 || r.status === 410) throw new ChelErrorResourceGone(msg, { cause: r.status })
+      throw new ChelErrorUnexpectedHttpResponseCode(msg, { cause: r.status })
+    }
+    return r[type]()
   }
 }
