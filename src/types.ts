@@ -230,11 +230,11 @@ export type ChelContractState = {
     pendingWatch?: Record<string, [fkName: string, fkId: string][]>,
     keyshares?: Record<string, { success: boolean, contractID: string, height: number, hash?: string }>,
     sharedKeyIds?: { id: string, contractID: string, height: number, keyRequestHash?: string, keyRequestHeight?: number }[],
-    pendingKeyshares: Record<string,
+    pendingKeyshares?: Record<string,
       | [isPrivate: boolean, height: number, signingKeyId: string]
       | [isPrivate: boolean, height: number, signingKeyId: string, [string, { _signedData: [string, string, string] }, number, string]]
     >,
-    props: Record<string, JSONType>
+    props?: Record<string, JSONType>
   },
   _volatile?: {
     pendingKeyRequests?: {

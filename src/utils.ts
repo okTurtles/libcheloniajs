@@ -160,7 +160,7 @@ export const validateKeyPermissions = (msg: SPMessage, config: CheloniaConfig, s
   return true
 }
 
-export const validateKeyAddPermissions = (contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (SPKey | EncryptedData<SPKey>)[], skipPrivateCheck?: boolean) => {
+export const validateKeyAddPermissions = (contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (ChelContractKey | SPKey | EncryptedData<SPKey>)[], skipPrivateCheck?: boolean) => {
   const signingKeyPermissions = Array.isArray(signingKey.permissions) ? new Set(signingKey.permissions) : signingKey.permissions
   const signingKeyAllowedActions = Array.isArray(signingKey.allowedActions) ? new Set(signingKey.allowedActions) : signingKey.allowedActions
   if (!state._vm?.authorizedKeys?.[signingKey.id]) throw new Error('Singing key for OP_KEY_ADD or OP_KEY_UPDATE must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id)
@@ -212,9 +212,9 @@ export const validateKeyDelPermissions = (contractID: string, signingKey: ChelCo
     })
 }
 
-export const validateKeyUpdatePermissions = (contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]): [SPKey[], Record<string, string>] => {
+export const validateKeyUpdatePermissions = (contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]): [ChelContractKey[], Record<string, string>] => {
   const updatedMap = Object.create(null) as Record<string, string>
-  const keys = v.map((wuk): SPKey | undefined => {
+  const keys = v.map((wuk): ChelContractKey | undefined => {
     const data = unwrapMaybeEncryptedData(wuk)
     if (!data) return undefined
     const uk = data.data
@@ -238,7 +238,7 @@ export const validateKeyUpdatePermissions = (contractID: string, signingKey: Che
     if (uk.id && uk.id !== uk.oldKeyId) {
       updatedMap[uk.id] = uk.oldKeyId
     }
-    const updatedKey = { ...existingKey } as SPKey
+    const updatedKey = { ...existingKey } as ChelContractKey
     // Set the corresponding updated attributes
     if (uk.permissions) {
       updatedKey.permissions = uk.permissions
@@ -260,16 +260,16 @@ export const validateKeyUpdatePermissions = (contractID: string, signingKey: Che
     }
     return updatedKey
   // eslint-disable-next-line no-use-before-define
-  }).filter(Boolean as unknown as (key: unknown) => key is SPKey)
+  }).filter(Boolean as unknown as (key: unknown) => key is ChelContractKey)
   validateKeyAddPermissions(contractID, signingKey, state, keys, true)
   return [keys, updatedMap]
 }
 
-export const keyAdditionProcessor = function (this: CheloniaContext, msg: SPMessage, hash: string, keys: (SPKey | EncryptedData<SPKey>)[], state: ChelContractState, contractID: string, signingKey: ChelContractKey, internalSideEffectStack?: (({ state, message }: { state: ChelContractState, message: SPMessage }) => void)[]) {
+export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMessage, hash: string, keys: (ChelContractKey| SPKey | EncryptedData<SPKey>)[], state: ChelContractState, contractID: string, _signingKey: ChelContractKey, internalSideEffectStack?: (({ state, message }: { state: ChelContractState, message: SPMessage }) => void)[]) {
   const decryptedKeys = []
   const keysToPersist: { key: Key, transient: boolean }[] = []
 
-  const storeSecretKey = (key: SPKey, decryptedKey: string) => {
+  const storeSecretKey = (key: SPKey | ChelContractKey, decryptedKey: string) => {
     const decryptedDeserializedKey = deserializeKey(decryptedKey)
     const transient = !!key.meta?.private?.transient
     sbp('chelonia/storeSecretKeys', new Secret([{
@@ -354,14 +354,14 @@ export const keyAdditionProcessor = function (this: CheloniaContext, msg: SPMess
       // when a corresponding OP_KEY_SHARE is received, which could trigger subscribing to this previously unsubscribed to contract
       if (data && internalSideEffectStack) {
         const keyRequestContractID = data.data
-        const reference = key.meta.keyRequest.reference && unwrapMaybeEncryptedData(key.meta.keyRequest.reference)
+        const reference = unwrapMaybeEncryptedData(key.meta.keyRequest.reference)
 
         // Since now we'll make changes to keyRequestContractID, we need to
         // do this while no other operations are running for that
         // contract
         internalSideEffectStack.push(() => {
           sbp('chelonia/private/queueEvent', keyRequestContractID, () => {
-            const rootState = sbp(this.config.stateSelector)
+            const rootState = sbp(this.config.stateSelector) as ChelRootState
 
             const originatingContractState = rootState[contractID] as ChelContractState
             if (sbp('chelonia/contract/hasKeyShareBeenRespondedBy', originatingContractState, keyRequestContractID, reference)) {
@@ -377,7 +377,7 @@ export const keyAdditionProcessor = function (this: CheloniaContext, msg: SPMess
               this.config.reactiveSet(targetState, '_volatile', Object.create(null))
             }
             if (!targetState._volatile!.pendingKeyRequests) {
-              this.config.reactiveSet(rootState[keyRequestContractID]._volatile, 'pendingKeyRequests', [])
+              this.config.reactiveSet(rootState[keyRequestContractID]._volatile!, 'pendingKeyRequests', [])
             }
 
             if (targetState._volatile!.pendingKeyRequests!.some((pkr) => {

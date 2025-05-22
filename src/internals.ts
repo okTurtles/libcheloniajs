@@ -1041,7 +1041,7 @@ export default sbp('sbp/selectors/register', {
 
         if (!state._vm.pendingKeyshares) config.reactiveSet(state._vm, 'pendingKeyshares', Object.create(null))
 
-        config.reactiveSet(state._vm.pendingKeyshares, message.hash(), context
+        config.reactiveSet(state._vm.pendingKeyshares!, message.hash(), context
           ? [
               // Full-encryption (i.e., KRS encryption) requires that this request
               // was encrypted and that the invite is marked as private
@@ -1102,8 +1102,8 @@ export default sbp('sbp/selectors/register', {
       },
       [SPMessage.OP_PROP_DEL]: notImplemented,
       [SPMessage.OP_PROP_SET] (v: SPOpPropSet) {
-        if (!state._vm.props) state._vm.props = {}
-        state._vm.props[v.key] = v.value
+        if (!state._vm.props) config.reactiveSet(state._vm, 'props', Object.create(null))
+        config.reactiveSet(state._vm.props!, v.key, v.value)
       },
       [SPMessage.OP_KEY_ADD] (v: SPOpKeyAdd) {
         const keys = keysToMap(v, height, state._vm.authorizedKeys)
