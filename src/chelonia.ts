@@ -9,7 +9,6 @@ import type { Key } from '@chelonia/crypto'
 import { EDWARDS25519SHA512BATCH, deserializeKey, keyId, keygen, serializeKey } from '@chelonia/crypto'
 import { ChelErrorResourceGone, ChelErrorUnexpected, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable } from './errors.js'
 import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './events.js'
-// TODO: rename this to ChelMessage
 import { SPMessage } from './SPMessage.js'
 import type { Secret } from './Secret.js'
 import './chelonia-utils.js'

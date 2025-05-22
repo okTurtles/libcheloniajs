@@ -87,10 +87,29 @@ export type SPOpKeyUpdate = (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]
 
 export type SPOpType = 'c' | 'a' | 'ae' | 'au' | 'ka' | 'kd' | 'ku' | 'pu' | 'ps' | 'pd' | 'ks' | 'kr' | 'krs'
 type ProtoSPOpValue = SPOpContract | SPOpActionEncrypted | SPOpActionUnencrypted | SPOpKeyAdd | SPOpKeyDel | SPOpPropSet | SPOpKeyShare | SPOpKeyRequest | SPOpKeyRequestSeen | SPOpKeyUpdate
-export type SPOpAtomic = [SPOpType, ProtoSPOpValue][]
+export type ProtoSPOpMap = {
+  'c': SPOpContract,
+  'ae': SPOpActionEncrypted,
+  'au': SPOpActionUnencrypted,
+  'ka': SPOpKeyAdd,
+  'kd': SPOpKeyDel,
+  'ku': SPOpKeyUpdate,
+  'pu': never,
+  'ps': SPOpPropSet,
+  'pd': never,
+  'ks': SPOpKeyShare,
+  'kr': SPOpKeyRequest,
+  'krs': SPOpKeyRequestSeen
+}
+export type SPOpAtomic = {
+  [K in keyof ProtoSPOpMap]: [K, ProtoSPOpMap[K]]
+}[keyof ProtoSPOpMap][]
 export type SPOpValue = ProtoSPOpValue | SPOpAtomic
 export type SPOpRaw = [SPOpType, SignedData<SPOpValue>]
-export type SPOp = [SPOpType, SPOpValue]
+export type SPOpMap = ProtoSPOpMap & { 'a': SPOpAtomic }
+export type SPOp = {
+  [K in keyof SPOpMap]: [K, SPOpMap[K]]
+}[keyof SPOpMap]
 
 export type SPMsgDirection = 'incoming' | 'outgoing'
 export type SPHead = { version: '1.0.0', op: SPOpType, height: number, contractID: string | null, previousKeyOp: string | null, previousHEAD: string | null, manifest: string }
@@ -452,7 +471,7 @@ export class SPMessage {
 
   message (): SPOpValue { return this._message }
 
-  op (): SPOp { return [this.head().op, this.message()] }
+  op (): SPOp { return [this.head().op, this.message()] as SPOp }
 
   rawOp (): SPOpRaw { return [this.head().op, this._signedMessageData] }
 

@@ -71,7 +71,7 @@ export const findSuitablePublicKeyIds = (state: ChelContractState, permissions: 
       .map((k) => k.id)
 }
 
-const validateActionPermissions = (msg: SPMessage, signingKey: SPKey | ChelContractKey, state: ChelContractState, opT: string, opV: SPOpActionUnencrypted) => {
+const validateActionPermissions = (msg: SPMessage, signingKey: SPKey | ChelContractKey, state: { _vm: { authorizedKeys: ChelContractState['_vm']['authorizedKeys'] } }, opT: string, opV: SPOpActionUnencrypted) => {
   const data = isSignedData(opV)
     ? opV.valueOf() as ProtoSPOpActionUnencrypted
     : opV as ProtoSPOpActionUnencrypted
@@ -125,7 +125,7 @@ const validateActionPermissions = (msg: SPMessage, signingKey: SPKey | ChelContr
   return true
 }
 
-export const validateKeyPermissions = (msg: SPMessage, config: CheloniaConfig, state: ChelContractState, signingKeyId: string, opT: string, opV: SPOpValue): boolean => {
+export const validateKeyPermissions = (msg: SPMessage, config: CheloniaConfig, state: { _vm: { authorizedKeys: ChelContractState['_vm']['authorizedKeys'] } }, signingKeyId: string, opT: string, opV: SPOpValue): boolean => {
   const signingKey = state._vm?.authorizedKeys?.[signingKeyId]
   if (
     !signingKey ||
@@ -160,7 +160,7 @@ export const validateKeyPermissions = (msg: SPMessage, config: CheloniaConfig, s
   return true
 }
 
-export const validateKeyAddPermissions = (contractID: string, signingKey: SPKey, state: ChelContractState, v: (SPKey | EncryptedData<SPKey>)[], skipPrivateCheck?: boolean) => {
+export const validateKeyAddPermissions = (contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (SPKey | EncryptedData<SPKey>)[], skipPrivateCheck?: boolean) => {
   const signingKeyPermissions = Array.isArray(signingKey.permissions) ? new Set(signingKey.permissions) : signingKey.permissions
   const signingKeyAllowedActions = Array.isArray(signingKey.allowedActions) ? new Set(signingKey.allowedActions) : signingKey.allowedActions
   if (!state._vm?.authorizedKeys?.[signingKey.id]) throw new Error('Singing key for OP_KEY_ADD or OP_KEY_UPDATE must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id)
@@ -188,7 +188,7 @@ export const validateKeyAddPermissions = (contractID: string, signingKey: SPKey,
   })
 }
 
-export const validateKeyDelPermissions = (contractID: string, signingKey: SPKey, state: ChelContractState, v: (string | EncryptedData<string>)[]) => {
+export const validateKeyDelPermissions = (contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (string | EncryptedData<string>)[]) => {
   if (!state._vm?.authorizedKeys?.[signingKey.id]) throw new Error('Singing key for OP_KEY_DEL must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id)
   const localSigningKey = state._vm.authorizedKeys[signingKey.id]
   v
@@ -212,7 +212,7 @@ export const validateKeyDelPermissions = (contractID: string, signingKey: SPKey,
     })
 }
 
-export const validateKeyUpdatePermissions = (contractID: string, signingKey: SPKey, state: ChelContractState, v: (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]): [SPKey[], Record<string, string>] => {
+export const validateKeyUpdatePermissions = (contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]): [SPKey[], Record<string, string>] => {
   const updatedMap = Object.create(null) as Record<string, string>
   const keys = v.map((wuk): SPKey | undefined => {
     const data = unwrapMaybeEncryptedData(wuk)
@@ -265,7 +265,7 @@ export const validateKeyUpdatePermissions = (contractID: string, signingKey: SPK
   return [keys, updatedMap]
 }
 
-export const keyAdditionProcessor = function (this: CheloniaContext, msg: SPMessage, hash: string, keys: (SPKey | EncryptedData<SPKey>)[], state: ChelContractState, contractID: string, signingKey: SPKey, internalSideEffectStack?: (({ state, message }: { state: ChelContractState, message: SPMessage }) => void)[]) {
+export const keyAdditionProcessor = function (this: CheloniaContext, msg: SPMessage, hash: string, keys: (SPKey | EncryptedData<SPKey>)[], state: ChelContractState, contractID: string, signingKey: ChelContractKey, internalSideEffectStack?: (({ state, message }: { state: ChelContractState, message: SPMessage }) => void)[]) {
   const decryptedKeys = []
   const keysToPersist: { key: Key, transient: boolean }[] = []
 

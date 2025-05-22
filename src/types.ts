@@ -2,8 +2,8 @@
 
 import type { Key } from '@chelonia/crypto'
 import type sbp from '@sbp/sbp'
-import { PubSubClient } from './pubsub/index.js'
-import { SPMessage, SPMsgDirection } from './SPMessage.js'
+import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.js'
+import type { PubSubClient } from './pubsub/index.js'
 
 export type JSONType =
     | null
@@ -29,48 +29,62 @@ export type ResTypePub = 'pub'
 export type ResTypeEntry = 'entry'
 
 export type CheloniaConfig = {
-  connectionURL: string,
-  stateSelector: string,
+  // eslint-disable-next-line no-unused-vars
+  [_ in `preOp_${SPOpType}`]?: (message: SPMessage, state: ChelContractState) => boolean;
+} & {
+  // eslint-disable-next-line no-unused-vars
+  [_ in `postOp_${SPOpType}`]?: (message: SPMessage, state: ChelContractState) => boolean;
+} & {
+  connectionURL: string;
+  stateSelector: string;
   contracts: {
     defaults: {
       // '<module name>' => resolved module import
-      modules: Record<string, unknown>,
-      exposedGlobals: object,
-      allowedDomains: string[],
-      allowedSelectors: string[],
-      preferSlim: boolean,
-    },
+      modules: Record<string, unknown>;
+      exposedGlobals: object;
+      allowedDomains: string[];
+      allowedSelectors: string[];
+      preferSlim: boolean;
+    };
     // TODO: Currently not used
-    overrides: object,
-    manifests: Record<string, string>
-  },
-  whitelisted: (action: string) => boolean,
-  reactiveSet: <T> (obj: T, key: keyof T, value: T[typeof key]) => void
-  fetch: typeof fetch,
-  reactiveDel: <T> (obj: T, key: keyof T) => void,
-  acceptAllMessages: boolean,
-  skipActionProcessing: boolean,
-  skipSideEffects: boolean,
-  strictProcessing: boolean,
+    overrides: object;
+    manifests: Record<string, string>;
+  };
+  whitelisted: (action: string) => boolean;
+  reactiveSet: <T>(obj: T, key: keyof T, value: T[typeof key]) => void;
+  fetch: typeof fetch;
+  reactiveDel: <T>(obj: T, key: keyof T) => void;
+  acceptAllMessages: boolean;
+  skipActionProcessing: boolean;
+  skipSideEffects: boolean;
+  strictProcessing: boolean;
   // Strict ordering will throw on past events with ChelErrorAlreadyProcessed
   // Similarly, future events will not be reingested and will throw
   // with ChelErrorDBBadPreviousHEAD
-  strictOrdering: boolean,
+  strictOrdering: boolean;
   connectionOptions: {
-    maxRetries: number,
-    reconnectOnTimeout: boolean,
-  },
-  preOp?: (message: SPMessage, state: ChelContractState) => boolean,
-  hooks: {
-    preHandleEvent?: { (message: SPMessage): Promise<void> } | null,
-    postHandleEvent?: { (message: SPMessage): Promise<void> } | null,
-    processError?: { (e: unknown, message: SPMessage | null | undefined, meta: object | null | undefined): void } | null,
-    sideEffectError?: { (e: unknown, message?: SPMessage): void } | null,
-    handleEventError?: { (e: unknown, message?: SPMessage): void } | null,
-    syncContractError?: { (e: unknown, contractID: string): void } | null,
-    pubsubError?: { (e: unknown, socket: PubSubClient): void } | null
-  }
-}
+    maxRetries: number;
+    reconnectOnTimeout: boolean;
+  }; preOp?: (message: SPMessage, state: ChelContractState) => boolean;
+  postOp?: (message: SPMessage, state: ChelContractState) => boolean;
+  hooks: Partial<{
+    preHandleEvent: { (message: SPMessage): Promise<void>; } | null;
+    postHandleEvent: { (message: SPMessage): Promise<void>; } | null;
+    processError: { (e: unknown, message: SPMessage | null | undefined, meta: object | null | undefined): void; } | null;
+    sideEffectError: { (e: unknown, message?: SPMessage): void; } | null;
+    handleEventError: { (e: unknown, message?: SPMessage): void; } | null;
+    syncContractError: { (e: unknown, contractID: string): void; } | null;
+    pubsubError: { (e: unknown, socket: PubSubClient): void; } | null;
+  }>;
+};
+
+export type SendMessageHooks = Partial<{
+  prepublish: (entry: SPMessage) => void | Promise<void>,
+  onprocessed: (entry: SPMessage) => void,
+  preSendCheck: (entry: SPMessage, state: ChelContractState) => boolean | Promise<boolean>,
+  beforeRequest: (newEntry: SPMessage, oldEntry: SPMessage) => void | Promise<void>,
+  postpublish: (entry: SPMessage) => void | Promise<void>,
+}>
 
 export type ChelContractProcessMessageObject = Readonly<{
   data: object,
@@ -143,6 +157,23 @@ export type CheloniaContext = {
   defContract: CheloniaContractCtx
 }
 
+export type ChelContractManifestBody = {
+  name: string,
+  version: string,
+  contract: { hash: string, file: string },
+  contractSlim: { hash: string, file: string },
+  signingKeys: string[]
+}
+
+export type ChelContractManifest = {
+  head: string, // '{ manifestVersion : 1.0.0" }'
+  body: string // 'ChelContractManifestBody'
+  signature: {
+    keyId: string,
+    value: string
+  }
+}
+
 export type ChelFileManifest = {
   version: '1.0.0',
   type?: string,
@@ -193,13 +224,16 @@ export type ChelContractState = {
       quantity: number,
       expires: number,
       inviteSecret: string,
-      responses: string[]
+      responses: string[],
     }>,
     type: string,
     pendingWatch?: Record<string, [fkName: string, fkId: string][]>,
     keyshares?: Record<string, { success: boolean, contractID: string, height: number, hash?: string }>,
     sharedKeyIds?: { id: string, contractID: string, height: number, keyRequestHash?: string, keyRequestHeight?: number }[],
-    pendingKeyshares: Record<string, [isPrivate: boolean, height: number, signingKeyId: string] | [isPrivate: boolean, height: number, signingKeyId: string, ...unknown[]]>,
+    pendingKeyshares: Record<string,
+      | [isPrivate: boolean, height: number, signingKeyId: string]
+      | [isPrivate: boolean, height: number, signingKeyId: string, [string, { _signedData: [string, string, string] }, number, string]]
+    >,
     props: Record<string, JSONType>
   },
   _volatile?: {
