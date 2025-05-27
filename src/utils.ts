@@ -1,7 +1,7 @@
 import type { Key } from '@chelonia/crypto'
 import { deserializeKey, serializeKey, sign, verifySignature } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
-import { has } from 'turtledash'
+import { has, omit } from 'turtledash'
 import type { ProtoSPOpActionUnencrypted, SPKey, SPKeyPurpose, SPKeyUpdate, SPOpActionUnencrypted, SPOpAtomic, SPOpKeyAdd, SPOpKeyDel, SPOpKeyUpdate, SPOpRaw, SPOpValue } from './SPMessage.js'
 import { SPMessage } from './SPMessage.js'
 import { Secret } from './Secret.js'
@@ -238,7 +238,13 @@ export const validateKeyUpdatePermissions = (contractID: string, signingKey: Che
     if (uk.id && uk.id !== uk.oldKeyId) {
       updatedMap[uk.id] = uk.oldKeyId
     }
-    const updatedKey = { ...existingKey } as ChelContractKey
+    // Discard `_notAfterHeight` and `_notBeforeHeight`, since retaining them
+    // can cause issues reprocessing messages.
+    // An example is reprocessing old messages in a chatroom using
+    // `chelonia/in/processMessage`: cloning `_notAfterHeight` will break key
+    // rotations, since the new key will have the same expiration value as the
+    // old key (the new key is supposed to have no expiration height).
+    const updatedKey = omit(existingKey, ['_notAfterHeight', '_notBeforeHeight'])as ChelContractKey
     // Set the corresponding updated attributes
     if (uk.permissions) {
       updatedKey.permissions = uk.permissions

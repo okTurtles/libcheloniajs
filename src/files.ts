@@ -26,7 +26,7 @@ let supportsRequestStreams: boolean | 2 = typeof window !== 'object' || (() => {
       duplexAccessed = true
       return 'half'
     }
-  } as unknown as Request).headers.has('content-yype')
+  } as unknown as Request).headers.has('content-type')
 
   return duplexAccessed && !hasContentType
 })()
