@@ -2,13 +2,13 @@
 
 import sbp from '@sbp/sbp'
 import assert from 'node:assert'
-import { test, it } from 'node:test'
+import { test } from 'node:test'
 
 import './db.js'
 
 import { PERSISTENT_ACTION_FAILURE, PERSISTENT_ACTION_SUCCESS, PERSISTENT_ACTION_TOTAL_FAILURE } from './events.js'
 import './persistent-actions.js'
-import type { PersistentActionSbpStatus } from './persistent-actions.js'
+import type { PersistentActionError, PersistentActionSbpStatus, PersistentActionSuccess, UUIDV4 } from './persistent-actions.js'
 
 // Necessary to avoid 'JSON.stringify' errors since Node timeouts are circular objects, whereas browser timeouts are just integers.
 setTimeout(() => {}).constructor.prototype.toJSON = () => undefined
@@ -49,19 +49,19 @@ const testOptions = {
   retrySeconds: 0.5
 }
 
-test('Test persistent actions', function (t) {
+test('Test persistent actions', async (t) => {
   const spies = {
     returnImmediately: t.mock.fn(sbp('sbp/selectors/fn', 'returnImmediately'))
   }
 
-  it('should configure', function () {
+  await test('should configure', function () {
     sbp('chelonia.persistentActions/configure', {
       databaseKey: 'test-key',
       options: testOptions
     })
   })
 
-  it('should enqueue without immediately attempting', function () {
+  await test('should enqueue without immediately attempting', function () {
     // Prepare actions to enqueue. Random numbers are used to make invocations different.
     const args = [
       // Basic syntax.
@@ -99,7 +99,7 @@ test('Test persistent actions', function (t) {
     assert.strictEqual(spies.returnImmediately.mock.callCount(), 0)
   })
 
-  it('should emit a success event and remove the action', async () => {
+  await test('should emit a success event and remove the action', async () => {
     // Prepare actions using both sync and async invocations.
     // TODO: maybe the async case is enough, which would make the code simpler.
     const randomNumbers = [Math.random(), Math.random()]
@@ -107,10 +107,10 @@ test('Test persistent actions', function (t) {
       ['resolveAfter100ms', randomNumbers[0]],
       ['returnImmediately', randomNumbers[1]]
     ]
-    const ids = sbp('chelonia.persistentActions/enqueue', ...invocations)
+    const ids = sbp('chelonia.persistentActions/enqueue', ...invocations) as UUIDV4[]
     await Promise.all(ids.map((id, index) => new Promise<void>((resolve, reject) => {
       // Registers a success handler for each received id.
-      sbp('okTurtles.events/on', PERSISTENT_ACTION_SUCCESS, function handler (details) {
+      sbp('okTurtles.events/on', PERSISTENT_ACTION_SUCCESS, function handler (details: PersistentActionSuccess) {
         if (details.id !== id) return
         try {
           // Check the action has actually been called and its result is correct.
@@ -128,12 +128,12 @@ test('Test persistent actions', function (t) {
     })))
   })
 
-  it('should emit a failure event and schedule a retry', function () {
+  await test('should emit a failure event and schedule a retry', function () {
     const ourError = createRandomError()
     const invocation = ['rejectAfter100ms', ourError]
     const [id] = sbp('chelonia.persistentActions/enqueue', invocation)
     return new Promise((resolve, reject) => {
-      sbp('okTurtles.events/once', PERSISTENT_ACTION_FAILURE, (details) => {
+      sbp('okTurtles.events/once', PERSISTENT_ACTION_FAILURE, (details: PersistentActionError) => {
         try {
           assert.strictEqual(details.id, id)
           assert.strictEqual(details.error, ourError)
@@ -152,19 +152,19 @@ test('Test persistent actions', function (t) {
     })
   })
 
-  it('should emit N failure events, then a total failure event and remove the action (sync)', () => {
+  await test('should emit N failure events, then a total failure event and remove the action (sync)', () => {
     const ourError = createRandomError()
     const invocation = ['throwImmediately', ourError]
     return e2eFailureTest(invocation, ourError)
   })
 
-  it('should emit N failure events, then a total failure event and remove the action (async)', () => {
+  await test('should emit N failure events, then a total failure event and remove the action (async)', () => {
     const ourError = createRandomError()
     const invocation = ['rejectAfter100ms', ourError]
     return e2eFailureTest(invocation, ourError)
   })
 
-  it('should handle non-Error failures gracefully', () => {
+  await test('should handle non-Error failures gracefully', () => {
     const ourError = 'not a real error'
     const invocation = ['rejectAfter100ms', ourError]
     return e2eFailureTest(invocation, ourError)
@@ -205,7 +205,7 @@ test('Test persistent actions', function (t) {
     })
   }
 
-  it('should cancel and remove the given action', function () {
+  await test('should cancel and remove the given action', function () {
     return new Promise((resolve, reject) => {
       // This action will reject the promise and fail the test if it ever gets tried.
       const [id] = sbp('chelonia.persistentActions/enqueue', ['call', reject])

@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
     "outDir": "dist/esm",
     "strict": true,
     "strictNullChecks": true,
@@ -18,5 +18,5 @@
     "experimentalResolver": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist/**/*", "**/*.spec.ts", "**/*.test.ts"]
+  "exclude": ["node_modules", "dist/**/*"]
 }

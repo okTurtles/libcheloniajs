@@ -6,7 +6,7 @@ import { PERSISTENT_ACTION_FAILURE, PERSISTENT_ACTION_SUCCESS, PERSISTENT_ACTION
 const timer = Symbol('timer')
 
 type SbpInvocation = Parameters<typeof sbp>
-type UUIDV4 = `${string}-${string}-${string}-${string}-${string}`
+export type UUIDV4 = `${string}-${string}-${string}-${string}-${string}`
 
 type PersistentActionOptions = {
   errorInvocation?: SbpInvocation,
@@ -24,6 +24,16 @@ export type PersistentActionStatus = {
   lastError: string,
   nextRetry: string,
   resolved: boolean
+}
+
+export type PersistentActionError = {
+  id: UUIDV4,
+  error: Error
+}
+
+export type PersistentActionSuccess = {
+  id: UUIDV4,
+  result: unknown
 }
 
 export type PersistentActionSbpStatus = {
@@ -146,7 +156,7 @@ type PersistentActionContext = {
   databaseKey: string
 }
 
-sbp('sbp/selectors/register', {
+export default sbp('sbp/selectors/register', {
   'chelonia.persistentActions/_init' (this: PersistentActionContext): void {
     this.actionsByID = Object.create(null)
     this.checkDatabaseKey = () => {
@@ -264,4 +274,4 @@ sbp('sbp/selectors/register', {
       delete this.actionsByID[id as UUIDV4]
     }
   }
-})
+}) as string[]
