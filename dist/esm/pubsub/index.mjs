@@ -6,6 +6,7 @@ export const NOTIFICATION_TYPE = Object.freeze({
     ENTRY: 'entry',
     DELETION: 'deletion',
     KV: 'kv',
+    KV_FILTER: 'kv_filter',
     PING: 'ping',
     PONG: 'pong',
     PUB: 'pub',
@@ -17,7 +18,8 @@ export const REQUEST_TYPE = Object.freeze({
     PUB: 'pub',
     SUB: 'sub',
     UNSUB: 'unsub',
-    PUSH_ACTION: 'push_action'
+    PUSH_ACTION: 'push_action',
+    KV_FILTER: 'kv_filter'
 });
 export const RESPONSE_TYPE = Object.freeze({
     ERROR: 'error',
@@ -70,18 +72,33 @@ export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded';
  * @returns {PubSubClient}
  */
 export function createClient(url, options = {}) {
-    const client = Object.assign({ customEventHandlers: options.handlers || {}, 
+    const client = {
+        customEventHandlers: options.handlers || {},
         // The current number of connection attempts that failed.
         // Reset to 0 upon successful connection.
         // Used to compute how long to wait before the next reconnection attempt.
-        failedConnectionAttempts: 0, isLocal: /\/\/(localhost|127\.0\.0\.1)([:?/]|$)/.test(url), 
+        failedConnectionAttempts: 0,
+        isLocal: /\/\/(localhost|127\.0\.0\.1)([:?/]|$)/.test(url),
         // True if this client has never been connected yet.
-        isNew: true, listeners: Object.create(null), messageHandlers: Object.assign(Object.assign({}, defaultMessageHandlers), options.messageHandlers), nextConnectionAttemptDelayID: undefined, options: Object.assign(Object.assign({}, defaultOptions), options), 
+        isNew: true,
+        listeners: Object.create(null),
+        messageHandlers: { ...defaultMessageHandlers, ...options.messageHandlers },
+        nextConnectionAttemptDelayID: undefined,
+        options: { ...defaultOptions, ...options },
         // Requested subscriptions for which we didn't receive a response yet.
-        pendingSubscriptionSet: new Set(), pendingUnsubscriptionSet: new Set(), pingTimeoutID: undefined, shouldReconnect: true, 
+        pendingSubscriptionSet: new Set(),
+        pendingUnsubscriptionSet: new Set(),
+        pingTimeoutID: undefined,
+        shouldReconnect: true,
         // The underlying WebSocket object.
         // A new one is necessary for every connection or reconnection attempt.
-        socket: null, subscriptionSet: new Set(), connectionTimeoutID: undefined, url: url.replace(/^http/, 'ws') }, publicMethods);
+        socket: null,
+        subscriptionSet: new Set(),
+        kvFilter: new Map(),
+        connectionTimeoutID: undefined,
+        url: url.replace(/^http/, 'ws'),
+        ...publicMethods
+    };
     // Create and save references to reusable event listeners.
     // Every time a new underlying WebSocket object will be created for this
     // client instance, these event listeners will be detached from the older
@@ -91,16 +108,15 @@ export function createClient(url, options = {}) {
     // updating the client's custom event handler map.
     for (const name of Object.keys(defaultClientEventHandlers)) {
         client.listeners[name] = (event) => {
-            var _a;
             try {
                 // Use `.call()` to pass the client via the 'this' binding.
                 ;
                 defaultClientEventHandlers[name].call(client, event);
-                (_a = client.customEventHandlers[name]) === null || _a === void 0 ? void 0 : _a.call(client, event);
+                client.customEventHandlers[name]?.call(client, event);
             }
             catch (error) {
                 // Do not throw any error but emit an `error` event instead.
-                sbp('okTurtles.events/emit', PUBSUB_ERROR, client, error === null || error === void 0 ? void 0 : error.message);
+                sbp('okTurtles.events/emit', PUBSUB_ERROR, client, error?.message);
             }
         };
     }
@@ -116,7 +132,7 @@ export function createClient(url, options = {}) {
     return client;
 }
 export function createMessage(type, data, meta) {
-    const message = Object.assign(Object.assign({}, meta), { type, data });
+    const message = { ...meta, type, data };
     let string;
     const stringify = function () {
         if (!string)
@@ -221,7 +237,7 @@ const defaultClientEventHandlers = {
         }
         catch (error) {
             sbp('okTurtles.events/emit', PUBSUB_ERROR, client, {
-                message: `Malformed message: ${error === null || error === void 0 ? void 0 : error.message}`
+                message: `Malformed message: ${error?.message}`
             });
             return client.destroy();
         }
@@ -234,14 +250,13 @@ const defaultClientEventHandlers = {
         }
     },
     offline() {
-        var _a;
         console.info('[pubsub] Event: offline');
         const client = this;
         client.clearAllTimers();
         // Reset the connection attempt counter so that we'll start a new
         // reconnection loop when we are back online.
         client.failedConnectionAttempts = 0;
-        (_a = client.socket) === null || _a === void 0 ? void 0 : _a.close();
+        client.socket?.close();
     },
     online() {
         console.info('[pubsub] Event: online');
@@ -268,14 +283,13 @@ const defaultClientEventHandlers = {
         // It will close the connection if we don't get any message from the server.
         if (options.pingTimeout > 0 && options.pingTimeout < Infinity) {
             client.pingTimeoutID = setTimeout(() => {
-                var _a;
-                (_a = client.socket) === null || _a === void 0 ? void 0 : _a.close();
+                client.socket?.close();
             }, options.pingTimeout);
         }
         // Send any pending subscription request.
         client.pendingSubscriptionSet.forEach((channelID) => {
-            var _a;
-            (_a = client.socket) === null || _a === void 0 ? void 0 : _a.send(createRequest(REQUEST_TYPE.SUB, { channelID }));
+            const kvFilter = this.kvFilter.get(channelID);
+            client.socket?.send(createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }));
         });
         // There should be no pending unsubscription since we just got connected.
     },
@@ -305,7 +319,6 @@ const defaultMessageHandlers = {
         console.debug('[pubsub] Received ENTRY:', msg);
     },
     [NOTIFICATION_TYPE.PING]({ data }) {
-        var _a;
         const client = this;
         if (client.options.logPingMessages) {
             console.debug(`[pubsub] Ping received in ${Date.now() - Number(data)} ms`);
@@ -313,12 +326,11 @@ const defaultMessageHandlers = {
         // Reply with a pong message using the same data.
         // TODO: Type coercion to string because we actually support passing this
         // object type, but the correct TypeScript type hasn't been written.
-        (_a = client.socket) === null || _a === void 0 ? void 0 : _a.send(createMessage(NOTIFICATION_TYPE.PONG, data));
+        client.socket?.send(createMessage(NOTIFICATION_TYPE.PONG, data));
         // Refresh the ping timer, waiting for the next ping.
         clearTimeout(client.pingTimeoutID);
         client.pingTimeoutID = setTimeout(() => {
-            var _a;
-            (_a = client.socket) === null || _a === void 0 ? void 0 : _a.close();
+            client.socket?.close();
         }, client.options.pingTimeout);
     },
     [NOTIFICATION_TYPE.PUB]({ channelID, data }) {
@@ -373,6 +385,11 @@ const defaultMessageHandlers = {
                 console.debug(`[pubsub] Unsubscribed from ${channelID}`);
                 client.pendingUnsubscriptionSet.delete(channelID);
                 client.subscriptionSet.delete(channelID);
+                client.kvFilter.delete(channelID);
+                break;
+            }
+            case REQUEST_TYPE.KV_FILTER: {
+                console.debug(`[pubsub] Set KV filter for ${channelID}`);
                 break;
             }
             default: {
@@ -392,7 +409,7 @@ if (typeof self === 'object' && self instanceof EventTarget) {
     for (const name of globalEventNames) {
         const handler = (ev) => {
             const h = globalEventMap.get(name);
-            return h === null || h === void 0 ? void 0 : h(ev);
+            return h?.(ev);
         };
         self.addEventListener(name, handler, false);
     }
@@ -450,12 +467,11 @@ const publicMethods = {
         if (client.options.timeout) {
             const start = performance.now();
             client.connectionTimeoutID = setTimeout(() => {
-                var _a;
                 client.connectionTimeoutID = undefined;
                 if (client.options.reconnectOnTimeout) {
                     client.connectionTimeUsed = performance.now() - start;
                 }
-                (_a = client.socket) === null || _a === void 0 ? void 0 : _a.close(4000, 'timeout');
+                client.socket?.close(4000, 'timeout');
             }, client.options.timeout);
         }
         // Attach WebSocket event listeners.
@@ -499,7 +515,7 @@ const publicMethods = {
     getNextRandomDelay() {
         const client = this;
         const { maxReconnectionDelay, minReconnectionDelay, reconnectionDelayGrowFactor } = client.options;
-        const minDelay = minReconnectionDelay * Math.pow(reconnectionDelayGrowFactor, client.failedConnectionAttempts);
+        const minDelay = minReconnectionDelay * reconnectionDelayGrowFactor ** client.failedConnectionAttempts;
         const maxDelay = minDelay * reconnectionDelayGrowFactor;
         const connectionTimeUsed = client.connectionTimeUsed;
         client.connectionTimeUsed = undefined;
@@ -530,8 +546,7 @@ const publicMethods = {
     // Can be used to send ephemeral messages outside of any contract log.
     // Does nothing if the socket is not in the OPEN state.
     pub(channelID, data) {
-        var _a;
-        if (((_a = this.socket) === null || _a === void 0 ? void 0 : _a.readyState) === WebSocket.OPEN) {
+        if (this.socket?.readyState === WebSocket.OPEN) {
             this.socket.send(createPubMessage(channelID, data));
         }
     },
@@ -550,8 +565,26 @@ const publicMethods = {
         if (!client.pendingSubscriptionSet.has(channelID)) {
             client.pendingSubscriptionSet.add(channelID);
             client.pendingUnsubscriptionSet.delete(channelID);
-            if ((socket === null || socket === void 0 ? void 0 : socket.readyState) === WebSocket.OPEN) {
+            if (socket?.readyState === WebSocket.OPEN) {
                 socket.send(createRequest(REQUEST_TYPE.SUB, { channelID }));
+            }
+        }
+    },
+    /**
+     * Sends a KV_FILTER request to the server as soon as possible.
+     */
+    setKvFilter(channelID, kvFilter) {
+        const client = this;
+        const { socket } = this;
+        if (kvFilter) {
+            client.kvFilter.set(channelID, kvFilter);
+        }
+        else {
+            client.kvFilter.delete(channelID);
+        }
+        if (client.subscriptionSet.has(channelID)) {
+            if (socket?.readyState === WebSocket.OPEN) {
+                socket.send(createRequest(REQUEST_TYPE.KV_FILTER, kvFilter ? { channelID, kvFilter } : { channelID }));
             }
         }
     },
@@ -570,7 +603,7 @@ const publicMethods = {
         if (!client.pendingUnsubscriptionSet.has(channelID)) {
             client.pendingSubscriptionSet.delete(channelID);
             client.pendingUnsubscriptionSet.add(channelID);
-            if ((socket === null || socket === void 0 ? void 0 : socket.readyState) === WebSocket.OPEN) {
+            if (socket?.readyState === WebSocket.OPEN) {
                 socket.send(createRequest(REQUEST_TYPE.UNSUB, { channelID }));
             }
         }

@@ -38,7 +38,7 @@ export type SPKey = {
   foreignKey?: string;
   _notBeforeHeight: number;
   _notAfterHeight?: number;
-  _private?: false | string;
+  _private?: string;
 }
 // Allows server to check if the user is allowed to register this type of contract
 // TODO: rename 'type' to 'contractName':
@@ -169,6 +169,9 @@ const decryptedAndVerifiedDeserializedMessage = (head: SPHead, headJSON: string,
     (message as SPOpContract).keys = (message as SPOpContract).keys?.map((key) => {
       return maybeEncryptedIncomingData<SPKey>(contractID, state, key as SPKey, height, additionalKeys, headJSON, (key) => {
         if (!key.meta?.private?.content) return
+        // The following two lines are commented out because this feature
+        // (using a foreign decryption contract) doesn't seem to be in use and
+        // the use case seems unclear.
         // const decryptionFn = key.meta.private.foreignContractID ? encryptedIncomingForeignData : encryptedIncomingData
         // const decryptionContract = key.meta.private.foreignContractID ? key.meta.private.foreignContractID : contractID
         const decryptionFn = encryptedIncomingData
@@ -327,9 +330,11 @@ export class SPMessage {
     if (!state?._vm?.authorizedKeys && head.op === SPMessage.OP_CONTRACT) {
       const value = rawSignedIncomingData<SPOpContract>(parsedValue)
       const authorizedKeys = Object.fromEntries(value.valueOf()?.keys.map(wk => {
-        const k = wk.valueOf() as ChelContractKey
-        return [k.id, k]
-      }))
+        const k = unwrapMaybeEncryptedData(wk)
+        if (!k) return null
+        return [k.data.id, k.data] as [string, ChelContractKey]
+      // eslint-disable-next-line no-use-before-define
+      }).filter(Boolean as unknown as (x: unknown) => x is [string, ChelContractKey]))
       state = {
         _vm: {
           type: head.type,
@@ -492,9 +497,13 @@ export class SPMessage {
     const type = this.opType()
     let desc = `<op_${type}`
     if (type === SPMessage.OP_ACTION_UNENCRYPTED) {
-      const value = this.opValue().valueOf() as ProtoSPOpActionUnencrypted
-      if (typeof value.action === 'string') {
-        desc += `|${value.action}`
+      try {
+        const value = this.opValue().valueOf() as ProtoSPOpActionUnencrypted
+        if (typeof value.action === 'string') {
+          desc += `|${value.action}`
+        }
+      } catch (e) {
+        console.warn('Error on .description()', this.hash(), e)
       }
     }
     return `${desc}|${this.hash()} of ${this.contractID()}>`

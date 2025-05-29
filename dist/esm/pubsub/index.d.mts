@@ -1,8 +1,10 @@
 import '@sbp/okturtles.events';
+import type { JSONObject, JSONType } from '../types.mjs';
 export declare const NOTIFICATION_TYPE: Readonly<{
     ENTRY: "entry";
     DELETION: "deletion";
     KV: "kv";
+    KV_FILTER: "kv_filter";
     PING: "ping";
     PONG: "pong";
     PUB: "pub";
@@ -15,6 +17,7 @@ export declare const REQUEST_TYPE: Readonly<{
     SUB: "sub";
     UNSUB: "unsub";
     PUSH_ACTION: "push_action";
+    KV_FILTER: "kv_filter";
 }>;
 export declare const RESPONSE_TYPE: Readonly<{
     ERROR: "error";
@@ -29,12 +32,8 @@ export declare const PUSH_SERVER_ACTION_TYPE: Readonly<{
 export type NotificationTypeEnum = typeof NOTIFICATION_TYPE[keyof typeof NOTIFICATION_TYPE];
 export type RequestTypeEnum = typeof REQUEST_TYPE[keyof typeof REQUEST_TYPE];
 export type ResponseTypeEnum = typeof RESPONSE_TYPE[keyof typeof RESPONSE_TYPE];
-export type JSONType = string | number | boolean | null | JSONObject | JSONArray;
-export type JSONObject = {
-    [key: string]: JSONType;
-};
-export type JSONArray = Array<JSONType>;
-type Options = {
+type TimeoutID = ReturnType<typeof setTimeout>;
+export type Options = {
     logPingMessages: boolean;
     pingTimeout: number;
     maxReconnectionDelay: number;
@@ -49,13 +48,6 @@ type Options = {
     handlers?: Partial<ClientEventHandlers>;
     messageHandlers?: Partial<MessageHandlers>;
 };
-export declare const PUBSUB_ERROR = "pubsub-error";
-export declare const PUBSUB_RECONNECTION_ATTEMPT = "pubsub-reconnection-attempt";
-export declare const PUBSUB_RECONNECTION_FAILED = "pubsub-reconnection-failed";
-export declare const PUBSUB_RECONNECTION_SCHEDULED = "pubsub-reconnection-scheduled";
-export declare const PUBSUB_RECONNECTION_SUCCEEDED = "pubsub-reconnection-succeeded";
-export declare const PUBSUB_SUBSCRIPTION_SUCCEEDED = "pubsub-subscription-succeeded";
-type TimeoutID = ReturnType<typeof setTimeout>;
 export type Message = {
     [key: string]: JSONType;
     type: string;
@@ -77,6 +69,7 @@ export type PubSubClient = {
     shouldReconnect: boolean;
     socket: WebSocket | null;
     subscriptionSet: Set<string>;
+    kvFilter: Map<string, string[]>;
     url: string;
     clearAllTimers(this: PubSubClient): void;
     connect(this: PubSubClient): void;
@@ -86,6 +79,7 @@ export type PubSubClient = {
     sub(this: PubSubClient, channelID: string): void;
     unsub(this: PubSubClient, channelID: string): void;
     getNextRandomDelay(this: PubSubClient): number;
+    setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void;
 };
 type ClientEventHandlers = {
     close(this: PubSubClient, event: CloseEvent): void;
@@ -154,12 +148,20 @@ export type SubMessage = {
     [key: string]: JSONType;
     type: 'sub';
     channelID: string;
+} & {
+    kvFilter?: Array<string>;
 };
 export type UnsubMessage = {
     [key: string]: JSONType;
     type: 'unsub';
     channelID: string;
 };
+export declare const PUBSUB_ERROR = "pubsub-error";
+export declare const PUBSUB_RECONNECTION_ATTEMPT = "pubsub-reconnection-attempt";
+export declare const PUBSUB_RECONNECTION_FAILED = "pubsub-reconnection-failed";
+export declare const PUBSUB_RECONNECTION_SCHEDULED = "pubsub-reconnection-scheduled";
+export declare const PUBSUB_RECONNECTION_SUCCEEDED = "pubsub-reconnection-succeeded";
+export declare const PUBSUB_SUBSCRIPTION_SUCCEEDED = "pubsub-subscription-succeeded";
 /**
  * Creates a pubsub client instance.
  *
@@ -192,6 +194,7 @@ declare const _default: {
         ENTRY: "entry";
         DELETION: "deletion";
         KV: "kv";
+        KV_FILTER: "kv_filter";
         PING: "ping";
         PONG: "pong";
         PUB: "pub";
@@ -204,6 +207,7 @@ declare const _default: {
         SUB: "sub";
         UNSUB: "unsub";
         PUSH_ACTION: "push_action";
+        KV_FILTER: "kv_filter";
     }>;
     RESPONSE_TYPE: Readonly<{
         ERROR: "error";

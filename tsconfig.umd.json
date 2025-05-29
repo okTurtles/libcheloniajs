@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "UMD",
-    "moduleResolution": "node",
+    "moduleResolution": "node16",
     "outDir": "dist/umd",
     "strict": true,
     "strictNullChecks": true,
