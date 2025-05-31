@@ -10,7 +10,7 @@ const extMap = {
     '.d.ts': '.d.mts',
     '.js': '.mjs'
   },
-  umd: {
+  cjs: {
     '.d.ts': '.d.cts',
     '.js': '.cjs'
   }
@@ -53,8 +53,8 @@ function processDirectory (dir, ext) {
 
 if (process.argv[2] === 'esm') {
   processDirectory('./dist/esm', extMap.esm)
-} else if (process.argv[2] === 'umd') {
-  processDirectory('./dist/umd', extMap.umd)
+} else if (process.argv[2] === 'cjs') {
+  processDirectory('./dist/cjs', extMap.cjs)
 } else {
   console.error('Invalid dist output')
 }
