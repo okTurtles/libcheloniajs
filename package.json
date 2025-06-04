@@ -210,8 +210,8 @@
   },
   "scripts": {
     "test": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => console.error(\"ERROR\", e));' src/index.test.ts",
-    "build:esm": "tsc --project tsconfig.json --declaration && node renameFiles.mjs esm",
-    "build:cjs": "tsc --project tsconfig.cjs.json --declaration && node renameFiles.mjs cjs",
+    "build:esm": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => console.error(\"ERROR\", e));' buildHelper.ts esm",
+    "build:cjs": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => console.error(\"ERROR\", e));' buildHelper.ts cjs",
     "build": "npm run build:esm && npm run build:cjs",
     "lint": "eslint .",
     "clean": "rm -f dist/*"

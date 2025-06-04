@@ -16,6 +16,10 @@ const extMap = {
   }
 }
 
+/**
+ * @param {string} dir Directory name
+ * @param {Record<string, string>} ext File extension map
+ */
 function processDirectory (dir, ext) {
   fs.readdir(dir, { withFileTypes: true }).then((entries) => {
     return Promise.all(entries.map(async (entry) => {
@@ -26,6 +30,7 @@ function processDirectory (dir, ext) {
       } else if (entry.isFile() && Object.keys(ext).some(e => entry.name.endsWith(e))) {
         // Generate the new file name
         const curExt = Object.keys(ext).find(e => entry.name.endsWith(e))
+        if (!curExt) throw new Error('Extension not found')
         const newExt = ext[curExt]
         const newFullPath = fullPath.slice(0, -curExt.length) + newExt
 
