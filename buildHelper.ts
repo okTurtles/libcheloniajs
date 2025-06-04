@@ -43,7 +43,8 @@ const buildInternal = async (opts: Opts) => {
       env: {
         ...process.env,
         PATH: [join(__dirname, 'node_modules', '.bin'), process.env.PATH].filter(Boolean).join(':')
-      }
+      },
+      stdio: 'inherit'
     })
     tsc.on('close', (code) => {
       if (code !== 0) {
@@ -51,18 +52,16 @@ const buildInternal = async (opts: Opts) => {
       } else {
         resolve()
       }
-      tsc.stdin.end()
     })
   })
   await new Promise<void>((resolve, reject) => {
-    const rename = fork(new URL('./renameFiles.mjs', import.meta.url), opts.renameFileArgs)
+    const rename = fork(new URL('./renameFiles.mjs', import.meta.url), opts.renameFileArgs, { stdio: 'inherit' })
     rename.on('close', (code) => {
       if (code !== 0) {
         reject(new Error(`[rename] code ${code}`))
       } else {
         resolve()
       }
-      rename.stdin?.end()
     })
   })
 }
