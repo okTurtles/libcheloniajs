@@ -7,7 +7,6 @@ import { SPMessage } from './SPMessage.js'
 import { Secret } from './Secret.js'
 import { INVITE_STATUS } from './constants.js'
 import type { EncryptedData } from './encryptedData.js'
-import { unwrapMaybeEncryptedData } from './encryptedData.js'
 import { ChelErrorForkedChain, ChelErrorResourceGone, ChelErrorUnexpectedHttpResponseCode, ChelErrorWarning } from './errors.js'
 import { CONTRACT_IS_PENDING_KEY_REQUESTS } from './events.js'
 import { b64ToStr } from './functions.js'
@@ -160,13 +159,13 @@ export const validateKeyPermissions = (msg: SPMessage, config: CheloniaConfig, s
   return true
 }
 
-export const validateKeyAddPermissions = (contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (ChelContractKey | SPKey | EncryptedData<SPKey>)[], skipPrivateCheck?: boolean) => {
+export const validateKeyAddPermissions = function (this: CheloniaContext, contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (ChelContractKey | SPKey | EncryptedData<SPKey>)[], skipPrivateCheck?: boolean) {
   const signingKeyPermissions = Array.isArray(signingKey.permissions) ? new Set(signingKey.permissions) : signingKey.permissions
   const signingKeyAllowedActions = Array.isArray(signingKey.allowedActions) ? new Set(signingKey.allowedActions) : signingKey.allowedActions
   if (!state._vm?.authorizedKeys?.[signingKey.id]) throw new Error('Singing key for OP_KEY_ADD or OP_KEY_UPDATE must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id)
   const localSigningKey = state._vm.authorizedKeys[signingKey.id]
   v.forEach(wk => {
-    const data = unwrapMaybeEncryptedData(wk)
+    const data = this.config.unwrapMaybeEncryptedData(wk)
     if (!data) return
     const k = data.data as SPKey
     if (!skipPrivateCheck && signingKey._private && !data.encryptionKeyId) {
@@ -188,12 +187,12 @@ export const validateKeyAddPermissions = (contractID: string, signingKey: ChelCo
   })
 }
 
-export const validateKeyDelPermissions = (contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (string | EncryptedData<string>)[]) => {
+export const validateKeyDelPermissions = function (this: CheloniaContext, contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (string | EncryptedData<string>)[]) {
   if (!state._vm?.authorizedKeys?.[signingKey.id]) throw new Error('Singing key for OP_KEY_DEL must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id)
   const localSigningKey = state._vm.authorizedKeys[signingKey.id]
   v
     .forEach((wid) => {
-      const data = unwrapMaybeEncryptedData<string>(wid)
+      const data = this.config.unwrapMaybeEncryptedData<string>(wid)
       if (!data) return
       const id = data.data
       const k = state._vm.authorizedKeys[id]
@@ -212,10 +211,10 @@ export const validateKeyDelPermissions = (contractID: string, signingKey: ChelCo
     })
 }
 
-export const validateKeyUpdatePermissions = (contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]): [ChelContractKey[], Record<string, string>] => {
+export const validateKeyUpdatePermissions = function (this: CheloniaContext, contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]): [ChelContractKey[], Record<string, string>] {
   const updatedMap = Object.create(null) as Record<string, string>
   const keys = v.map((wuk): ChelContractKey | undefined => {
-    const data = unwrapMaybeEncryptedData(wuk)
+    const data = this.config.unwrapMaybeEncryptedData(wuk)
     if (!data) return undefined
     const uk = data.data
 
@@ -267,7 +266,7 @@ export const validateKeyUpdatePermissions = (contractID: string, signingKey: Che
     return updatedKey
   // eslint-disable-next-line no-use-before-define
   }).filter(Boolean as unknown as (key: unknown) => key is ChelContractKey)
-  validateKeyAddPermissions(contractID, signingKey, state, keys, true)
+  validateKeyAddPermissions.call(this, contractID, signingKey, state, keys, true)
   return [keys, updatedMap]
 }
 
@@ -290,7 +289,7 @@ export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMes
   }
 
   for (const wkey of keys) {
-    const data = unwrapMaybeEncryptedData(wkey)
+    const data = this.config.unwrapMaybeEncryptedData(wkey)
     if (!data) continue
     const key = data.data
     let decryptedKey: string | null | undefined
@@ -301,7 +300,7 @@ export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMes
         key.meta.private.content &&
         !sbp('chelonia/haveSecretKey', key.id, !key.meta.private.transient)
       ) {
-        const decryptedKeyResult = unwrapMaybeEncryptedData(key.meta.private.content)
+        const decryptedKeyResult = this.config.unwrapMaybeEncryptedData(key.meta.private.content)
         // Ignore data that couldn't be decrypted
         if (decryptedKeyResult) {
         // Data aren't encrypted
@@ -352,7 +351,7 @@ export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMes
 
     // Is this KEY operation the result of requesting keys for another contract?
     if (key.meta?.keyRequest?.contractID && findSuitableSecretKeyId(state, [SPMessage.OP_KEY_ADD], ['sig'])) {
-      const data = unwrapMaybeEncryptedData(key.meta.keyRequest.contractID)
+      const data = this.config.unwrapMaybeEncryptedData(key.meta.keyRequest.contractID)
 
       // Are we subscribed to this contract?
       // If we are not subscribed to the contract, we don't set pendingKeyRequests because we don't need that contract's state
@@ -360,7 +359,7 @@ export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMes
       // when a corresponding OP_KEY_SHARE is received, which could trigger subscribing to this previously unsubscribed to contract
       if (data && internalSideEffectStack) {
         const keyRequestContractID = data.data
-        const reference = unwrapMaybeEncryptedData(key.meta.keyRequest.reference)
+        const reference = this.config.unwrapMaybeEncryptedData(key.meta.keyRequest.reference)
 
         // Since now we'll make changes to keyRequestContractID, we need to
         // do this while no other operations are running for that

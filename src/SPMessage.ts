@@ -319,7 +319,7 @@ export class SPMessage {
     return new this(messageToParams(head, targetOp[1]))
   }
 
-  static deserialize (value: string, additionalKeys?: Record<string, Key | string>, state?: ChelContractState): SPMessage {
+  static deserialize (value: string, additionalKeys?: Record<string, Key | string>, state?: ChelContractState, unwrapMaybeEncryptedDataFn: (data: SPKey | EncryptedData<SPKey>) => { encryptionKeyId: string | null, data: SPKey } | undefined = unwrapMaybeEncryptedData): SPMessage {
     if (!value) throw new Error(`deserialize bad value: ${value}`)
     const { head: headJSON, ...parsedValue } = JSON.parse(value)
     const head = JSON.parse(headJSON)
@@ -330,7 +330,7 @@ export class SPMessage {
     if (!state?._vm?.authorizedKeys && head.op === SPMessage.OP_CONTRACT) {
       const value = rawSignedIncomingData<SPOpContract>(parsedValue)
       const authorizedKeys = Object.fromEntries(value.valueOf()?.keys.map(wk => {
-        const k = unwrapMaybeEncryptedData(wk)
+        const k = unwrapMaybeEncryptedDataFn(wk)
         if (!k) return null
         return [k.data.id, k.data] as [string, ChelContractKey]
       // eslint-disable-next-line no-use-before-define
@@ -448,6 +448,10 @@ export class SPMessage {
     if (this._decryptedValue) return this._decryptedValue
     try {
       const value = this.message()
+      // TODO: This uses `unwrapMaybeEncryptedData` instead of a configurable
+      // version based on `skipDecryptionAttempts`. This is fine based on current
+      // use, and also something else might be confusing based on the explicit
+      // name of this function, `decryptedValue`.
       const data = unwrapMaybeEncryptedData(value)
       // Did decryption succeed? (unwrapMaybeEncryptedData will return undefined
       // on failure)

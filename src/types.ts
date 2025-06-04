@@ -3,6 +3,7 @@
 import type { Key } from '@chelonia/crypto'
 import type sbp from '@sbp/sbp'
 import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.js'
+import type { EncryptedData } from './encryptedData.js'
 import type { PubSubClient } from './pubsub/index.js'
 
 export type JSONType =
@@ -76,6 +77,11 @@ export type CheloniaConfig = {
     syncContractError: { (e: unknown, contractID: string): void; } | null;
     pubsubError: { (e: unknown, socket: PubSubClient): void; } | null;
   }>;
+  skipDecryptionAttempts: boolean;
+  unwrapMaybeEncryptedData: <T>(data: T | EncryptedData<T>) => {
+    encryptionKeyId: string | null;
+    data: T;
+  } | undefined;
 };
 
 export type SendMessageHooks = Partial<{

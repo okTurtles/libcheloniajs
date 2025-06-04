@@ -351,10 +351,6 @@ export const isRawEncryptedData = (data: unknown): data is [string, string] => {
 export const unwrapMaybeEncryptedData = <T> (data: T | EncryptedData<T>): { encryptionKeyId: string | null, data: T } | undefined => {
   if (data == null) return
   if (isEncryptedData(data)) {
-    // If not running on a browser, we don't decrypt data to avoid filling the
-    // logs with unable to decrypt messages.
-    // This variable is set in Gruntfile.js for web builds
-    if (process.env.BUILD !== 'web') return
     try {
       return {
         encryptionKeyId: data.encryptionKeyId,
