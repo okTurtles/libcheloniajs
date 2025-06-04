@@ -1899,7 +1899,7 @@ export default sbp('sbp/selectors/register', {
       // as we wouldn't know that the key is valid from that state, and the
       // state copy (contractStateCopy) is only written to the root state after
       // all processing has completed.
-      message = SPMessage.deserialize(rawMessage, this.transientSecretKeys, contractStateCopy)
+      message = SPMessage.deserialize(rawMessage, this.transientSecretKeys, contractStateCopy, this.config.unwrapMaybeEncryptedData)
       if (message.contractID() !== contractID) {
         throw new Error(`[chelonia] Wrong contract ID. Expected ${contractID} but got ${message.contractID()}`)
       }
