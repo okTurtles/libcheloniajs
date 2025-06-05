@@ -365,7 +365,8 @@ export default sbp('sbp/selectors/register', {
         try {
           const response = await this.config.fetch(`${this.config.connectionURL}/time`, { signal: this.abortController.signal })
           return handleFetchResult('text')(response)
-        } catch {
+        } catch (e) {
+          console.warn('[fetchServerTime] Error', e)
           if (fallback) {
             return new Date(sbp('chelonia/time')).toISOString()
           }
@@ -1103,8 +1104,8 @@ export default sbp('sbp/selectors/register', {
       },
       [SPMessage.OP_PROP_DEL]: notImplemented,
       [SPMessage.OP_PROP_SET] (v: SPOpPropSet) {
-        if (!state._vm.props) config.reactiveSet(state._vm, 'props', Object.create(null))
-        config.reactiveSet(state._vm.props!, v.key, v.value)
+        if (!state._vm.props) state._vm.props = {}
+        state._vm.props[v.key] = v.value
       },
       [SPMessage.OP_KEY_ADD] (v: SPOpKeyAdd) {
         const keys = keysToMap.call(self, v, height, state._vm.authorizedKeys)
@@ -1172,10 +1173,10 @@ export default sbp('sbp/selectors/register', {
                     })
                   }
                 }
-              }).catch(() => {
+              }).catch((e: unknown) => {
                 // Using console.error instead of logEvtError because this
                 // is a side-effect and not relevant for outgoing messages
-                console.error('Error stopping watching events after removing key', { contractID, foreignContract, foreignKeyName, fkUrl })
+                console.error('Error stopping watching events after removing key', { contractID, foreignContract, foreignKeyName, fkUrl }, e)
               })
             })
 

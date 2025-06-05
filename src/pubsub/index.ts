@@ -763,7 +763,8 @@ const publicMethods: {
       client.pendingUnsubscriptionSet.delete(channelID)
 
       if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(createRequest(REQUEST_TYPE.SUB, { channelID }))
+        const kvFilter = client.kvFilter.get(channelID)
+        socket.send(createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }))
       }
     }
   },
