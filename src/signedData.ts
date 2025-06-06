@@ -203,8 +203,7 @@ export const signedOutgoingData = <T, U extends object = object>(stateOrContract
 }
 
 // Used for OP_CONTRACT as a state does not yet exist
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export const signedOutgoingDataWithRawKey = <T, U extends object = object>(key: Key, data: T, _height?: number): SignedData<T, U> => {
+export const signedOutgoingDataWithRawKey = <T, U extends object = object>(key: Key, data: T): SignedData<T, U> => {
   const sKeyId = keyId(key)
   const state = {
     _vm: {

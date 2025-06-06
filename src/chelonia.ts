@@ -696,7 +696,7 @@ export default sbp('sbp/selectors/register', {
   // although it can be used as a general-purpose API to process events received
   // from other external sources that are not managed by Chelonia itself (i.e. sources
   // other than the Chelonia-managed websocket connection and RESTful API).
-  'chelonia/handleEvent': async (event: string) => {
+  'chelonia/handleEvent': async function (event: string) {
     const { contractID } = SPMessage.deserializeHEAD(event)
     return await sbp('chelonia/private/in/enqueueHandleEvent', contractID, event)
   },

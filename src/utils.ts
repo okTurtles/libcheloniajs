@@ -47,10 +47,11 @@ export const findSuitableSecretKeyId = (state: ChelContractState, permissions: '
 }
 
 export const findContractIDByForeignKeyId = (state: ChelContractState, keyId: string): string | null | undefined => {
-  if (!keyId || !state?._vm?.authorizedKeys?.[keyId]?.foreignKey) return
+  let fk: string | undefined
+  if (!keyId || !(fk = state?._vm?.authorizedKeys?.[keyId]?.foreignKey)) return
 
   try {
-    const fkUrl = new URL(state._vm.authorizedKeys[keyId].foreignKey!)
+    const fkUrl = new URL(fk)
     return fkUrl.pathname
   } catch {}
 }

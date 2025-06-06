@@ -869,16 +869,16 @@ export default sbp('sbp/selectors/register', {
                   ) {
                     newestEncryptionKeyHeight = Math.min(newestEncryptionKeyHeight, targetState._vm.authorizedKeys[key.id]._notBeforeHeight)
                   }
-                } catch (e) {
-                  const e_ = e as Error | undefined
-                  if (e_?.name === 'ChelErrorDecryptionKeyNotFound') {
-                    console.warn(`OP_KEY_SHARE (${hash} of ${contractID}) missing secret key: ${e_.message}`,
-                      e_)
+                } catch (e_) {
+                  const e = e_ as Error | undefined
+                  if (e?.name === 'ChelErrorDecryptionKeyNotFound') {
+                    console.warn(`OP_KEY_SHARE (${hash} of ${contractID}) missing secret key: ${e.message}`,
+                      e)
                   } else {
                     // Using console.error instead of logEvtError because this
                     // is a side-effect and not relevant for outgoing messages
-                    console.error(`OP_KEY_SHARE (${hash} of ${contractID}) error '${e_!.message || e_}':`,
-                      e_)
+                    console.error(`OP_KEY_SHARE (${hash} of ${contractID}) error '${e!.message || e}':`,
+                      e)
                   }
                 }
               }
@@ -1307,7 +1307,7 @@ export default sbp('sbp/selectors/register', {
       config[`postOp_${opT}`]?.(message, state) // hack to fix syntax highlighting `
     }
   },
-  'chelonia/private/in/enqueueHandleEvent': (contractID: string, event: string) => {
+  'chelonia/private/in/enqueueHandleEvent': function (contractID: string, event: string) {
     // make sure handleEvent is called AFTER any currently-running invocations
     // to 'chelonia/private/out/sync', to prevent gi.db from throwing
     // "bad previousHEAD" errors
@@ -2023,8 +2023,8 @@ export default sbp('sbp/selectors/register', {
 }) as string[]
 
 const eventsToReingest: string[] = []
-const reprocessDebounced = debounce((contractID) => sbp('chelonia/private/out/sync', contractID, { force: true }).catch(() => {
-  console.error(`[chelonia] Error at reprocessDebounced for ${contractID}`)
+const reprocessDebounced = debounce((contractID) => sbp('chelonia/private/out/sync', contractID, { force: true }).catch((e: unknown) => {
+  console.error(`[chelonia] Error at reprocessDebounced for ${contractID}`, e)
 }), 1000)
 
 const handleEvent = {
