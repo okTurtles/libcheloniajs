@@ -1,0 +1,15 @@
+import { CID } from '@chelonia/multiformats/cid';
+import { Buffer } from 'buffer';
+export declare const multicodes: Record<string, number>;
+export declare const parseCID: (cid: string) => CID;
+export declare const maybeParseCID: (cid: string) => CID | null;
+export declare function createCIDfromStream(data: string | Uint8Array | ReadableStream, multicode?: number): Promise<string>;
+export declare function createCID(data: string | Uint8Array, multicode?: number): string;
+export declare function blake32Hash(data: string | Uint8Array): string;
+export declare const b64ToBuf: (b64: string) => Buffer;
+export declare const b64ToStr: (b64: string) => string;
+export declare const bufToB64: (buf: Buffer) => string;
+export declare const strToBuf: (str: string) => Buffer;
+export declare const strToB64: (str: string) => string;
+export declare const bytesToB64: (ary: Uint8Array) => string;
+export declare const getSubscriptionId: (subscriptionInfo: ReturnType<PushSubscription["toJSON"]>) => Promise<string>;

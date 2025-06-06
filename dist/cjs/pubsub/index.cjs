@@ -1,8 +1,19 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.messageParser = exports.PUBSUB_SUBSCRIPTION_SUCCEEDED = exports.PUBSUB_RECONNECTION_SUCCEEDED = exports.PUBSUB_RECONNECTION_SCHEDULED = exports.PUBSUB_RECONNECTION_FAILED = exports.PUBSUB_RECONNECTION_ATTEMPT = exports.PUBSUB_ERROR = exports.PUSH_SERVER_ACTION_TYPE = exports.RESPONSE_TYPE = exports.REQUEST_TYPE = exports.NOTIFICATION_TYPE = void 0;
+exports.createClient = createClient;
+exports.createMessage = createMessage;
+exports.createKvMessage = createKvMessage;
+exports.createPubMessage = createPubMessage;
+exports.createRequest = createRequest;
 /* eslint-disable @typescript-eslint/no-this-alias */
-import '@sbp/okturtles.events';
-import sbp from '@sbp/sbp';
+require("@sbp/okturtles.events");
+const sbp_1 = __importDefault(require("@sbp/sbp"));
 // ====== Enums ====== //
-export const NOTIFICATION_TYPE = Object.freeze({
+exports.NOTIFICATION_TYPE = Object.freeze({
     ENTRY: 'entry',
     DELETION: 'deletion',
     KV: 'kv',
@@ -14,18 +25,18 @@ export const NOTIFICATION_TYPE = Object.freeze({
     UNSUB: 'unsub',
     VERSION_INFO: 'version_info'
 });
-export const REQUEST_TYPE = Object.freeze({
+exports.REQUEST_TYPE = Object.freeze({
     PUB: 'pub',
     SUB: 'sub',
     UNSUB: 'unsub',
     PUSH_ACTION: 'push_action',
     KV_FILTER: 'kv_filter'
 });
-export const RESPONSE_TYPE = Object.freeze({
+exports.RESPONSE_TYPE = Object.freeze({
     ERROR: 'error',
     OK: 'ok'
 });
-export const PUSH_SERVER_ACTION_TYPE = Object.freeze({
+exports.PUSH_SERVER_ACTION_TYPE = Object.freeze({
     SEND_PUBLIC_KEY: 'send-public-key',
     STORE_SUBSCRIPTION: 'store-subscription',
     DELETE_SUBSCRIPTION: 'delete-subscription',
@@ -47,12 +58,12 @@ const defaultOptions = {
     timeout: 60000
 };
 // ====== Event name constants ====== //
-export const PUBSUB_ERROR = 'pubsub-error';
-export const PUBSUB_RECONNECTION_ATTEMPT = 'pubsub-reconnection-attempt';
-export const PUBSUB_RECONNECTION_FAILED = 'pubsub-reconnection-failed';
-export const PUBSUB_RECONNECTION_SCHEDULED = 'pubsub-reconnection-scheduled';
-export const PUBSUB_RECONNECTION_SUCCEEDED = 'pubsub-reconnection-succeeded';
-export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded';
+exports.PUBSUB_ERROR = 'pubsub-error';
+exports.PUBSUB_RECONNECTION_ATTEMPT = 'pubsub-reconnection-attempt';
+exports.PUBSUB_RECONNECTION_FAILED = 'pubsub-reconnection-failed';
+exports.PUBSUB_RECONNECTION_SCHEDULED = 'pubsub-reconnection-scheduled';
+exports.PUBSUB_RECONNECTION_SUCCEEDED = 'pubsub-reconnection-succeeded';
+exports.PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded';
 // ====== API ====== //
 /**
  * Creates a pubsub client instance.
@@ -71,7 +82,7 @@ export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded';
  * {number?} timeout=5_000 - Connection timeout duration in milliseconds.
  * @returns {PubSubClient}
  */
-export function createClient(url, options = {}) {
+function createClient(url, options = {}) {
     const client = {
         customEventHandlers: options.handlers || {},
         // The current number of connection attempts that failed.
@@ -116,7 +127,7 @@ export function createClient(url, options = {}) {
             }
             catch (error) {
                 // Do not throw any error but emit an `error` event instead.
-                sbp('okTurtles.events/emit', PUBSUB_ERROR, client, error?.message);
+                (0, sbp_1.default)('okTurtles.events/emit', exports.PUBSUB_ERROR, client, error?.message);
             }
         };
     }
@@ -131,7 +142,7 @@ export function createClient(url, options = {}) {
     }
     return client;
 }
-export function createMessage(type, data, meta) {
+function createMessage(type, data, meta) {
     const message = { ...meta, type, data };
     let string;
     const stringify = function () {
@@ -146,13 +157,13 @@ export function createMessage(type, data, meta) {
     });
     return message;
 }
-export function createKvMessage(channelID, key, data) {
-    return JSON.stringify({ type: NOTIFICATION_TYPE.KV, channelID, key, data });
+function createKvMessage(channelID, key, data) {
+    return JSON.stringify({ type: exports.NOTIFICATION_TYPE.KV, channelID, key, data });
 }
-export function createPubMessage(channelID, data) {
-    return JSON.stringify({ type: NOTIFICATION_TYPE.PUB, channelID, data });
+function createPubMessage(channelID, data) {
+    return JSON.stringify({ type: exports.NOTIFICATION_TYPE.PUB, channelID, data });
 }
-export function createRequest(type, data) {
+function createRequest(type, data) {
     // Had to use Object.assign() instead of object spreading to make Flow happy.
     return JSON.stringify(Object.assign({ type }, data));
 }
@@ -199,7 +210,7 @@ const defaultClientEventHandlers = {
         client.pendingUnsubscriptionSet.clear();
         if (client.shouldReconnect && client.options.reconnectOnDisconnection) {
             if (client.failedConnectionAttempts > client.options.maxRetries) {
-                sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_FAILED, client);
+                (0, sbp_1.default)('okTurtles.events/emit', exports.PUBSUB_RECONNECTION_FAILED, client);
             }
             else {
                 // If we are definetely offline then do not try to reconnect now,
@@ -226,17 +237,17 @@ const defaultClientEventHandlers = {
         const client = this;
         const { data } = event;
         if (typeof data !== 'string') {
-            sbp('okTurtles.events/emit', PUBSUB_ERROR, client, {
+            (0, sbp_1.default)('okTurtles.events/emit', exports.PUBSUB_ERROR, client, {
                 message: `Wrong data type: ${typeof data}`
             });
             return client.destroy();
         }
         let msg = { type: '' };
         try {
-            msg = messageParser(data);
+            msg = (0, exports.messageParser)(data);
         }
         catch (error) {
-            sbp('okTurtles.events/emit', PUBSUB_ERROR, client, {
+            (0, sbp_1.default)('okTurtles.events/emit', exports.PUBSUB_ERROR, client, {
                 message: `Malformed message: ${error?.message}`
             });
             return client.destroy();
@@ -275,7 +286,7 @@ const defaultClientEventHandlers = {
         const { options } = this;
         client.connectionTimeUsed = undefined;
         client.clearAllTimers();
-        sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SUCCEEDED, client);
+        (0, sbp_1.default)('okTurtles.events/emit', exports.PUBSUB_RECONNECTION_SUCCEEDED, client);
         // Set it to -1 so that it becomes 0 on the next `close` event.
         client.failedConnectionAttempts = -1;
         client.isNew = false;
@@ -289,7 +300,7 @@ const defaultClientEventHandlers = {
         // Send any pending subscription request.
         client.pendingSubscriptionSet.forEach((channelID) => {
             const kvFilter = this.kvFilter.get(channelID);
-            client.socket?.send(createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }));
+            client.socket?.send(createRequest(exports.REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }));
         });
         // There should be no pending unsubscription since we just got connected.
     },
@@ -315,10 +326,10 @@ const defaultClientEventHandlers = {
 };
 // These handlers receive the PubSubClient instance through the `this` binding.
 const defaultMessageHandlers = {
-    [NOTIFICATION_TYPE.ENTRY](msg) {
+    [exports.NOTIFICATION_TYPE.ENTRY](msg) {
         console.debug('[pubsub] Received ENTRY:', msg);
     },
-    [NOTIFICATION_TYPE.PING]({ data }) {
+    [exports.NOTIFICATION_TYPE.PING]({ data }) {
         const client = this;
         if (client.options.logPingMessages) {
             console.debug(`[pubsub] Ping received in ${Date.now() - Number(data)} ms`);
@@ -326,43 +337,43 @@ const defaultMessageHandlers = {
         // Reply with a pong message using the same data.
         // TODO: Type coercion to string because we actually support passing this
         // object type, but the correct TypeScript type hasn't been written.
-        client.socket?.send(createMessage(NOTIFICATION_TYPE.PONG, data));
+        client.socket?.send(createMessage(exports.NOTIFICATION_TYPE.PONG, data));
         // Refresh the ping timer, waiting for the next ping.
         clearTimeout(client.pingTimeoutID);
         client.pingTimeoutID = setTimeout(() => {
             client.socket?.close();
         }, client.options.pingTimeout);
     },
-    [NOTIFICATION_TYPE.PUB]({ channelID, data }) {
+    [exports.NOTIFICATION_TYPE.PUB]({ channelID, data }) {
         console.log(`[pubsub] Received data from channel ${channelID}:`, data);
         // No need to reply.
     },
-    [NOTIFICATION_TYPE.KV]({ channelID, key, data }) {
+    [exports.NOTIFICATION_TYPE.KV]({ channelID, key, data }) {
         console.log(`[pubsub] Received KV update from channel ${channelID} ${key}:`, data);
         // No need to reply.
     },
-    [NOTIFICATION_TYPE.SUB](msg) {
+    [exports.NOTIFICATION_TYPE.SUB](msg) {
         console.debug(`[pubsub] Ignoring ${msg.type} message:`, msg.data);
     },
-    [NOTIFICATION_TYPE.UNSUB](msg) {
+    [exports.NOTIFICATION_TYPE.UNSUB](msg) {
         console.debug(`[pubsub] Ignoring ${msg.type} message:`, msg.data);
     },
-    [RESPONSE_TYPE.ERROR]({ data }) {
+    [exports.RESPONSE_TYPE.ERROR]({ data }) {
         const { type, channelID, reason } = data;
         console.warn(`[pubsub] Received ERROR response for ${type} request to ${channelID}`);
         const client = this;
         switch (type) {
-            case REQUEST_TYPE.SUB: {
+            case exports.REQUEST_TYPE.SUB: {
                 console.warn(`[pubsub] Could not subscribe to ${channelID}: ${reason}`);
                 client.pendingSubscriptionSet.delete(channelID);
                 break;
             }
-            case REQUEST_TYPE.UNSUB: {
+            case exports.REQUEST_TYPE.UNSUB: {
                 console.warn(`[pubsub] Could not unsubscribe from ${channelID}: ${reason}`);
                 client.pendingUnsubscriptionSet.delete(channelID);
                 break;
             }
-            case REQUEST_TYPE.PUSH_ACTION: {
+            case exports.REQUEST_TYPE.PUSH_ACTION: {
                 const { actionType, message } = data;
                 console.warn(`[pubsub] Received ERROR for PUSH_ACTION request with the action type '${actionType}' and the following message: ${message}`);
                 break;
@@ -372,23 +383,23 @@ const defaultMessageHandlers = {
             }
         }
     },
-    [RESPONSE_TYPE.OK]({ data: { type, channelID } }) {
+    [exports.RESPONSE_TYPE.OK]({ data: { type, channelID } }) {
         const client = this;
         switch (type) {
-            case REQUEST_TYPE.SUB: {
+            case exports.REQUEST_TYPE.SUB: {
                 client.pendingSubscriptionSet.delete(channelID);
                 client.subscriptionSet.add(channelID);
-                sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, client, { channelID });
+                (0, sbp_1.default)('okTurtles.events/emit', exports.PUBSUB_SUBSCRIPTION_SUCCEEDED, client, { channelID });
                 break;
             }
-            case REQUEST_TYPE.UNSUB: {
+            case exports.REQUEST_TYPE.UNSUB: {
                 console.debug(`[pubsub] Unsubscribed from ${channelID}`);
                 client.pendingUnsubscriptionSet.delete(channelID);
                 client.subscriptionSet.delete(channelID);
                 client.kvFilter.delete(channelID);
                 break;
             }
-            case REQUEST_TYPE.KV_FILTER: {
+            case exports.REQUEST_TYPE.KV_FILTER: {
                 console.debug(`[pubsub] Set KV filter for ${channelID}`);
                 break;
             }
@@ -419,7 +430,7 @@ if (typeof self === 'object' && self instanceof EventTarget) {
 // See https://developer.mozilla.org/en-US/docs/Web/API/Navigator/onLine
 const isDefinetelyOffline = () => typeof navigator === 'object' && navigator.onLine === false;
 // Parses and validates a received message.
-export const messageParser = (data) => {
+const messageParser = (data) => {
     const msg = JSON.parse(data);
     if (typeof msg !== 'object' || msg === null) {
         throw new TypeError('Message is null or not an object');
@@ -430,6 +441,7 @@ export const messageParser = (data) => {
     }
     return msg;
 };
+exports.messageParser = messageParser;
 const publicMethods = {
     clearAllTimers() {
         const client = this;
@@ -537,11 +549,11 @@ const publicMethods = {
         const delay = client.getNextRandomDelay();
         const nth = client.failedConnectionAttempts + 1;
         client.nextConnectionAttemptDelayID = setTimeout(() => {
-            sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_ATTEMPT, client);
+            (0, sbp_1.default)('okTurtles.events/emit', exports.PUBSUB_RECONNECTION_ATTEMPT, client);
             client.nextConnectionAttemptDelayID = undefined;
             client.connect();
         }, delay);
-        sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SCHEDULED, client, { delay, nth });
+        (0, sbp_1.default)('okTurtles.events/emit', exports.PUBSUB_RECONNECTION_SCHEDULED, client, { delay, nth });
     },
     // Can be used to send ephemeral messages outside of any contract log.
     // Does nothing if the socket is not in the OPEN state.
@@ -567,7 +579,7 @@ const publicMethods = {
             client.pendingUnsubscriptionSet.delete(channelID);
             if (socket?.readyState === WebSocket.OPEN) {
                 const kvFilter = client.kvFilter.get(channelID);
-                socket.send(createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }));
+                socket.send(createRequest(exports.REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }));
             }
         }
     },
@@ -585,7 +597,7 @@ const publicMethods = {
         }
         if (client.subscriptionSet.has(channelID)) {
             if (socket?.readyState === WebSocket.OPEN) {
-                socket.send(createRequest(REQUEST_TYPE.KV_FILTER, kvFilter ? { channelID, kvFilter } : { channelID }));
+                socket.send(createRequest(exports.REQUEST_TYPE.KV_FILTER, kvFilter ? { channelID, kvFilter } : { channelID }));
             }
         }
     },
@@ -605,7 +617,7 @@ const publicMethods = {
             client.pendingSubscriptionSet.delete(channelID);
             client.pendingUnsubscriptionSet.add(channelID);
             if (socket?.readyState === WebSocket.OPEN) {
-                socket.send(createRequest(REQUEST_TYPE.UNSUB, { channelID }));
+                socket.send(createRequest(exports.REQUEST_TYPE.UNSUB, { channelID }));
             }
         }
     }
@@ -613,16 +625,16 @@ const publicMethods = {
 // Register custom SBP event listeners before the first connection.
 for (const name of Object.keys(defaultClientEventHandlers)) {
     if (name === 'error' || !socketEventNames.includes(name)) {
-        sbp('okTurtles.events/on', `pubsub-${name}`, (target, detail) => {
+        (0, sbp_1.default)('okTurtles.events/on', `pubsub-${name}`, (target, detail) => {
             const ev = new CustomEvent(name, { detail });
             target.listeners[name].call(target, ev);
         });
     }
 }
-export default {
-    NOTIFICATION_TYPE,
-    REQUEST_TYPE,
-    RESPONSE_TYPE,
+exports.default = {
+    NOTIFICATION_TYPE: exports.NOTIFICATION_TYPE,
+    REQUEST_TYPE: exports.REQUEST_TYPE,
+    RESPONSE_TYPE: exports.RESPONSE_TYPE,
     createClient,
     createMessage,
     createRequest
