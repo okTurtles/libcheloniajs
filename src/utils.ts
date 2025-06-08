@@ -1,6 +1,7 @@
 import type { Key } from '@chelonia/crypto'
 import { deserializeKey, serializeKey, sign, verifySignature } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
+import { Buffer } from 'buffer'
 import { has, omit } from 'turtledash'
 import type { ProtoSPOpActionUnencrypted, SPKey, SPKeyPurpose, SPKeyUpdate, SPOpActionUnencrypted, SPOpAtomic, SPOpKeyAdd, SPOpKeyDel, SPOpKeyUpdate, SPOpRaw, SPOpValue } from './SPMessage.js'
 import { SPMessage } from './SPMessage.js'

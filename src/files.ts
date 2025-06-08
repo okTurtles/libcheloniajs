@@ -5,10 +5,11 @@ import encrypt from '@apeleghq/rfc8188/encrypt'
 import { generateSalt } from '@chelonia/crypto'
 import { coerce } from '@chelonia/multiformats/bytes'
 import sbp from '@sbp/sbp'
+import { Buffer } from 'buffer'
 import { has } from 'turtledash'
 import type { Secret } from './Secret.js'
 import { blake32Hash, createCID, createCIDfromStream, multicodes } from './functions.js'
-import { CheloniaContext, ChelFileManifest } from './types.js'
+import { ChelFileManifest, CheloniaContext } from './types.js'
 import { buildShelterAuthorizationHeader } from './utils.js'
 
 // Snippet from <https://github.com/WebKit/standards-positions/issues/24#issuecomment-1181821440>
