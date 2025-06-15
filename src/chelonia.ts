@@ -1124,7 +1124,7 @@ export default sbp('sbp/selectors/register', {
     const eventsAfterLimit = Math.min(beforeHeight + 1, limit)
     return sbp('chelonia/out/eventsAfter', contractID, offset, eventsAfterLimit, undefined, options)
   },
-  'chelonia/out/eventsBetween': function (this: CheloniaContext, contractID: string, startHash: string, endHeight: number, offset: number = 0, { stream } = { stream: true }) {
+  'chelonia/out/eventsBetween': function (this: CheloniaContext, contractID: string, { startHash, endHeight, offset = 0, limit = 0, stream = true }: { startHash: string, endHeight: number, offset?: number, limit: number, stream: boolean }) {
     if (offset < 0) {
       console.error('[chelonia] invalid params error: "offset" needs to be positive integer or zero')
       return
@@ -1139,8 +1139,8 @@ export default sbp('sbp/selectors/register', {
           return
         }
         const startOffset = Math.max(0, deserializedHEAD.head.height - offset)
-        const limit = endHeight - startOffset + 1
-        if (limit < 1) {
+        const ourLimit = limit ? Math.min(endHeight - startOffset + 1, limit) : endHeight - startOffset + 1
+        if (ourLimit < 1) {
           controller.close()
           return
         }
