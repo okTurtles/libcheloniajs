@@ -571,7 +571,7 @@ export const getContractIDfromKeyId = (contractID: string, signingKeyId: string 
     : contractID
 }
 
-export function eventsAfter (this: CheloniaContext, contractID: string, sinceHeight: number, limit?: number, sinceHash?: string, { stream }: { stream: boolean } = { stream: true }): ReadableStream<string> | Promise<string[]> {
+export function eventsAfter (this: CheloniaContext, contractID: string, { sinceHeight, limit, sinceHash, stream = true }: { sinceHeight: number, limit?: number, sinceHash?: string, stream: boolean }): ReadableStream<string> | Promise<string[]> {
   if (!contractID) {
     // Avoid making a network roundtrip to tell us what we already know
     throw new Error('Missing contract ID')
