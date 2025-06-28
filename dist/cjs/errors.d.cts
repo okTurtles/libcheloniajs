@@ -1,0 +1,17 @@
+export declare const ChelErrorGenerator: (name: string, base?: ErrorConstructor) => ErrorConstructor;
+export declare const ChelErrorWarning: typeof Error;
+export declare const ChelErrorAlreadyProcessed: typeof Error;
+export declare const ChelErrorDBBadPreviousHEAD: typeof Error;
+export declare const ChelErrorDBConnection: typeof Error;
+export declare const ChelErrorUnexpected: typeof Error;
+export declare const ChelErrorKeyAlreadyExists: typeof Error;
+export declare const ChelErrorUnrecoverable: typeof Error;
+export declare const ChelErrorForkedChain: typeof Error;
+export declare const ChelErrorDecryptionError: typeof Error;
+export declare const ChelErrorDecryptionKeyNotFound: typeof Error;
+export declare const ChelErrorSignatureError: typeof Error;
+export declare const ChelErrorSignatureKeyUnauthorized: typeof Error;
+export declare const ChelErrorSignatureKeyNotFound: typeof Error;
+export declare const ChelErrorFetchServerTimeFailed: typeof Error;
+export declare const ChelErrorUnexpectedHttpResponseCode: typeof Error;
+export declare const ChelErrorResourceGone: typeof Error;

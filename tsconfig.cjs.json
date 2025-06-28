@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "outDir": "dist/cjs",
+    "strict": true,
+    "strictNullChecks": true,
+    "alwaysStrict": true,
+    "noUnusedLocals": true,
+    "esModuleInterop": true,
+    "skipLibCheck": false,
+    "forceConsistentCasingInFileNames": true,
+    "allowJs": true,
+    "checkJs": true
+  },
+  "ts-node": {
+    "experimentalResolver": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist/**/*", "**/*.spec.ts", "**/*.test.ts"]
+}
