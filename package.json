@@ -1,0 +1,270 @@
+{
+  "name": "libchelonia",
+  "version": "1.0.0",
+  "description": "Library for building Chelonia applications",
+  "main": "dist/cjs/index.cjs",
+  "types": "dist/cjs/index.d.cts",
+  "module": "dist/esm/index.mjs",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.mts",
+        "default": "./dist/esm/index.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.cts",
+        "default": "./dist/cjs/index.cjs"
+      }
+    },
+    "./chelonia":{
+      "import":{
+        "types": "./dist/esm/chelonia.d.mts",
+        "default": "./dist/esm/chelonia.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/chelonia.d.cts",
+        "default": "./dist/cjs/chelonia.cjs"
+      }
+    },
+    "./chelonia-utils":{
+      "import":{
+        "types": "./dist/esm/chelonia-utils.d.mts",
+        "default": "./dist/esm/chelonia-utils.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/chelonia-utils.d.cts",
+        "default": "./dist/cjs/chelonia-utils.cjs"
+      }
+    },
+    "./constants":{
+      "import":{
+        "types": "./dist/esm/constants.d.mts",
+        "default": "./dist/esm/constants.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/constants.d.cts",
+        "default": "./dist/cjs/constants.cjs"
+      }
+    },
+    "./db":{
+      "import":{
+        "types": "./dist/esm/db.d.mts",
+        "default": "./dist/esm/db.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/db.d.cts",
+        "default": "./dist/cjs/db.cjs"
+      }
+    },
+    "./encryptedData":{
+      "import":{
+        "types": "./dist/esm/encryptedData.d.mts",
+        "default": "./dist/esm/encryptedData.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/encryptedData.d.cts",
+        "default": "./dist/cjs/encryptedData.cjs"
+      }
+    },
+    "./errors":{
+      "import":{
+        "types": "./dist/esm/errors.d.mts",
+        "default": "./dist/esm/errors.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/errors.d.cts",
+        "default": "./dist/cjs/errors.cjs"
+      }
+    },
+    "./events":{
+      "import":{
+        "types": "./dist/esm/events.d.mts",
+        "default": "./dist/esm/events.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/events.d.cts",
+        "default": "./dist/cjs/events.cjs"
+      }
+    },
+    "./files":{
+      "import":{
+        "types": "./dist/esm/files.d.mts",
+        "default": "./dist/esm/files.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/files.d.cts",
+        "default": "./dist/cjs/files.cjs"
+      }
+    },
+    "./functions":{
+      "import":{
+        "types": "./dist/esm/functions.d.mts",
+        "default": "./dist/esm/functions.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/functions.d.cts",
+        "default": "./dist/cjs/functions.cjs"
+      }
+    },
+    "./local-selectors":{
+      "import":{
+        "types": "./dist/esm/local-selectors/index.d.mts",
+        "default": "./dist/esm/local-selectors/index.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/local-selectors/index.d.cts",
+        "default": "./dist/cjs/local-selectors/index.cjs"
+      }
+    },
+    "./persistent-actions":{
+      "import":{
+        "types": "./dist/esm/persistent-actions.d.mts",
+        "default": "./dist/esm/persistent-actions.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/persistent-actions.d.cts",
+        "default": "./dist/cjs/persistent-actions.cjs"
+      }
+    },
+    "./presets":{
+      "import":{
+        "types": "./dist/esm/presets.d.mts",
+        "default": "./dist/esm/presets.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/presets.d.cts",
+        "default": "./dist/cjs/presets.cjs"
+      }
+    },
+    "./pubsub":{
+      "import":{
+        "types": "./dist/esm/pubsub/index.d.mts",
+        "default": "./dist/esm/pubsub/index.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/pubsub/index.d.cts",
+        "default": "./dist/cjs/pubsub/index.cjs"
+      }
+    },
+    "./Secret":{
+      "import":{
+        "types": "./dist/esm/Secret.d.mts",
+        "default": "./dist/esm/Secret.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/Secret.d.cts",
+        "default": "./dist/cjs/Secret.cjs"
+      }
+    },
+    "./signedData":{
+      "import":{
+        "types": "./dist/esm/signedData.d.mts",
+        "default": "./dist/esm/signedData.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/signedData.d.cts",
+        "default": "./dist/cjs/signedData.cjs"
+      }
+    },
+    "./SPMessage":{
+      "import":{
+        "types": "./dist/esm/SPMessage.d.mts",
+        "default": "./dist/esm/SPMessage.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/SPMessage.d.cts",
+        "default": "./dist/cjs/SPMessage.cjs"
+      }
+    },
+    "./time-sync":{
+      "import":{
+        "types": "./dist/esm/time-sync.d.mts",
+        "default": "./dist/esm/time-sync.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/time-sync.d.cts",
+        "default": "./dist/cjs/time-sync.cjs"
+      }
+    },
+    "./types":{
+      "import":{
+        "types": "./dist/esm/types.d.mts",
+        "default": "./dist/esm/types.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/types.d.cts",
+        "default": "./dist/cjs/types.cjs"
+      }
+    },
+    "./utils":{
+      "import":{
+        "types": "./dist/esm/utils.d.mts",
+        "default": "./dist/esm/utils.mjs"
+      },
+      "require":{
+        "types": "./dist/cjs/utils.d.cts",
+        "default": "./dist/cjs/utils.cjs"
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => console.error(\"ERROR\", e));' src/index.test.ts",
+    "build:esm": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => console.error(\"ERROR\", e));' buildHelper.ts esm",
+    "build:cjs": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => console.error(\"ERROR\", e));' buildHelper.ts cjs",
+    "build": "npm run build:esm && npm run build:cjs",
+    "lint": "eslint .",
+    "clean": "rm -f dist/*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/okTurtles/libcheloniajs.git"
+  },
+  "author": "okTurtles Foundation Inc.",
+  "license": "AGPL-3.0",
+  "bugs": {
+    "url": "https://github.com/okTurtles/libcheloniajs/issues"
+  },
+  "homepage": "https://github.com/okTurtles/libcheloniajs#readme",
+  "dependencies": {
+    "@apeleghq/multipart-parser": "1.0.18",
+    "@apeleghq/rfc8188": "1.0.8",
+    "@chelonia/crypto": "1.0.1",
+    "@chelonia/serdes": "1.0.0",
+    "@sbp/okturtles.data": "0.1.6",
+    "@sbp/okturtles.eventqueue": "1.2.1",
+    "@sbp/okturtles.events": "1.0.1",
+    "turtledash": "1.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.29",
+    "@typescript-eslint/eslint-plugin": "8.33.0",
+    "eslint-config-standard": "17.1.0",
+    "ts-node": "10.9.2",
+    "typescript": "5.8.3"
+  },
+  "peerDependencies": {
+    "@sbp/sbp": "2.x"
+  },
+  "eslintConfig": {
+    "root": true,
+    "env": {
+      "browser": true,
+      "commonjs": true,
+      "node": true
+    },
+    "parser": "@typescript-eslint/parser",
+    "plugins": [
+      "@typescript-eslint"
+    ],
+    "extends": [
+      "plugin:@typescript-eslint/recommended",
+      "standard"
+    ]
+  },
+  "eslintIgnore": [
+    "dist/*",
+    "node_modules/*",
+    "**/*.md"
+  ]
+}

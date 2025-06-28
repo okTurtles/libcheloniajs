@@ -1,0 +1,15 @@
+export declare const CHELONIA_RESET = "chelonia-reset";
+export declare const CONTRACT_IS_SYNCING = "contract-is-syncing";
+export declare const CONTRACTS_MODIFIED = "contracts-modified";
+export declare const CONTRACTS_MODIFIED_READY = "contracts-modified-ready";
+export declare const EVENT_HANDLED = "event-handled";
+export declare const EVENT_PUBLISHED = "event-published";
+export declare const EVENT_PUBLISHING_ERROR = "event-publishing-error";
+export declare const EVENT_HANDLED_READY = "event-handled-ready";
+export declare const CONTRACT_REGISTERED = "contract-registered";
+export declare const CONTRACT_UNREGISTERED = "contract-unregistered";
+export declare const CONTRACT_IS_PENDING_KEY_REQUESTS = "contract-is-pending-key-requests";
+export declare const CONTRACT_HAS_RECEIVED_KEYS = "contract-has-received-keys";
+export declare const PERSISTENT_ACTION_FAILURE = "persistent-action-failure";
+export declare const PERSISTENT_ACTION_SUCCESS = "persistent-action-success";
+export declare const PERSISTENT_ACTION_TOTAL_FAILURE = "persistent-action-total_failure";

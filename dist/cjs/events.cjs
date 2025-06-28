@@ -1,0 +1,18 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.PERSISTENT_ACTION_TOTAL_FAILURE = exports.PERSISTENT_ACTION_SUCCESS = exports.PERSISTENT_ACTION_FAILURE = exports.CONTRACT_HAS_RECEIVED_KEYS = exports.CONTRACT_IS_PENDING_KEY_REQUESTS = exports.CONTRACT_UNREGISTERED = exports.CONTRACT_REGISTERED = exports.EVENT_HANDLED_READY = exports.EVENT_PUBLISHING_ERROR = exports.EVENT_PUBLISHED = exports.EVENT_HANDLED = exports.CONTRACTS_MODIFIED_READY = exports.CONTRACTS_MODIFIED = exports.CONTRACT_IS_SYNCING = exports.CHELONIA_RESET = void 0;
+exports.CHELONIA_RESET = 'chelonia-reset';
+exports.CONTRACT_IS_SYNCING = 'contract-is-syncing';
+exports.CONTRACTS_MODIFIED = 'contracts-modified';
+exports.CONTRACTS_MODIFIED_READY = 'contracts-modified-ready';
+exports.EVENT_HANDLED = 'event-handled';
+exports.EVENT_PUBLISHED = 'event-published';
+exports.EVENT_PUBLISHING_ERROR = 'event-publishing-error';
+exports.EVENT_HANDLED_READY = 'event-handled-ready';
+exports.CONTRACT_REGISTERED = 'contract-registered';
+exports.CONTRACT_UNREGISTERED = 'contract-unregistered';
+exports.CONTRACT_IS_PENDING_KEY_REQUESTS = 'contract-is-pending-key-requests';
+exports.CONTRACT_HAS_RECEIVED_KEYS = 'contract-has-received-keys';
+exports.PERSISTENT_ACTION_FAILURE = 'persistent-action-failure';
+exports.PERSISTENT_ACTION_SUCCESS = 'persistent-action-success';
+exports.PERSISTENT_ACTION_TOTAL_FAILURE = 'persistent-action-total_failure';
