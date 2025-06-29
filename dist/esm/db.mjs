@@ -1,6 +1,7 @@
 import '@sbp/okturtles.data';
 import '@sbp/okturtles.eventqueue';
 import sbp from '@sbp/sbp';
+import { Buffer } from 'buffer';
 import { SPMessage } from './SPMessage.mjs';
 import { ChelErrorDBBadPreviousHEAD, ChelErrorDBConnection } from './errors.mjs';
 const headPrefix = 'head=';
