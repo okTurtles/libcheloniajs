@@ -11,6 +11,7 @@ const encrypt_1 = __importDefault(require("@apeleghq/rfc8188/encrypt"));
 const crypto_1 = require("@chelonia/crypto");
 const bytes_1 = require("@chelonia/multiformats/bytes");
 const sbp_1 = __importDefault(require("@sbp/sbp"));
+const buffer_1 = require("buffer");
 const turtledash_1 = require("turtledash");
 const functions_js_1 = require("./functions.cjs");
 const utils_js_1 = require("./utils.cjs");
@@ -57,7 +58,7 @@ const ArrayBufferToUint8ArrayStream = async function (connectionURL, s) {
     if (supportsRequestStreams === true) {
         await this.config.fetch(`${connectionURL}/streams-test`, {
             method: 'POST',
-            body: new ReadableStream({ start(c) { c.enqueue(Buffer.from('ok')); c.close(); } }),
+            body: new ReadableStream({ start(c) { c.enqueue(buffer_1.Buffer.from('ok')); c.close(); } }),
             duplex: 'half'
         }).then((r) => {
             if (!r.ok)
@@ -185,7 +186,7 @@ exports.aes256gcmHandlers = {
         // here (namely, including the IKM in the downloadParams) may need to use
         // longer key IDs, possibly a full hash.
         const keyId = (0, functions_js_1.blake32Hash)('aes256gcm-keyId' + (0, functions_js_1.blake32Hash)(IKM)).slice(-8);
-        const binaryKeyId = Buffer.from(keyId);
+        const binaryKeyId = buffer_1.Buffer.from(keyId);
         return {
             cipherParams: {
                 keyId
@@ -194,7 +195,7 @@ exports.aes256gcmHandlers = {
                 return await (0, encrypt_1.default)(encodings_1.aes256gcm, stream, recordSize, binaryKeyId, IKM);
             },
             downloadParams: {
-                IKM: Buffer.from(IKM).toString('base64'),
+                IKM: buffer_1.Buffer.from(IKM).toString('base64'),
                 rs: recordSize
             }
         };
@@ -204,7 +205,7 @@ exports.aes256gcmHandlers = {
         if (!IKMb64) {
             throw new Error('Missing IKM in downloadParams');
         }
-        const IKM = Buffer.from(IKMb64, 'base64');
+        const IKM = buffer_1.Buffer.from(IKMb64, 'base64');
         const keyId = (0, functions_js_1.blake32Hash)('aes256gcm-keyId' + (0, functions_js_1.blake32Hash)(IKM)).slice(-8);
         if (!manifest['cipher-params'] || !manifest['cipher-params'].keyId) {
             throw new Error('Missing cipher-params');
@@ -216,7 +217,7 @@ exports.aes256gcmHandlers = {
         return {
             payloadHandler: async () => {
                 const bytes = await streamToUint8Array((0, decrypt_1.default)(encodings_1.aes256gcm, fileStream(chelonia, manifest), (actualKeyId) => {
-                    if (Buffer.from(actualKeyId).toString() !== keyId) {
+                    if (buffer_1.Buffer.from(actualKeyId).toString() !== keyId) {
                         throw new Error('Invalid key ID');
                     }
                     return IKM;
@@ -294,7 +295,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         'name-map': manifestOptions['name-map'] ?? undefined,
                         alternatives: manifestOptions.alternatives ?? undefined
                     };
-                    controller.enqueue(Buffer.from(JSON.stringify(manifest)));
+                    controller.enqueue(buffer_1.Buffer.from(JSON.stringify(manifest)));
                     controller.close();
                 }
             })
@@ -345,7 +346,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const manifestBinary = await manifestResponse.arrayBuffer();
         if ((0, functions_js_1.createCID)((0, bytes_1.coerce)(manifestBinary), functions_js_1.multicodes.SHELTER_FILE_MANIFEST) !== manifestCid)
             throw new Error('mismatched manifest hash');
-        const manifest = JSON.parse(Buffer.from(manifestBinary).toString());
+        const manifest = JSON.parse(buffer_1.Buffer.from(manifestBinary).toString());
         if (typeof manifest !== 'object')
             throw new Error('manifest format is invalid');
         if (manifest.version !== '1.0.0')

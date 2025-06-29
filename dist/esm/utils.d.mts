@@ -23,7 +23,10 @@ export declare const keyAdditionProcessor: (this: CheloniaContext, _msg: SPMessa
 export declare const subscribeToForeignKeyContracts: (this: CheloniaContext, contractID: string, state: ChelContractState) => void;
 export declare const recreateEvent: (entry: SPMessage, state: ChelContractState, contractsState: ChelRootState["contracts"][string]) => undefined | SPMessage;
 export declare const getContractIDfromKeyId: (contractID: string, signingKeyId: string | null | undefined, state: ChelContractState) => string | null | undefined;
-export declare function eventsAfter(this: CheloniaContext, contractID: string, sinceHeight: number, limit?: number, sinceHash?: string, { stream }?: {
+export declare function eventsAfter(this: CheloniaContext, contractID: string, { sinceHeight, limit, sinceHash, stream }: {
+    sinceHeight: number;
+    limit?: number;
+    sinceHash?: string;
     stream: boolean;
 }): ReadableStream<string> | Promise<string[]>;
 export declare function buildShelterAuthorizationHeader(this: CheloniaContext, contractID: string, state?: ChelContractState): string;

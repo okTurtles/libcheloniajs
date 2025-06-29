@@ -9,6 +9,7 @@ require("@sbp/okturtles.events");
 const sbp_1 = __importDefault(require("@sbp/sbp"));
 const turtledash_1 = require("turtledash");
 const functions_js_1 = require("./functions.cjs");
+const buffer_1 = require("buffer");
 const index_js_1 = require("./pubsub/index.cjs");
 const crypto_1 = require("@chelonia/crypto");
 const errors_js_1 = require("./errors.cjs");
@@ -516,7 +517,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                         v.call(this.pubsub, [msg.key, parseEncryptedOrUnencryptedMessage(this, {
                                                 contractID: msg.channelID,
                                                 meta: msg.key,
-                                                serializedData: JSON.parse(Buffer.from(msg.data).toString())
+                                                serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
                                             })]);
                                     }).catch((e) => {
                                         console.error(`[chelonia] Error processing kv event for ${msg.channelID} and key ${msg.key}`, msg, e);
@@ -968,15 +969,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }).then((0, utils_js_1.handleFetchResult)('json'));
     },
     'chelonia/out/eventsAfter': utils_js_1.eventsAfter,
-    'chelonia/out/eventsBefore': function (contractID, beforeHeight, limit, options) {
+    'chelonia/out/eventsBefore': function (contractID, { beforeHeight, limit, stream }) {
         if (limit <= 0) {
             console.error('[chelonia] invalid params error: "limit" needs to be positive integer');
         }
         const offset = Math.max(0, beforeHeight - limit + 1);
         const eventsAfterLimit = Math.min(beforeHeight + 1, limit);
-        return (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, offset, eventsAfterLimit, undefined, options);
+        return (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, { sinceHeight: offset, limit: eventsAfterLimit, stream });
     },
-    'chelonia/out/eventsBetween': function (contractID, startHash, endHeight, offset = 0, { stream } = { stream: true }) {
+    'chelonia/out/eventsBetween': function (contractID, { startHash, endHeight, offset = 0, limit = 0, stream = true }) {
         if (offset < 0) {
             console.error('[chelonia] invalid params error: "offset" needs to be positive integer or zero');
             return;
@@ -991,12 +992,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     return;
                 }
                 const startOffset = Math.max(0, deserializedHEAD.head.height - offset);
-                const limit = endHeight - startOffset + 1;
-                if (limit < 1) {
+                const ourLimit = limit ? Math.min(endHeight - startOffset + 1, limit) : endHeight - startOffset + 1;
+                if (ourLimit < 1) {
                     controller.close();
                     return;
                 }
-                reader = (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, startOffset, limit).getReader();
+                reader = (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, { sinceHeight: startOffset, limit: ourLimit }).getReader();
             },
             async pull(controller) {
                 const { done, value } = await reader.read();
@@ -1026,7 +1027,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         let state = Object.create(null);
         let contractName = rootState.contracts[contractID]?.type;
-        const eventsStream = (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, 0, undefined, contractID);
+        const eventsStream = (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, { sinceHeight: 0, sinceHash: contractID });
         const eventsStreamReader = eventsStream.getReader();
         if (rootState[contractID])
             state._volatile = rootState[contractID]._volatile;
