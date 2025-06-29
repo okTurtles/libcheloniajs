@@ -10,7 +10,6 @@ const blake2bstream_1 = require("@chelonia/multiformats/blake2bstream");
 const cid_1 = require("@chelonia/multiformats/cid");
 // Use 'buffer' instead of 'node:buffer' to polyfill in the browser
 const buffer_1 = require("buffer");
-const turtledash_1 = require("turtledash");
 // Values from https://github.com/multiformats/multicodec/blob/master/table.csv
 exports.multicodes = {
     RAW: 0x00,
@@ -44,10 +43,6 @@ const maybeParseCID = (cid) => {
     }
 };
 exports.maybeParseCID = maybeParseCID;
-// Makes the `Buffer` global available in the browser if needed.
-if (typeof globalThis === 'object' && !(0, turtledash_1.has)(globalThis, 'Buffer')) {
-    globalThis.Buffer = buffer_1.Buffer;
-}
 async function createCIDfromStream(data, multicode = exports.multicodes.RAW) {
     const uint8array = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     const digest = await blake2bstream_1.blake2b256stream.digest(uint8array);

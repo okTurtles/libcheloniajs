@@ -7,6 +7,7 @@ exports.prefixHandlers = exports.parsePrefixableKey = exports.checkKey = void 0;
 require("@sbp/okturtles.data");
 require("@sbp/okturtles.eventqueue");
 const sbp_1 = __importDefault(require("@sbp/sbp"));
+const buffer_1 = require("buffer");
 const SPMessage_js_1 = require("./SPMessage.cjs");
 const errors_js_1 = require("./errors.cjs");
 const headPrefix = 'head=';
@@ -39,7 +40,7 @@ const parsePrefixableKey = (key) => {
 exports.parsePrefixableKey = parsePrefixableKey;
 exports.prefixHandlers = {
     // Decode buffers, but don't transform other values.
-    '': (value) => Buffer.isBuffer(value) ? value.toString('utf8') : value,
+    '': (value) => buffer_1.Buffer.isBuffer(value) ? value.toString('utf8') : value,
     'any:': (value) => value
     /*
     // 2025-03-24: Commented out because it's not used; currently, only `any:`

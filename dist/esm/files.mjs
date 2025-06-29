@@ -5,6 +5,7 @@ import encrypt from '@apeleghq/rfc8188/encrypt';
 import { generateSalt } from '@chelonia/crypto';
 import { coerce } from '@chelonia/multiformats/bytes';
 import sbp from '@sbp/sbp';
+import { Buffer } from 'buffer';
 import { has } from 'turtledash';
 import { blake32Hash, createCID, createCIDfromStream, multicodes } from './functions.mjs';
 import { buildShelterAuthorizationHeader } from './utils.mjs';

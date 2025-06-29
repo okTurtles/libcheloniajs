@@ -9,6 +9,7 @@ exports.buildShelterAuthorizationHeader = buildShelterAuthorizationHeader;
 exports.verifyShelterAuthorizationHeader = verifyShelterAuthorizationHeader;
 const crypto_1 = require("@chelonia/crypto");
 const sbp_1 = __importDefault(require("@sbp/sbp"));
+const buffer_1 = require("buffer");
 const turtledash_1 = require("turtledash");
 const SPMessage_js_1 = require("./SPMessage.cjs");
 const Secret_js_1 = require("./Secret.cjs");
@@ -522,7 +523,7 @@ const getContractIDfromKeyId = (contractID, signingKeyId, state) => {
         : contractID;
 };
 exports.getContractIDfromKeyId = getContractIDfromKeyId;
-function eventsAfter(contractID, sinceHeight, limit, sinceHash, { stream } = { stream: true }) {
+function eventsAfter(contractID, { sinceHeight, limit, sinceHash, stream = true }) {
     if (!contractID) {
         // Avoid making a network roundtrip to tell us what we already know
         throw new Error('Missing contract ID');
@@ -609,7 +610,7 @@ function eventsAfter(contractID, sinceHeight, limit, sinceHash, { stream } = { s
                             // Concatenate new data to the buffer, trimming any
                             // leading/trailing whitespace (the response is a JSON array of
                             // base64-encoded data, meaning that whitespace is not significant)
-                            buffer = buffer + Buffer.from(value).toString().trim();
+                            buffer = buffer + buffer_1.Buffer.from(value).toString().trim();
                             // If there was only whitespace, try reading again
                             if (!buffer)
                                 break;
@@ -755,7 +756,7 @@ function buildShelterAuthorizationHeader(contractID, state) {
     const nonceBytes = new Uint8Array(15);
     globalThis.crypto.getRandomValues(nonceBytes);
     // <contractID> <UNIX ms time>.<nonce>
-    const data = `${contractID} ${(0, sbp_1.default)('chelonia/time')}.${Buffer.from(nonceBytes).toString('base64')}`;
+    const data = `${contractID} ${(0, sbp_1.default)('chelonia/time')}.${buffer_1.Buffer.from(nonceBytes).toString('base64')}`;
     // shelter <contractID> <UNIX time>.<nonce>.<signature>
     return `shelter ${data}.${(0, crypto_1.sign)(deserializedSAK, data)}`;
 }

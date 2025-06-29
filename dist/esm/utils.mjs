@@ -1,5 +1,6 @@
 import { deserializeKey, serializeKey, sign, verifySignature } from '@chelonia/crypto';
 import sbp from '@sbp/sbp';
+import { Buffer } from 'buffer';
 import { has, omit } from 'turtledash';
 import { SPMessage } from './SPMessage.mjs';
 import { Secret } from './Secret.mjs';
@@ -499,7 +500,7 @@ export const getContractIDfromKeyId = (contractID, signingKeyId, state) => {
         ? new URL(state._vm.authorizedKeys[signingKeyId].foreignKey).pathname
         : contractID;
 };
-export function eventsAfter(contractID, sinceHeight, limit, sinceHash, { stream } = { stream: true }) {
+export function eventsAfter(contractID, { sinceHeight, limit, sinceHash, stream = true }) {
     if (!contractID) {
         // Avoid making a network roundtrip to tell us what we already know
         throw new Error('Missing contract ID');
