@@ -39,4 +39,4 @@ Should work with Node 22 or Deno.
 
 This software is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
-For commercial licensing options or if you need a different license arrangement, please contact us for dual-licensing opportunities.
+For commercial licensing options or if you need a different license arrangement, please contact hi@okturtles.org for dual-licensing opportunities. If you don't hear back, try reaching out on [Keybase](https://keybase.io/greg).
