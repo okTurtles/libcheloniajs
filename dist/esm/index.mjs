@@ -17,4 +17,6 @@ export * from './pubsub/index.mjs';
 export * from './signedData.mjs';
 export * from './types.mjs';
 export * from './utils.mjs';
+export * from './zkpp.mjs';
+export * from './zkppConstants.mjs';
 export default [...chelonia, ...db, ...files, ...persistentActions];
