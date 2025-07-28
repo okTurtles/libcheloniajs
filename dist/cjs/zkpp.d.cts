@@ -1,0 +1,22 @@
+import { Buffer } from 'buffer';
+export declare const base64ToBase64url: (s: string) => string;
+export declare const base64urlToBase64: (s: string) => string;
+export declare const hashStringArray: (...args: Array<Uint8Array | string>) => Uint8Array;
+export declare const hashRawStringArray: (...args: Array<Uint8Array | string>) => Uint8Array;
+export declare const randomNonce: () => string;
+export declare const hashRawB64url: (v: string | Buffer) => string;
+export declare const hash: (v: string | Buffer) => string;
+export declare const computeCAndHc: (r: string, s: string, h: string) => [Uint8Array, Uint8Array];
+export declare const encryptContractSalt: (c: Uint8Array, contractSalt: string) => string;
+export declare const decryptContractSalt: (c: Uint8Array, encryptedContractSaltBox: string) => string;
+export declare const encryptSaltUpdate: (secret: string, recordId: string, record: string) => string;
+export declare const decryptSaltUpdate: (secret: string, recordId: string, encryptedRecordBox: string) => string;
+export declare const hashPassword: (password: string, salt: string) => Promise<string>;
+export declare const boxKeyPair: () => {
+    publicKey: Uint8Array;
+    secretKey: Uint8Array;
+};
+export declare const saltAgreement: (publicKey: string, secretKey: Uint8Array) => false | [string, string];
+export declare const parseRegisterSalt: (publicKey: string, secretKey: Uint8Array, encryptedHashedPassword: string) => false | [string, string, Uint8Array, Uint8Array];
+export declare const buildRegisterSaltRequest: (publicKey: string, secretKey: Uint8Array, password: string) => Promise<[string, string, Uint8Array]>;
+export declare const buildUpdateSaltRequestEc: (password: string, c: Uint8Array) => Promise<[string, string]>;

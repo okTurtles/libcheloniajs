@@ -18,5 +18,7 @@ export * from './pubsub/index.js'
 export * from './signedData.js'
 export * from './types.js'
 export * from './utils.js'
+export * from './zkpp.js'
+export * from './zkppConstants.js'
 
 export default [...chelonia, ...db, ...files, ...persistentActions]

@@ -13,5 +13,7 @@ export * from './pubsub/index.cjs';
 export * from './signedData.cjs';
 export * from './types.cjs';
 export * from './utils.cjs';
+export * from './zkpp.cjs';
+export * from './zkppConstants.cjs';
 declare const _default: string[];
 export default _default;

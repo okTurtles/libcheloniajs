@@ -36,4 +36,6 @@ __exportStar(require("./pubsub/index.cjs"), exports);
 __exportStar(require("./signedData.cjs"), exports);
 __exportStar(require("./types.cjs"), exports);
 __exportStar(require("./utils.cjs"), exports);
+__exportStar(require("./zkpp.cjs"), exports);
+__exportStar(require("./zkppConstants.cjs"), exports);
 exports.default = [...chelonia_js_1.default, ...db_js_1.default, ...files_js_1.default, ...persistent_actions_js_1.default];
