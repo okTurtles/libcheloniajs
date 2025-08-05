@@ -1,6 +1,6 @@
 {
   "name": "@chelonia/lib",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Library for building Chelonia applications",
   "main": "dist/cjs/index.cjs",
   "types": "dist/cjs/index.d.cts",
@@ -255,7 +255,8 @@
     "@sbp/okturtles.eventqueue": "1.2.1",
     "@sbp/okturtles.events": "1.0.1",
     "scrypt-async": "2.0.1",
-    "turtledash": "1.0.2"
+    "turtledash": "1.0.2",
+    "tweetnacl": "1.0.3"
   },
   "devDependencies": {
     "@types/node": "22.15.29",
