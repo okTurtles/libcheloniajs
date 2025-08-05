@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.buildUpdateSaltRequestEc = exports.buildRegisterSaltRequest = exports.parseRegisterSalt = exports.saltAgreement = exports.boxKeyPair = exports.hashPassword = exports.decryptSaltUpdate = exports.encryptSaltUpdate = exports.decryptContractSalt = exports.encryptContractSalt = exports.computeCAndHc = exports.hash = exports.hashRawB64url = exports.randomNonce = exports.hashRawStringArray = exports.hashStringArray = exports.base64urlToBase64 = exports.base64ToBase64url = void 0;
+exports.buildUpdateSaltRequestEc = exports.buildRegisterSaltRequest = exports.parseRegisterSalt = exports.saltAgreement = exports.boxKeyPair = exports.hashPassword = exports.decryptSaltUpdate = exports.encryptSaltUpdate = exports.decryptContractSalt = exports.encryptContractSalt = exports.computeCAndHc = exports.hash = exports.randomNonce = exports.hashRawStringArray = exports.hashStringArray = exports.base64urlToBase64 = exports.base64ToBase64url = void 0;
 const buffer_1 = require("buffer");
 const scrypt_async_1 = __importDefault(require("scrypt-async"));
 const tweetnacl_1 = __importDefault(require("tweetnacl"));
@@ -25,10 +25,6 @@ const randomNonce = () => {
     return (0, exports.base64ToBase64url)(buffer_1.Buffer.from(tweetnacl_1.default.randomBytes(12)).toString('base64'));
 };
 exports.randomNonce = randomNonce;
-const hashRawB64url = (v) => {
-    return (0, exports.base64ToBase64url)(buffer_1.Buffer.from(tweetnacl_1.default.hash(buffer_1.Buffer.from(v))).toString('base64'));
-};
-exports.hashRawB64url = hashRawB64url;
 const hash = (v) => {
     return (0, exports.base64ToBase64url)(buffer_1.Buffer.from(tweetnacl_1.default.hash(buffer_1.Buffer.from(v))).toString('base64'));
 };

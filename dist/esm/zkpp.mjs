@@ -14,9 +14,6 @@ export const hashRawStringArray = (...args) => {
 export const randomNonce = () => {
     return base64ToBase64url(Buffer.from(nacl.randomBytes(12)).toString('base64'));
 };
-export const hashRawB64url = (v) => {
-    return base64ToBase64url(Buffer.from(nacl.hash(Buffer.from(v))).toString('base64'));
-};
 export const hash = (v) => {
     return base64ToBase64url(Buffer.from(nacl.hash(Buffer.from(v))).toString('base64'));
 };
