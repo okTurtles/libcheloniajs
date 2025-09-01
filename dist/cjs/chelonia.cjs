@@ -1230,16 +1230,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             throw new Error('Contract name not found');
         }
         const state = contract.state(contractID);
-        const payload = data.filter((wk) => {
-            const k = ((0, encryptedData_js_1.isEncryptedData)(wk) ? wk.valueOf() : wk);
-            if ((0, turtledash_1.has)(state._vm.authorizedKeys, k.id)) {
-                if (state._vm.authorizedKeys[k.id]._notAfterHeight == null) {
-                    // Can't add a key that exists
-                    return false;
+        const payload = params.skipExistingKeyCheck
+            ? data
+            : data.filter((wk) => {
+                const k = ((0, encryptedData_js_1.isEncryptedData)(wk) ? wk.valueOf() : wk);
+                if ((0, turtledash_1.has)(state._vm.authorizedKeys, k.id)) {
+                    if (state._vm.authorizedKeys[k.id]._notAfterHeight == null) {
+                        // Can't add a key that exists
+                        return false;
+                    }
                 }
-            }
-            return true;
-        });
+                return true;
+            });
         if (payload.length === 0)
             return;
         let msg = SPMessage_js_1.SPMessage.createV1_0({
