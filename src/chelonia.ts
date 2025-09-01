@@ -76,7 +76,10 @@ export type ChelKeyAddParams = {
   };
   publishOptions?: { maxAttempts?: number };
   atomic: boolean;
-  skipDuplicateKeyCheck?: boolean;
+  // Usually `keyAdd` will ignore calls for keys that already exist in the
+  // contract, for convenience. In some cases, e.g., when using OP_KEY_DEL
+  // and OP_KEY_ADD inside of OP_ATOMIC, we might want to skip this check.
+  skipExistingKeyCheck?: boolean;
 }
 
 export type ChelKeyDelParams = {
@@ -1384,7 +1387,7 @@ export default sbp('sbp/selectors/register', {
     }
     const state = contract.state(contractID)
 
-    const payload = params.skipDuplicateKeyCheck
+    const payload = params.skipExistingKeyCheck
       ? (data as SPOpKeyAdd)
       : (data as SPOpKeyAdd).filter((wk) => {
           const k = ((isEncryptedData(wk) ? wk.valueOf() : wk) as SPKey)

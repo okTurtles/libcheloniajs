@@ -1230,7 +1230,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             throw new Error('Contract name not found');
         }
         const state = contract.state(contractID);
-        const payload = params.skipDuplicateKeyCheck
+        const payload = params.skipExistingKeyCheck
             ? data
             : data.filter((wk) => {
                 const k = ((0, encryptedData_js_1.isEncryptedData)(wk) ? wk.valueOf() : wk);

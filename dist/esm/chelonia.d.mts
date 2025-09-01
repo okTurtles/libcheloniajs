@@ -66,7 +66,7 @@ export type ChelKeyAddParams = {
         maxAttempts?: number;
     };
     atomic: boolean;
-    skipDuplicateKeyCheck?: boolean;
+    skipExistingKeyCheck?: boolean;
 };
 export type ChelKeyDelParams = {
     contractName: string;
