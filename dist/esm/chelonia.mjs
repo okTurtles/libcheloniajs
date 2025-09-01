@@ -1224,16 +1224,18 @@ export default sbp('sbp/selectors/register', {
             throw new Error('Contract name not found');
         }
         const state = contract.state(contractID);
-        const payload = data.filter((wk) => {
-            const k = (isEncryptedData(wk) ? wk.valueOf() : wk);
-            if (has(state._vm.authorizedKeys, k.id)) {
-                if (state._vm.authorizedKeys[k.id]._notAfterHeight == null) {
-                    // Can't add a key that exists
-                    return false;
+        const payload = params.skipDuplicateKeyCheck
+            ? data
+            : data.filter((wk) => {
+                const k = (isEncryptedData(wk) ? wk.valueOf() : wk);
+                if (has(state._vm.authorizedKeys, k.id)) {
+                    if (state._vm.authorizedKeys[k.id]._notAfterHeight == null) {
+                        // Can't add a key that exists
+                        return false;
+                    }
                 }
-            }
-            return true;
-        });
+                return true;
+            });
         if (payload.length === 0)
             return;
         let msg = SPMessage.createV1_0({

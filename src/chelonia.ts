@@ -76,6 +76,7 @@ export type ChelKeyAddParams = {
   };
   publishOptions?: { maxAttempts?: number };
   atomic: boolean;
+  skipDuplicateKeyCheck?: boolean;
 }
 
 export type ChelKeyDelParams = {
@@ -1383,17 +1384,20 @@ export default sbp('sbp/selectors/register', {
     }
     const state = contract.state(contractID)
 
-    const payload = (data as SPOpKeyAdd).filter((wk) => {
-      const k = ((isEncryptedData(wk) ? wk.valueOf() : wk) as SPKey)
-      if (has(state._vm.authorizedKeys, k.id)) {
-        if (state._vm.authorizedKeys[k.id]._notAfterHeight == null) {
-          // Can't add a key that exists
-          return false
-        }
-      }
+    const payload = params.skipDuplicateKeyCheck
+      ? (data as SPOpKeyAdd)
+      : (data as SPOpKeyAdd).filter((wk) => {
+          const k = ((isEncryptedData(wk) ? wk.valueOf() : wk) as SPKey)
+          if (has(state._vm.authorizedKeys, k.id)) {
+            if (state._vm.authorizedKeys[k.id]._notAfterHeight == null) {
+              // Can't add a key that exists
+              return false
+            }
+          }
 
-      return true
-    })
+          return true
+        })
+
     if (payload.length === 0) return
     let msg = SPMessage.createV1_0({
       contractID,
