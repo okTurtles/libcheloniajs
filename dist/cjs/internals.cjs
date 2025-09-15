@@ -46,7 +46,6 @@ const errors_js_1 = require("./errors.cjs");
 const events_js_1 = require("./events.cjs");
 const utils_js_1 = require("./utils.cjs");
 const signedData_js_1 = require("./signedData.cjs");
-// import 'ses'
 // Used for temporarily storing the missing decryption key IDs in a given
 // message
 const missingDecryptionKeyIdsMap = new WeakMap();
@@ -491,7 +490,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             });
         }));
     },
-    'chelonia/private/out/publishEvent': function (entry, { maxAttempts = 5, headers, billableContractID, bearer } = {}, hooks) {
+    'chelonia/private/out/publishEvent': function (entry, { maxAttempts = 5, headers, billableContractID, bearer, disableAutoDedup } = {}, hooks) {
         const contractID = entry.contractID();
         const originalEntry = entry;
         return (0, sbp_1.default)('chelonia/private/queueEvent', `publish:${contractID}`, async () => {
@@ -576,7 +575,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     // We always call recreateEvent because we may have received new events
                     // in the web socket
                     if (!isFirstMessage) {
-                        return (0, utils_js_1.recreateEvent)(entry, state, rootState.contracts[contractID]);
+                        return (0, utils_js_1.recreateEvent)(entry, state, rootState.contracts[contractID], disableAutoDedup);
                     }
                     return entry;
                 });

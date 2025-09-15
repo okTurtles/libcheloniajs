@@ -17,6 +17,7 @@ import type { EncryptedData } from './encryptedData.js'
 import { encryptedOutgoingData, encryptedOutgoingDataWithRawKey, isEncryptedData, maybeEncryptedIncomingData, unwrapMaybeEncryptedData } from './encryptedData.js'
 import './files.js'
 import './internals.js'
+import type { PublishOptions } from './internals.js'
 import { isSignedData, signedIncomingData, signedOutgoingData, signedOutgoingDataWithRawKey } from './signedData.js'
 import './time-sync.js'
 import { buildShelterAuthorizationHeader, checkCanBeGarbageCollected, clearObject, collectEventStream, eventsAfter, findForeignKeysByContractID, findKeyIdByName, findRevokedKeyIdsByName, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, reactiveClearObject } from './utils.js'
@@ -24,6 +25,8 @@ import { ChelContractKey, ChelContractProcessMessageObject, ChelContractSideeffe
 import type { Options as PubSubOptions, PubSubClient } from './pubsub/index.js'
 
 // TODO: define ChelContractType for /defineContract
+
+export type { PublishOptions }
 
 export type ChelRegParams = {
   contractName: string;
@@ -43,7 +46,7 @@ export type ChelRegParams = {
     postpublish?: (msg: SPMessage) => Promise<void> | void;
     onprocessed?: (msg: SPMessage) => Promise<void> | void;
   };
-  publishOptions?: { headers?: Record<string, string> | null | undefined, billableContractID?: string | null | undefined, maxAttempts?: number | null | undefined };
+  publishOptions?: PublishOptions;
 }
 
 export type ChelActionParams = {
@@ -60,7 +63,7 @@ export type ChelActionParams = {
     prepublish?: (msg: SPMessage) => Promise<void> | void;
     postpublish?: (msg: SPMessage) => Promise<void> | void;
   };
-  publishOptions?: { maxAttempts?: number };
+  publishOptions?: PublishOptions;
   atomic: boolean;
 }
 
@@ -74,7 +77,7 @@ export type ChelKeyAddParams = {
     prepublish?: (msg: SPMessage) => Promise<void> | void;
     postpublish?: (msg: SPMessage) => Promise<void> | void;
   };
-  publishOptions?: { maxAttempts?: number };
+  publishOptions?: PublishOptions;
   atomic: boolean;
   // Usually `keyAdd` will ignore calls for keys that already exist in the
   // contract, for convenience. In some cases, e.g., when using OP_KEY_DEL
@@ -92,7 +95,7 @@ export type ChelKeyDelParams = {
     prepublish?: (msg: SPMessage) => Promise<void>;
     postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts?: number };
+  publishOptions?: PublishOptions;
   atomic: boolean;
 }
 
@@ -106,7 +109,7 @@ export type ChelKeyUpdateParams = {
     prepublish?: (msg: SPMessage) => Promise<void>;
     postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts?: number };
+  publishOptions?: PublishOptions;
   atomic: boolean;
 }
 
@@ -123,7 +126,7 @@ export type ChelKeyShareParams = {
     prepublish?: (msg: SPMessage) => Promise<void>;
     postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts: number };
+  publishOptions?: PublishOptions;
   atomic: boolean;
 }
 
@@ -147,7 +150,7 @@ export type ChelKeyRequestParams = {
     prepublish?: (msg: SPMessage) => Promise<void>;
     postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts?: number };
+  publishOptions?: PublishOptions;
   atomic: boolean;
 }
 
@@ -161,7 +164,7 @@ export type ChelKeyRequestResponseParams = {
     prepublish?: (msg: SPMessage) => Promise<void>;
     postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts?: number };
+  publishOptions?: PublishOptions;
   atomic: boolean;
 }
 
@@ -177,7 +180,7 @@ export type ChelAtomicParams = {
     prepublish?: (msg: SPMessage) => Promise<void>;
     postpublish?: (msg: SPMessage) => Promise<void>;
   };
-  publishOptions?: { maxAttempts?: number };
+  publishOptions?: PublishOptions;
 }
 
 export { SPMessage }

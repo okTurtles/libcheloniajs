@@ -11,7 +11,6 @@ import { ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnrecoverabl
 import { CONTRACTS_MODIFIED, CONTRACT_HAS_RECEIVED_KEYS, CONTRACT_IS_SYNCING, EVENT_HANDLED, EVENT_PUBLISHED, EVENT_PUBLISHING_ERROR } from './events.mjs';
 import { buildShelterAuthorizationHeader, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, validateKeyPermissions, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyUpdatePermissions } from './utils.mjs';
 import { isSignedData, signedIncomingData } from './signedData.mjs';
-// import 'ses'
 // Used for temporarily storing the missing decryption key IDs in a given
 // message
 const missingDecryptionKeyIdsMap = new WeakMap();
@@ -456,7 +455,7 @@ export default sbp('sbp/selectors/register', {
             });
         }));
     },
-    'chelonia/private/out/publishEvent': function (entry, { maxAttempts = 5, headers, billableContractID, bearer } = {}, hooks) {
+    'chelonia/private/out/publishEvent': function (entry, { maxAttempts = 5, headers, billableContractID, bearer, disableAutoDedup } = {}, hooks) {
         const contractID = entry.contractID();
         const originalEntry = entry;
         return sbp('chelonia/private/queueEvent', `publish:${contractID}`, async () => {
@@ -541,7 +540,7 @@ export default sbp('sbp/selectors/register', {
                     // We always call recreateEvent because we may have received new events
                     // in the web socket
                     if (!isFirstMessage) {
-                        return recreateEvent(entry, state, rootState.contracts[contractID]);
+                        return recreateEvent(entry, state, rootState.contracts[contractID], disableAutoDedup);
                     }
                     return entry;
                 });
