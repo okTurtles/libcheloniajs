@@ -16,6 +16,14 @@ import { isSignedData, signedIncomingData } from './signedData.js'
 import { ChelContractKey, ChelContractManifest, ChelContractManifestBody, ChelContractProcessMessageObject, ChelContractSideeffectMutationObject, ChelContractState, ChelRootState, CheloniaConfig, CheloniaContext, SendMessageHooks } from './types.js'
 // import 'ses'
 
+export type PublishOptions = {
+  maxAttempts?: number;
+  headers?: Record<string, string>;
+  billableContractID?: string;
+  bearer?: string;
+  disableAutoDedup?: boolean
+}
+
 // Used for temporarily storing the missing decryption key IDs in a given
 // message
 const missingDecryptionKeyIdsMap = new WeakMap<SPMessage, Set<string>>()
@@ -471,7 +479,7 @@ export default sbp('sbp/selectors/register', {
       })
     }))
   },
-  'chelonia/private/out/publishEvent': function (this: CheloniaContext, entry: SPMessage, { maxAttempts = 5, headers, billableContractID, bearer }: { maxAttempts?: number, headers?: Record<string, string>, billableContractID?: string, bearer?: string } = {}, hooks: SendMessageHooks) {
+  'chelonia/private/out/publishEvent': function (this: CheloniaContext, entry: SPMessage, { maxAttempts = 5, headers, billableContractID, bearer, disableAutoDedup }: PublishOptions = {}, hooks: SendMessageHooks) {
     const contractID = entry.contractID()
     const originalEntry = entry
 
@@ -564,7 +572,7 @@ export default sbp('sbp/selectors/register', {
           // We always call recreateEvent because we may have received new events
           // in the web socket
           if (!isFirstMessage) {
-            return recreateEvent(entry, state, rootState.contracts[contractID])
+            return recreateEvent(entry, state, rootState.contracts[contractID], disableAutoDedup)
           }
 
           return entry

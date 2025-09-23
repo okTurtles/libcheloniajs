@@ -7,8 +7,10 @@ import './chelonia-utils.cjs';
 import type { EncryptedData } from './encryptedData.cjs';
 import './files.cjs';
 import './internals.cjs';
+import type { PublishOptions } from './internals.cjs';
 import './time-sync.cjs';
 import { ChelContractState } from './types.cjs';
+export type { PublishOptions };
 export type ChelRegParams = {
     contractName: string;
     server?: string;
@@ -27,11 +29,7 @@ export type ChelRegParams = {
         postpublish?: (msg: SPMessage) => Promise<void> | void;
         onprocessed?: (msg: SPMessage) => Promise<void> | void;
     };
-    publishOptions?: {
-        headers?: Record<string, string> | null | undefined;
-        billableContractID?: string | null | undefined;
-        maxAttempts?: number | null | undefined;
-    };
+    publishOptions?: PublishOptions;
 };
 export type ChelActionParams = {
     action: string;
@@ -47,9 +45,7 @@ export type ChelActionParams = {
         prepublish?: (msg: SPMessage) => Promise<void> | void;
         postpublish?: (msg: SPMessage) => Promise<void> | void;
     };
-    publishOptions?: {
-        maxAttempts?: number;
-    };
+    publishOptions?: PublishOptions;
     atomic: boolean;
 };
 export type ChelKeyAddParams = {
@@ -62,9 +58,7 @@ export type ChelKeyAddParams = {
         prepublish?: (msg: SPMessage) => Promise<void> | void;
         postpublish?: (msg: SPMessage) => Promise<void> | void;
     };
-    publishOptions?: {
-        maxAttempts?: number;
-    };
+    publishOptions?: PublishOptions;
     atomic: boolean;
     skipExistingKeyCheck?: boolean;
 };
@@ -78,9 +72,7 @@ export type ChelKeyDelParams = {
         prepublish?: (msg: SPMessage) => Promise<void>;
         postpublish?: (msg: SPMessage) => Promise<void>;
     };
-    publishOptions?: {
-        maxAttempts?: number;
-    };
+    publishOptions?: PublishOptions;
     atomic: boolean;
 };
 export type ChelKeyUpdateParams = {
@@ -93,9 +85,7 @@ export type ChelKeyUpdateParams = {
         prepublish?: (msg: SPMessage) => Promise<void>;
         postpublish?: (msg: SPMessage) => Promise<void>;
     };
-    publishOptions?: {
-        maxAttempts?: number;
-    };
+    publishOptions?: PublishOptions;
     atomic: boolean;
 };
 export type ChelKeyShareParams = {
@@ -111,9 +101,7 @@ export type ChelKeyShareParams = {
         prepublish?: (msg: SPMessage) => Promise<void>;
         postpublish?: (msg: SPMessage) => Promise<void>;
     };
-    publishOptions?: {
-        maxAttempts: number;
-    };
+    publishOptions?: PublishOptions;
     atomic: boolean;
 };
 export type ChelKeyRequestParams = {
@@ -134,9 +122,7 @@ export type ChelKeyRequestParams = {
         prepublish?: (msg: SPMessage) => Promise<void>;
         postpublish?: (msg: SPMessage) => Promise<void>;
     };
-    publishOptions?: {
-        maxAttempts?: number;
-    };
+    publishOptions?: PublishOptions;
     atomic: boolean;
 };
 export type ChelKeyRequestResponseParams = {
@@ -149,9 +135,7 @@ export type ChelKeyRequestResponseParams = {
         prepublish?: (msg: SPMessage) => Promise<void>;
         postpublish?: (msg: SPMessage) => Promise<void>;
     };
-    publishOptions?: {
-        maxAttempts?: number;
-    };
+    publishOptions?: PublishOptions;
     atomic: boolean;
 };
 export type ChelAtomicParams = {
@@ -166,9 +150,7 @@ export type ChelAtomicParams = {
         prepublish?: (msg: SPMessage) => Promise<void>;
         postpublish?: (msg: SPMessage) => Promise<void>;
     };
-    publishOptions?: {
-        maxAttempts?: number;
-    };
+    publishOptions?: PublishOptions;
 };
 export { SPMessage };
 export declare const ACTION_REGEX: RegExp;

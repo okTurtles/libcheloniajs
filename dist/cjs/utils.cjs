@@ -420,7 +420,10 @@ exports.subscribeToForeignKeyContracts = subscribeToForeignKeyContracts;
 // duplicate operations. For operations involving keys, the payload will be
 // rewritten to eliminate no-longer-relevant keys. In most cases, this would
 // result in an empty payload, in which case the message is omitted entirely.
-const recreateEvent = (entry, state, contractsState) => {
+// The `raw` parameter will not modify the message payload in any way,
+// which is typically done to avoid sending out invalid or redundant operations
+// (e.g., a duplicate OP_KEY_ADD).
+const recreateEvent = (entry, state, contractsState, disableAutoDedup) => {
     const { HEAD: previousHEAD, height: previousHeight, previousKeyOp } = contractsState || {};
     if (!previousHEAD) {
         throw new Error('recreateEvent: Giving up because the contract has been removed');
@@ -507,7 +510,7 @@ const recreateEvent = (entry, state, contractsState) => {
         }
         return rawOpV.recreate(newOpV);
     };
-    const newRawOpV = recreateOperation(opT, rawOpV);
+    const newRawOpV = disableAutoDedup ? rawOpV : recreateOperation(opT, rawOpV);
     if (!newRawOpV)
         return;
     const newOp = [opT, newRawOpV];

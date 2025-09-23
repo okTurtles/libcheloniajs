@@ -1353,7 +1353,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             const keyRequestReplyKeyS = (0, crypto_1.serializeKey)(keyRequestReplyKey, true);
             const signingKeyId = (0, utils_js_1.findSuitableSecretKeyId)(originatingState, [SPMessage_js_1.SPMessage.OP_KEY_ADD], ['sig']);
             if (!signingKeyId) {
-                throw (0, errors_js_1.ChelErrorUnexpected)(`Unable to send key request. Originating contract is missing a key with OP_KEY_ADD permission. contractID=${contractID} originatingContractID=${originatingContractID}`);
+                throw new errors_js_1.ChelErrorUnexpected(`Unable to send key request. Originating contract is missing a key with OP_KEY_ADD permission. contractID=${contractID} originatingContractID=${originatingContractID}`);
             }
             const keyAddOp = () => (0, sbp_1.default)('chelonia/out/keyAdd', {
                 contractID: originatingContractID,
