@@ -1,9 +1,9 @@
 "use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.ChelErrorResourceGone = exports.ChelErrorUnexpectedHttpResponseCode = exports.ChelErrorFetchServerTimeFailed = exports.ChelErrorSignatureKeyNotFound = exports.ChelErrorSignatureKeyUnauthorized = exports.ChelErrorSignatureError = exports.ChelErrorDecryptionKeyNotFound = exports.ChelErrorDecryptionError = exports.ChelErrorForkedChain = exports.ChelErrorUnrecoverable = exports.ChelErrorKeyAlreadyExists = exports.ChelErrorUnexpected = exports.ChelErrorDBConnection = exports.ChelErrorDBBadPreviousHEAD = exports.ChelErrorAlreadyProcessed = exports.ChelErrorWarning = exports.ChelErrorGenerator = void 0;
 // ugly boilerplate because JavaScript is stupid
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
-const ChelErrorGenerator = (name, base = Error) => (class extends base {
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.ChelErrorResourceGone = exports.ChelErrorUnexpectedHttpResponseCode = exports.ChelErrorFetchServerTimeFailed = exports.ChelErrorSignatureKeyNotFound = exports.ChelErrorSignatureKeyUnauthorized = exports.ChelErrorSignatureError = exports.ChelErrorDecryptionKeyNotFound = exports.ChelErrorDecryptionError = exports.ChelErrorForkedChain = exports.ChelErrorUnrecoverable = exports.ChelErrorKeyAlreadyExists = exports.ChelErrorUnexpected = exports.ChelErrorDBConnection = exports.ChelErrorDBBadPreviousHEAD = exports.ChelErrorAlreadyProcessed = exports.ChelErrorWarning = exports.ChelErrorGenerator = void 0;
+const ChelErrorGenerator = (name, base = Error) => ((class extends base {
     constructor(...params) {
         super(...params);
         this.name = name; // string literal so minifier doesn't overwrite
@@ -15,7 +15,7 @@ const ChelErrorGenerator = (name, base = Error) => (class extends base {
             Error.captureStackTrace(this, this.constructor);
         }
     }
-});
+}));
 exports.ChelErrorGenerator = ChelErrorGenerator;
 exports.ChelErrorWarning = (0, exports.ChelErrorGenerator)('ChelErrorWarning');
 exports.ChelErrorAlreadyProcessed = (0, exports.ChelErrorGenerator)('ChelErrorAlreadyProcessed');

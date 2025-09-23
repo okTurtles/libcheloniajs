@@ -1347,7 +1347,7 @@ export default sbp('sbp/selectors/register', {
             const keyRequestReplyKeyS = serializeKey(keyRequestReplyKey, true);
             const signingKeyId = findSuitableSecretKeyId(originatingState, [SPMessage.OP_KEY_ADD], ['sig']);
             if (!signingKeyId) {
-                throw ChelErrorUnexpected(`Unable to send key request. Originating contract is missing a key with OP_KEY_ADD permission. contractID=${contractID} originatingContractID=${originatingContractID}`);
+                throw new ChelErrorUnexpected(`Unable to send key request. Originating contract is missing a key with OP_KEY_ADD permission. contractID=${contractID} originatingContractID=${originatingContractID}`);
             }
             const keyAddOp = () => sbp('chelonia/out/keyAdd', {
                 contractID: originatingContractID,
