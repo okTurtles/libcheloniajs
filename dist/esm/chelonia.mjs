@@ -181,6 +181,8 @@ export default sbp('sbp/selectors/register', {
         if (has(config, 'skipDecryptionAttempts')) {
             if (config.skipDecryptionAttempts) {
                 this.config.unwrapMaybeEncryptedData = (data) => {
+                    if (data == null)
+                        return;
                     if (!isEncryptedData(data)) {
                         return {
                             encryptionKeyId: null, data
