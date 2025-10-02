@@ -187,6 +187,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if ((0, turtledash_1.has)(config, 'skipDecryptionAttempts')) {
             if (config.skipDecryptionAttempts) {
                 this.config.unwrapMaybeEncryptedData = (data) => {
+                    if (data == null)
+                        return;
                     if (!(0, encryptedData_js_1.isEncryptedData)(data)) {
                         return {
                             encryptionKeyId: null, data

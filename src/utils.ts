@@ -17,6 +17,8 @@ import { ChelContractKey, ChelContractState, ChelRootState, CheloniaConfig, Chel
 
 const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10) || Infinity
 
+const copiedExistingData = Symbol('copiedExistingData')
+
 export const findKeyIdByName = (state: ChelContractState, name: string): string | null | undefined => state._vm?.authorizedKeys && Object.values((state._vm.authorizedKeys)).find((k) => k.name === name && k._notAfterHeight == null)?.id
 
 export const findForeignKeysByContractID = (state: ChelContractState, contractID: string): string[] | undefined => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys)))).filter((k) => k._notAfterHeight == null && k.foreignKey?.includes(contractID)).map(k => k.id)
@@ -258,6 +260,8 @@ export const validateKeyUpdatePermissions = function (this: CheloniaContext, con
     }
     if (uk.meta) {
       updatedKey.meta = uk.meta
+    } else if (updatedKey.meta) {
+      Object.defineProperty(updatedKey.meta, copiedExistingData, { value: true })
     }
     if (uk.id) {
       updatedKey.id = uk.id
@@ -296,10 +300,11 @@ export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMes
     const key = data.data
     let decryptedKey: string | null | undefined
     // Does the key have key.meta?.private? If so, attempt to decrypt it
-    if (key.meta?.private && key.meta.private.content) {
+    // copiedExistingData refers to key data that have been copied from an
+    // existing key on OP_KEY_UPDATE. These shouldn't be processed.
+    if (key.meta?.private?.content && !has(key.meta, copiedExistingData)) {
       if (
         key.id &&
-        key.meta.private.content &&
         !sbp('chelonia/haveSecretKey', key.id, !key.meta.private.transient)
       ) {
         const decryptedKeyResult = this.config.unwrapMaybeEncryptedData(key.meta.private.content)

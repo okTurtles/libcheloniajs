@@ -10,6 +10,7 @@ import { CONTRACT_IS_PENDING_KEY_REQUESTS } from './events.mjs';
 import { b64ToStr } from './functions.mjs';
 import { isSignedData } from './signedData.mjs';
 const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10) || Infinity;
+const copiedExistingData = Symbol('copiedExistingData');
 export const findKeyIdByName = (state, name) => state._vm?.authorizedKeys && Object.values((state._vm.authorizedKeys)).find((k) => k.name === name && k._notAfterHeight == null)?.id;
 export const findForeignKeysByContractID = (state, contractID) => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys)))).filter((k) => k._notAfterHeight == null && k.foreignKey?.includes(contractID)).map(k => k.id);
 export const findRevokedKeyIdsByName = (state, name) => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys) || {}))).filter((k) => k.name === name && k._notAfterHeight != null).map(k => k.id);
@@ -209,6 +210,9 @@ export const validateKeyUpdatePermissions = function (contractID, signingKey, st
         if (uk.meta) {
             updatedKey.meta = uk.meta;
         }
+        else if (updatedKey.meta) {
+            Object.defineProperty(updatedKey.meta, copiedExistingData, { value: true });
+        }
         if (uk.id) {
             updatedKey.id = uk.id;
         }
@@ -244,9 +248,10 @@ export const keyAdditionProcessor = function (_msg, hash, keys, state, contractI
         const key = data.data;
         let decryptedKey;
         // Does the key have key.meta?.private? If so, attempt to decrypt it
-        if (key.meta?.private && key.meta.private.content) {
+        // copiedExistingData refers to key data that have been copied from an
+        // existing key on OP_KEY_UPDATE. These shouldn't be processed.
+        if (key.meta?.private?.content && !has(key.meta, copiedExistingData)) {
             if (key.id &&
-                key.meta.private.content &&
                 !sbp('chelonia/haveSecretKey', key.id, !key.meta.private.transient)) {
                 const decryptedKeyResult = this.config.unwrapMaybeEncryptedData(key.meta.private.content);
                 // Ignore data that couldn't be decrypted
