@@ -4,7 +4,7 @@ import nacl from 'tweetnacl';
 import { AUTHSALT, CONTRACTSALT, CS, SALT_LENGTH_IN_OCTETS, SU } from './zkppConstants.mjs';
 // .toString('base64url') only works in Node.js
 export const base64ToBase64url = (s) => s.replace(/\//g, '_').replace(/\+/g, '-').replace(/=*$/, '');
-export const base64urlToBase64 = (s) => s.replace(/_/g, '/').replace(/-/g, '+') + '='.repeat((4 - s.length % 4) % 4);
+export const base64urlToBase64 = (s) => s.replace(/_/g, '/').replace(/-/g, '+') + '='.repeat((4 - (s.length % 4)) % 4);
 export const hashStringArray = (...args) => {
     return nacl.hash(Buffer.concat(args.map((s) => nacl.hash(Buffer.from(s)))));
 };
@@ -60,7 +60,7 @@ export const decryptSaltUpdate = (secret, recordId, encryptedRecordBox) => {
 export const hashPassword = (password, salt) => {
     // NOTE: Type cast needed on `scrypt` because for some reason TypeScript will
     // incorrectly complain about it not taking string arguments.
-    return new Promise(resolve => scrypt(password, salt, {
+    return new Promise((resolve) => scrypt(password, salt, {
         N: 16384,
         r: 8,
         p: 1,
@@ -77,8 +77,12 @@ export const saltAgreement = (publicKey, secretKey) => {
     if (!publicKeyBuf || publicKeyBuf.byteLength !== nacl.box.publicKeyLength) {
         return false;
     }
-    const authSalt = Buffer.from(hashStringArray(AUTHSALT, dhKey)).subarray(0, SALT_LENGTH_IN_OCTETS).toString('base64');
-    const contractSalt = Buffer.from(hashStringArray(CONTRACTSALT, dhKey)).subarray(0, SALT_LENGTH_IN_OCTETS).toString('base64');
+    const authSalt = Buffer.from(hashStringArray(AUTHSALT, dhKey))
+        .subarray(0, SALT_LENGTH_IN_OCTETS)
+        .toString('base64');
+    const contractSalt = Buffer.from(hashStringArray(CONTRACTSALT, dhKey))
+        .subarray(0, SALT_LENGTH_IN_OCTETS)
+        .toString('base64');
     return [authSalt, contractSalt];
 };
 export const parseRegisterSalt = (publicKey, secretKey, encryptedHashedPassword) => {
@@ -87,7 +91,9 @@ export const parseRegisterSalt = (publicKey, secretKey, encryptedHashedPassword)
         return false;
     }
     const [authSalt, contractSalt] = saltAgreementRes;
-    const encryptionKey = nacl.hash(Buffer.from(authSalt + contractSalt)).slice(0, nacl.secretbox.keyLength);
+    const encryptionKey = nacl
+        .hash(Buffer.from(authSalt + contractSalt))
+        .slice(0, nacl.secretbox.keyLength);
     const encryptedHashedPasswordBuf = Buffer.from(base64urlToBase64(encryptedHashedPassword), 'base64');
     const hashedPasswordBuf = nacl.secretbox.open(encryptedHashedPasswordBuf.subarray(nacl.box.nonceLength), encryptedHashedPasswordBuf.subarray(0, nacl.box.nonceLength), encryptionKey);
     if (!hashedPasswordBuf) {
@@ -103,9 +109,15 @@ export const buildRegisterSaltRequest = async (publicKey, secretKey, password) =
     const [authSalt, contractSalt] = saltAgreementRes;
     const hashedPassword = await hashPassword(password, authSalt);
     const nonce = nacl.randomBytes(nacl.box.nonceLength);
-    const encryptionKey = nacl.hash(Buffer.from(authSalt + contractSalt)).slice(0, nacl.secretbox.keyLength);
+    const encryptionKey = nacl
+        .hash(Buffer.from(authSalt + contractSalt))
+        .slice(0, nacl.secretbox.keyLength);
     const encryptedHashedPasswordBuf = nacl.secretbox(Buffer.from(hashedPassword), nonce, encryptionKey);
-    return [contractSalt, base64ToBase64url(Buffer.concat([nonce, encryptedHashedPasswordBuf]).toString('base64')), encryptionKey];
+    return [
+        contractSalt,
+        base64ToBase64url(Buffer.concat([nonce, encryptedHashedPasswordBuf]).toString('base64')),
+        encryptionKey
+    ];
 };
 // Build the `E_c` (encrypted arguments) to send to the server to negotiate a
 // password change. `password` corresponds to the raw user password, `c` is a
@@ -122,8 +134,12 @@ export const buildUpdateSaltRequestEc = async (password, c) => {
     // When sending the encrypted data, the encrypted information would be
     // `hashedPassword`, which needs to be verified server-side to verify
     // it matches p and would be used to derive S_A and S_C.
-    const authSalt = Buffer.from(hashStringArray(AUTHSALT, c)).subarray(0, SALT_LENGTH_IN_OCTETS).toString('base64');
-    const contractSalt = Buffer.from(hashStringArray(CONTRACTSALT, c)).subarray(0, SALT_LENGTH_IN_OCTETS).toString('base64');
+    const authSalt = Buffer.from(hashStringArray(AUTHSALT, c))
+        .subarray(0, SALT_LENGTH_IN_OCTETS)
+        .toString('base64');
+    const contractSalt = Buffer.from(hashStringArray(CONTRACTSALT, c))
+        .subarray(0, SALT_LENGTH_IN_OCTETS)
+        .toString('base64');
     const encryptionKey = hashRawStringArray(SU, c).slice(0, nacl.secretbox.keyLength);
     const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
     const hashedPassword = await hashPassword(password, authSalt);

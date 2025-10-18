@@ -283,7 +283,10 @@
     "extends": [
       "plugin:@typescript-eslint/recommended",
       "standard"
-    ]
+    ],
+    "rules": {
+      "max-len": ["error", { "code" : 100, "comments": 150, "ignoreTemplateLiterals": true, "ignoreStrings": true } ]
+    }
   },
   "eslintIgnore": [
     "dist/*",

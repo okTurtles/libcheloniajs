@@ -17,20 +17,22 @@ import { buildShelterAuthorizationHeader } from './utils.js'
 // This part only checks for client-side support. Later, when we try uploading
 // a file for the first time, we'll check if requests work, as streams are not
 // supported in HTTP/1.1 and lower versions.
-let supportsRequestStreams: boolean | 2 = typeof window !== 'object' || (() => {
-  let duplexAccessed = false
+let supportsRequestStreams: boolean | 2 =
+  typeof window !== 'object' ||
+  (() => {
+    let duplexAccessed = false
 
-  const hasContentType = new Request('', {
-    body: new ReadableStream(),
-    method: 'POST',
-    get duplex () {
-      duplexAccessed = true
-      return 'half'
-    }
-  } as unknown as Request).headers.has('content-type')
+    const hasContentType = new Request('', {
+      body: new ReadableStream(),
+      method: 'POST',
+      get duplex () {
+        duplexAccessed = true
+        return 'half'
+      }
+    } as unknown as Request).headers.has('content-type')
 
-  return duplexAccessed && !hasContentType
-})()
+    return duplexAccessed && !hasContentType
+  })()
 
 const streamToUint8Array = async (s: ReadableStream) => {
   const reader = s.getReader()
@@ -52,22 +54,34 @@ const streamToUint8Array = async (s: ReadableStream) => {
 
 // Check for streaming support, as of today (Feb 2024) only Blink-
 // based browsers support this (i.e., Firefox and Safari don't).
-const ArrayBufferToUint8ArrayStream = async function (this: CheloniaContext, connectionURL: string, s: ReadableStream) {
+const ArrayBufferToUint8ArrayStream = async function (
+  this: CheloniaContext,
+  connectionURL: string,
+  s: ReadableStream
+) {
   // Even if the browser supports streams, some browsers (e.g., Chrome) also
   // require that the server support HTTP/2
   if (supportsRequestStreams === true) {
-    await this.config.fetch(`${connectionURL}/streams-test`, {
-      method: 'POST',
-      body: new ReadableStream({ start (c) { c.enqueue(Buffer.from('ok')); c.close() } }),
-      duplex: 'half'
-    } as unknown as Request).then((r) => {
-      if (!r.ok) throw new Error('Unexpected response')
-      // supportsRequestStreams is tri-state
-      supportsRequestStreams = 2
-    }).catch(() => {
-      console.info('files: Disabling streams support because the streams test failed')
-      supportsRequestStreams = false
-    })
+    await this.config
+      .fetch(`${connectionURL}/streams-test`, {
+        method: 'POST',
+        body: new ReadableStream({
+          start (c) {
+            c.enqueue(Buffer.from('ok'))
+            c.close()
+          }
+        }),
+        duplex: 'half'
+      } as unknown as Request)
+      .then((r) => {
+        if (!r.ok) throw new Error('Unexpected response')
+        // supportsRequestStreams is tri-state
+        supportsRequestStreams = 2
+      })
+      .catch(() => {
+        console.info('files: Disabling streams support because the streams test failed')
+        supportsRequestStreams = false
+      })
   }
   if (!supportsRequestStreams) {
     return await streamToUint8Array(s)
@@ -75,12 +89,11 @@ const ArrayBufferToUint8ArrayStream = async function (this: CheloniaContext, con
 
   return s.pipeThrough(
     // eslint-disable-next-line no-undef
-    new TransformStream(
-      {
-        transform (chunk, controller) {
-          controller.enqueue(coerce(chunk))
-        }
-      })
+    new TransformStream({
+      transform (chunk, controller) {
+        controller.enqueue(coerce(chunk))
+      }
+    })
   )
 }
 
@@ -88,17 +101,19 @@ const computeChunkDescriptors = (inStream: ReadableStream) => {
   let length = 0
   const [lengthStream, cidStream] = inStream.tee()
   const lengthPromise = new Promise<number>((resolve, reject) => {
-    lengthStream.pipeTo(new WritableStream({
-      write (chunk) {
-        length += chunk.byteLength
-      },
-      close () {
-        resolve(length)
-      },
-      abort (reason) {
-        reject(reason)
-      }
-    }))
+    lengthStream.pipeTo(
+      new WritableStream({
+        write (chunk) {
+          length += chunk.byteLength
+        },
+        close () {
+          resolve(length)
+        },
+        abort (reason) {
+          reject(reason)
+        }
+      })
+    )
   })
   const cidPromise = createCIDfromStream(cidStream, multicodes.SHELTER_FILE_CHUNK)
   return Promise.all([lengthPromise, cidPromise])
@@ -108,17 +123,16 @@ const fileStream = (chelonia: CheloniaContext, manifest: ChelFileManifest) => {
   const dataGenerator = async function * () {
     let readSize = 0
     for (const chunk of manifest.chunks) {
-      if (
-        !Array.isArray(chunk) ||
-        typeof chunk[0] !== 'number' ||
-        typeof chunk[1] !== 'string'
-      ) {
+      if (!Array.isArray(chunk) || typeof chunk[0] !== 'number' || typeof chunk[1] !== 'string') {
         throw new Error('Invalid chunk descriptor')
       }
-      const chunkResponse = await chelonia.config.fetch(`${chelonia.config.connectionURL}/file/${chunk[1]}`, {
-        method: 'GET',
-        signal: chelonia.abortController.signal
-      })
+      const chunkResponse = await chelonia.config.fetch(
+        `${chelonia.config.connectionURL}/file/${chunk[1]}`,
+        {
+          method: 'GET',
+          signal: chelonia.abortController.signal
+        }
+      )
       if (!chunkResponse.ok) {
         throw new Error('Unable to retrieve manifest')
       }
@@ -130,7 +144,7 @@ const fileStream = (chelonia: CheloniaContext, manifest: ChelFileManifest) => {
       if (chunkBinary.byteLength !== chunk[0]) throw new Error('mismatched chunk size')
       readSize += chunkBinary.byteLength
       if (readSize > manifest.size) throw new Error('read size exceeds declared size')
-      if (createCID(coerce(chunkBinary), multicodes.SHELTER_FILE_CHUNK) !== chunk[1]) throw new Error('mismatched chunk hash')
+      if (createCID(coerce(chunkBinary), multicodes.SHELTER_FILE_CHUNK) !== chunk[1]) { throw new Error('mismatched chunk hash') }
       yield chunkBinary
     }
     // Now that we're done, we check to see if we read the correct size
@@ -204,14 +218,21 @@ export const aes256gcmHandlers = {
       }
     }
   },
-  download: (chelonia: CheloniaContext, downloadParams: { IKM?: string, rs?: number }, manifest: ChelFileManifest) => {
+  download: (
+    chelonia: CheloniaContext,
+    downloadParams: { IKM?: string; rs?: number },
+    manifest: ChelFileManifest
+  ) => {
     const IKMb64 = downloadParams.IKM
     if (!IKMb64) {
       throw new Error('Missing IKM in downloadParams')
     }
     const IKM = Buffer.from(IKMb64, 'base64')
     const keyId = blake32Hash('aes256gcm-keyId' + blake32Hash(IKM)).slice(-8)
-    if (!manifest['cipher-params'] || !(manifest['cipher-params'] as Record<string, unknown>).keyId) {
+    if (
+      !manifest['cipher-params'] ||
+      !(manifest['cipher-params'] as Record<string, unknown>).keyId
+    ) {
       throw new Error('Missing cipher-params')
     }
     if (keyId !== (manifest['cipher-params'] as Record<string, unknown>).keyId) {
@@ -221,12 +242,17 @@ export const aes256gcmHandlers = {
     return {
       payloadHandler: async () => {
         const bytes = await streamToUint8Array(
-          decrypt(aes256gcm, fileStream(chelonia, manifest), (actualKeyId) => {
-            if (Buffer.from(actualKeyId).toString() !== keyId) {
-              throw new Error('Invalid key ID')
-            }
-            return IKM
-          }, maxRecordSize)
+          decrypt(
+            aes256gcm,
+            fileStream(chelonia, manifest),
+            (actualKeyId) => {
+              if (Buffer.from(actualKeyId).toString() !== keyId) {
+                throw new Error('Invalid key ID')
+              }
+              return IKM
+            },
+            maxRecordSize
+          )
         )
         return new Blob([bytes], { type: manifest.type || 'application/octet-stream' })
       }
@@ -261,25 +287,34 @@ const cipherHandlers = {
 }
 
 export default sbp('sbp/selectors/register', {
-  'chelonia/fileUpload': async function (this: CheloniaContext, chunks: Blob | Blob[], manifestOptions: ChelFileManifest, { billableContractID }: { billableContractID?: string } = {}) {
+  'chelonia/fileUpload': async function (
+    this: CheloniaContext,
+    chunks: Blob | Blob[],
+    manifestOptions: ChelFileManifest,
+    { billableContractID }: { billableContractID?: string } = {}
+  ) {
     if (!Array.isArray(chunks)) chunks = [chunks]
     const chunkDescriptors: Promise<[number, string]>[] = []
-    const cipherHandler = await cipherHandlers[manifestOptions.cipher as keyof typeof cipherHandlers]?.upload?.(this, manifestOptions)
+    const cipherHandler = await cipherHandlers[
+      manifestOptions.cipher as keyof typeof cipherHandlers
+    ]?.upload?.(this, manifestOptions)
     if (!cipherHandler) throw new Error('Unsupported cipher')
     const cipherParams = cipherHandler.cipherParams
-    const transferParts = await Promise.all(chunks.map(async (chunk: Blob, i) => {
-      const stream = chunk.stream()
-      const encryptedStream = await cipherHandler.streamHandler(stream)
-      const [body, s] = encryptedStream.tee()
-      chunkDescriptors.push(computeChunkDescriptors(s))
-      return {
-        headers: new Headers([
-          ['content-disposition', `form-data; name="${i}"; filename="${i}"`],
-          ['content-type', 'application/octet-stream']
-        ]),
-        body
-      }
-    }))
+    const transferParts = await Promise.all(
+      chunks.map(async (chunk: Blob, i) => {
+        const stream = chunk.stream()
+        const encryptedStream = await cipherHandler.streamHandler(stream)
+        const [body, s] = encryptedStream.tee()
+        chunkDescriptors.push(computeChunkDescriptors(s))
+        return {
+          headers: new Headers([
+            ['content-disposition', `form-data; name="${i}"; filename="${i}"`],
+            ['content-type', 'application/octet-stream']
+          ]),
+          body
+        }
+      })
+    )
     transferParts.push({
       headers: new Headers([
         ['content-disposition', 'form-data; name="manifest"; filename="manifest.json"'],
@@ -309,14 +344,17 @@ export default sbp('sbp/selectors/register', {
     })
     // TODO: Using `self.crypto.randomUUID` breaks the tests. Maybe upgrading
     // Cypress would fix this.
-    const boundary = typeof self.crypto?.randomUUID === 'function'
-      ? self.crypto.randomUUID()
-      // If randomUUID not available, we instead compute a random boundary
-      // The indirect call to Math.random (`(0, Math.random)`) is to explicitly
-      // mark that we intend on using Math.random, even though it's not a
-      // CSPRNG, so that it's not reported as a bug in by static analysis tools.
-      : new Array(36).fill('').map(() =>
-        'abcdefghijklmnopqrstuvwxyz'[(0, Math.random)() * 26 | 0]).join('')
+    const boundary =
+      typeof self.crypto?.randomUUID === 'function'
+        ? self.crypto.randomUUID()
+        // If randomUUID not available, we instead compute a random boundary
+        // The indirect call to Math.random (`(0, Math.random)`) is to explicitly
+        // mark that we intend on using Math.random, even though it's not a
+        // CSPRNG, so that it's not reported as a bug in by static analysis tools.
+        : new Array(36)
+          .fill('')
+          .map(() => 'abcdefghijklmnopqrstuvwxyz'[((0, Math.random)() * 26) | 0])
+          .join('')
     const stream = encodeMultipartMessage(boundary, transferParts)
 
     const deletionToken = 'deletionToken' + generateSalt()
@@ -327,7 +365,9 @@ export default sbp('sbp/selectors/register', {
       signal: this.abortController.signal,
       body: await ArrayBufferToUint8ArrayStream.call(this, this.config.connectionURL, stream),
       headers: new Headers([
-        ...(billableContractID ? [['authorization', buildShelterAuthorizationHeader.call(this, billableContractID)]] : []) as [string, string][],
+        ...((billableContractID
+          ? [['authorization', buildShelterAuthorizationHeader.call(this, billableContractID)]]
+          : []) as [string, string][]),
         ['content-type', `multipart/form-data; boundary=${boundary}`],
         ['shelter-deletion-token-digest', deletionTokenHash]
       ]),
@@ -343,18 +383,25 @@ export default sbp('sbp/selectors/register', {
       delete: deletionToken
     }
   },
-  'chelonia/fileDownload': async function (this: CheloniaContext, downloadOptions: Secret<{ manifestCid: string, downloadParams: { IKM?: string, rs?: number } }>, manifestChecker?: (manifest: ChelFileManifest) => boolean | Promise<boolean>) {
+  'chelonia/fileDownload': async function (
+    this: CheloniaContext,
+    downloadOptions: Secret<{ manifestCid: string; downloadParams: { IKM?: string; rs?: number } }>,
+    manifestChecker?: (manifest: ChelFileManifest) => boolean | Promise<boolean>
+  ) {
     // Using a function to prevent accidental logging
     const { manifestCid, downloadParams } = downloadOptions.valueOf()
-    const manifestResponse = await this.config.fetch(`${this.config.connectionURL}/file/${manifestCid}`, {
-      method: 'GET',
-      signal: this.abortController.signal
-    })
+    const manifestResponse = await this.config.fetch(
+      `${this.config.connectionURL}/file/${manifestCid}`,
+      {
+        method: 'GET',
+        signal: this.abortController.signal
+      }
+    )
     if (!manifestResponse.ok) {
       throw new Error('Unable to retrieve manifest')
     }
     const manifestBinary = await manifestResponse.arrayBuffer()
-    if (createCID(coerce(manifestBinary), multicodes.SHELTER_FILE_MANIFEST) !== manifestCid) throw new Error('mismatched manifest hash')
+    if (createCID(coerce(manifestBinary), multicodes.SHELTER_FILE_MANIFEST) !== manifestCid) { throw new Error('mismatched manifest hash') }
     const manifest = JSON.parse(Buffer.from(manifestBinary).toString()) as ChelFileManifest
     if (typeof manifest !== 'object') throw new Error('manifest format is invalid')
     if (manifest.version !== '1.0.0') throw new Error('unsupported manifest version')
@@ -365,37 +412,55 @@ export default sbp('sbp/selectors/register', {
       if (!proceed) return false
     }
 
-    const cipherHandler = await cipherHandlers[manifest.cipher as keyof typeof cipherHandlers]?.download?.(this, downloadParams, manifest)
+    const cipherHandler = await cipherHandlers[
+      manifest.cipher as keyof typeof cipherHandlers
+    ]?.download?.(this, downloadParams, manifest)
     if (!cipherHandler) throw new Error('Unsupported cipher')
 
     return cipherHandler.payloadHandler()
   },
-  'chelonia/fileDelete': async function (this: CheloniaContext, manifestCid: string | string[], credentials: { [manifestCid: string]: { token?: string | null | undefined, billableContractID?: string | null | undefined } } = {}) {
+  'chelonia/fileDelete': async function (
+    this: CheloniaContext,
+    manifestCid: string | string[],
+    credentials: {
+      [manifestCid: string]: {
+        token?: string | null | undefined;
+        billableContractID?: string | null | undefined;
+      };
+    } = {}
+  ) {
     if (!manifestCid) {
       throw new TypeError('A manifest CID must be provided')
     }
     if (!Array.isArray(manifestCid)) manifestCid = [manifestCid]
-    return await Promise.allSettled(manifestCid.map(async (cid) => {
-      const hasCredential = has(credentials, cid)
-      const hasToken = has(credentials[cid], 'token') && credentials[cid].token
-      const hasBillableContractID = has(credentials[cid], 'billableContractID') && credentials[cid].billableContractID
-      if (!hasCredential || hasToken === hasBillableContractID) {
-        throw new TypeError(`Either a token or a billable contract ID must be provided for ${cid}`)
-      }
+    return await Promise.allSettled(
+      manifestCid.map(async (cid) => {
+        const hasCredential = has(credentials, cid)
+        const hasToken = has(credentials[cid], 'token') && credentials[cid].token
+        const hasBillableContractID =
+          has(credentials[cid], 'billableContractID') && credentials[cid].billableContractID
+        if (!hasCredential || hasToken === hasBillableContractID) {
+          throw new TypeError(
+            `Either a token or a billable contract ID must be provided for ${cid}`
+          )
+        }
 
-      const response = await this.config.fetch(`${this.config.connectionURL}/deleteFile/${cid}`, {
-        method: 'POST',
-        signal: this.abortController.signal,
-        headers: new Headers([
-          ['authorization',
-            hasToken
-              ? `bearer ${credentials[cid].token!.valueOf()}`
-              : buildShelterAuthorizationHeader.call(this, credentials[cid].billableContractID!)]
-        ])
+        const response = await this.config.fetch(`${this.config.connectionURL}/deleteFile/${cid}`, {
+          method: 'POST',
+          signal: this.abortController.signal,
+          headers: new Headers([
+            [
+              'authorization',
+              hasToken
+                ? `bearer ${credentials[cid].token!.valueOf()}`
+                : buildShelterAuthorizationHeader.call(this, credentials[cid].billableContractID!)
+            ]
+          ])
+        })
+        if (!response.ok) {
+          throw new Error(`Unable to delete file ${cid}`)
+        }
       })
-      if (!response.ok) {
-        throw new Error(`Unable to delete file ${cid}`)
-      }
-    }))
+    )
   }
 }) as string[]

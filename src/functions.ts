@@ -42,7 +42,10 @@ export const maybeParseCID = (cid: string): CID | null => {
   }
 }
 
-export async function createCIDfromStream (data: string | Uint8Array | ReadableStream, multicode: number = multicodes.RAW): Promise<string> {
+export async function createCIDfromStream (
+  data: string | Uint8Array | ReadableStream,
+  multicode: number = multicodes.RAW
+): Promise<string> {
   const uint8array = typeof data === 'string' ? new TextEncoder().encode(data) : data
   const digest = await blake2b256stream.digest(uint8array)
   return CID.create(1, multicode, digest).toString(base58btc)
@@ -78,7 +81,9 @@ export const strToB64 = (str: string): string => strToBuf(str).toString('base64'
 export const bytesToB64 = (ary: Uint8Array): string => Buffer.from(ary).toString('base64')
 
 // Generate an UUID from a `PushSubscription'
-export const getSubscriptionId = async (subscriptionInfo: ReturnType<PushSubscription['toJSON']>): Promise<string> => {
+export const getSubscriptionId = async (
+  subscriptionInfo: ReturnType<PushSubscription['toJSON']>
+): Promise<string> => {
   const textEncoder = new TextEncoder()
   // <https://w3c.github.io/push-api/#pushsubscription-interface>
   const endpoint = textEncoder.encode(subscriptionInfo.endpoint)
@@ -87,18 +92,14 @@ export const getSubscriptionId = async (subscriptionInfo: ReturnType<PushSubscri
   const auth = textEncoder.encode(subscriptionInfo.keys!.auth)
 
   const canonicalForm = new ArrayBuffer(
-    8 +
-      (4 + endpoint.byteLength) + (2 + p256dh.byteLength) +
-      (2 + auth.byteLength)
+    8 + (4 + endpoint.byteLength) + (2 + p256dh.byteLength) + (2 + auth.byteLength)
   )
   const canonicalFormU8 = new Uint8Array(canonicalForm)
   const canonicalFormDV = new DataView(canonicalForm)
   let offset = 0
   canonicalFormDV.setFloat64(
     offset,
-    subscriptionInfo.expirationTime == null
-      ? NaN
-      : subscriptionInfo.expirationTime,
+    subscriptionInfo.expirationTime == null ? NaN : subscriptionInfo.expirationTime,
     false
   )
   offset += 8
@@ -116,14 +117,10 @@ export const getSubscriptionId = async (subscriptionInfo: ReturnType<PushSubscri
 
   const digest = await crypto.subtle.digest('SHA-384', canonicalForm)
   const id = Buffer.from(digest.slice(0, 16))
-  id[6] = 0x80 | (id[6] & 0x0F)
-  id[8] = 0x80 | (id[8] & 0x3F)
+  id[6] = 0x80 | (id[6] & 0x0f)
+  id[8] = 0x80 | (id[8] & 0x3f)
 
-  return [
-    id.slice(0, 4),
-    id.slice(4, 6),
-    id.slice(6, 8),
-    id.slice(8, 10),
-    id.slice(10, 16)
-  ].map((p) => p.toString('hex')).join('-')
+  return [id.slice(0, 4), id.slice(4, 6), id.slice(6, 8), id.slice(8, 10), id.slice(10, 16)]
+    .map((p) => p.toString('hex'))
+    .join('-')
 }

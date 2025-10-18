@@ -84,7 +84,9 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
             message.keys?.forEach((key) => {
                 if (!key.meta?.private?.content)
                     return;
-                const decryptionFn = message.foreignContractID ? encryptedData_js_1.encryptedIncomingForeignData : encryptedData_js_1.encryptedIncomingData;
+                const decryptionFn = message.foreignContractID
+                    ? encryptedData_js_1.encryptedIncomingForeignData
+                    : encryptedData_js_1.encryptedIncomingData;
                 const decryptionContract = message.foreignContractID || contractID;
                 key.meta.private.content = decryptionFn(decryptionContract, state, key.meta.private.content, height, additionalKeys, headJSON, (value) => {
                     const computedKeyId = (0, crypto_1.keyId)(value);
@@ -122,8 +124,7 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
     }
     // If the operation is OP_ATOMIC, call this function recursively
     if (op === SPMessage.OP_ATOMIC) {
-        return message
-            .map(([opT, opV]) => [
+        return message.map(([opT, opV]) => [
             opT,
             decryptedAndVerifiedDeserializedMessage({ ...head, op: opT }, headJSON, contractID, opV, additionalKeys, state)
         ]);
@@ -183,18 +184,23 @@ class SPMessage {
             throw new Error(`deserialize bad value: ${value}`);
         const { head: headJSON, ...parsedValue } = JSON.parse(value);
         const head = JSON.parse(headJSON);
-        const contractID = head.op === SPMessage.OP_CONTRACT ? (0, functions_js_1.createCID)(value, functions_js_1.multicodes.SHELTER_CONTRACT_DATA) : head.contractID;
+        const contractID = head.op === SPMessage.OP_CONTRACT
+            ? (0, functions_js_1.createCID)(value, functions_js_1.multicodes.SHELTER_CONTRACT_DATA)
+            : head.contractID;
         // Special case for OP_CONTRACT, since the keys are not yet present in the
         // state
         if (!state?._vm?.authorizedKeys && head.op === SPMessage.OP_CONTRACT) {
             const value = (0, signedData_js_1.rawSignedIncomingData)(parsedValue);
-            const authorizedKeys = Object.fromEntries(value.valueOf()?.keys.map(wk => {
+            const authorizedKeys = Object.fromEntries(value
+                .valueOf()
+                ?.keys.map((wk) => {
                 const k = unwrapMaybeEncryptedDataFn(wk);
                 if (!k)
                     return null;
                 return [k.data.id, k.data];
+            })
                 // eslint-disable-next-line no-use-before-define
-            }).filter(Boolean));
+                .filter(Boolean));
             state = {
                 _vm: {
                     type: head.type,
@@ -253,8 +259,9 @@ class SPMessage {
         const validate = (type, message) => {
             switch (type) {
                 case SPMessage.OP_CONTRACT:
-                    if (!this.isFirstMessage() || !atomicTopLevel)
+                    if (!this.isFirstMessage() || !atomicTopLevel) {
                         throw new Error('OP_CONTRACT: must be first message');
+                    }
                     break;
                 case SPMessage.OP_ATOMIC:
                     if (!atomicTopLevel) {
@@ -269,8 +276,9 @@ class SPMessage {
                 case SPMessage.OP_KEY_ADD:
                 case SPMessage.OP_KEY_DEL:
                 case SPMessage.OP_KEY_UPDATE:
-                    if (!Array.isArray(message))
+                    if (!Array.isArray(message)) {
                         throw new TypeError('OP_KEY_{ADD|DEL|UPDATE} must be of an array type');
+                    }
                     break;
                 case SPMessage.OP_KEY_SHARE:
                 case SPMessage.OP_KEY_REQUEST:
@@ -335,14 +343,30 @@ class SPMessage {
         }
         return this._innerSigningKeyId;
     }
-    head() { return this._head; }
-    message() { return this._message; }
-    op() { return [this.head().op, this.message()]; }
-    rawOp() { return [this.head().op, this._signedMessageData]; }
-    opType() { return this.head().op; }
-    opValue() { return this.message(); }
-    signingKeyId() { return this._signedMessageData.signingKeyId; }
-    manifest() { return this.head().manifest; }
+    head() {
+        return this._head;
+    }
+    message() {
+        return this._message;
+    }
+    op() {
+        return [this.head().op, this.message()];
+    }
+    rawOp() {
+        return [this.head().op, this._signedMessageData];
+    }
+    opType() {
+        return this.head().op;
+    }
+    opValue() {
+        return this.message();
+    }
+    signingKeyId() {
+        return this._signedMessageData.signingKeyId;
+    }
+    manifest() {
+        return this.head().manifest;
+    }
     description() {
         const type = this.opType();
         let desc = `<op_${type}`;
@@ -359,12 +383,24 @@ class SPMessage {
         }
         return `${desc}|${this.hash()} of ${this.contractID()}>`;
     }
-    isFirstMessage() { return !this.head().contractID; }
-    contractID() { return this.head().contractID || this.hash(); }
-    serialize() { return this._mapping.value; }
-    hash() { return this._mapping.key; }
-    previousKeyOp() { return this._head.previousKeyOp; }
-    height() { return this._head.height; }
+    isFirstMessage() {
+        return !this.head().contractID;
+    }
+    contractID() {
+        return this.head().contractID || this.hash();
+    }
+    serialize() {
+        return this._mapping.value;
+    }
+    hash() {
+        return this._mapping.key;
+    }
+    previousKeyOp() {
+        return this._head.previousKeyOp;
+    }
+    height() {
+        return this._head.height;
+    }
     id() {
         // TODO: Schedule for later removal
         throw new Error('SPMessage.id() was called but it has been removed');
@@ -377,9 +413,11 @@ class SPMessage {
     isKeyOp() {
         let value;
         return !!(keyOps.includes(this.opType()) ||
-            (this.opType() === SPMessage.OP_ATOMIC && Array.isArray(value = this.opValue()) && value.some(([opT]) => {
-                return keyOps.includes(opT);
-            })));
+            (this.opType() === SPMessage.OP_ATOMIC &&
+                Array.isArray((value = this.opValue())) &&
+                value.some(([opT]) => {
+                    return keyOps.includes(opT);
+                })));
     }
     static get [serdes_1.serdesTagSymbol]() {
         return 'SPMessage';
@@ -428,4 +466,9 @@ function messageToParams(head, message) {
     };
 }
 // Operations that affect valid keys
-const keyOps = [SPMessage.OP_CONTRACT, SPMessage.OP_KEY_ADD, SPMessage.OP_KEY_DEL, SPMessage.OP_KEY_UPDATE];
+const keyOps = [
+    SPMessage.OP_CONTRACT,
+    SPMessage.OP_KEY_ADD,
+    SPMessage.OP_KEY_DEL,
+    SPMessage.OP_KEY_UPDATE
+];

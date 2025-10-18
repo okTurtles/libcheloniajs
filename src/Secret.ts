@@ -9,11 +9,11 @@ from being logged */
 // shouldn't be logged.
 const wm = new WeakMap()
 export class Secret<T> {
-  static [serdesDeserializeSymbol] <T> (secret: T) {
+  static [serdesDeserializeSymbol]<T> (secret: T) {
     return new this(secret)
   }
 
-  static [serdesSerializeSymbol] <T> (secret: Secret<T>) {
+  static [serdesSerializeSymbol]<T> (secret: Secret<T>) {
     return wm.get(secret)
   }
 

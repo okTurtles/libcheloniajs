@@ -1,7 +1,11 @@
 import { CURVE25519XSALSA20POLY1305, keygen, keyId, serializeKey } from '@chelonia/crypto'
 import * as assert from 'node:assert'
 import { describe, it } from 'node:test'
-import { encryptedIncomingData, encryptedOutgoingData, encryptedOutgoingDataWithRawKey } from './encryptedData.js'
+import {
+  encryptedIncomingData,
+  encryptedOutgoingData,
+  encryptedOutgoingDataWithRawKey
+} from './encryptedData.js'
 import type { ChelContractState } from './types.js'
 
 describe('Encrypted data API', () => {
@@ -58,15 +62,21 @@ describe('Encrypted data API', () => {
     const serializedEncryptedData = encryptedData.serialize()
     assert.notEqual(serializedEncryptedData, 'foo')
 
-    const incoming = encryptedIncomingData('', {
-      _vm: {
-        authorizedKeys: {
-          [id]: {
-            purpose: ['enc']
+    const incoming = encryptedIncomingData(
+      '',
+      {
+        _vm: {
+          authorizedKeys: {
+            [id]: {
+              purpose: ['enc']
+            }
           }
         }
-      }
-    } as ChelContractState, serializedEncryptedData, 0, { [id]: key })
+      } as ChelContractState,
+      serializedEncryptedData,
+      0,
+      { [id]: key }
+    )
 
     assert.ok(typeof incoming === 'object')
     assert.ok(typeof incoming.toString === 'function')

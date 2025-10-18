@@ -38,13 +38,13 @@ export const PUSH_SERVER_ACTION_TYPE = Object.freeze({
   SEND_PUSH_NOTIFICATION: 'send-push-notification'
 })
 
-export type NotificationTypeEnum = typeof NOTIFICATION_TYPE[keyof typeof NOTIFICATION_TYPE]
-export type RequestTypeEnum = typeof REQUEST_TYPE[keyof typeof REQUEST_TYPE]
-export type ResponseTypeEnum = typeof RESPONSE_TYPE[keyof typeof RESPONSE_TYPE]
+export type NotificationTypeEnum = (typeof NOTIFICATION_TYPE)[keyof typeof NOTIFICATION_TYPE];
+export type RequestTypeEnum = (typeof REQUEST_TYPE)[keyof typeof REQUEST_TYPE];
+export type ResponseTypeEnum = (typeof RESPONSE_TYPE)[keyof typeof RESPONSE_TYPE];
 
 // ====== Types ====== //
 
-type TimeoutID = ReturnType<typeof setTimeout>
+type TimeoutID = ReturnType<typeof setTimeout>;
 
 export type Options = {
   logPingMessages: boolean;
@@ -62,89 +62,113 @@ export type Options = {
   handlers?: Partial<ClientEventHandlers>;
   // eslint-disable-next-line no-use-before-define
   messageHandlers?: Partial<MessageHandlers>;
-}
+};
 
 export type Message = {
-  [key: string]: JSONType,
-  type: string
-}
+  [key: string]: JSONType;
+  type: string;
+};
 
 export type PubSubClient = {
-  connectionTimeoutID: TimeoutID | undefined,
-  connectionTimeUsed?: number,
+  connectionTimeoutID: TimeoutID | undefined;
+  connectionTimeUsed?: number;
   // eslint-disable-next-line no-use-before-define
-  customEventHandlers: Partial<ClientEventHandlers>,
-  failedConnectionAttempts: number,
-  isLocal: boolean,
-  isNew: boolean,
+  customEventHandlers: Partial<ClientEventHandlers>;
+  failedConnectionAttempts: number;
+  isLocal: boolean;
+  isNew: boolean;
   // eslint-disable-next-line no-use-before-define
-  listeners: ClientEventHandlers,
+  listeners: ClientEventHandlers;
   // eslint-disable-next-line no-use-before-define
-  messageHandlers: MessageHandlers,
-  nextConnectionAttemptDelayID: TimeoutID | undefined,
-  options: Options,
-  pendingSubscriptionSet: Set<string>,
-  pendingUnsubscriptionSet: Set<string>,
-  pingTimeoutID: TimeoutID | undefined,
-  shouldReconnect: boolean,
-  socket: WebSocket | null,
-  subscriptionSet: Set<string>,
-  kvFilter: Map<string, string[]>,
-  url: string,
+  messageHandlers: MessageHandlers;
+  nextConnectionAttemptDelayID: TimeoutID | undefined;
+  options: Options;
+  pendingSubscriptionSet: Set<string>;
+  pendingUnsubscriptionSet: Set<string>;
+  pingTimeoutID: TimeoutID | undefined;
+  shouldReconnect: boolean;
+  socket: WebSocket | null;
+  subscriptionSet: Set<string>;
+  kvFilter: Map<string, string[]>;
+  url: string;
   // Methods
-  clearAllTimers(this: PubSubClient): void,
-  connect(this: PubSubClient): void,
-  destroy(this: PubSubClient): void,
-  pub(this: PubSubClient, channelID: string, data: JSONType): void,
-  scheduleConnectionAttempt(this: PubSubClient): void,
-  sub(this: PubSubClient, channelID: string): void,
-  unsub(this: PubSubClient, channelID: string): void,
-  getNextRandomDelay(this: PubSubClient): number,
-  setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void
-}
+  clearAllTimers(this: PubSubClient): void;
+  connect(this: PubSubClient): void;
+  destroy(this: PubSubClient): void;
+  pub(this: PubSubClient, channelID: string, data: JSONType): void;
+  scheduleConnectionAttempt(this: PubSubClient): void;
+  sub(this: PubSubClient, channelID: string): void;
+  unsub(this: PubSubClient, channelID: string): void;
+  getNextRandomDelay(this: PubSubClient): number;
+  setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void;
+};
 
 type ClientEventHandlers = {
-  close (this: PubSubClient, event: CloseEvent): void,
-  error (this: PubSubClient, event: Event): void,
-  message (this: PubSubClient, event: MessageEvent): void,
-  offline (this: PubSubClient, event: Event): void,
-  online (this: PubSubClient, event: Event): void,
-  open (this: PubSubClient, event: Event): void,
-  'reconnection-attempt' (this: PubSubClient, event: CustomEvent): void,
-  'reconnection-succeeded' (this: PubSubClient, event: CustomEvent): void,
-  'reconnection-failed' (this: PubSubClient, event: CustomEvent): void,
-  'reconnection-scheduled' (this: PubSubClient, event: CustomEvent): void,
-  'subscription-succeeded' (this: PubSubClient, event: CustomEvent): void
-}
+  close(this: PubSubClient, event: CloseEvent): void;
+  error(this: PubSubClient, event: Event): void;
+  message(this: PubSubClient, event: MessageEvent): void;
+  offline(this: PubSubClient, event: Event): void;
+  online(this: PubSubClient, event: Event): void;
+  open(this: PubSubClient, event: Event): void;
+  'reconnection-attempt'(this: PubSubClient, event: CustomEvent): void;
+  'reconnection-succeeded'(this: PubSubClient, event: CustomEvent): void;
+  'reconnection-failed'(this: PubSubClient, event: CustomEvent): void;
+  'reconnection-scheduled'(this: PubSubClient, event: CustomEvent): void;
+  'subscription-succeeded'(this: PubSubClient, event: CustomEvent): void;
+};
 
 type MessageHandlers = {
-  [NOTIFICATION_TYPE.ENTRY](this: PubSubClient, msg: { data: JSONType, type: string, [x: string]: unknown }): void,
-  [NOTIFICATION_TYPE.PING](this: PubSubClient, msg: { data: JSONType }): void,
-  [NOTIFICATION_TYPE.PUB](this: PubSubClient, msg: { channelID: string, data: JSONType }): void,
-  [NOTIFICATION_TYPE.KV](this: PubSubClient, msg: { channelID: string, key: string, data: JSONType }): void,
-  [NOTIFICATION_TYPE.SUB](this: PubSubClient, msg: { channelID: string, type: string, data: JSONType }): void,
-  [NOTIFICATION_TYPE.UNSUB](this: PubSubClient, msg: { channelID: string, type: string, data: JSONType }): void,
-  [RESPONSE_TYPE.ERROR](this: PubSubClient, msg: { data: { type: string, channelID: string, data: JSONType, reason: string, actionType?: string, message?: string } }): void,
-  [RESPONSE_TYPE.OK](this: PubSubClient, msg: { data: { type: string, channelID: string } }): void
-}
+  [NOTIFICATION_TYPE.ENTRY](
+    this: PubSubClient,
+    msg: { data: JSONType; type: string; [x: string]: unknown },
+  ): void;
+  [NOTIFICATION_TYPE.PING](this: PubSubClient, msg: { data: JSONType }): void;
+  [NOTIFICATION_TYPE.PUB](this: PubSubClient, msg: { channelID: string; data: JSONType }): void;
+  [NOTIFICATION_TYPE.KV](
+    this: PubSubClient,
+    msg: { channelID: string; key: string; data: JSONType },
+  ): void;
+  [NOTIFICATION_TYPE.SUB](
+    this: PubSubClient,
+    msg: { channelID: string; type: string; data: JSONType },
+  ): void;
+  [NOTIFICATION_TYPE.UNSUB](
+    this: PubSubClient,
+    msg: { channelID: string; type: string; data: JSONType },
+  ): void;
+  [RESPONSE_TYPE.ERROR](
+    this: PubSubClient,
+    msg: {
+      data: {
+        type: string;
+        channelID: string;
+        data: JSONType;
+        reason: string;
+        actionType?: string;
+        message?: string;
+      };
+    },
+  ): void;
+  [RESPONSE_TYPE.OK](this: PubSubClient, msg: { data: { type: string; channelID: string } }): void;
+};
 
 export type PubMessage = {
-  type: 'pub',
-  channelID: string,
-  data: JSONType
-}
+  type: 'pub';
+  channelID: string;
+  data: JSONType;
+};
 
 export type SubMessage = {
-  [key: string]: JSONType,
-  type: 'sub',
-  channelID: string
-} & { kvFilter?: Array<string> }
+  [key: string]: JSONType;
+  type: 'sub';
+  channelID: string;
+} & { kvFilter?: Array<string> };
 
 export type UnsubMessage = {
-  [key: string]: JSONType,
-  type: 'unsub',
-  channelID: string
-}
+  [key: string]: JSONType;
+  type: 'unsub';
+  channelID: string;
+};
 
 // TODO: verify these are good defaults
 const defaultOptions: Options = {
@@ -225,12 +249,20 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
   // allocations and garbage collections of a bunch of functions every time.
   // Another benefit is the ability to patch the client protocol at runtime by
   // updating the client's custom event handler map.
-  for (const name of Object.keys(defaultClientEventHandlers) as (keyof typeof defaultClientEventHandlers)[]) {
+  for (const name of Object.keys(
+    defaultClientEventHandlers
+  ) as (keyof typeof defaultClientEventHandlers)[]) {
     client.listeners[name] = (event) => {
       try {
         // Use `.call()` to pass the client via the 'this' binding.
-        ;(defaultClientEventHandlers[name] as (this: PubSubClient, ev: typeof event) => void).call(client, event)
-        ;(client.customEventHandlers[name] as (this: PubSubClient, ev: typeof event) => void)?.call(client, event)
+        (defaultClientEventHandlers[name] as (this: PubSubClient, ev: typeof event) => void).call(
+          client,
+          event
+        );
+        (client.customEventHandlers[name] as (this: PubSubClient, ev: typeof event) => void)?.call(
+          client,
+          event
+        )
       } catch (error) {
         // Do not throw any error but emit an `error` event instead.
         sbp('okTurtles.events/emit', PUBSUB_ERROR, client, (error as Error)?.message)
@@ -249,7 +281,11 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
   return client
 }
 
-export function createMessage (type: string, data: JSONType, meta?: object | null | undefined): { type: string, data: JSONType, [x: string]: unknown } {
+export function createMessage (
+  type: string,
+  data: JSONType,
+  meta?: object | null | undefined
+): { type: string; data: JSONType; [x: string]: unknown } {
   const message = { ...meta, type, data }
   let string: string
   const stringify = function (this: typeof message) {
@@ -423,7 +459,9 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     // Send any pending subscription request.
     client.pendingSubscriptionSet.forEach((channelID) => {
       const kvFilter = this.kvFilter.get(channelID)
-      client.socket?.send(createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }))
+      client.socket?.send(
+        createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID })
+      )
     })
     // There should be no pending unsubscription since we just got connected.
   },
@@ -513,7 +551,9 @@ const defaultMessageHandlers: MessageHandlers = {
       }
       case REQUEST_TYPE.PUSH_ACTION: {
         const { actionType, message } = data
-        console.warn(`[pubsub] Received ERROR for PUSH_ACTION request with the action type '${actionType}' and the following message: ${message}`)
+        console.warn(
+          `[pubsub] Received ERROR for PUSH_ACTION request with the action type '${actionType}' and the following message: ${message}`
+        )
         break
       }
       default: {
@@ -589,15 +629,15 @@ export const messageParser = (data: string): Message => {
 }
 
 const publicMethods: {
-  clearAllTimers(this: PubSubClient): void,
-  connect(this: PubSubClient): void,
-  destroy(this: PubSubClient): void,
-  pub(this: PubSubClient, channelID: string, data: JSONType): void,
-  scheduleConnectionAttempt(this: PubSubClient): void,
-  sub(this: PubSubClient, channelID: string): void,
-  setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void,
-  unsub(this: PubSubClient, channelID: string): void,
-  getNextRandomDelay(this: PubSubClient): number
+  clearAllTimers(this: PubSubClient): void;
+  connect(this: PubSubClient): void;
+  destroy(this: PubSubClient): void;
+  pub(this: PubSubClient, channelID: string, data: JSONType): void;
+  scheduleConnectionAttempt(this: PubSubClient): void;
+  sub(this: PubSubClient, channelID: string): void;
+  setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void;
+  unsub(this: PubSubClient, channelID: string): void;
+  getNextRandomDelay(this: PubSubClient): number;
 } = {
   clearAllTimers () {
     const client = this
@@ -631,7 +671,8 @@ const publicMethods: {
       const send = WebSocket.prototype.send.bind(this)
       if (
         typeof data === 'object' &&
-        typeof (data as object as { [Symbol.toPrimitive]?: unknown })[Symbol.toPrimitive] === 'function'
+        typeof (data as object as { [Symbol.toPrimitive]?: unknown })[Symbol.toPrimitive] ===
+          'function'
       ) {
         return send(
           (data as object as { [Symbol.toPrimitive]: () => string })[Symbol.toPrimitive]()
@@ -694,13 +735,11 @@ const publicMethods: {
   getNextRandomDelay (): number {
     const client = this
 
-    const {
-      maxReconnectionDelay,
-      minReconnectionDelay,
-      reconnectionDelayGrowFactor
-    } = client.options
+    const { maxReconnectionDelay, minReconnectionDelay, reconnectionDelayGrowFactor } =
+      client.options
 
-    const minDelay = minReconnectionDelay * reconnectionDelayGrowFactor ** client.failedConnectionAttempts
+    const minDelay =
+      minReconnectionDelay * reconnectionDelayGrowFactor ** client.failedConnectionAttempts
     const maxDelay = minDelay * reconnectionDelayGrowFactor
     const connectionTimeUsed = client.connectionTimeUsed
     client.connectionTimeUsed = undefined
@@ -764,7 +803,9 @@ const publicMethods: {
 
       if (socket?.readyState === WebSocket.OPEN) {
         const kvFilter = client.kvFilter.get(channelID)
-        socket.send(createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }))
+        socket.send(
+          createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID })
+        )
       }
     }
   },
@@ -784,7 +825,9 @@ const publicMethods: {
 
     if (client.subscriptionSet.has(channelID)) {
       if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(createRequest(REQUEST_TYPE.KV_FILTER, kvFilter ? { channelID, kvFilter } : { channelID }))
+        socket.send(
+          createRequest(REQUEST_TYPE.KV_FILTER, kvFilter ? { channelID, kvFilter } : { channelID })
+        )
       }
     }
   },
@@ -817,8 +860,13 @@ const publicMethods: {
 for (const name of Object.keys(defaultClientEventHandlers)) {
   if (name === 'error' || !(socketEventNames as readonly string[]).includes(name)) {
     sbp('okTurtles.events/on', `pubsub-${name}`, (target: PubSubClient, detail?: object) => {
-      const ev = new CustomEvent(name, { detail })
-      ;(target.listeners[name as keyof ClientEventHandlers] as (this: typeof target, e: typeof ev) => void).call(target, ev)
+      const ev = new CustomEvent(name, { detail });
+      (
+        target.listeners[name as keyof ClientEventHandlers] as (
+          this: typeof target,
+          e: typeof ev,
+        ) => void
+      ).call(target, ev)
     })
   }
 }

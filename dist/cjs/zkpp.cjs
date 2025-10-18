@@ -11,7 +11,7 @@ const zkppConstants_js_1 = require("./zkppConstants.cjs");
 // .toString('base64url') only works in Node.js
 const base64ToBase64url = (s) => s.replace(/\//g, '_').replace(/\+/g, '-').replace(/=*$/, '');
 exports.base64ToBase64url = base64ToBase64url;
-const base64urlToBase64 = (s) => s.replace(/_/g, '/').replace(/-/g, '+') + '='.repeat((4 - s.length % 4) % 4);
+const base64urlToBase64 = (s) => s.replace(/_/g, '/').replace(/-/g, '+') + '='.repeat((4 - (s.length % 4)) % 4);
 exports.base64urlToBase64 = base64urlToBase64;
 const hashStringArray = (...args) => {
     return tweetnacl_1.default.hash(buffer_1.Buffer.concat(args.map((s) => tweetnacl_1.default.hash(buffer_1.Buffer.from(s)))));
@@ -77,7 +77,7 @@ exports.decryptSaltUpdate = decryptSaltUpdate;
 const hashPassword = (password, salt) => {
     // NOTE: Type cast needed on `scrypt` because for some reason TypeScript will
     // incorrectly complain about it not taking string arguments.
-    return new Promise(resolve => scrypt_async_1.default(password, salt, {
+    return new Promise((resolve) => scrypt_async_1.default(password, salt, {
         N: 16384,
         r: 8,
         p: 1,
@@ -96,8 +96,12 @@ const saltAgreement = (publicKey, secretKey) => {
     if (!publicKeyBuf || publicKeyBuf.byteLength !== tweetnacl_1.default.box.publicKeyLength) {
         return false;
     }
-    const authSalt = buffer_1.Buffer.from((0, exports.hashStringArray)(zkppConstants_js_1.AUTHSALT, dhKey)).subarray(0, zkppConstants_js_1.SALT_LENGTH_IN_OCTETS).toString('base64');
-    const contractSalt = buffer_1.Buffer.from((0, exports.hashStringArray)(zkppConstants_js_1.CONTRACTSALT, dhKey)).subarray(0, zkppConstants_js_1.SALT_LENGTH_IN_OCTETS).toString('base64');
+    const authSalt = buffer_1.Buffer.from((0, exports.hashStringArray)(zkppConstants_js_1.AUTHSALT, dhKey))
+        .subarray(0, zkppConstants_js_1.SALT_LENGTH_IN_OCTETS)
+        .toString('base64');
+    const contractSalt = buffer_1.Buffer.from((0, exports.hashStringArray)(zkppConstants_js_1.CONTRACTSALT, dhKey))
+        .subarray(0, zkppConstants_js_1.SALT_LENGTH_IN_OCTETS)
+        .toString('base64');
     return [authSalt, contractSalt];
 };
 exports.saltAgreement = saltAgreement;
@@ -107,7 +111,9 @@ const parseRegisterSalt = (publicKey, secretKey, encryptedHashedPassword) => {
         return false;
     }
     const [authSalt, contractSalt] = saltAgreementRes;
-    const encryptionKey = tweetnacl_1.default.hash(buffer_1.Buffer.from(authSalt + contractSalt)).slice(0, tweetnacl_1.default.secretbox.keyLength);
+    const encryptionKey = tweetnacl_1.default
+        .hash(buffer_1.Buffer.from(authSalt + contractSalt))
+        .slice(0, tweetnacl_1.default.secretbox.keyLength);
     const encryptedHashedPasswordBuf = buffer_1.Buffer.from((0, exports.base64urlToBase64)(encryptedHashedPassword), 'base64');
     const hashedPasswordBuf = tweetnacl_1.default.secretbox.open(encryptedHashedPasswordBuf.subarray(tweetnacl_1.default.box.nonceLength), encryptedHashedPasswordBuf.subarray(0, tweetnacl_1.default.box.nonceLength), encryptionKey);
     if (!hashedPasswordBuf) {
@@ -124,9 +130,15 @@ const buildRegisterSaltRequest = async (publicKey, secretKey, password) => {
     const [authSalt, contractSalt] = saltAgreementRes;
     const hashedPassword = await (0, exports.hashPassword)(password, authSalt);
     const nonce = tweetnacl_1.default.randomBytes(tweetnacl_1.default.box.nonceLength);
-    const encryptionKey = tweetnacl_1.default.hash(buffer_1.Buffer.from(authSalt + contractSalt)).slice(0, tweetnacl_1.default.secretbox.keyLength);
+    const encryptionKey = tweetnacl_1.default
+        .hash(buffer_1.Buffer.from(authSalt + contractSalt))
+        .slice(0, tweetnacl_1.default.secretbox.keyLength);
     const encryptedHashedPasswordBuf = tweetnacl_1.default.secretbox(buffer_1.Buffer.from(hashedPassword), nonce, encryptionKey);
-    return [contractSalt, (0, exports.base64ToBase64url)(buffer_1.Buffer.concat([nonce, encryptedHashedPasswordBuf]).toString('base64')), encryptionKey];
+    return [
+        contractSalt,
+        (0, exports.base64ToBase64url)(buffer_1.Buffer.concat([nonce, encryptedHashedPasswordBuf]).toString('base64')),
+        encryptionKey
+    ];
 };
 exports.buildRegisterSaltRequest = buildRegisterSaltRequest;
 // Build the `E_c` (encrypted arguments) to send to the server to negotiate a
@@ -144,8 +156,12 @@ const buildUpdateSaltRequestEc = async (password, c) => {
     // When sending the encrypted data, the encrypted information would be
     // `hashedPassword`, which needs to be verified server-side to verify
     // it matches p and would be used to derive S_A and S_C.
-    const authSalt = buffer_1.Buffer.from((0, exports.hashStringArray)(zkppConstants_js_1.AUTHSALT, c)).subarray(0, zkppConstants_js_1.SALT_LENGTH_IN_OCTETS).toString('base64');
-    const contractSalt = buffer_1.Buffer.from((0, exports.hashStringArray)(zkppConstants_js_1.CONTRACTSALT, c)).subarray(0, zkppConstants_js_1.SALT_LENGTH_IN_OCTETS).toString('base64');
+    const authSalt = buffer_1.Buffer.from((0, exports.hashStringArray)(zkppConstants_js_1.AUTHSALT, c))
+        .subarray(0, zkppConstants_js_1.SALT_LENGTH_IN_OCTETS)
+        .toString('base64');
+    const contractSalt = buffer_1.Buffer.from((0, exports.hashStringArray)(zkppConstants_js_1.CONTRACTSALT, c))
+        .subarray(0, zkppConstants_js_1.SALT_LENGTH_IN_OCTETS)
+        .toString('base64');
     const encryptionKey = (0, exports.hashRawStringArray)(zkppConstants_js_1.SU, c).slice(0, tweetnacl_1.default.secretbox.keyLength);
     const nonce = tweetnacl_1.default.randomBytes(tweetnacl_1.default.secretbox.nonceLength);
     const hashedPassword = await (0, exports.hashPassword)(password, authSalt);

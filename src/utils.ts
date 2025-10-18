@@ -3,53 +3,111 @@ import { deserializeKey, serializeKey, sign, verifySignature } from '@chelonia/c
 import sbp from '@sbp/sbp'
 import { Buffer } from 'buffer'
 import { has, omit } from 'turtledash'
-import type { ProtoSPOpActionUnencrypted, SPKey, SPKeyPurpose, SPKeyUpdate, SPOpActionUnencrypted, SPOpAtomic, SPOpKeyAdd, SPOpKeyDel, SPOpKeyUpdate, SPOpRaw, SPOpValue } from './SPMessage.js'
+import type {
+  ProtoSPOpActionUnencrypted,
+  SPKey,
+  SPKeyPurpose,
+  SPKeyUpdate,
+  SPOpActionUnencrypted,
+  SPOpAtomic,
+  SPOpKeyAdd,
+  SPOpKeyDel,
+  SPOpKeyUpdate,
+  SPOpRaw,
+  SPOpValue
+} from './SPMessage.js'
 import { SPMessage } from './SPMessage.js'
 import { Secret } from './Secret.js'
 import { INVITE_STATUS } from './constants.js'
 import type { EncryptedData } from './encryptedData.js'
-import { ChelErrorForkedChain, ChelErrorResourceGone, ChelErrorUnexpectedHttpResponseCode, ChelErrorWarning } from './errors.js'
+import {
+  ChelErrorForkedChain,
+  ChelErrorResourceGone,
+  ChelErrorUnexpectedHttpResponseCode,
+  ChelErrorWarning
+} from './errors.js'
 import { CONTRACT_IS_PENDING_KEY_REQUESTS } from './events.js'
 import { b64ToStr } from './functions.js'
 import type { SignedData } from './signedData.js'
 import { isSignedData } from './signedData.js'
-import { ChelContractKey, ChelContractState, ChelRootState, CheloniaConfig, CheloniaContext, JSONType } from './types.js'
+import {
+  ChelContractKey,
+  ChelContractState,
+  ChelRootState,
+  CheloniaConfig,
+  CheloniaContext,
+  JSONType
+} from './types.js'
 
 const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10) || Infinity
 
 const copiedExistingData = Symbol('copiedExistingData')
 
-export const findKeyIdByName = (state: ChelContractState, name: string): string | null | undefined => state._vm?.authorizedKeys && Object.values((state._vm.authorizedKeys)).find((k) => k.name === name && k._notAfterHeight == null)?.id
+export const findKeyIdByName = (
+  state: ChelContractState,
+  name: string
+): string | null | undefined =>
+  state._vm?.authorizedKeys &&
+  Object.values(state._vm.authorizedKeys).find((k) => k.name === name && k._notAfterHeight == null)
+    ?.id
 
-export const findForeignKeysByContractID = (state: ChelContractState, contractID: string): string[] | undefined => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys)))).filter((k) => k._notAfterHeight == null && k.foreignKey?.includes(contractID)).map(k => k.id)
+export const findForeignKeysByContractID = (
+  state: ChelContractState,
+  contractID: string
+): string[] | undefined =>
+  state._vm?.authorizedKeys &&
+  Object.values(state._vm.authorizedKeys)
+    .filter((k) => k._notAfterHeight == null && k.foreignKey?.includes(contractID))
+    .map((k) => k.id)
 
-export const findRevokedKeyIdsByName = (state: ChelContractState, name: string): string[] => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys) || {}))).filter((k) => k.name === name && k._notAfterHeight != null).map(k => k.id)
+export const findRevokedKeyIdsByName = (state: ChelContractState, name: string): string[] =>
+  state._vm?.authorizedKeys &&
+  Object.values(state._vm.authorizedKeys || {})
+    .filter((k) => k.name === name && k._notAfterHeight != null)
+    .map((k) => k.id)
 
-export const findSuitableSecretKeyId = (state: ChelContractState, permissions: '*' | string[], purposes: SPKeyPurpose[], ringLevel?: number, allowedActions?: '*' | string[]): string | null | undefined => {
-  return state._vm?.authorizedKeys &&
-    Object.values((state._vm.authorizedKeys))
+export const findSuitableSecretKeyId = (
+  state: ChelContractState,
+  permissions: '*' | string[],
+  purposes: SPKeyPurpose[],
+  ringLevel?: number,
+  allowedActions?: '*' | string[]
+): string | null | undefined => {
+  return (
+    state._vm?.authorizedKeys &&
+    Object.values(state._vm.authorizedKeys)
       .filter((k) => {
-        return k._notAfterHeight == null &&
-        (k.ringLevel <= (ringLevel ?? Number.POSITIVE_INFINITY)) &&
-        sbp('chelonia/haveSecretKey', k.id) &&
-        (Array.isArray(permissions)
-          ? permissions.reduce((acc, permission) =>
-            acc && (k.permissions === '*' || k.permissions.includes(permission)), true
-          )
-          : permissions === k.permissions
-        ) &&
-      purposes.reduce((acc, purpose) => acc && k.purpose.includes(purpose), true) &&
-      (Array.isArray(allowedActions)
-        ? allowedActions.reduce((acc, action) =>
-          acc && (k.allowedActions === '*' || !!k.allowedActions?.includes(action)), true
+        return (
+          k._notAfterHeight == null &&
+          k.ringLevel <= (ringLevel ?? Number.POSITIVE_INFINITY) &&
+          sbp('chelonia/haveSecretKey', k.id) &&
+          (Array.isArray(permissions)
+            ? permissions.reduce(
+              (acc, permission) =>
+                acc && (k.permissions === '*' || k.permissions.includes(permission)),
+              true
+            )
+            : permissions === k.permissions) &&
+          purposes.reduce((acc, purpose) => acc && k.purpose.includes(purpose), true) &&
+          (Array.isArray(allowedActions)
+            ? allowedActions.reduce(
+              (acc, action) =>
+                acc && (k.allowedActions === '*' || !!k.allowedActions?.includes(action)),
+              true
+            )
+            : allowedActions
+              ? allowedActions === k.allowedActions
+              : true)
         )
-        : allowedActions ? allowedActions === k.allowedActions : true
-      )
       })
       .sort((a, b) => b.ringLevel - a.ringLevel)[0]?.id
+  )
 }
 
-export const findContractIDByForeignKeyId = (state: ChelContractState, keyId: string): string | null | undefined => {
+export const findContractIDByForeignKeyId = (
+  state: ChelContractState,
+  keyId: string
+): string | null | undefined => {
   let fk: string | undefined
   if (!keyId || !(fk = state?._vm?.authorizedKeys?.[keyId]?.foreignKey)) return
 
@@ -60,30 +118,47 @@ export const findContractIDByForeignKeyId = (state: ChelContractState, keyId: st
 }
 
 // TODO: Resolve inviteKey being added (doesn't have krs permission)
-export const findSuitablePublicKeyIds = (state: ChelContractState, permissions: '*' | string[], purposes: SPKeyPurpose[], ringLevel?: number): string[] | null | undefined => {
-  return state._vm?.authorizedKeys &&
-    Object.values((state._vm.authorizedKeys)).filter((k) =>
-      (k._notAfterHeight == null) &&
-      (k.ringLevel <= (ringLevel ?? Number.POSITIVE_INFINITY)) &&
-      (Array.isArray(permissions)
-        ? permissions.reduce((acc, permission) => acc && (k.permissions === '*' || k.permissions.includes(permission)), true)
-        : permissions === k.permissions
-      ) &&
-      purposes.reduce((acc, purpose) => acc && k.purpose.includes(purpose), true))
+export const findSuitablePublicKeyIds = (
+  state: ChelContractState,
+  permissions: '*' | string[],
+  purposes: SPKeyPurpose[],
+  ringLevel?: number
+): string[] | null | undefined => {
+  return (
+    state._vm?.authorizedKeys &&
+    Object.values(state._vm.authorizedKeys)
+      .filter(
+        (k) =>
+          k._notAfterHeight == null &&
+          k.ringLevel <= (ringLevel ?? Number.POSITIVE_INFINITY) &&
+          (Array.isArray(permissions)
+            ? permissions.reduce(
+              (acc, permission) =>
+                acc && (k.permissions === '*' || k.permissions.includes(permission)),
+              true
+            )
+            : permissions === k.permissions) &&
+          purposes.reduce((acc, purpose) => acc && k.purpose.includes(purpose), true)
+      )
       .sort((a, b) => b.ringLevel - a.ringLevel)
       .map((k) => k.id)
+  )
 }
 
-const validateActionPermissions = (msg: SPMessage, signingKey: SPKey | ChelContractKey, state: { _vm: { authorizedKeys: ChelContractState['_vm']['authorizedKeys'] } }, opT: string, opV: SPOpActionUnencrypted) => {
+const validateActionPermissions = (
+  msg: SPMessage,
+  signingKey: SPKey | ChelContractKey,
+  state: { _vm: { authorizedKeys: ChelContractState['_vm']['authorizedKeys'] } },
+  opT: string,
+  opV: SPOpActionUnencrypted
+) => {
   const data = isSignedData(opV)
-    ? opV.valueOf() as ProtoSPOpActionUnencrypted
-    : opV as ProtoSPOpActionUnencrypted
+    ? (opV.valueOf() as ProtoSPOpActionUnencrypted)
+    : (opV as ProtoSPOpActionUnencrypted)
 
   if (
-    signingKey.allowedActions !== '*' && (
-      !Array.isArray(signingKey.allowedActions) ||
-      !signingKey.allowedActions.includes(data.action)
-    )
+    signingKey.allowedActions !== '*' &&
+    (!Array.isArray(signingKey.allowedActions) || !signingKey.allowedActions.includes(data.action))
   ) {
     logEvtError(msg, `Signing key ${signingKey.id} is not allowed for action ${data.action}`)
     return false
@@ -102,25 +177,24 @@ const validateActionPermissions = (msg: SPMessage, signingKey: SPKey | ChelContr
     if (
       !innerSigningKey ||
       !Array.isArray(innerSigningKey.purpose) ||
-        !innerSigningKey.purpose.includes('sig') ||
-        (innerSigningKey.permissions !== '*' &&
-          (
-            !Array.isArray(innerSigningKey.permissions) ||
-            !innerSigningKey.permissions.includes(opT + '#inner')
-          )
-        )
+      !innerSigningKey.purpose.includes('sig') ||
+      (innerSigningKey.permissions !== '*' &&
+        (!Array.isArray(innerSigningKey.permissions) ||
+          !innerSigningKey.permissions.includes(opT + '#inner')))
     ) {
       logEvtError(msg, `Signing key ${s.signingKeyId} is missing permissions for operation ${opT}`)
       return false
     }
 
     if (
-      innerSigningKey.allowedActions !== '*' && (
-        !Array.isArray(innerSigningKey.allowedActions) ||
-        !innerSigningKey.allowedActions.includes(data.action + '#inner')
-      )
+      innerSigningKey.allowedActions !== '*' &&
+      (!Array.isArray(innerSigningKey.allowedActions) ||
+        !innerSigningKey.allowedActions.includes(data.action + '#inner'))
     ) {
-      logEvtError(msg, `Signing key ${innerSigningKey.id} is not allowed for action ${data.action}`)
+      logEvtError(
+        msg,
+        `Signing key ${innerSigningKey.id} is not allowed for action ${data.action}`
+      )
       return false
     }
   }
@@ -128,18 +202,21 @@ const validateActionPermissions = (msg: SPMessage, signingKey: SPKey | ChelContr
   return true
 }
 
-export const validateKeyPermissions = (msg: SPMessage, config: CheloniaConfig, state: { _vm: { authorizedKeys: ChelContractState['_vm']['authorizedKeys'] } }, signingKeyId: string, opT: string, opV: SPOpValue): boolean => {
+export const validateKeyPermissions = (
+  msg: SPMessage,
+  config: CheloniaConfig,
+  state: { _vm: { authorizedKeys: ChelContractState['_vm']['authorizedKeys'] } },
+  signingKeyId: string,
+  opT: string,
+  opV: SPOpValue
+): boolean => {
   const signingKey = state._vm?.authorizedKeys?.[signingKeyId]
   if (
     !signingKey ||
     !Array.isArray(signingKey.purpose) ||
-      !signingKey.purpose.includes('sig') ||
-      (signingKey.permissions !== '*' &&
-        (
-          !Array.isArray(signingKey.permissions) ||
-          !signingKey.permissions.includes(opT)
-        )
-      )
+    !signingKey.purpose.includes('sig') ||
+    (signingKey.permissions !== '*' &&
+      (!Array.isArray(signingKey.permissions) || !signingKey.permissions.includes(opT)))
   ) {
     logEvtError(msg, `Signing key ${signingKeyId} is missing permissions for operation ${opT}`)
     return false
@@ -163,12 +240,30 @@ export const validateKeyPermissions = (msg: SPMessage, config: CheloniaConfig, s
   return true
 }
 
-export const validateKeyAddPermissions = function (this: CheloniaContext, contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (ChelContractKey | SPKey | EncryptedData<SPKey>)[], skipPrivateCheck?: boolean) {
-  const signingKeyPermissions = Array.isArray(signingKey.permissions) ? new Set(signingKey.permissions) : signingKey.permissions
-  const signingKeyAllowedActions = Array.isArray(signingKey.allowedActions) ? new Set(signingKey.allowedActions) : signingKey.allowedActions
-  if (!state._vm?.authorizedKeys?.[signingKey.id]) throw new Error('Singing key for OP_KEY_ADD or OP_KEY_UPDATE must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id)
+export const validateKeyAddPermissions = function (
+  this: CheloniaContext,
+  contractID: string,
+  signingKey: ChelContractKey,
+  state: ChelContractState,
+  v: (ChelContractKey | SPKey | EncryptedData<SPKey>)[],
+  skipPrivateCheck?: boolean
+) {
+  const signingKeyPermissions = Array.isArray(signingKey.permissions)
+    ? new Set(signingKey.permissions)
+    : signingKey.permissions
+  const signingKeyAllowedActions = Array.isArray(signingKey.allowedActions)
+    ? new Set(signingKey.allowedActions)
+    : signingKey.allowedActions
+  if (!state._vm?.authorizedKeys?.[signingKey.id]) {
+    throw new Error(
+      'Singing key for OP_KEY_ADD or OP_KEY_UPDATE must exist in _vm.authorizedKeys. contractID=' +
+        contractID +
+        ' signingKeyId=' +
+        signingKey.id
+    )
+  }
   const localSigningKey = state._vm.authorizedKeys[signingKey.id]
-  v.forEach(wk => {
+  v.forEach((wk) => {
     const data = this.config.unwrapMaybeEncryptedData(wk)
     if (!data) return
     const k = data.data as SPKey
@@ -176,119 +271,191 @@ export const validateKeyAddPermissions = function (this: CheloniaContext, contra
       throw new Error('Signing key is private but it tried adding a public key')
     }
     if (!Number.isSafeInteger(k.ringLevel) || k.ringLevel < localSigningKey.ringLevel) {
-      throw new Error('Signing key has ringLevel ' + localSigningKey.ringLevel + ' but attempted to add or update a key with ringLevel ' + k.ringLevel)
+      throw new Error(
+        'Signing key has ringLevel ' +
+          localSigningKey.ringLevel +
+          ' but attempted to add or update a key with ringLevel ' +
+          k.ringLevel
+      )
     }
     if (signingKeyPermissions !== '*') {
-      if (!Array.isArray(k.permissions) || !k.permissions.reduce((acc, cv) => acc && signingKeyPermissions.has(cv), true)) {
-        throw new Error('Unable to add or update a key with more permissions than the signing key. signingKey permissions: ' + String(signingKey?.permissions) + '; key add permissions: ' + String(k.permissions))
+      if (
+        !Array.isArray(k.permissions) ||
+        !k.permissions.reduce((acc, cv) => acc && signingKeyPermissions.has(cv), true)
+      ) {
+        throw new Error(
+          'Unable to add or update a key with more permissions than the signing key. signingKey permissions: ' +
+            String(signingKey?.permissions) +
+            '; key add permissions: ' +
+            String(k.permissions)
+        )
       }
     }
     if (signingKeyAllowedActions !== '*' && k.allowedActions) {
-      if (!signingKeyAllowedActions || !Array.isArray(k.allowedActions) || !k.allowedActions.reduce((acc, cv) => acc && signingKeyAllowedActions.has(cv), true)) {
-        throw new Error('Unable to add or update a key with more allowed actions than the signing key. signingKey allowed actions: ' + String(signingKey?.allowedActions) + '; key add allowed actions: ' + String(k.allowedActions))
+      if (
+        !signingKeyAllowedActions ||
+        !Array.isArray(k.allowedActions) ||
+        !k.allowedActions.reduce((acc, cv) => acc && signingKeyAllowedActions.has(cv), true)
+      ) {
+        throw new Error(
+          'Unable to add or update a key with more allowed actions than the signing key. signingKey allowed actions: ' +
+            String(signingKey?.allowedActions) +
+            '; key add allowed actions: ' +
+            String(k.allowedActions)
+        )
       }
     }
   })
 }
 
-export const validateKeyDelPermissions = function (this: CheloniaContext, contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (string | EncryptedData<string>)[]) {
-  if (!state._vm?.authorizedKeys?.[signingKey.id]) throw new Error('Singing key for OP_KEY_DEL must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id)
+export const validateKeyDelPermissions = function (
+  this: CheloniaContext,
+  contractID: string,
+  signingKey: ChelContractKey,
+  state: ChelContractState,
+  v: (string | EncryptedData<string>)[]
+) {
+  if (!state._vm?.authorizedKeys?.[signingKey.id]) {
+    throw new Error(
+      'Singing key for OP_KEY_DEL must exist in _vm.authorizedKeys. contractID=' +
+        contractID +
+        ' signingKeyId=' +
+        signingKey.id
+    )
+  }
   const localSigningKey = state._vm.authorizedKeys[signingKey.id]
-  v
-    .forEach((wid) => {
-      const data = this.config.unwrapMaybeEncryptedData<string>(wid)
-      if (!data) return
-      const id = data.data
-      const k = state._vm.authorizedKeys[id]
-      if (!k) {
-        throw new Error('Nonexisting key ID ' + id)
-      }
-      if (signingKey._private) {
-        throw new Error('Signing key is private')
-      }
-      if (!k._private !== !data.encryptionKeyId) {
-        throw new Error('_private attribute must be preserved')
-      }
-      if (!Number.isSafeInteger(k.ringLevel) || k.ringLevel < localSigningKey.ringLevel) {
-        throw new Error('Signing key has ringLevel ' + localSigningKey.ringLevel + ' but attempted to remove a key with ringLevel ' + k.ringLevel)
-      }
-    })
-}
-
-export const validateKeyUpdatePermissions = function (this: CheloniaContext, contractID: string, signingKey: ChelContractKey, state: ChelContractState, v: (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]): [ChelContractKey[], Record<string, string>] {
-  const updatedMap = Object.create(null) as Record<string, string>
-  const keys = v.map((wuk): ChelContractKey | undefined => {
-    const data = this.config.unwrapMaybeEncryptedData(wuk)
-    if (!data) return undefined
-    const uk = data.data
-
-    const existingKey = state._vm.authorizedKeys[uk.oldKeyId]
-    if (!existingKey) {
-      throw new ChelErrorWarning('Missing old key ID ' + uk.oldKeyId)
+  v.forEach((wid) => {
+    const data = this.config.unwrapMaybeEncryptedData<string>(wid)
+    if (!data) return
+    const id = data.data
+    const k = state._vm.authorizedKeys[id]
+    if (!k) {
+      throw new Error('Nonexisting key ID ' + id)
     }
-    if (!existingKey._private !== !data.encryptionKeyId) {
+    if (signingKey._private) {
+      throw new Error('Signing key is private')
+    }
+    if (!k._private !== !data.encryptionKeyId) {
       throw new Error('_private attribute must be preserved')
     }
-    if (uk.name !== existingKey.name) {
-      throw new Error('Name cannot be updated')
+    if (!Number.isSafeInteger(k.ringLevel) || k.ringLevel < localSigningKey.ringLevel) {
+      throw new Error(
+        'Signing key has ringLevel ' +
+          localSigningKey.ringLevel +
+          ' but attempted to remove a key with ringLevel ' +
+          k.ringLevel
+      )
     }
-    if (!uk.id !== !uk.data) {
-      throw new Error('Both or none of the id and data attributes must be provided. Old key ID: ' + uk.oldKeyId)
-    }
-    if (uk.data && existingKey.meta?.private && !(uk.meta?.private)) {
-      throw new Error('Missing private key. Old key ID: ' + uk.oldKeyId)
-    }
-    if (uk.id && uk.id !== uk.oldKeyId) {
-      updatedMap[uk.id] = uk.oldKeyId
-    }
-    // Discard `_notAfterHeight` and `_notBeforeHeight`, since retaining them
-    // can cause issues reprocessing messages.
-    // An example is reprocessing old messages in a chatroom using
-    // `chelonia/in/processMessage`: cloning `_notAfterHeight` will break key
-    // rotations, since the new key will have the same expiration value as the
-    // old key (the new key is supposed to have no expiration height).
-    const updatedKey = omit(existingKey, ['_notAfterHeight', '_notBeforeHeight'])as ChelContractKey
-    // Set the corresponding updated attributes
-    if (uk.permissions) {
-      updatedKey.permissions = uk.permissions
-    }
-    if (uk.allowedActions) {
-      updatedKey.allowedActions = uk.allowedActions
-    }
-    if (uk.purpose) {
-      updatedKey.purpose = uk.purpose as SPKeyPurpose[]
-    }
-    if (uk.meta) {
-      updatedKey.meta = uk.meta
-    } else if (updatedKey.meta) {
-      Object.defineProperty(updatedKey.meta, copiedExistingData, { value: true })
-    }
-    if (uk.id) {
-      updatedKey.id = uk.id
-    }
-    if (uk.data) {
-      updatedKey.data = uk.data
-    }
-    return updatedKey
-  // eslint-disable-next-line no-use-before-define
-  }).filter(Boolean as unknown as (key: unknown) => key is ChelContractKey)
+  })
+}
+
+export const validateKeyUpdatePermissions = function (
+  this: CheloniaContext,
+  contractID: string,
+  signingKey: ChelContractKey,
+  state: ChelContractState,
+  v: (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]
+): [ChelContractKey[], Record<string, string>] {
+  const updatedMap = Object.create(null) as Record<string, string>
+  const keys = v
+    .map((wuk): ChelContractKey | undefined => {
+      const data = this.config.unwrapMaybeEncryptedData(wuk)
+      if (!data) return undefined
+      const uk = data.data
+
+      const existingKey = state._vm.authorizedKeys[uk.oldKeyId]
+      if (!existingKey) {
+        throw new ChelErrorWarning('Missing old key ID ' + uk.oldKeyId)
+      }
+      if (!existingKey._private !== !data.encryptionKeyId) {
+        throw new Error('_private attribute must be preserved')
+      }
+      if (uk.name !== existingKey.name) {
+        throw new Error('Name cannot be updated')
+      }
+      if (!uk.id !== !uk.data) {
+        throw new Error(
+          'Both or none of the id and data attributes must be provided. Old key ID: ' + uk.oldKeyId
+        )
+      }
+      if (uk.data && existingKey.meta?.private && !uk.meta?.private) {
+        throw new Error('Missing private key. Old key ID: ' + uk.oldKeyId)
+      }
+      if (uk.id && uk.id !== uk.oldKeyId) {
+        updatedMap[uk.id] = uk.oldKeyId
+      }
+      // Discard `_notAfterHeight` and `_notBeforeHeight`, since retaining them
+      // can cause issues reprocessing messages.
+      // An example is reprocessing old messages in a chatroom using
+      // `chelonia/in/processMessage`: cloning `_notAfterHeight` will break key
+      // rotations, since the new key will have the same expiration value as the
+      // old key (the new key is supposed to have no expiration height).
+      const updatedKey = omit(existingKey, [
+        '_notAfterHeight',
+        '_notBeforeHeight'
+      ]) as ChelContractKey
+      // Set the corresponding updated attributes
+      if (uk.permissions) {
+        updatedKey.permissions = uk.permissions
+      }
+      if (uk.allowedActions) {
+        updatedKey.allowedActions = uk.allowedActions
+      }
+      if (uk.purpose) {
+        updatedKey.purpose = uk.purpose as SPKeyPurpose[]
+      }
+      if (uk.meta) {
+        updatedKey.meta = uk.meta
+      } else if (updatedKey.meta) {
+        Object.defineProperty(updatedKey.meta, copiedExistingData, { value: true })
+      }
+      if (uk.id) {
+        updatedKey.id = uk.id
+      }
+      if (uk.data) {
+        updatedKey.data = uk.data
+      }
+      return updatedKey
+    })
+    // eslint-disable-next-line no-use-before-define
+    .filter(Boolean as unknown as (key: unknown) => key is ChelContractKey)
   validateKeyAddPermissions.call(this, contractID, signingKey, state, keys, true)
   return [keys, updatedMap]
 }
 
-export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMessage, hash: string, keys: (ChelContractKey| SPKey | EncryptedData<SPKey>)[], state: ChelContractState, contractID: string, _signingKey: ChelContractKey, internalSideEffectStack?: (({ state, message }: { state: ChelContractState, message: SPMessage }) => void)[]) {
+export const keyAdditionProcessor = function (
+  this: CheloniaContext,
+  _msg: SPMessage,
+  hash: string,
+  keys: (ChelContractKey | SPKey | EncryptedData<SPKey>)[],
+  state: ChelContractState,
+  contractID: string,
+  _signingKey: ChelContractKey,
+  internalSideEffectStack?: (({
+    state,
+    message
+  }: {
+    state: ChelContractState;
+    message: SPMessage;
+  }) => void)[]
+) {
   const decryptedKeys = []
-  const keysToPersist: { key: Key, transient: boolean }[] = []
+  const keysToPersist: { key: Key; transient: boolean }[] = []
 
   const storeSecretKey = (key: SPKey | ChelContractKey, decryptedKey: string) => {
     const decryptedDeserializedKey = deserializeKey(decryptedKey)
     const transient = !!key.meta?.private?.transient
-    sbp('chelonia/storeSecretKeys', new Secret([{
-      key: decryptedDeserializedKey,
-      // We always set this to true because this could be done from
-      // an outgoing message
-      transient: true
-    }]))
+    sbp(
+      'chelonia/storeSecretKeys',
+      new Secret([
+        {
+          key: decryptedDeserializedKey,
+          // We always set this to true because this could be done from
+          // an outgoing message
+          transient: true
+        }
+      ])
+    )
     if (!transient) {
       keysToPersist.push({ key: decryptedDeserializedKey, transient })
     }
@@ -303,16 +470,15 @@ export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMes
     // copiedExistingData refers to key data that have been copied from an
     // existing key on OP_KEY_UPDATE. These shouldn't be processed.
     if (key.meta?.private?.content && !has(key.meta, copiedExistingData)) {
-      if (
-        key.id &&
-        !sbp('chelonia/haveSecretKey', key.id, !key.meta.private.transient)
-      ) {
+      if (key.id && !sbp('chelonia/haveSecretKey', key.id, !key.meta.private.transient)) {
         const decryptedKeyResult = this.config.unwrapMaybeEncryptedData(key.meta.private.content)
         // Ignore data that couldn't be decrypted
         if (decryptedKeyResult) {
-        // Data aren't encrypted
+          // Data aren't encrypted
           if (decryptedKeyResult.encryptionKeyId == null) {
-            throw new Error('Expected encrypted data but got unencrypted data for key with ID: ' + key.id)
+            throw new Error(
+              'Expected encrypted data but got unencrypted data for key with ID: ' + key.id
+            )
           }
           decryptedKey = decryptedKeyResult.data
           decryptedKeys.push([key.id, decryptedKey])
@@ -341,11 +507,11 @@ export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMes
     // accounting
     if (key.name.startsWith('#inviteKey-')) {
       if (!state._vm.invites) state._vm.invites = Object.create(null)
-      const inviteSecret = decryptedKey || (
-        has(this.transientSecretKeys, key.id)
+      const inviteSecret =
+        decryptedKey ||
+        (has(this.transientSecretKeys, key.id)
           ? serializeKey(this.transientSecretKeys[key.id], true)
-          : undefined
-      )
+          : undefined)
       state._vm.invites![key.id] = {
         status: INVITE_STATUS.VALID,
         initialQuantity: key.meta!.quantity!,
@@ -357,7 +523,10 @@ export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMes
     }
 
     // Is this KEY operation the result of requesting keys for another contract?
-    if (key.meta?.keyRequest?.contractID && findSuitableSecretKeyId(state, [SPMessage.OP_KEY_ADD], ['sig'])) {
+    if (
+      key.meta?.keyRequest?.contractID &&
+      findSuitableSecretKeyId(state, [SPMessage.OP_KEY_ADD], ['sig'])
+    ) {
       const data = this.config.unwrapMaybeEncryptedData(key.meta.keyRequest.contractID)
 
       // Are we subscribed to this contract?
@@ -376,40 +545,68 @@ export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMes
             const rootState = sbp(this.config.stateSelector) as ChelRootState
 
             const originatingContractState = rootState[contractID] as ChelContractState
-            if (sbp('chelonia/contract/hasKeyShareBeenRespondedBy', originatingContractState, keyRequestContractID, reference)) {
-            // In the meantime, our key request has been responded, so we
-            // don't need to set pendingKeyRequests.
+            if (
+              sbp(
+                'chelonia/contract/hasKeyShareBeenRespondedBy',
+                originatingContractState,
+                keyRequestContractID,
+                reference
+              )
+            ) {
+              // In the meantime, our key request has been responded, so we
+              // don't need to set pendingKeyRequests.
               return
             }
 
-            if (!has(rootState, keyRequestContractID)) this.config.reactiveSet(rootState, keyRequestContractID, Object.create(null))
+            if (!has(rootState, keyRequestContractID)) {
+              this.config.reactiveSet(rootState, keyRequestContractID, Object.create(null))
+            }
             const targetState = rootState[keyRequestContractID] as ChelContractState
 
             if (!targetState._volatile) {
               this.config.reactiveSet(targetState, '_volatile', Object.create(null))
             }
             if (!targetState._volatile!.pendingKeyRequests) {
-              this.config.reactiveSet(rootState[keyRequestContractID]._volatile!, 'pendingKeyRequests', [])
+              this.config.reactiveSet(
+                rootState[keyRequestContractID]._volatile!,
+                'pendingKeyRequests',
+                []
+              )
             }
 
-            if (targetState._volatile!.pendingKeyRequests!.some((pkr) => {
-              return pkr && pkr.contractID === contractID && pkr.hash === hash
-            })) {
-            // This pending key request has already been registered.
-            // Nothing left to do.
+            if (
+              targetState._volatile!.pendingKeyRequests!.some((pkr) => {
+                return pkr && pkr.contractID === contractID && pkr.hash === hash
+              })
+            ) {
+              // This pending key request has already been registered.
+              // Nothing left to do.
               return
             }
 
             // Mark the contract for which keys were requested as pending keys
             // The hash (of the current message) is added to this dictionary
             // for cross-referencing puposes.
-            targetState._volatile!.pendingKeyRequests!.push({ contractID, name: key.name, hash, reference: reference?.data })
+            targetState._volatile!.pendingKeyRequests!.push({
+              contractID,
+              name: key.name,
+              hash,
+              reference: reference?.data
+            })
 
-            this.setPostSyncOp(contractID, 'pending-keys-for-' + keyRequestContractID, ['okTurtles.events/emit', CONTRACT_IS_PENDING_KEY_REQUESTS, { contractID: keyRequestContractID }])
+            this.setPostSyncOp(contractID, 'pending-keys-for-' + keyRequestContractID, [
+              'okTurtles.events/emit',
+              CONTRACT_IS_PENDING_KEY_REQUESTS,
+              { contractID: keyRequestContractID }
+            ])
           }).catch((e: unknown) => {
             // Using console.error instead of logEvtError because this
             // is a side-effect and not relevant for outgoing messages
-            console.error('Error while setting or updating pendingKeyRequests', { contractID, keyRequestContractID, reference }, e)
+            console.error(
+              'Error while setting or updating pendingKeyRequests',
+              { contractID, keyRequestContractID, reference },
+              e
+            )
           })
         })
       }
@@ -425,42 +622,65 @@ export const keyAdditionProcessor = function (this: CheloniaContext, _msg: SPMes
   internalSideEffectStack?.push(() => subscribeToForeignKeyContracts.call(this, contractID, state))
 }
 
-export const subscribeToForeignKeyContracts = function (this: CheloniaContext, contractID: string, state: ChelContractState) {
+export const subscribeToForeignKeyContracts = function (
+  this: CheloniaContext,
+  contractID: string,
+  state: ChelContractState
+) {
   try {
-    Object.values(state._vm.authorizedKeys).filter((key) => !!((key)).foreignKey && findKeyIdByName(state, ((key)).name) != null).forEach((key) => {
-      const foreignKey = String(key.foreignKey)
-      const fkUrl = new URL(foreignKey)
-      const foreignContract = fkUrl.pathname
-      const foreignKeyName = fkUrl.searchParams.get('keyName')
+    Object.values(state._vm.authorizedKeys)
+      .filter((key) => !!key.foreignKey && findKeyIdByName(state, key.name) != null)
+      .forEach((key) => {
+        const foreignKey = String(key.foreignKey)
+        const fkUrl = new URL(foreignKey)
+        const foreignContract = fkUrl.pathname
+        const foreignKeyName = fkUrl.searchParams.get('keyName')
 
-      if (!foreignContract || !foreignKeyName) {
-        console.warn('Invalid foreign key: missing contract or key name', { contractID, keyId: key.id })
-        return
-      }
+        if (!foreignContract || !foreignKeyName) {
+          console.warn('Invalid foreign key: missing contract or key name', {
+            contractID,
+            keyId: key.id
+          })
+          return
+        }
 
-      const rootState = sbp(this.config.stateSelector)
+        const rootState = sbp(this.config.stateSelector)
 
-      const signingKey = findSuitableSecretKeyId(state, [SPMessage.OP_KEY_DEL], ['sig'], key.ringLevel)
-      const canMirrorOperations = !!signingKey
+        const signingKey = findSuitableSecretKeyId(
+          state,
+          [SPMessage.OP_KEY_DEL],
+          ['sig'],
+          key.ringLevel
+        )
+        const canMirrorOperations = !!signingKey
 
-      // If we cannot mirror operations, then there is nothing left to do
-      if (!canMirrorOperations) return
+        // If we cannot mirror operations, then there is nothing left to do
+        if (!canMirrorOperations) return
 
-      // If the key is already being watched, do nothing
-      if (Array.isArray(rootState?.[foreignContract]?._volatile?.watch)) {
-        if ((rootState[foreignContract] as ChelContractState)._volatile!.watch!.find((v) =>
-          v[0] === key.name && v[1] === contractID
-        )) return
-      }
+        // If the key is already being watched, do nothing
+        if (Array.isArray(rootState?.[foreignContract]?._volatile?.watch)) {
+          if (
+            (rootState[foreignContract] as ChelContractState)._volatile!.watch!.find(
+              (v) => v[0] === key.name && v[1] === contractID
+            )
+          ) { return }
+        }
 
-      if (!has(state._vm, 'pendingWatch')) this.config.reactiveSet(state._vm, 'pendingWatch', Object.create(null))
-      if (!has(state._vm.pendingWatch, foreignContract)) this.config.reactiveSet(state._vm.pendingWatch!, foreignContract, [])
-      if (!state._vm.pendingWatch![foreignContract].find(([n]) => n === foreignKeyName)) {
-        state._vm.pendingWatch![foreignContract].push([foreignKeyName, key.id])
-      }
+        if (!has(state._vm, 'pendingWatch')) {
+          this.config.reactiveSet(state._vm, 'pendingWatch', Object.create(null))
+        }
+        if (!has(state._vm.pendingWatch, foreignContract)) {
+          this.config.reactiveSet(state._vm.pendingWatch!, foreignContract, [])
+        }
+        if (!state._vm.pendingWatch![foreignContract].find(([n]) => n === foreignKeyName)) {
+          state._vm.pendingWatch![foreignContract].push([foreignKeyName, key.id])
+        }
 
-      this.setPostSyncOp(contractID, `watchForeignKeys-${contractID}`, ['chelonia/private/watchForeignKeys', contractID])
-    })
+        this.setPostSyncOp(contractID, `watchForeignKeys-${contractID}`, [
+          'chelonia/private/watchForeignKeys',
+          contractID
+        ])
+      })
   } catch (e: unknown) {
     console.warn('Error at subscribeToForeignKeyContracts: ' + ((e as Error).message || e))
   }
@@ -479,7 +699,12 @@ export const subscribeToForeignKeyContracts = function (this: CheloniaContext, c
 // The `raw` parameter will not modify the message payload in any way,
 // which is typically done to avoid sending out invalid or redundant operations
 // (e.g., a duplicate OP_KEY_ADD).
-export const recreateEvent = (entry: SPMessage, state: ChelContractState, contractsState: ChelRootState['contracts'][string], disableAutoDedup?: boolean): undefined | SPMessage => {
+export const recreateEvent = (
+  entry: SPMessage,
+  state: ChelContractState,
+  contractsState: ChelRootState['contracts'][string],
+  disableAutoDedup?: boolean
+): undefined | SPMessage => {
   const { HEAD: previousHEAD, height: previousHeight, previousKeyOp } = contractsState || {}
   if (!previousHEAD) {
     throw new Error('recreateEvent: Giving up because the contract has been removed')
@@ -490,13 +715,19 @@ export const recreateEvent = (entry: SPMessage, state: ChelContractState, contra
 
   const recreateOperation = (opT: string, rawOpV: SignedData<SPOpValue>) => {
     const opV = rawOpV.valueOf()
-    const recreateOperationInternal = (opT: string, opV: SPOpValue): SPOpValue | typeof undefined => {
+    const recreateOperationInternal = (
+      opT: string,
+      opV: SPOpValue
+    ): SPOpValue | typeof undefined => {
       let newOpV: SPOpValue
       if (opT === SPMessage.OP_KEY_ADD) {
         if (!Array.isArray(opV)) throw new Error('Invalid message format')
         newOpV = (opV as SPOpKeyAdd).filter((k) => {
           const kId = (k.valueOf() as SPKey).id
-          return !has(state._vm.authorizedKeys, kId) || state._vm.authorizedKeys[kId]._notAfterHeight != null
+          return (
+            !has(state._vm.authorizedKeys, kId) ||
+            state._vm.authorizedKeys[kId]._notAfterHeight != null
+          )
         })
         // Has this key already been added? (i.e., present in authorizedKeys)
         if (newOpV.length === 0) {
@@ -509,7 +740,10 @@ export const recreateEvent = (entry: SPMessage, state: ChelContractState, contra
         // Has this key already been removed? (i.e., no longer in authorizedKeys)
         newOpV = (opV as SPOpKeyDel).filter((keyId) => {
           const kId = Object(keyId).valueOf()
-          return has(state._vm.authorizedKeys, kId) && state._vm.authorizedKeys[kId]._notAfterHeight == null
+          return (
+            has(state._vm.authorizedKeys, kId) &&
+            state._vm.authorizedKeys[kId]._notAfterHeight == null
+          )
         })
         if (newOpV.length === 0) {
           console.info('Omitting empty OP_KEY_DEL', { head })
@@ -522,7 +756,11 @@ export const recreateEvent = (entry: SPMessage, state: ChelContractState, contra
         newOpV = (opV as SPOpKeyUpdate).filter((k) => {
           const oKId = (k.valueOf() as SPKeyUpdate).oldKeyId
           const nKId = (k.valueOf() as SPKeyUpdate).id
-          return nKId == null || (has(state._vm.authorizedKeys, oKId) && state._vm.authorizedKeys[oKId]._notAfterHeight == null)
+          return (
+            nKId == null ||
+            (has(state._vm.authorizedKeys, oKId) &&
+              state._vm.authorizedKeys[oKId]._notAfterHeight == null)
+          )
         })
         if (newOpV.length === 0) {
           console.info('Omitting empty OP_KEY_UPDATE', { head })
@@ -531,10 +769,15 @@ export const recreateEvent = (entry: SPMessage, state: ChelContractState, contra
         }
       } else if (opT === SPMessage.OP_ATOMIC) {
         if (!Array.isArray(opV)) throw new Error('Invalid message format')
-        newOpV = (opV as SPOpAtomic).map(([t, v]) => [t, recreateOperationInternal(t, v)]).filter(([, v]) => !!v) as SPOpAtomic
+        newOpV = (opV as SPOpAtomic)
+          .map(([t, v]) => [t, recreateOperationInternal(t, v)])
+          .filter(([, v]) => !!v) as SPOpAtomic
         if ((newOpV as SPOpAtomic).length === 0) {
           console.info('Omitting empty OP_ATOMIC', { head })
-        } else if ((newOpV as SPOpAtomic).length === opV.length && (newOpV as SPOpAtomic).reduce((acc, cv, i) => acc && cv === opV[i], true)) {
+        } else if (
+          (newOpV as SPOpAtomic).length === opV.length &&
+          (newOpV as SPOpAtomic).reduce((acc, cv, i) => acc && cv === opV[i], true)
+        ) {
           return opV
         } else {
           return newOpV
@@ -565,21 +808,36 @@ export const recreateEvent = (entry: SPMessage, state: ChelContractState, contra
 
   const newOp = [opT, newRawOpV]
 
-  entry = SPMessage.cloneWith(
-    head, newOp as SPOpRaw, { previousKeyOp, previousHEAD, height: previousHeight + 1 }
-  )
+  entry = SPMessage.cloneWith(head, newOp as SPOpRaw, {
+    previousKeyOp,
+    previousHEAD,
+    height: previousHeight + 1
+  })
 
   return entry
 }
 
-export const getContractIDfromKeyId = (contractID: string, signingKeyId: string | null | undefined, state: ChelContractState): string | null | undefined => {
+export const getContractIDfromKeyId = (
+  contractID: string,
+  signingKeyId: string | null | undefined,
+  state: ChelContractState
+): string | null | undefined => {
   if (!signingKeyId) return
   return signingKeyId && state._vm?.authorizedKeys?.[signingKeyId]?.foreignKey
     ? new URL(state._vm.authorizedKeys[signingKeyId].foreignKey!).pathname
     : contractID
 }
 
-export function eventsAfter (this: CheloniaContext, contractID: string, { sinceHeight, limit, sinceHash, stream = true }: { sinceHeight: number, limit?: number, sinceHash?: string, stream: boolean }): ReadableStream<string> | Promise<string[]> {
+export function eventsAfter (
+  this: CheloniaContext,
+  contractID: string,
+  {
+    sinceHeight,
+    limit,
+    sinceHash,
+    stream = true
+  }: { sinceHeight: number; limit?: number; sinceHash?: string; stream: boolean }
+): ReadableStream<string> | Promise<string[]> {
   if (!contractID) {
     // Avoid making a network roundtrip to tell us what we already know
     throw new Error('Missing contract ID')
@@ -592,7 +850,9 @@ export function eventsAfter (this: CheloniaContext, contractID: string, { sinceH
     const eventsResponse = await this.config.fetch(lastUrl, { signal })
     if (!eventsResponse.ok) {
       const msg = `${eventsResponse.status}: ${eventsResponse.statusText}`
-      if (eventsResponse.status === 404 || eventsResponse.status === 410) throw new ChelErrorResourceGone(msg, { cause: eventsResponse.status })
+      if (eventsResponse.status === 404 || eventsResponse.status === 410) {
+        throw new ChelErrorResourceGone(msg, { cause: eventsResponse.status })
+      }
       throw new ChelErrorUnexpectedHttpResponseCode(msg, { cause: eventsResponse.status })
     }
     if (!eventsResponse.body) throw new Error('Missing body')
@@ -621,10 +881,10 @@ export function eventsAfter (this: CheloniaContext, contractID: string, { sinceH
     async pull (controller) {
       try {
         for (;;) {
-        // Handle different states of the stream reading process.
+          // Handle different states of the stream reading process.
           switch (state) {
-          // When in 'fetch' state, initiate a new fetch request to obtain a
-          // stream reader for events.
+            // When in 'fetch' state, initiate a new fetch request to obtain a
+            // stream reader for events.
             case 'fetch': {
               eventsStreamReader = await fetchEventsStreamReader()
               // Transition to reading the new response and reset the processed
@@ -635,28 +895,29 @@ export function eventsAfter (this: CheloniaContext, contractID: string, { sinceH
             }
             case 'read-eos': // End of stream case
             case 'read-new-response': // Just started reading a new response
-            case 'read': { // Reading from the response stream
+            case 'read': {
+              // Reading from the response stream
               const { done, value } = await eventsStreamReader.read()
               // If done, determine if the stream should close or fetch more
               // data by making a new request
               if (done) {
-              // No more events to process or reached the latest event
-              // Using `>=` instead of `===` to avoid an infinite loop in the
-              // event of data loss on the server.
+                // No more events to process or reached the latest event
+                // Using `>=` instead of `===` to avoid an infinite loop in the
+                // event of data loss on the server.
                 if (remainingEvents === 0 || sinceHeight >= latestHeight) {
                   controller.close()
                   return
                 } else if (state === 'read-new-response' || buffer) {
-                // If done prematurely, throw an error
+                  // If done prematurely, throw an error
                   throw new Error('Invalid response: done too early')
                 } else {
-                // If there are still events to fetch, switch state to fetch
+                  // If there are still events to fetch, switch state to fetch
                   state = 'fetch'
                   break
                 }
               }
               if (!value) {
-              // If there's no value (e.g., empty response), throw an error
+                // If there's no value (e.g., empty response), throw an error
                 throw new Error('Invalid response: missing body')
               }
               // Concatenate new data to the buffer, trimming any
@@ -666,17 +927,17 @@ export function eventsAfter (this: CheloniaContext, contractID: string, { sinceH
               // If there was only whitespace, try reading again
               if (!buffer) break
               if (state === 'read-new-response') {
-              // Response is in JSON format, so we look for the start of an
-              // array (`[`)
+                // Response is in JSON format, so we look for the start of an
+                // array (`[`)
                 if (buffer[0] !== '[') {
                   throw new Error('Invalid response: no array start delimiter')
                 }
                 // Trim the array start delimiter from the buffer
                 buffer = buffer.slice(1)
               } else if (state === 'read-eos') {
-              // If in 'read-eos' state and still reading data, it's an error
-              // because the response isn't valid JSON (there should be
-              // nothing other than whitespace after `]`)
+                // If in 'read-eos' state and still reading data, it's an error
+                // because the response isn't valid JSON (there should be
+                // nothing other than whitespace after `]`)
                 throw new Error('Invalid data at the end of response')
               }
               // If not handling new response or end-of-stream, switch to
@@ -685,8 +946,8 @@ export function eventsAfter (this: CheloniaContext, contractID: string, { sinceH
               break
             }
             case 'events': {
-            // Process events by looking for a comma or closing bracket that
-            // indicates the end of an event
+              // Process events by looking for a comma or closing bracket that
+              // indicates the end of an event
               const nextIdx = buffer.search(/(?<=\s*)[,\]]/)
               // If the end of the event isn't found, go back to reading more
               // data
@@ -696,10 +957,10 @@ export function eventsAfter (this: CheloniaContext, contractID: string, { sinceH
               }
               let enqueued = false
               try {
-              // Extract the current event's value and trim whitespace
+                // Extract the current event's value and trim whitespace
                 const eventValue = buffer.slice(0, nextIdx).trim()
                 if (eventValue) {
-                // Check if the event limit is reached; if so, throw an error
+                  // Check if the event limit is reached; if so, throw an error
                   if (count === requestLimit) {
                     throw new Error('Received too many events')
                   }
@@ -709,9 +970,13 @@ export function eventsAfter (this: CheloniaContext, contractID: string, { sinceH
                     const height = SPMessage.deserializeHEAD(currentEvent).head.height
                     if (height !== sinceHeight || (sinceHash && sinceHash !== hash)) {
                       if (height === sinceHeight && sinceHash && sinceHash !== hash) {
-                        throw new ChelErrorForkedChain(`Forked chain: hash(${hash}) !== since(${sinceHash})`)
+                        throw new ChelErrorForkedChain(
+                          `Forked chain: hash(${hash}) !== since(${sinceHash})`
+                        )
                       } else {
-                        throw new Error(`Unexpected data: hash(${hash}) !== since(${sinceHash || ''}) or height(${height}) !== since(${sinceHeight})`)
+                        throw new Error(
+                          `Unexpected data: hash(${hash}) !== since(${sinceHash || ''}) or height(${height}) !== since(${sinceHeight})`
+                        )
                       }
                     }
                   }
@@ -734,19 +999,19 @@ export function eventsAfter (this: CheloniaContext, contractID: string, { sinceH
                     sinceHash = deserialized.hash
                     state = 'read-eos'
                   } else {
-                  // If the response came empty, assume there are no more events
-                  // after. Mostly this prevents infinite loops if a server is
-                  // claiming there are more events than it's willing to return
-                  // data for.
+                    // If the response came empty, assume there are no more events
+                    // after. Mostly this prevents infinite loops if a server is
+                    // claiming there are more events than it's willing to return
+                    // data for.
                     state = 'eod'
                   }
                   // This should be an empty string now
                   buffer = buffer.slice(nextIdx + 1).trim()
                 } else if (currentEvent) {
-                // Otherwise, move the buffer pointer to the next event
+                  // Otherwise, move the buffer pointer to the next event
                   buffer = buffer.slice(nextIdx + 1).trimStart()
                 } else {
-                // If the end delimiter (`]`) is missing, throw an error
+                  // If the end delimiter (`]`) is missing, throw an error
                   throw new Error('Missing end delimiter')
                 }
                 // If an event was successfully enqueued, exit the loop to wait
@@ -772,7 +1037,7 @@ export function eventsAfter (this: CheloniaContext, contractID: string, { sinceH
         }
       } catch (e) {
         console.error('[eventsAfter] Error', { lastUrl }, e)
-        eventsStreamReader?.cancel('Error during pull').catch(e2 => {
+        eventsStreamReader?.cancel('Error during pull').catch((e2) => {
           console.error('Error canceling underlying event stream reader on error', e, e2)
         })
         throw e
@@ -784,7 +1049,11 @@ export function eventsAfter (this: CheloniaContext, contractID: string, { sinceH
   return collectEventStream(s)
 }
 
-export function buildShelterAuthorizationHeader (this: CheloniaContext, contractID: string, state?: ChelContractState): string {
+export function buildShelterAuthorizationHeader (
+  this: CheloniaContext,
+  contractID: string,
+  state?: ChelContractState
+): string {
   if (!state) state = sbp(this.config.stateSelector)[contractID]
   const SAKid = findKeyIdByName(state!, '#sak')
   if (!SAKid) {
@@ -806,7 +1075,10 @@ export function buildShelterAuthorizationHeader (this: CheloniaContext, contract
   return `shelter ${data}.${sign(deserializedSAK, data)}`
 }
 
-export function verifyShelterAuthorizationHeader (authorization: string, rootState?: object): string {
+export function verifyShelterAuthorizationHeader (
+  authorization: string,
+  rootState?: object
+): string {
   const regex = /^shelter (([a-zA-Z0-9]+) ([0-9]+)\.([a-zA-Z0-9+/=]{20}))\.([a-zA-Z0-9+/=]+)$/i
   if (authorization.length > 1024) {
     throw new Error('Authorization header too long')
@@ -851,14 +1123,23 @@ export const checkCanBeGarbageCollected = function (this: CheloniaContext, id: s
   const rootState = sbp(this.config.stateSelector)
   return (
     // Check persistent references
-    (!has(rootState.contracts, id) || !rootState.contracts[id] || !has(rootState.contracts[id], 'references')) &&
+    (!has(rootState.contracts, id) ||
+      !rootState.contracts[id] ||
+      !has(rootState.contracts[id], 'references')) &&
     // Check ephemeral references
-    !has(this.ephemeralReferenceCount, id)) &&
+    !has(this.ephemeralReferenceCount, id) &&
     // Check foreign keys (i.e., that no keys from this contract are being watched)
-    (!has(rootState, id) || !has(rootState[id], '_volatile') || !has(rootState[id]._volatile, 'watch') || rootState[id]._volatile.watch.length === 0 || (rootState[id] as ChelContractState)._volatile!.watch!.filter(([, cID]) => this.subscriptionSet.has(cID)).length === 0)
+    (!has(rootState, id) ||
+      !has(rootState[id], '_volatile') ||
+      !has(rootState[id]._volatile, 'watch') ||
+      rootState[id]._volatile.watch.length === 0 ||
+      (rootState[id] as ChelContractState)._volatile!.watch!.filter(([, cID]) =>
+        this.subscriptionSet.has(cID)
+      ).length === 0)
+  )
 }
 
-export const collectEventStream = async <T> (s: ReadableStream<T>): Promise<T[]> => {
+export const collectEventStream = async <T>(s: ReadableStream<T>): Promise<T[]> => {
   const reader = s.getReader()
   const r = []
   for (;;) {
@@ -879,13 +1160,17 @@ export const logEvtError = (msg: SPMessage, ...args: unknown[]) => {
   }
 }
 
-export const handleFetchResult = (type: 'text' | 'json' | 'blob'): ((r: Response) => Promise<string | JSONType | Blob>) => {
+export const handleFetchResult = (
+  type: 'text' | 'json' | 'blob'
+): ((r: Response) => Promise<string | JSONType | Blob>) => {
   return function (r: Response) {
     if (!r.ok) {
       const msg = `${r.status}: ${r.statusText}`
       // 410 is sometimes special (for example, it can mean that a contract or
       // a file been deleted)
-      if (r.status === 404 || r.status === 410) throw new ChelErrorResourceGone(msg, { cause: r.status })
+      if (r.status === 404 || r.status === 410) {
+        throw new ChelErrorResourceGone(msg, { cause: r.status })
+      }
       throw new ChelErrorUnexpectedHttpResponseCode(msg, { cause: r.status })
     }
     return r[type]()

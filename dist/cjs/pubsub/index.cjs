@@ -121,7 +121,6 @@ function createClient(url, options = {}) {
         client.listeners[name] = (event) => {
             try {
                 // Use `.call()` to pass the client via the 'this' binding.
-                ;
                 defaultClientEventHandlers[name].call(client, event);
                 client.customEventHandlers[name]?.call(client, event);
             }
@@ -471,7 +470,8 @@ const publicMethods = {
         client.socket.send = function (data) {
             const send = WebSocket.prototype.send.bind(this);
             if (typeof data === 'object' &&
-                typeof data[Symbol.toPrimitive] === 'function') {
+                typeof data[Symbol.toPrimitive] ===
+                    'function') {
                 return send(data[Symbol.toPrimitive]());
             }
             return send(data);

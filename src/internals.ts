@@ -1,7 +1,24 @@
 import sbp, { domainFromSelector } from '@sbp/sbp'
 import { multicodes } from './functions.js'
 import { cloneDeep, debounce, delay, has, pick, randomIntFromRange } from 'turtledash'
-import type { SPKey, SPOpActionEncrypted, SPOpActionUnencrypted, SPOpAtomic, SPOpContract, SPOpKeyAdd, SPOpKeyDel, SPOpKeyRequest, SPOpKeyRequestSeen, SPOpKeyShare, SPOpKeyUpdate, SPOpPropSet, SPOpType, SPOp, ProtoSPOpActionUnencrypted, SPOpMap } from './SPMessage.js'
+import type {
+  SPKey,
+  SPOpActionEncrypted,
+  SPOpActionUnencrypted,
+  SPOpAtomic,
+  SPOpContract,
+  SPOpKeyAdd,
+  SPOpKeyDel,
+  SPOpKeyRequest,
+  SPOpKeyRequestSeen,
+  SPOpKeyShare,
+  SPOpKeyUpdate,
+  SPOpPropSet,
+  SPOpType,
+  SPOp,
+  ProtoSPOpActionUnencrypted,
+  SPOpMap
+} from './SPMessage.js'
 import { SPMessage } from './SPMessage.js'
 import { Secret } from './Secret.js'
 import { INVITE_STATUS } from './constants.js'
@@ -9,11 +26,52 @@ import { deserializeKey, keyId, verifySignature } from '@chelonia/crypto'
 import './db.js'
 import { encryptedIncomingData, encryptedOutgoingData } from './encryptedData.js'
 import type { EncryptedData } from './encryptedData.js'
-import { ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnrecoverable, ChelErrorWarning, ChelErrorDBBadPreviousHEAD, ChelErrorAlreadyProcessed, ChelErrorFetchServerTimeFailed, ChelErrorForkedChain } from './errors.js'
-import { CONTRACTS_MODIFIED, CONTRACT_HAS_RECEIVED_KEYS, CONTRACT_IS_SYNCING, EVENT_HANDLED, EVENT_PUBLISHED, EVENT_PUBLISHING_ERROR } from './events.js'
-import { buildShelterAuthorizationHeader, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, validateKeyPermissions, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyUpdatePermissions } from './utils.js'
+import {
+  ChelErrorKeyAlreadyExists,
+  ChelErrorResourceGone,
+  ChelErrorUnrecoverable,
+  ChelErrorWarning,
+  ChelErrorDBBadPreviousHEAD,
+  ChelErrorAlreadyProcessed,
+  ChelErrorFetchServerTimeFailed,
+  ChelErrorForkedChain
+} from './errors.js'
+import {
+  CONTRACTS_MODIFIED,
+  CONTRACT_HAS_RECEIVED_KEYS,
+  CONTRACT_IS_SYNCING,
+  EVENT_HANDLED,
+  EVENT_PUBLISHED,
+  EVENT_PUBLISHING_ERROR
+} from './events.js'
+import {
+  buildShelterAuthorizationHeader,
+  findKeyIdByName,
+  findSuitablePublicKeyIds,
+  findSuitableSecretKeyId,
+  getContractIDfromKeyId,
+  handleFetchResult,
+  keyAdditionProcessor,
+  logEvtError,
+  recreateEvent,
+  validateKeyPermissions,
+  validateKeyAddPermissions,
+  validateKeyDelPermissions,
+  validateKeyUpdatePermissions
+} from './utils.js'
 import { isSignedData, signedIncomingData } from './signedData.js'
-import { ChelContractKey, ChelContractManifest, ChelContractManifestBody, ChelContractProcessMessageObject, ChelContractSideeffectMutationObject, ChelContractState, ChelRootState, CheloniaConfig, CheloniaContext, SendMessageHooks } from './types.js'
+import {
+  ChelContractKey,
+  ChelContractManifest,
+  ChelContractManifestBody,
+  ChelContractProcessMessageObject,
+  ChelContractSideeffectMutationObject,
+  ChelContractState,
+  ChelRootState,
+  CheloniaConfig,
+  CheloniaContext,
+  SendMessageHooks
+} from './types.js'
 // import 'ses'
 
 export type PublishOptions = {
@@ -21,14 +79,20 @@ export type PublishOptions = {
   headers?: Record<string, string>;
   billableContractID?: string;
   bearer?: string;
-  disableAutoDedup?: boolean
-}
+  disableAutoDedup?: boolean;
+};
 
 // Used for temporarily storing the missing decryption key IDs in a given
 // message
 const missingDecryptionKeyIdsMap = new WeakMap<SPMessage, Set<string>>()
 
-const getMsgMeta = function (this: CheloniaContext, message: SPMessage, contractID: string, state: ChelContractState, index?: number) {
+const getMsgMeta = function (
+  this: CheloniaContext,
+  message: SPMessage,
+  contractID: string,
+  state: ChelContractState,
+  index?: number
+) {
   const signingKeyId = message.signingKeyId()
   let innerSigningKeyId: string | null | undefined = null
   const config = this.config
@@ -59,42 +123,66 @@ const getMsgMeta = function (this: CheloniaContext, message: SPMessage, contract
   return result
 }
 
-const keysToMap = function (this: CheloniaContext, keys_: (SPKey | EncryptedData<SPKey>)[], height: number, authorizedKeys?: ChelContractState['_vm']['authorizedKeys']): ChelContractState['_vm']['authorizedKeys'] {
+const keysToMap = function (
+  this: CheloniaContext,
+  keys_: (SPKey | EncryptedData<SPKey>)[],
+  height: number,
+  authorizedKeys?: ChelContractState['_vm']['authorizedKeys']
+): ChelContractState['_vm']['authorizedKeys'] {
   // Using cloneDeep to ensure that the returned object is serializable
   // Keys in a SPMessage may not be serializable (i.e., supported by the
   // structured clone algorithm) when they contain encryptedIncomingData
-  const keys = keys_.map((key) => {
-    const data = this.config.unwrapMaybeEncryptedData(key)
-    if (!data) return undefined
-    if (data.encryptionKeyId) {
-      data.data._private = data.encryptionKeyId
-    }
-    return data.data
-  // eslint-disable-next-line no-use-before-define
-  }).filter(Boolean as unknown as (v: unknown) => v is ChelContractKey) as ChelContractKey[]
+  const keys = keys_
+    .map((key) => {
+      const data = this.config.unwrapMaybeEncryptedData(key)
+      if (!data) return undefined
+      if (data.encryptionKeyId) {
+        data.data._private = data.encryptionKeyId
+      }
+      return data.data
+    })
+    // eslint-disable-next-line no-use-before-define
+    .filter(Boolean as unknown as (v: unknown) => v is ChelContractKey) as ChelContractKey[]
 
   const keysCopy = cloneDeep(keys) as typeof keys
-  return Object.fromEntries(keysCopy.map((key) => {
-    key._notBeforeHeight = height
-    if (authorizedKeys?.[key.id]) {
-      if (authorizedKeys[key.id]._notAfterHeight == null) {
-        throw new ChelErrorKeyAlreadyExists(`Cannot set existing unrevoked key: ${key.id}`)
-      }
-      // If the key was get previously, preserve its _notBeforeHeight
-      // NOTE: (SECURITY) This may allow keys for periods for which it wasn't
-      // supposed to be active. This is a trade-off for simplicity, instead of
-      // considering discrete periods, which is the correct solution
-      // Discrete ranges *MUST* be implemented because they impact permissions
-      key._notBeforeHeight = Math.min(height, authorizedKeys[key.id]._notBeforeHeight ?? 0)
-    } else {
+  return Object.fromEntries(
+    keysCopy.map((key) => {
       key._notBeforeHeight = height
-    }
-    delete key._notAfterHeight
-    return [key.id, key]
-  }))
+      if (authorizedKeys?.[key.id]) {
+        if (authorizedKeys[key.id]._notAfterHeight == null) {
+          throw new ChelErrorKeyAlreadyExists(`Cannot set existing unrevoked key: ${key.id}`)
+        }
+        // If the key was get previously, preserve its _notBeforeHeight
+        // NOTE: (SECURITY) This may allow keys for periods for which it wasn't
+        // supposed to be active. This is a trade-off for simplicity, instead of
+        // considering discrete periods, which is the correct solution
+        // Discrete ranges *MUST* be implemented because they impact permissions
+        key._notBeforeHeight = Math.min(height, authorizedKeys[key.id]._notBeforeHeight ?? 0)
+      } else {
+        key._notBeforeHeight = height
+      }
+      delete key._notAfterHeight
+      return [key.id, key]
+    })
+  )
 }
 
-const keyRotationHelper = <T> (contractID: string, state: ChelContractState, config: CheloniaConfig, updatedKeysMap: Record<string, {name: string, oldKeyId: string}>, requiredPermissions: string[], outputSelector: string, outputMapper: (name: [string, string]) => T, internalSideEffectStack?: (({ state, message }: { state: ChelContractState, message: SPMessage }) => void)[]) => {
+const keyRotationHelper = <T>(
+  contractID: string,
+  state: ChelContractState,
+  config: CheloniaConfig,
+  updatedKeysMap: Record<string, { name: string; oldKeyId: string }>,
+  requiredPermissions: string[],
+  outputSelector: string,
+  outputMapper: (name: [string, string]) => T,
+  internalSideEffectStack?: (({
+    state,
+    message
+  }: {
+    state: ChelContractState;
+    message: SPMessage;
+  }) => void)[]
+) => {
   if (!internalSideEffectStack || !Array.isArray(state._volatile?.watch)) return
 
   const rootState = sbp(config.stateSelector)
@@ -105,7 +193,10 @@ const keyRotationHelper = <T> (contractID: string, state: ChelContractState, con
       return
     }
     if (!watchMap[cID]) {
-      if (!rootState.contracts[cID]?.type || !findSuitableSecretKeyId(rootState[cID], [SPMessage.OP_KEY_UPDATE], ['sig'])) {
+      if (
+        !rootState.contracts[cID]?.type ||
+        !findSuitableSecretKeyId(rootState[cID], [SPMessage.OP_KEY_UPDATE], ['sig'])
+      ) {
         watchMap[cID] = null
         return
       }
@@ -119,24 +210,51 @@ const keyRotationHelper = <T> (contractID: string, state: ChelContractState, con
   Object.entries(watchMap).forEach(([cID, names]) => {
     if (!Array.isArray(names) || !names.length) return
 
-    const [keyNamesToUpdate, signingKeyId] = names.map((name): [[name: string, foreignName: string], signingKeyId: string, ringLevel: number] | undefined => {
-      const foreignContractKey = rootState[cID]?._vm?.authorizedKeys?.[updatedKeysMap[name].oldKeyId]
+    const [keyNamesToUpdate, signingKeyId] = names
+      .map(
+        (
+          name
+        ):
+          | [[name: string, foreignName: string], signingKeyId: string, ringLevel: number]
+          | undefined => {
+          const foreignContractKey =
+            rootState[cID]?._vm?.authorizedKeys?.[updatedKeysMap[name].oldKeyId]
 
-      if (!foreignContractKey) return undefined
+          if (!foreignContractKey) return undefined
 
-      const signingKeyId = findSuitableSecretKeyId(rootState[cID], requiredPermissions, ['sig'], foreignContractKey.ringLevel)
+          const signingKeyId = findSuitableSecretKeyId(
+            rootState[cID],
+            requiredPermissions,
+            ['sig'],
+            foreignContractKey.ringLevel
+          )
 
-      if (signingKeyId) {
-        return [[name, foreignContractKey.name], signingKeyId, rootState[cID]._vm.authorizedKeys[signingKeyId].ringLevel]
-      }
+          if (signingKeyId) {
+            return [
+              [name, foreignContractKey.name],
+              signingKeyId,
+              rootState[cID]._vm.authorizedKeys[signingKeyId].ringLevel
+            ]
+          }
 
-      return undefined
-    // eslint-disable-next-line no-use-before-define
-    }).filter(Boolean as unknown as (x: unknown) => x is [[name: string, foreignName: string], signingKeyId: string, ringLevel: number])
-      .reduce<[[name: string, foreignName: string][], signingKeyId: string | undefined, ringLevel: number]>((acc, [name, signingKeyId, ringLevel]) => {
-        acc[0].push(name)
-        return ringLevel < acc[2] ? [acc[0], signingKeyId, ringLevel] : acc
-      }, [[] as [name: string, foreignName: string][], undefined, Number.POSITIVE_INFINITY])
+          return undefined
+        }
+      )
+      .filter(
+        Boolean as unknown as (
+          x: unknown,
+        // eslint-disable-next-line no-use-before-define
+        ) => x is [[name: string, foreignName: string], signingKeyId: string, ringLevel: number]
+      )
+      .reduce<
+        [[name: string, foreignName: string][], signingKeyId: string | undefined, ringLevel: number]
+      >(
+        (acc, [name, signingKeyId, ringLevel]) => {
+          acc[0].push(name)
+          return ringLevel < acc[2] ? [acc[0], signingKeyId, ringLevel] : acc
+        },
+        [[] as [name: string, foreignName: string][], undefined, Number.POSITIVE_INFINITY]
+      )
 
     if (!signingKeyId) return
 
@@ -154,7 +272,9 @@ const keyRotationHelper = <T> (contractID: string, state: ChelContractState, con
         }),
         signingKeyId
       }).catch((e: unknown) => {
-        console.warn(`Error mirroring key operation (${outputSelector}) from ${contractID} to ${cID}: ${(e as Error)?.message || e}`)
+        console.warn(
+          `Error mirroring key operation (${outputSelector}) from ${contractID} to ${cID}: ${(e as Error)?.message || e}`
+        )
       })
     })
   })
@@ -167,10 +287,17 @@ export default sbp('sbp/selectors/register', {
   'chelonia/private/state': function (this: CheloniaContext) {
     return this.state
   },
-  'chelonia/private/invoke': function (this: CheloniaContext, instance: object, invocation: Parameters<typeof sbp> | { (): void }) {
+  'chelonia/private/invoke': function (
+    this: CheloniaContext,
+    instance: object,
+    invocation: Parameters<typeof sbp> | { (): void }
+  ) {
     // If this._instance !== instance (i.e., chelonia/reset was called)
     if (this._instance !== instance) {
-      console.info('[\'chelonia/private/invoke] Not proceeding with invocation as Chelonia was restarted', { invocation })
+      console.info(
+        "['chelonia/private/invoke] Not proceeding with invocation as Chelonia was restarted",
+        { invocation }
+      )
       return
     }
     if (Array.isArray(invocation)) {
@@ -178,17 +305,38 @@ export default sbp('sbp/selectors/register', {
     } else if (typeof invocation === 'function') {
       return invocation()
     } else {
-      throw new TypeError(`[chelonia/private/invoke] Expected invocation to be an array or a function. Saw ${typeof invocation} instead.`)
+      throw new TypeError(
+        `[chelonia/private/invoke] Expected invocation to be an array or a function. Saw ${typeof invocation} instead.`
+      )
     }
   },
-  'chelonia/private/queueEvent': function (this: CheloniaContext, queueName: string, invocation: Parameters<typeof sbp> | { (): void }) {
-    return sbp('okTurtles.eventQueue/queueEvent', queueName, ['chelonia/private/invoke', this._instance, invocation])
+  'chelonia/private/queueEvent': function (
+    this: CheloniaContext,
+    queueName: string,
+    invocation: Parameters<typeof sbp> | { (): void }
+  ) {
+    return sbp('okTurtles.eventQueue/queueEvent', queueName, [
+      'chelonia/private/invoke',
+      this._instance,
+      invocation
+    ])
   },
-  'chelonia/private/verifyManifestSignature': function (this: CheloniaContext, contractName: string, manifestHash: string, manifest: ChelContractManifest) {
+  'chelonia/private/verifyManifestSignature': function (
+    this: CheloniaContext,
+    contractName: string,
+    manifestHash: string,
+    manifest: ChelContractManifest
+  ) {
     // We check that the manifest contains a 'signature' field with the correct
     // shape
-    if (!has(manifest, 'signature') || typeof manifest.signature.keyId !== 'string' || typeof manifest.signature.value !== 'string') {
-      throw new Error(`Invalid or missing signature field for manifest ${manifestHash} (named ${contractName})`)
+    if (
+      !has(manifest, 'signature') ||
+      typeof manifest.signature.keyId !== 'string' ||
+      typeof manifest.signature.value !== 'string'
+    ) {
+      throw new Error(
+        `Invalid or missing signature field for manifest ${manifestHash} (named ${contractName})`
+      )
     }
 
     // Now, start the signature verification process
@@ -206,15 +354,26 @@ export default sbp('sbp/selectors/register', {
     const contractNameLookupKey = `name:${contractName}`
     // If the contract name has been seen before, validate its signature now
     let signatureValidated = false
-    if (process.env.UNSAFE_TRUST_ALL_MANIFEST_SIGNING_KEYS !== 'true' && has(rootState.contractSigningKeys, contractNameLookupKey)) {
+    if (
+      process.env.UNSAFE_TRUST_ALL_MANIFEST_SIGNING_KEYS !== 'true' &&
+      has(rootState.contractSigningKeys, contractNameLookupKey)
+    ) {
       console.info(`[chelonia] verifying signature for ${manifestHash} with an existing key`)
       if (!has(rootState.contractSigningKeys[contractNameLookupKey], manifest.signature.keyId)) {
-        console.error(`The manifest with ${manifestHash} (named ${contractName}) claims to be signed with a key with ID ${manifest.signature.keyId}, which is not trusted. The trusted key IDs for this name are:`, Object.keys(rootState.contractSigningKeys[contractNameLookupKey]))
-        throw new Error(`Invalid or missing signature in manifest ${manifestHash} (named ${contractName}). It claims to be signed with a key with ID ${manifest.signature.keyId}, which has not been authorized for this contract before.`)
+        console.error(
+          `The manifest with ${manifestHash} (named ${contractName}) claims to be signed with a key with ID ${manifest.signature.keyId}, which is not trusted. The trusted key IDs for this name are:`,
+          Object.keys(rootState.contractSigningKeys[contractNameLookupKey])
+        )
+        throw new Error(
+          `Invalid or missing signature in manifest ${manifestHash} (named ${contractName}). It claims to be signed with a key with ID ${manifest.signature.keyId}, which has not been authorized for this contract before.`
+        )
       }
-      const signingKey = rootState.contractSigningKeys[contractNameLookupKey][manifest.signature.keyId]
+      const signingKey =
+        rootState.contractSigningKeys[contractNameLookupKey][manifest.signature.keyId]
       verifySignature(signingKey, manifest.body + manifest.head, manifest.signature.value)
-      console.info(`[chelonia] successful signature verification for ${manifestHash} (named ${contractName}) using the already-trusted key ${manifest.signature.keyId}.`)
+      console.info(
+        `[chelonia] successful signature verification for ${manifestHash} (named ${contractName}) using the already-trusted key ${manifest.signature.keyId}.`
+      )
       signatureValidated = true
     }
     // Otherwise, when this is a yet-unseen contract, we parse the body to
@@ -223,27 +382,42 @@ export default sbp('sbp/selectors/register', {
     // If we don't have a list of authorized signatures yet, verify this
     // contract's signature and set the auhorized signing keys
     if (!signatureValidated) {
-      console.info(`[chelonia] verifying signature for ${manifestHash} (named ${contractName}) for the first time`)
+      console.info(
+        `[chelonia] verifying signature for ${manifestHash} (named ${contractName}) for the first time`
+      )
       if (!has(body, 'signingKeys') || !Array.isArray(body.signingKeys)) {
-        throw new Error(`Invalid manifest file ${manifestHash} (named ${contractName}). Its body doesn't contain a 'signingKeys' list'`)
+        throw new Error(
+          `Invalid manifest file ${manifestHash} (named ${contractName}). Its body doesn't contain a 'signingKeys' list'`
+        )
       }
-      let contractSigningKeys: { [idx: string]: string}
+      let contractSigningKeys: { [idx: string]: string }
       try {
-        contractSigningKeys = Object.fromEntries(body.signingKeys.map((serializedKey) => {
-          return [
-            keyId(serializedKey),
-            serializedKey
-          ]
-        }))
+        contractSigningKeys = Object.fromEntries(
+          body.signingKeys.map((serializedKey) => {
+            return [keyId(serializedKey), serializedKey]
+          })
+        )
       } catch (e) {
-        console.error(`[chelonia] Error parsing the public keys list for ${manifestHash} (named ${contractName})`, e)
+        console.error(
+          `[chelonia] Error parsing the public keys list for ${manifestHash} (named ${contractName})`,
+          e
+        )
         throw e
       }
       if (!has(contractSigningKeys, manifest.signature.keyId)) {
-        throw new Error(`Invalid or missing signature in manifest ${manifestHash} (named ${contractName}). It claims to be signed with a key with ID ${manifest.signature.keyId}, which is not listed in its 'signingKeys' field.`)
+        throw new Error(
+          `Invalid or missing signature in manifest ${manifestHash} (named ${contractName}). It claims to be signed with a key with ID ${manifest.signature.keyId}, which is not listed in its 'signingKeys' field.`
+        )
       }
-      verifySignature(contractSigningKeys[manifest.signature.keyId], manifest.body + manifest.head, manifest.signature.value)
-      console.info(`[chelonia] successful signature verification for ${manifestHash} (named ${contractName}) using ${manifest.signature.keyId}. The following key IDs will now be trusted for this contract name`, Object.keys(contractSigningKeys))
+      verifySignature(
+        contractSigningKeys[manifest.signature.keyId],
+        manifest.body + manifest.head,
+        manifest.signature.value
+      )
+      console.info(
+        `[chelonia] successful signature verification for ${manifestHash} (named ${contractName}) using ${manifest.signature.keyId}. The following key IDs will now be trusted for this contract name`,
+        Object.keys(contractSigningKeys)
+      )
       signatureValidated = true
       rootState.contractSigningKeys[contractNameLookupKey] = contractSigningKeys
     }
@@ -252,7 +426,11 @@ export default sbp('sbp/selectors/register', {
     // loaded contract available
     return body
   },
-  'chelonia/private/loadManifest': async function (this: CheloniaContext, contractName: string, manifestHash: string) {
+  'chelonia/private/loadManifest': async function (
+    this: CheloniaContext,
+    contractName: string,
+    manifestHash: string
+  ) {
     if (!contractName || typeof contractName !== 'string') {
       throw new Error('Invalid or missing contract name')
     }
@@ -260,21 +438,40 @@ export default sbp('sbp/selectors/register', {
       console.warn('[chelonia]: already loaded manifest', manifestHash)
       return
     }
-    const manifestSource = await sbp('chelonia/out/fetchResource', manifestHash, { code: multicodes.SHELTER_CONTRACT_MANIFEST })
+    const manifestSource = await sbp('chelonia/out/fetchResource', manifestHash, {
+      code: multicodes.SHELTER_CONTRACT_MANIFEST
+    })
     const manifest = JSON.parse(manifestSource)
-    const body = sbp('chelonia/private/verifyManifestSignature', contractName, manifestHash, manifest)
+    const body = sbp(
+      'chelonia/private/verifyManifestSignature',
+      contractName,
+      manifestHash,
+      manifest
+    )
     if (body.name !== contractName) {
       throw new Error(`Mismatched contract name. Expected ${contractName} but got ${body.name}`)
     }
-    const contractInfo = (this.config.contracts.defaults.preferSlim && body.contractSlim) || body.contract
-    console.info(`[chelonia] loading contract '${contractInfo.file}'@'${body.version}' from manifest: ${manifestHash}`)
-    const source = await sbp('chelonia/out/fetchResource', contractInfo.hash, { code: multicodes.SHELTER_CONTRACT_TEXT })
-    const reduceAllow = <T extends PropertyKey>(acc: Record<T, true>, v: T) => { acc[v] = true; return acc }
-    const allowedSels: Record<string, boolean> = ['okTurtles.events/on', 'chelonia/defineContract', 'chelonia/out/keyRequest']
+    const contractInfo =
+      (this.config.contracts.defaults.preferSlim && body.contractSlim) || body.contract
+    console.info(
+      `[chelonia] loading contract '${contractInfo.file}'@'${body.version}' from manifest: ${manifestHash}`
+    )
+    const source = await sbp('chelonia/out/fetchResource', contractInfo.hash, {
+      code: multicodes.SHELTER_CONTRACT_TEXT
+    })
+    const reduceAllow = <T extends PropertyKey>(acc: Record<T, true>, v: T) => {
+      acc[v] = true
+      return acc
+    }
+    const allowedSels: Record<string, boolean> = [
+      'okTurtles.events/on',
+      'chelonia/defineContract',
+      'chelonia/out/keyRequest'
+    ]
       .concat(this.config.contracts.defaults.allowedSelectors)
       .reduce(reduceAllow, {})
-    const allowedDoms: Record<string, boolean> = this.config.contracts.defaults.allowedDomains
-      .reduce(reduceAllow, {})
+    const allowedDoms: Record<string, boolean> =
+      this.config.contracts.defaults.allowedDomains.reduce(reduceAllow, {})
     const contractSBP = (selector: string, ...args: unknown[]) => {
       const domain = domainFromSelector(selector)
       if (selector.startsWith(contractName + '/')) {
@@ -283,7 +480,11 @@ export default sbp('sbp/selectors/register', {
       if (allowedSels[selector] || allowedDoms[domain]) {
         return sbp(selector, ...args)
       } else {
-        console.error('[chelonia] selector not on allowlist', { selector, allowedSels, allowedDoms })
+        console.error('[chelonia] selector not on allowlist', {
+          selector,
+          allowedSels,
+          allowedDoms
+        })
         throw new Error(`[chelonia] selector not on allowlist: '${selector}'`)
       }
     }
@@ -318,9 +519,11 @@ export default sbp('sbp/selectors/register', {
       // pass in globals that we want access to by default in the sandbox
       // note: you can undefine these by setting them to undefined in exposedGlobals
       crypto: {
-        getRandomValues: <T extends ArrayBufferView | null> (v: T) => globalThis.crypto.getRandomValues<T>(v)
+        getRandomValues: <T extends ArrayBufferView | null>(v: T) =>
+          globalThis.crypto.getRandomValues<T>(v)
       },
-      ...(typeof window === 'object' && window && {
+      ...(typeof window === 'object' &&
+        window && {
         alert: window.alert.bind(window),
         confirm: window.confirm.bind(window),
         prompt: window.prompt.bind(window)
@@ -358,9 +561,7 @@ export default sbp('sbp/selectors/register', {
       WeakMap,
       ...this.config.contracts.defaults.exposedGlobals,
       require: (dep: string) => {
-        return dep === '@sbp/sbp'
-          ? contractSBP
-          : this.config.contracts.defaults.modules[dep]
+        return dep === '@sbp/sbp' ? contractSBP : this.config.contracts.defaults.modules[dep]
       },
       sbp: contractSBP,
       fetchServerTime: async (fallback: boolean = true) => {
@@ -370,21 +571,29 @@ export default sbp('sbp/selectors/register', {
         // with other client's clocks.
         // See: https://github.com/okTurtles/group-income/issues/531
         try {
-          const response = await this.config.fetch(`${this.config.connectionURL}/time`, { signal: this.abortController.signal })
+          const response = await this.config.fetch(`${this.config.connectionURL}/time`, {
+            signal: this.abortController.signal
+          })
           return handleFetchResult('text')(response)
         } catch (e) {
           console.warn('[fetchServerTime] Error', e)
           if (fallback) {
             return new Date(sbp('chelonia/time')).toISOString()
           }
-          throw new ChelErrorFetchServerTimeFailed('Can not fetch server time. Please check your internet connection.')
+          throw new ChelErrorFetchServerTimeFailed(
+            'Can not fetch server time. Please check your internet connection.'
+          )
         }
       }
     })
     if (contractName !== this.defContract.name) {
-      throw new Error(`Invalid contract name for manifest ${manifestHash}. Expected ${contractName} but got ${this.defContract.name}`)
+      throw new Error(
+        `Invalid contract name for manifest ${manifestHash}. Expected ${contractName} but got ${this.defContract.name}`
+      )
     }
-    this.defContractSelectors.forEach(s => { allowedSels[s] = true })
+    this.defContractSelectors.forEach((s) => {
+      allowedSels[s] = true
+    })
     this.manifestToContract[manifestHash] = {
       slim: contractInfo === body.contractSlim,
       info: contractInfo,
@@ -392,11 +601,17 @@ export default sbp('sbp/selectors/register', {
     }
   },
   // Warning: avoid using this unless you know what you're doing. Prefer using /remove.
-  'chelonia/private/removeImmediately': function (this: CheloniaContext, contractID: string, params?: { permanent?: boolean, resync?: boolean }) {
+  'chelonia/private/removeImmediately': function (
+    this: CheloniaContext,
+    contractID: string,
+    params?: { permanent?: boolean; resync?: boolean }
+  ) {
     const state = sbp(this.config.stateSelector)
     const contractName = state.contracts[contractID]?.type
     if (!contractName) {
-      console.error('[chelonia/private/removeImmediately] Missing contract name for contract', { contractID })
+      console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
+        contractID
+      })
       return
     }
 
@@ -409,7 +624,10 @@ export default sbp('sbp/selectors/register', {
         try {
           sbp(destructor, { contractID, resync: !!params?.resync, state: state[contractID] })
         } catch (e) {
-          console.error(`[chelonia/private/removeImmediately] Error at destructor for ${contractID}`, e)
+          console.error(
+            `[chelonia/private/removeImmediately] Error at destructor for ${contractID}`,
+            e
+          )
         }
       }
     }
@@ -451,35 +669,48 @@ export default sbp('sbp/selectors/register', {
   },
   // used by, e.g. 'chelonia/contract/wait'
   'chelonia/private/noop': function () {},
-  'chelonia/private/out/sync': function (this: CheloniaContext, contractIDs: string | string[], params?: { force?: boolean, resync?: boolean }): Promise<void[]> {
+  'chelonia/private/out/sync': function (
+    this: CheloniaContext,
+    contractIDs: string | string[],
+    params?: { force?: boolean; resync?: boolean }
+  ): Promise<void[]> {
     const listOfIds = typeof contractIDs === 'string' ? [contractIDs] : contractIDs
     const forcedSync = !!params?.force
-    return Promise.all(listOfIds.map(contractID => {
-      // If this isn't a forced sync and we're already subscribed to the contract,
-      // only wait on the event queue (as events should come over the subscription)
-      if (!forcedSync && this.subscriptionSet.has(contractID)) {
-        const rootState = sbp(this.config.stateSelector)
-        // However, if the contract has been marked as dirty (meaning its state
-        // could be wrong due to newly received encryption keys), sync it anyhow
-        // (i.e., disregard the force flag and proceed to sync the contract)
-        if (!rootState[contractID]?._volatile?.dirty) {
-          return sbp('chelonia/private/queueEvent', contractID, ['chelonia/private/noop'])
+    return Promise.all(
+      listOfIds.map((contractID) => {
+        // If this isn't a forced sync and we're already subscribed to the contract,
+        // only wait on the event queue (as events should come over the subscription)
+        if (!forcedSync && this.subscriptionSet.has(contractID)) {
+          const rootState = sbp(this.config.stateSelector)
+          // However, if the contract has been marked as dirty (meaning its state
+          // could be wrong due to newly received encryption keys), sync it anyhow
+          // (i.e., disregard the force flag and proceed to sync the contract)
+          if (!rootState[contractID]?._volatile?.dirty) {
+            return sbp('chelonia/private/queueEvent', contractID, ['chelonia/private/noop'])
+          }
         }
-      }
-      // enqueue this invocation in a serial queue to ensure
-      // handleEvent does not get called on contractID while it's syncing,
-      // but after it's finished. This is used in tandem with
-      // queuing the 'chelonia/private/in/handleEvent' selector, defined below.
-      // This prevents handleEvent getting called with the wrong previousHEAD for an event.
-      return sbp('chelonia/private/queueEvent', contractID, [
-        'chelonia/private/in/syncContract', contractID, params
-      ]).catch((err: unknown) => {
-        console.error(`[chelonia] failed to sync ${contractID}:`, err)
-        throw err // re-throw the error
+        // enqueue this invocation in a serial queue to ensure
+        // handleEvent does not get called on contractID while it's syncing,
+        // but after it's finished. This is used in tandem with
+        // queuing the 'chelonia/private/in/handleEvent' selector, defined below.
+        // This prevents handleEvent getting called with the wrong previousHEAD for an event.
+        return sbp('chelonia/private/queueEvent', contractID, [
+          'chelonia/private/in/syncContract',
+          contractID,
+          params
+        ]).catch((err: unknown) => {
+          console.error(`[chelonia] failed to sync ${contractID}:`, err)
+          throw err // re-throw the error
+        })
       })
-    }))
+    )
   },
-  'chelonia/private/out/publishEvent': function (this: CheloniaContext, entry: SPMessage, { maxAttempts = 5, headers, billableContractID, bearer, disableAutoDedup }: PublishOptions = {}, hooks: SendMessageHooks) {
+  'chelonia/private/out/publishEvent': function (
+    this: CheloniaContext,
+    entry: SPMessage,
+    { maxAttempts = 5, headers, billableContractID, bearer, disableAutoDedup }: PublishOptions = {},
+    hooks: SendMessageHooks
+  ) {
     const contractID = entry.contractID()
     const originalEntry = entry
 
@@ -504,10 +735,10 @@ export default sbp('sbp/selectors/register', {
       // auto resend after short random delay
       // https://github.com/okTurtles/group-income/issues/608
       while (true) {
-      // Queued event to ensure that we send the event with whatever the
-      // 'latest' state may be for that contract (in case we were receiving
-      // something over the web socket)
-      // This also ensures that the state doesn't change while reading it
+        // Queued event to ensure that we send the event with whatever the
+        // 'latest' state may be for that contract (in case we were receiving
+        // something over the web socket)
+        // This also ensures that the state doesn't change while reading it
         lastAttemptedHeight = entry.height()
         const newEntry = await sbp('chelonia/private/queueEvent', contractID, async () => {
           const rootState = sbp(this.config.stateSelector)
@@ -515,13 +746,17 @@ export default sbp('sbp/selectors/register', {
           const isFirstMessage = entry.isFirstMessage()
 
           if (!state && !isFirstMessage) {
-            console.info(`[chelonia] Not sending message as contract state has been removed: ${entry.description()}`)
+            console.info(
+              `[chelonia] Not sending message as contract state has been removed: ${entry.description()}`
+            )
             return
           }
 
           if (hooks?.preSendCheck) {
-            if (!await hooks.preSendCheck(entry, state)) {
-              console.info(`[chelonia] Not sending message as preSendCheck hook returned non-truish value: ${entry.description()}`)
+            if (!(await hooks.preSendCheck(entry, state))) {
+              console.info(
+                `[chelonia] Not sending message as preSendCheck hook returned non-truish value: ${entry.description()}`
+              )
               return
             }
           }
@@ -589,12 +824,12 @@ export default sbp('sbp/selectors/register', {
           body: entry.serialize(),
           headers: {
             ...headers,
-            ...bearer && {
+            ...(bearer && {
               Authorization: `Bearer ${bearer}`
-            },
-            ...billableContractID && {
+            }),
+            ...(billableContractID && {
               Authorization: buildShelterAuthorizationHeader.call(this, billableContractID)
-            },
+            }),
             'Content-Type': 'text/plain'
           },
           signal: this.abortController.signal
@@ -606,12 +841,17 @@ export default sbp('sbp/selectors/register', {
         try {
           if (r.status === 409) {
             if (attempt + 1 > maxAttempts) {
-              console.error(`[chelonia] failed to publish ${entry.description()} after ${attempt} attempts`, entry)
+              console.error(
+                `[chelonia] failed to publish ${entry.description()} after ${attempt} attempts`,
+                entry
+              )
               throw new Error(`publishEvent: ${r.status} - ${r.statusText}. attempt ${attempt}`)
             }
             // create new entry
             const randDelay = randomIntFromRange(0, 1500)
-            console.warn(`[chelonia] publish attempt ${attempt} of ${maxAttempts} failed. Waiting ${randDelay} msec before resending ${entry.description()}`)
+            console.warn(
+              `[chelonia] publish attempt ${attempt} of ${maxAttempts} failed. Waiting ${randDelay} msec before resending ${entry.description()}`
+            )
             attempt += 1
             await delay(randDelay) // wait randDelay ms before sending it again
 
@@ -623,7 +863,10 @@ export default sbp('sbp/selectors/register', {
             }
           } else {
             const message = (await r.json())?.message
-            console.error(`[chelonia] ERROR: failed to publish ${entry.description()}: ${r.status} - ${r.statusText}: ${message}`, entry)
+            console.error(
+              `[chelonia] ERROR: failed to publish ${entry.description()}: ${r.status} - ${r.statusText}: ${message}`,
+              entry
+            )
             throw new Error(`publishEvent: ${r.status} - ${r.statusText}: ${message}`)
           }
         } catch (e) {
@@ -632,35 +875,55 @@ export default sbp('sbp/selectors/register', {
           throw e
         }
       }
-    }).then((entry: SPMessage) => {
-      sbp('okTurtles.events/emit', EVENT_PUBLISHED, { contractID, message: entry, originalMessage: originalEntry })
-      return entry
-    }).catch((e: unknown) => {
-      sbp('okTurtles.events/emit', EVENT_PUBLISHING_ERROR, { contractID, message: entry, originalMessage: originalEntry, error: e })
-      throw e
     })
+      .then((entry: SPMessage) => {
+        sbp('okTurtles.events/emit', EVENT_PUBLISHED, {
+          contractID,
+          message: entry,
+          originalMessage: originalEntry
+        })
+        return entry
+      })
+      .catch((e: unknown) => {
+        sbp('okTurtles.events/emit', EVENT_PUBLISHING_ERROR, {
+          contractID,
+          message: entry,
+          originalMessage: originalEntry,
+          error: e
+        })
+        throw e
+      })
   },
   'chelonia/private/out/latestHEADinfo': function (this: CheloniaContext, contractID: string) {
-    return this.config.fetch(`${this.config.connectionURL}/latestHEADinfo/${contractID}`, {
-      cache: 'no-store',
-      signal: this.abortController.signal
-    }).then(handleFetchResult('json'))
+    return this.config
+      .fetch(`${this.config.connectionURL}/latestHEADinfo/${contractID}`, {
+        cache: 'no-store',
+        signal: this.abortController.signal
+      })
+      .then(handleFetchResult('json'))
   },
-  'chelonia/private/postKeyShare': function (this: CheloniaContext, contractID: string, previousVolatileState: ChelContractState['_volatile'], signingKey: SPKey) {
+  'chelonia/private/postKeyShare': function (
+    this: CheloniaContext,
+    contractID: string,
+    previousVolatileState: ChelContractState['_volatile'],
+    signingKey: SPKey
+  ) {
     const cheloniaState = sbp(this.config.stateSelector)
     const targetState = cheloniaState[contractID] as ChelContractState
 
     if (!targetState) return
 
     if (previousVolatileState && has(previousVolatileState, 'watch')) {
-      if (!targetState._volatile) this.config.reactiveSet(targetState, '_volatile', Object.create(null))
+      if (!targetState._volatile) { this.config.reactiveSet(targetState, '_volatile', Object.create(null)) }
       if (!targetState._volatile!.watch) {
         this.config.reactiveSet(targetState._volatile!, 'watch', previousVolatileState.watch)
       } else if (targetState._volatile!.watch !== previousVolatileState.watch) {
         previousVolatileState.watch!.forEach((pWatch) => {
-          if (!targetState._volatile!.watch!.some((tWatch) => {
-            return (tWatch[0] === pWatch[0]) && (tWatch[1] === pWatch[1])
-          })) {
+          if (
+            !targetState._volatile!.watch!.some((tWatch) => {
+              return tWatch[0] === pWatch[0] && tWatch[1] === pWatch[1]
+            })
+          ) {
             targetState._volatile!.watch!.push(pWatch)
           }
         })
@@ -670,13 +933,24 @@ export default sbp('sbp/selectors/register', {
     if (!Array.isArray(targetState._volatile?.pendingKeyRequests)) return
 
     this.config.reactiveSet(
-      targetState._volatile, 'pendingKeyRequests',
-      targetState._volatile.pendingKeyRequests.filter((pkr) =>
-        pkr?.name !== signingKey.name
-      )
+      targetState._volatile,
+      'pendingKeyRequests',
+      targetState._volatile.pendingKeyRequests.filter((pkr) => pkr?.name !== signingKey.name)
     )
   },
-  'chelonia/private/in/processMessage': async function (this: CheloniaContext, message: SPMessage, state: ChelContractState, internalSideEffectStack?: (({ state, message }: { state: ChelContractState, message: SPMessage }) => void)[], contractName?: string) {
+  'chelonia/private/in/processMessage': async function (
+    this: CheloniaContext,
+    message: SPMessage,
+    state: ChelContractState,
+    internalSideEffectStack?: (({
+      state,
+      message
+    }: {
+      state: ChelContractState;
+      message: SPMessage;
+    }) => void)[],
+    contractName?: string
+  ) {
     const [opT, opV] = message.op()
     const hash = message.hash()
     const height = message.height()
@@ -690,26 +964,37 @@ export default sbp('sbp/selectors/register', {
     const opName = Object.entries(SPMessage).find(([, y]) => y === opT)?.[0]
     console.debug('PROCESSING OPCODE:', opName, 'to', contractID)
     if (state?._volatile?.dirty) {
-      console.debug('IGNORING OPCODE BECAUSE CONTRACT STATE IS MARKED AS DIRTY.', 'OPCODE:', opName, 'CONTRACT:', contractID)
+      console.debug(
+        'IGNORING OPCODE BECAUSE CONTRACT STATE IS MARKED AS DIRTY.',
+        'OPCODE:',
+        opName,
+        'CONTRACT:',
+        contractID
+      )
       return
     }
     if (!state._vm) state._vm = Object.create(null)
     const opFns: {
-      [K in keyof SPOpMap]: (op: SPOpMap[K]) => void | Promise<void>
+      [K in keyof SPOpMap]: (op: SPOpMap[K]) => void | Promise<void>;
     } = {
       /*
         There are two types of "errors" that we need to consider:
         1. "Ignoring" errors
         2. "Failure" errors
         Example: OP_KEY_ADD
-        1. IGNORING: an error is thrown because we wanted to add a key but the key we wanted to add is already there. This is not a hard error, it's an ignoring error. We don't care that the operation failed in this case because the intent was accomplished.
+        1. IGNORING: an error is thrown because we wanted to add a key but the
+        key we wanted to add is already there. This is not a hard error, it's an
+        ignoring error. We don't care that the operation failed in this case because the intent was accomplished.
         2. FAILURE: an error is thrown while attempting to add a key that doesn't exist.
         Example: OP_ACTION_ENCRYPTED
         1. IGNORING: An error is thrown because we don't have the key to decrypt the action. We ignore it.
         2. FAILURE: An error is thrown by the process function during processing.
         Handling these in OP_ATOMIC
-        • ALL errors of class "IGNORING" should be ignored. They should not impact our ability to process the rest of the operations in the OP_ATOMIC. No matter how many of these are thrown, it doesn't affect the rest of the operations.
-        • ANY error of class "FAILURE" will call the rest of the operations to fail and the state to be reverted to prior to the OP_ATOMIC. No side-effects should be run. Because an intention failed.
+        • ALL errors of class "IGNORING" should be ignored. They should not
+        impact our ability to process the rest of the operations in the OP_ATOMIC.
+        No matter how many of these are thrown, it doesn't affect the rest of the operations.
+        • ANY error of class "FAILURE" will call the rest of the operations to
+        fail and the state to be reverted to prior to the OP_ATOMIC. No side-effects should be run. Because an intention failed.
       */
       async [SPMessage.OP_ATOMIC] (v: SPOpAtomic) {
         for (let i = 0; i < v.length; i++) {
@@ -724,27 +1009,52 @@ export default sbp('sbp/selectors/register', {
             const e = e_ as Error
             if (e && typeof e === 'object') {
               if (e.name === 'ChelErrorDecryptionKeyNotFound') {
-                console.warn(`[chelonia] [OP_ATOMIC] WARN '${e.name}' in processMessage for ${message.description()}: ${e.message}`, e, message.serialize())
+                console.warn(
+                  `[chelonia] [OP_ATOMIC] WARN '${e.name}' in processMessage for ${message.description()}: ${e.message}`,
+                  e,
+                  message.serialize()
+                )
                 if (e.cause) {
                   const missingDecryptionKeyIds = missingDecryptionKeyIdsMap.get(message)
                   if (missingDecryptionKeyIds) {
                     missingDecryptionKeyIds.add(e.cause as unknown as string)
                   } else {
-                    missingDecryptionKeyIdsMap.set(message, new Set([e.cause as unknown as string]))
+                    missingDecryptionKeyIdsMap.set(
+                      message,
+                      new Set([e.cause as unknown as string])
+                    )
                   }
                 }
                 continue
               } else {
-                logEvtError(message, `[chelonia] [OP_ATOMIC] ERROR '${e.name}' in processMessage for ${message.description()}: ${e.message || e}`, e, message.serialize())
+                logEvtError(
+                  message,
+                  `[chelonia] [OP_ATOMIC] ERROR '${e.name}' in processMessage for ${message.description()}: ${e.message || e}`,
+                  e,
+                  message.serialize()
+                )
               }
-              console.warn(`[chelonia] [OP_ATOMIC] Error processing ${message.description()}: ${message.serialize()}. Any side effects will be skipped!`)
+              console.warn(
+                `[chelonia] [OP_ATOMIC] Error processing ${message.description()}: ${message.serialize()}. Any side effects will be skipped!`
+              )
               if (config.strictProcessing) {
                 throw e
               }
-              config.hooks.processError?.(e, message, getMsgMeta.call(self, message, contractID, state))
+              config.hooks.processError?.(
+                e,
+                message,
+                getMsgMeta.call(self, message, contractID, state)
+              )
               if (e.name === 'ChelErrorWarning') continue
             } else {
-              logEvtError(message, 'Inside OP_ATOMIC: Non-object or null error thrown', contractID, message, i, e)
+              logEvtError(
+                message,
+                'Inside OP_ATOMIC: Non-object or null error thrown',
+                contractID,
+                message,
+                i,
+                e
+              )
             }
             throw e
           }
@@ -760,7 +1070,16 @@ export default sbp('sbp/selectors/register', {
         // will use it to decrypt the rest of the keys which are encrypted with that.
         // Specifically, the IEK is used to decrypt the CSKs and the CEKs, which are
         // the encrypted versions of the CSK and CEK.
-        keyAdditionProcessor.call(self, message, hash, v.keys, state, contractID, signingKey, internalSideEffectStack)
+        keyAdditionProcessor.call(
+          self,
+          message,
+          hash,
+          v.keys,
+          state,
+          contractID,
+          signingKey,
+          internalSideEffectStack
+        )
       },
       [SPMessage.OP_ACTION_ENCRYPTED] (v: SPOpActionEncrypted) {
         if (config.skipActionProcessing) {
@@ -817,7 +1136,15 @@ export default sbp('sbp/selectors/register', {
         for (const key of v.keys) {
           if (key.id && key.meta?.private?.content) {
             if (!has(state._vm, 'sharedKeyIds')) state._vm.sharedKeyIds = []
-            if (!state._vm.sharedKeyIds!.some((sK) => sK.id === key.id)) state._vm.sharedKeyIds!.push({ id: key.id, contractID: v.contractID, height, keyRequestHash: v.keyRequestHash, keyRequestHeight: v.keyRequestHeight })
+            if (!state._vm.sharedKeyIds!.some((sK) => sK.id === key.id)) {
+ state._vm.sharedKeyIds!.push({
+   id: key.id,
+   contractID: v.contractID,
+   height,
+   keyRequestHash: v.keyRequestHash,
+   keyRequestHeight: v.keyRequestHeight
+ })
+            }
           }
         }
 
@@ -846,46 +1173,57 @@ export default sbp('sbp/selectors/register', {
           const cheloniaState = sbp(self.config.stateSelector) as ChelRootState
 
           const targetState = cheloniaState[v.contractID]
-          const missingDecryptionKeyIds = cheloniaState.contracts[v.contractID]?.missingDecryptionKeyIds
+          const missingDecryptionKeyIds =
+            cheloniaState.contracts[v.contractID]?.missingDecryptionKeyIds
 
           let newestEncryptionKeyHeight = Number.POSITIVE_INFINITY
           for (const key of v.keys) {
             if (key.id && key.meta?.private?.content) {
               // Outgoing messages' keys are always transient
               const transient = direction === 'outgoing' || key.meta.private.transient
-              if (
-                !sbp('chelonia/haveSecretKey', key.id, !transient)
-              ) {
+              if (!sbp('chelonia/haveSecretKey', key.id, !transient)) {
                 try {
                   const decrypted = key.meta.private.content.valueOf()
-                  sbp('chelonia/storeSecretKeys', new Secret([{
-                    key: deserializeKey(decrypted),
-                    transient
-                  }]))
+                  sbp(
+                    'chelonia/storeSecretKeys',
+                    new Secret([
+                      {
+                        key: deserializeKey(decrypted),
+                        transient
+                      }
+                    ])
+                  )
                   // If we've just received a known missing key (i.e., a key
                   // that previously resulted in a decryption error), we know
                   // our state is outdated and we need to re-sync the contract
                   if (missingDecryptionKeyIds?.includes(key.id)) {
                     newestEncryptionKeyHeight = Number.NEGATIVE_INFINITY
                   } else if (
-                  // Otherwise, we make an educated guess on whether a re-sync
-                  // is needed based on the height.
+                    // Otherwise, we make an educated guess on whether a re-sync
+                    // is needed based on the height.
                     targetState?._vm?.authorizedKeys?.[key.id]?._notBeforeHeight != null &&
-                      Array.isArray(targetState._vm.authorizedKeys[key.id].purpose) &&
-                      targetState._vm.authorizedKeys[key.id].purpose.includes('enc')
+                    Array.isArray(targetState._vm.authorizedKeys[key.id].purpose) &&
+                    targetState._vm.authorizedKeys[key.id].purpose.includes('enc')
                   ) {
-                    newestEncryptionKeyHeight = Math.min(newestEncryptionKeyHeight, targetState._vm.authorizedKeys[key.id]._notBeforeHeight)
+                    newestEncryptionKeyHeight = Math.min(
+                      newestEncryptionKeyHeight,
+                      targetState._vm.authorizedKeys[key.id]._notBeforeHeight
+                    )
                   }
                 } catch (e_) {
                   const e = e_ as Error | undefined
                   if (e?.name === 'ChelErrorDecryptionKeyNotFound') {
-                    console.warn(`OP_KEY_SHARE (${hash} of ${contractID}) missing secret key: ${e.message}`,
-                      e)
+                    console.warn(
+                      `OP_KEY_SHARE (${hash} of ${contractID}) missing secret key: ${e.message}`,
+                      e
+                    )
                   } else {
                     // Using console.error instead of logEvtError because this
                     // is a side-effect and not relevant for outgoing messages
-                    console.error(`OP_KEY_SHARE (${hash} of ${contractID}) error '${e!.message || e}':`,
-                      e)
+                    console.error(
+                      `OP_KEY_SHARE (${hash} of ${contractID}) error '${e!.message || e}':`,
+                      e
+                    )
                   }
                 }
               }
@@ -894,10 +1232,12 @@ export default sbp('sbp/selectors/register', {
 
           // If an encryption key has been shared with _notBefore lower than the
           // current height, then the contract must be resynced.
-          const mustResync = !!(newestEncryptionKeyHeight < cheloniaState.contracts[v.contractID]?.height)
+          const mustResync = !!(
+            newestEncryptionKeyHeight < cheloniaState.contracts[v.contractID]?.height
+          )
 
           if (mustResync) {
-            if (!has(targetState, '_volatile')) config.reactiveSet(targetState, '_volatile', Object.create(null))
+            if (!has(targetState, '_volatile')) { config.reactiveSet(targetState, '_volatile', Object.create(null)) }
             config.reactiveSet(targetState._volatile!, 'dirty', true)
 
             if (!Object.keys(targetState).some((k) => k !== '_volatile')) {
@@ -917,29 +1257,34 @@ export default sbp('sbp/selectors/register', {
               keyDict[keyName].push(contractID)
             })
             // Then, see which of those contracts need to be updated
-            const contractIdsToUpdate = Array.from(new Set(Object.entries(keyDict).flatMap(([keyName, contractIDs]) => {
-              const keyId = findKeyIdByName(targetState, keyName)
-              if (
-                // Does the key exist? (i.e., is it a current key)
-                keyId &&
-                // Is it an encryption key? (signing keys don't build up a
-                // potentially invalid state because the private key isn't
-                // required for validation; however, missing encryption keys
-                // prevent message processing)
-                targetState._vm.authorizedKeys[keyId].purpose.includes('enc') &&
-                // Is this a newly set key? (avoid re-syncing contracts that
-                // haven't been affected by the `OP_KEY_SHARE`)
-                targetState._vm.authorizedKeys[keyId]._notBeforeHeight >= newestEncryptionKeyHeight
-              ) {
-                return contractIDs
-              }
-              return []
-            })))
+            const contractIdsToUpdate = Array.from(
+              new Set(
+                Object.entries(keyDict).flatMap(([keyName, contractIDs]) => {
+                  const keyId = findKeyIdByName(targetState, keyName)
+                  if (
+                    // Does the key exist? (i.e., is it a current key)
+                    keyId &&
+                    // Is it an encryption key? (signing keys don't build up a
+                    // potentially invalid state because the private key isn't
+                    // required for validation; however, missing encryption keys
+                    // prevent message processing)
+                    targetState._vm.authorizedKeys[keyId].purpose.includes('enc') &&
+                    // Is this a newly set key? (avoid re-syncing contracts that
+                    // haven't been affected by the `OP_KEY_SHARE`)
+                    targetState._vm.authorizedKeys[keyId]._notBeforeHeight >=
+                      newestEncryptionKeyHeight
+                  ) {
+                    return contractIDs
+                  }
+                  return []
+                })
+              )
+            )
             // Mark these contracts as dirty
             contractIdsToUpdate.forEach((contractID) => {
               const targetState = cheloniaState[contractID]
               if (!targetState) return
-              if (!has(targetState, '_volatile')) config.reactiveSet(targetState, '_volatile', Object.create(null))
+              if (!has(targetState, '_volatile')) { config.reactiveSet(targetState, '_volatile', Object.create(null)) }
               config.reactiveSet(targetState._volatile!, 'dirty', true)
             })
 
@@ -949,28 +1294,37 @@ export default sbp('sbp/selectors/register', {
             // situation, not limited to the following sequence of events
             if (self.subscriptionSet.has(v.contractID)) {
               const resync = sbp('chelonia/private/queueEvent', v.contractID, [
-                'chelonia/private/in/syncContract', v.contractID
-              ]).then(() => {
-                // Now, if we're subscribed to any of the contracts that were
-                // marked as dirty, re-sync them
-                sbp('chelonia/private/out/sync',
-                  contractIdsToUpdate.filter((contractID) => {
-                    return self.subscriptionSet.has(contractID)
-                  }),
-                  { force: true, resync: true }
-                ).catch((e: unknown) => {
+                'chelonia/private/in/syncContract',
+                v.contractID
+              ])
+                .then(() => {
+                  // Now, if we're subscribed to any of the contracts that were
+                  // marked as dirty, re-sync them
+                  sbp(
+                    'chelonia/private/out/sync',
+                    contractIdsToUpdate.filter((contractID) => {
+                      return self.subscriptionSet.has(contractID)
+                    }),
+                    { force: true, resync: true }
+                  ).catch((e: unknown) => {
+                    // Using console.error instead of logEvtError because this
+                    // is a side-effect and not relevant for outgoing messages
+                    console.error(
+                      '[chelonia] Error resyncing contracts with foreign key references after key rotation',
+                      e
+                    )
+                  })
+                })
+                .catch((e: unknown) => {
                   // Using console.error instead of logEvtError because this
                   // is a side-effect and not relevant for outgoing messages
-                  console.error('[chelonia] Error resyncing contracts with foreign key references after key rotation', e)
+                  console.error(
+                    `[chelonia] Error during sync for ${v.contractID} during OP_KEY_SHARE for ${contractID}`
+                  )
+                  if (v.contractID === contractID) {
+                    throw e
+                  }
                 })
-              }).catch((e: unknown) => {
-                // Using console.error instead of logEvtError because this
-                // is a side-effect and not relevant for outgoing messages
-                console.error(`[chelonia] Error during sync for ${v.contractID} during OP_KEY_SHARE for ${contractID}`)
-                if (v.contractID === contractID) {
-                  throw e
-                }
-              })
 
               // If the keys received were for the current contract, we can't
               // use queueEvent as we're already on that same queue
@@ -981,20 +1335,34 @@ export default sbp('sbp/selectors/register', {
           }
 
           const previousVolatileState = targetState?._volatile
-          sbp('chelonia/private/queueEvent', v.contractID, ['chelonia/private/postKeyShare', v.contractID, mustResync ? previousVolatileState : null, signingKey])
-            .then(() => {
+          sbp('chelonia/private/queueEvent', v.contractID, [
+            'chelonia/private/postKeyShare',
+            v.contractID,
+            mustResync ? previousVolatileState : null,
+            signingKey
+          ]).then(() => {
             // The CONTRACT_HAS_RECEIVED_KEYS event is placed on the queue for
             // the current contract so that calling
             // 'chelonia/contract/waitingForKeyShareTo' will give correct results
             // (i.e., the event is processed after the state is written)
-              sbp('chelonia/private/queueEvent', contractID, () => {
-                sbp('okTurtles.events/emit', CONTRACT_HAS_RECEIVED_KEYS, { contractID: v.contractID, sharedWithContractID: contractID, signingKeyId, get signingKeyName () { return state._vm?.authorizedKeys?.[signingKeyId]?.name } })
-              }).catch((e: unknown) => {
-                // Using console.error instead of logEvtError because this
-                // is a side-effect and not relevant for outgoing messages
-                console.error(`[chelonia] Error while emitting the CONTRACT_HAS_RECEIVED_KEYS event for ${contractID}`, e)
+            sbp('chelonia/private/queueEvent', contractID, () => {
+              sbp('okTurtles.events/emit', CONTRACT_HAS_RECEIVED_KEYS, {
+                contractID: v.contractID,
+                sharedWithContractID: contractID,
+                signingKeyId,
+                get signingKeyName () {
+                  return state._vm?.authorizedKeys?.[signingKeyId]?.name
+                }
               })
+            }).catch((e: unknown) => {
+              // Using console.error instead of logEvtError because this
+              // is a side-effect and not relevant for outgoing messages
+              console.error(
+                `[chelonia] Error while emitting the CONTRACT_HAS_RECEIVED_KEYS event for ${contractID}`,
+                e
+              )
             })
+          })
         })
       },
       [SPMessage.OP_KEY_REQUEST] (wv: SPOpKeyRequest) {
@@ -1002,24 +1370,38 @@ export default sbp('sbp/selectors/register', {
 
         // If we're unable to decrypt the OP_KEY_REQUEST, then still
         // proceed to do accounting of invites
-        const v = data?.data || { contractID: '(private)', replyWith: { context: undefined }, request: '*' }
+        const v = data?.data || {
+          contractID: '(private)',
+          replyWith: { context: undefined },
+          request: '*'
+        }
 
         const originatingContractID = v.contractID
 
         if (state._vm?.invites?.[signingKeyId]?.quantity != null) {
           if (state._vm.invites[signingKeyId].quantity > 0) {
-            if ((--state._vm.invites[signingKeyId].quantity) <= 0) {
+            if (--state._vm.invites[signingKeyId].quantity <= 0) {
               state._vm.invites[signingKeyId].status = INVITE_STATUS.USED
             }
           } else {
-            logEvtError(message, 'Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' + originatingContractID)
+            logEvtError(
+              message,
+              'Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
+                originatingContractID
+            )
             return
           }
         }
 
         if (state._vm?.invites?.[signingKeyId]?.expires != null) {
           if (state._vm.invites[signingKeyId].expires < Date.now()) {
-            logEvtError(message, 'Ignoring OP_KEY_REQUEST because it expired at ' + state._vm.invites[signingKeyId].expires + ': ' + originatingContractID)
+            logEvtError(
+              message,
+              'Ignoring OP_KEY_REQUEST because it expired at ' +
+                state._vm.invites[signingKeyId].expires +
+                ': ' +
+                originatingContractID
+            )
             return
           }
         }
@@ -1032,19 +1414,29 @@ export default sbp('sbp/selectors/register', {
 
         // Outgoing messages don't have a context attribute
         if (!has(v.replyWith, 'context')) {
-          logEvtError(message, 'Ignoring OP_KEY_REQUEST because it is missing the context attribute')
+          logEvtError(
+            message,
+            'Ignoring OP_KEY_REQUEST because it is missing the context attribute'
+          )
           return
         }
 
         const context = v.replyWith.context
 
         if (data && (!Array.isArray(context) || context[0] !== originatingContractID)) {
-          logEvtError(message, 'Ignoring OP_KEY_REQUEST because it is signed by the wrong contract')
+          logEvtError(
+            message,
+            'Ignoring OP_KEY_REQUEST because it is signed by the wrong contract'
+          )
           return
         }
 
         if (v.request !== '*') {
-          logEvtError(message, 'Ignoring OP_KEY_REQUEST because it has an unsupported request attribute', v.request)
+          logEvtError(
+            message,
+            'Ignoring OP_KEY_REQUEST because it has an unsupported request attribute',
+            v.request
+          )
           return
         }
 
@@ -1059,16 +1451,15 @@ export default sbp('sbp/selectors/register', {
               signingKeyId,
               context
             ]
-          : [
-              !!data?.encryptionKeyId,
-              message.height(),
-              signingKeyId
-            ]
+          : [!!data?.encryptionKeyId, message.height(), signingKeyId]
 
         // Call 'chelonia/private/respondToAllKeyRequests' after sync
         if (data) {
           internalSideEffectStack?.push(() => {
-            self.setPostSyncOp(contractID, 'respondToAllKeyRequests-' + message.contractID(), ['chelonia/private/respondToAllKeyRequests', contractID])
+            self.setPostSyncOp(contractID, 'respondToAllKeyRequests-' + message.contractID(), [
+              'chelonia/private/respondToAllKeyRequests',
+              contractID
+            ])
           })
         }
       },
@@ -1118,31 +1509,53 @@ export default sbp('sbp/selectors/register', {
         const keys = keysToMap.call(self, v, height, state._vm.authorizedKeys)
         const keysArray = Object.values(v) as SPKey[]
         keysArray.forEach((k) => {
-          if (has(state._vm.authorizedKeys, k.id) && state._vm.authorizedKeys[k.id]._notAfterHeight == null) {
+          if (
+            has(state._vm.authorizedKeys, k.id) &&
+            state._vm.authorizedKeys[k.id]._notAfterHeight == null
+          ) {
             throw new ChelErrorWarning('Cannot use OP_KEY_ADD on existing keys. Key ID: ' + k.id)
           }
         })
         validateKeyAddPermissions.call(self, contractID, signingKey, state, v)
         state._vm.authorizedKeys = { ...state._vm.authorizedKeys, ...keys }
-        keyAdditionProcessor.call(self, message, hash, v, state, contractID, signingKey, internalSideEffectStack)
+        keyAdditionProcessor.call(
+          self,
+          message,
+          hash,
+          v,
+          state,
+          contractID,
+          signingKey,
+          internalSideEffectStack
+        )
       },
       [SPMessage.OP_KEY_DEL] (v: SPOpKeyDel) {
         if (!state._vm.authorizedKeys) state._vm.authorizedKeys = Object.create(null)
         if (!state._volatile) state._volatile = Object.create(null)
-        if (!state._volatile!.pendingKeyRevocations) state._volatile!.pendingKeyRevocations = Object.create(null)
+        if (!state._volatile!.pendingKeyRevocations) {
+          state._volatile!.pendingKeyRevocations = Object.create(null)
+        }
         validateKeyDelPermissions.call(self, contractID, signingKey, state, v)
-        const keyIds = v.map((k) => {
-          const data = config.unwrapMaybeEncryptedData(k)
-          if (!data) return undefined
-          return data.data
-        }).filter((keyId): keyId is string => {
-          if (!keyId || typeof keyId !== 'string') return false
-          if (!has(state._vm.authorizedKeys, keyId) || state._vm.authorizedKeys[keyId]._notAfterHeight != null) {
-            console.warn('Attempted to delete non-existent key from contract', { contractID, keyId })
-            return false
-          }
-          return true
-        })
+        const keyIds = v
+          .map((k) => {
+            const data = config.unwrapMaybeEncryptedData(k)
+            if (!data) return undefined
+            return data.data
+          })
+          .filter((keyId): keyId is string => {
+            if (!keyId || typeof keyId !== 'string') return false
+            if (
+              !has(state._vm.authorizedKeys, keyId) ||
+              state._vm.authorizedKeys[keyId]._notAfterHeight != null
+            ) {
+              console.warn('Attempted to delete non-existent key from contract', {
+                contractID,
+                keyId
+              })
+              return false
+            }
+            return true
+          })
 
         keyIds.forEach((keyId) => {
           const key = state._vm.authorizedKeys[keyId]
@@ -1160,7 +1573,7 @@ export default sbp('sbp/selectors/register', {
             const foreignContract = fkUrl.pathname
             const foreignKeyName = fkUrl.searchParams.get('keyName')
 
-            if (!foreignContract || !foreignKeyName) throw new Error('Invalid foreign key: missing contract or key name')
+            if (!foreignContract || !foreignKeyName) { throw new Error('Invalid foreign key: missing contract or key name') }
 
             internalSideEffectStack?.push(() => {
               sbp('chelonia/private/queueEvent', foreignContract, () => {
@@ -1168,28 +1581,41 @@ export default sbp('sbp/selectors/register', {
                 if (Array.isArray(rootState[foreignContract]?._volatile?.watch)) {
                   // Stop watching events for this key
                   const oldWatch = rootState[foreignContract]!._volatile!.watch!
-                  rootState[foreignContract]!._volatile!.watch = oldWatch.filter(([name, cID]) => name !== foreignKeyName || cID !== contractID)
+                  rootState[foreignContract]!._volatile!.watch = oldWatch.filter(
+                    ([name, cID]) => name !== foreignKeyName || cID !== contractID
+                  )
                   if (oldWatch.length !== rootState[foreignContract]._volatile!.watch!.length) {
                     // If the number of foreign keys changed, maybe there's no
                     // reason to remain subscribed to this contract. In this
                     // case, attempt to release it.
-                    sbp('chelonia/contract/release', foreignContract, { try: true }).catch((e: unknown) => {
-                      // Using console.error instead of logEvtError because this
-                      // is a side-effect and not relevant for outgoing messages
-                      console.error(`[chelonia] Error at OP_KEY_DEL internalSideEffectStack while attempting to release foreign contract ${foreignContract}`, e)
-                    })
+                    sbp('chelonia/contract/release', foreignContract, { try: true }).catch(
+                      (e: unknown) => {
+                        // Using console.error instead of logEvtError because this
+                        // is a side-effect and not relevant for outgoing messages
+                        console.error(
+                          `[chelonia] Error at OP_KEY_DEL internalSideEffectStack while attempting to release foreign contract ${foreignContract}`,
+                          e
+                        )
+                      }
+                    )
                   }
                 }
               }).catch((e: unknown) => {
                 // Using console.error instead of logEvtError because this
                 // is a side-effect and not relevant for outgoing messages
-                console.error('Error stopping watching events after removing key', { contractID, foreignContract, foreignKeyName, fkUrl }, e)
+                console.error(
+                  'Error stopping watching events after removing key',
+                  { contractID, foreignContract, foreignKeyName, fkUrl },
+                  e
+                )
               })
             })
 
             const pendingWatch = state._vm.pendingWatch?.[foreignContract]
             if (pendingWatch) {
-              state._vm.pendingWatch![foreignContract] = pendingWatch.filter(([, kId]) => kId !== keyId)
+              state._vm.pendingWatch![foreignContract] = pendingWatch.filter(
+                ([, kId]) => kId !== keyId
+              )
             }
           }
 
@@ -1202,7 +1628,8 @@ export default sbp('sbp/selectors/register', {
         // Check state._volatile.watch for contracts that should be
         // mirroring this operation
         if (Array.isArray(state._volatile?.watch)) {
-          const updatedKeysMap: Record<string, {name: string, oldKeyId: string}> = Object.create(null)
+          const updatedKeysMap: Record<string, { name: string; oldKeyId: string }> =
+            Object.create(null)
 
           keyIds.forEach((keyId) => {
             updatedKeysMap[state._vm.authorizedKeys[keyId!].name] = {
@@ -1211,13 +1638,30 @@ export default sbp('sbp/selectors/register', {
             }
           })
 
-          keyRotationHelper(contractID, state, config, updatedKeysMap, [SPMessage.OP_KEY_DEL], 'chelonia/out/keyDel', (name) => updatedKeysMap[name[0]].oldKeyId, internalSideEffectStack)
+          keyRotationHelper(
+            contractID,
+            state,
+            config,
+            updatedKeysMap,
+            [SPMessage.OP_KEY_DEL],
+            'chelonia/out/keyDel',
+            (name) => updatedKeysMap[name[0]].oldKeyId,
+            internalSideEffectStack
+          )
         }
       },
       [SPMessage.OP_KEY_UPDATE] (v: SPOpKeyUpdate) {
         if (!state._volatile) state._volatile = Object.create(null)
-        if (!state._volatile!.pendingKeyRevocations) state._volatile!.pendingKeyRevocations = Object.create(null)
-        const [updatedKeys, updatedMap] = validateKeyUpdatePermissions.call(self, contractID, signingKey, state, v)
+        if (!state._volatile!.pendingKeyRevocations) {
+          state._volatile!.pendingKeyRevocations = Object.create(null)
+        }
+        const [updatedKeys, updatedMap] = validateKeyUpdatePermissions.call(
+          self,
+          contractID,
+          signingKey,
+          state,
+          v
+        )
         const keysToDelete = Object.values(updatedMap)
         for (const keyId of keysToDelete) {
           if (has(state._volatile!.pendingKeyRevocations, keyId)) {
@@ -1232,7 +1676,16 @@ export default sbp('sbp/selectors/register', {
             state._vm.authorizedKeys[key.id] = cloneDeep(key)
           }
         }
-        keyAdditionProcessor.call(self, message, hash, updatedKeys, state, contractID, signingKey, internalSideEffectStack)
+        keyAdditionProcessor.call(
+          self,
+          message,
+          hash,
+          updatedKeys,
+          state,
+          contractID,
+          signingKey,
+          internalSideEffectStack
+        )
 
         // Check state._volatile.watch for contracts that should be
         // mirroring this operation
@@ -1246,12 +1699,21 @@ export default sbp('sbp/selectors/register', {
             }
           })
 
-          keyRotationHelper(contractID, state, config, updatedKeysMap, [SPMessage.OP_KEY_UPDATE], 'chelonia/out/keyUpdate', (name) => ({
-            name: name[1],
-            oldKeyId: updatedKeysMap[name[0]].oldKeyId,
-            id: updatedKeysMap[name[0]].id,
-            data: updatedKeysMap[name[0]].data
-          }), internalSideEffectStack)
+          keyRotationHelper(
+            contractID,
+            state,
+            config,
+            updatedKeysMap,
+            [SPMessage.OP_KEY_UPDATE],
+            'chelonia/out/keyUpdate',
+            (name) => ({
+              name: name[1],
+              oldKeyId: updatedKeysMap[name[0]].oldKeyId,
+              id: updatedKeysMap[name[0]].id,
+              data: updatedKeysMap[name[0]].data
+            }),
+            internalSideEffectStack
+          )
         }
       },
       [SPMessage.OP_PROTOCOL_UPGRADE]: notImplemented
@@ -1262,14 +1724,19 @@ export default sbp('sbp/selectors/register', {
       // have previously synced this contract, as reference counts are also
       // stored there. Hence, we check for the presence of 'type'
       if (!contractName) {
-        contractName = has(rootState.contracts, contractID) && rootState.contracts[contractID] && has(rootState.contracts[contractID], 'type')
-          ? rootState.contracts[contractID].type
-          : opT === SPMessage.OP_CONTRACT
-            ? (opV as SPOpContract).type
-            : ''
+        contractName =
+          has(rootState.contracts, contractID) &&
+          rootState.contracts[contractID] &&
+          has(rootState.contracts[contractID], 'type')
+            ? rootState.contracts[contractID].type
+            : opT === SPMessage.OP_CONTRACT
+              ? (opV as SPOpContract).type
+              : ''
       }
       if (!contractName) {
-        throw new Error(`Unable to determine the name for a contract and refusing to load it (contract ID was ${contractID} and its manifest hash was ${manifestHash})`)
+        throw new Error(
+          `Unable to determine the name for a contract and refusing to load it (contract ID was ${contractID} and its manifest hash was ${manifestHash})`
+        )
       }
       await sbp('chelonia/private/loadManifest', contractName, manifestHash)
     }
@@ -1283,18 +1750,23 @@ export default sbp('sbp/selectors/register', {
     {
       // This sync code has potential issues
       // The first issue is that it can deadlock if there are circular references
-      // The second issue is that it doesn't handle key rotation. If the key used for signing is invalidated / removed from the originating contract, we won't have it in the state
-      // Both of these issues can be resolved by introducing a parameter with the message ID the state is based on. This requires implementing a separate, ephemeral, state container for operations that refer to a different contract.
+      // The second issue is that it doesn't handle key rotation. If the key used
+      // for signing is invalidated / removed from the originating contract, we
+      // won't have it in the state
+      // Both of these issues can be resolved by introducing a parameter with the
+      // message ID the state is based on. This requires implementing a separate,
+      // ephemeral, state container for operations that refer to a different contract.
       // The difficulty of this is how to securely determine the message ID to use.
       // The server can assist with this.
 
-      const stateForValidation = opT === SPMessage.OP_CONTRACT && !state?._vm?.authorizedKeys
-        ? {
-            _vm: {
-              authorizedKeys: keysToMap.call(this, (opV as SPOpContract).keys, height)
+      const stateForValidation =
+        opT === SPMessage.OP_CONTRACT && !state?._vm?.authorizedKeys
+          ? {
+              _vm: {
+                authorizedKeys: keysToMap.call(this, (opV as SPOpContract).keys, height)
+              }
             }
-          }
-        : state
+          : state
 
       // Verify that the signing key is found, has the correct purpose and is
       // allowed to sign this particular operation
@@ -1325,7 +1797,11 @@ export default sbp('sbp/selectors/register', {
       sbp('chelonia/private/enqueuePostSyncOps', contractID)
     })
   },
-  'chelonia/private/in/syncContract': async function (this: CheloniaContext, contractID: string, params?: { force?: boolean, resync?: boolean }): Promise<void> {
+  'chelonia/private/in/syncContract': async function (
+    this: CheloniaContext,
+    contractID: string,
+    params?: { force?: boolean; resync?: boolean }
+  ): Promise<void> {
     const state = sbp(this.config.stateSelector)
     if (state.contracts[contractID] === null) {
       throw new ChelErrorResourceGone('Cannot sync permanently deleted contract ' + contractID)
@@ -1360,12 +1836,18 @@ export default sbp('sbp/selectors/register', {
           this.pending.push({ contractID })
         }
       }
-      this.postSyncOperations[contractID] = this.postSyncOperations[contractID] ?? Object.create(null)
+      this.postSyncOperations[contractID] =
+        this.postSyncOperations[contractID] ?? Object.create(null)
 
       if (latestHEAD !== recentHEAD) {
-        console.debug(`[chelonia] Synchronizing Contract ${contractID}: our recent was ${recentHEAD || 'undefined'} but the latest is ${latestHEAD}`)
+        console.debug(
+          `[chelonia] Synchronizing Contract ${contractID}: our recent was ${recentHEAD || 'undefined'} but the latest is ${latestHEAD}`
+        )
         // TODO: fetch events from localStorage instead of server if we have them
-        const eventsStream = sbp('chelonia/out/eventsAfter', contractID, { sinceHeight: recentHeight ?? 0, sinceHash: recentHEAD ?? contractID })
+        const eventsStream = sbp('chelonia/out/eventsAfter', contractID, {
+          sinceHeight: recentHeight ?? 0,
+          sinceHash: recentHEAD ?? contractID
+        })
         // Sanity check: verify event with latest hash exists in list of events
         // TODO: using findLastIndex, it will be more clean but it needs Cypress 9.7+ which has bad performance
         //       https://docs.cypress.io/guides/references/changelog#9-7-0
@@ -1373,11 +1855,17 @@ export default sbp('sbp/selectors/register', {
         let latestHashFound = false
         const eventReader = eventsStream.getReader()
         // remove the first element in cases where we are not getting the contract for the first time
-        for (let skip = has(state.contracts, contractID) && has(state.contracts[contractID], 'HEAD'); ; skip = false) {
+        for (
+          let skip = has(state.contracts, contractID) && has(state.contracts[contractID], 'HEAD');
+          ;
+          skip = false
+        ) {
           const { done, value: event } = await eventReader.read()
           if (done) {
             if (!latestHashFound) {
-              throw new ChelErrorForkedChain(`expected hash ${latestHEAD} in list of events for contract ${contractID}`)
+              throw new ChelErrorForkedChain(
+                `expected hash ${latestHEAD} in list of events for contract ${contractID}`
+              )
             }
             break
           }
@@ -1390,7 +1878,10 @@ export default sbp('sbp/selectors/register', {
         }
       } else if (!isSubscribed) {
         this.subscriptionSet.add(contractID)
-        sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), { added: [contractID], removed: [] })
+        sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {
+          added: [contractID],
+          removed: []
+        })
         const entryIndex = this.pending.findIndex((entry) => entry?.contractID === contractID)
         if (entryIndex !== -1) {
           this.pending.splice(entryIndex, 1)
@@ -1432,7 +1923,10 @@ export default sbp('sbp/selectors/register', {
       })
     })
   },
-  'chelonia/private/watchForeignKeys': function (this: CheloniaContext, externalContractID: string) {
+  'chelonia/private/watchForeignKeys': function (
+    this: CheloniaContext,
+    externalContractID: string
+  ) {
     const state = sbp(this.config.stateSelector)
     const externalContractState = state[externalContractID]
 
@@ -1440,7 +1934,11 @@ export default sbp('sbp/selectors/register', {
 
     if (!pendingWatch || !Object.keys(pendingWatch).length) return
 
-    const signingKey = findSuitableSecretKeyId(externalContractState, [SPMessage.OP_KEY_DEL], ['sig'])
+    const signingKey = findSuitableSecretKeyId(
+      externalContractState,
+      [SPMessage.OP_KEY_DEL],
+      ['sig']
+    )
     const canMirrorOperations = !!signingKey
 
     // Only sync contract if we are actually able to mirror key operations
@@ -1451,7 +1949,10 @@ export default sbp('sbp/selectors/register', {
     // contract, plus those contracts referenced by the foreign keys of those
     // other contracts and so on.
     if (!canMirrorOperations) {
-      console.info('[chelonia/private/watchForeignKeys]: Returning as operations cannot be mirrored', { externalContractID })
+      console.info(
+        '[chelonia/private/watchForeignKeys]: Returning as operations cannot be mirrored',
+        { externalContractID }
+      )
       return
     }
 
@@ -1465,19 +1966,33 @@ export default sbp('sbp/selectors/register', {
           return acc || has(externalContractState._vm.authorizedKeys, id)
         }, false)
       ) {
-        console.info('[chelonia/private/watchForeignKeys]: Skipping as none of the keys to watch exist', {
-          externalContractID,
-          contractID
-        })
+        console.info(
+          '[chelonia/private/watchForeignKeys]: Skipping as none of the keys to watch exist',
+          {
+            externalContractID,
+            contractID
+          }
+        )
         return
       }
 
-      sbp('chelonia/private/queueEvent', contractID, ['chelonia/private/in/syncContractAndWatchKeys', contractID, externalContractID]).catch((e: unknown) => {
-        console.error(`Error at syncContractAndWatchKeys for contractID ${contractID} and externalContractID ${externalContractID}`, e)
+      sbp('chelonia/private/queueEvent', contractID, [
+        'chelonia/private/in/syncContractAndWatchKeys',
+        contractID,
+        externalContractID
+      ]).catch((e: unknown) => {
+        console.error(
+          `Error at syncContractAndWatchKeys for contractID ${contractID} and externalContractID ${externalContractID}`,
+          e
+        )
       })
     })
   },
-  'chelonia/private/in/syncContractAndWatchKeys': async function (this: CheloniaContext, contractID: string, externalContractID: string) {
+  'chelonia/private/in/syncContractAndWatchKeys': async function (
+    this: CheloniaContext,
+    contractID: string,
+    externalContractID: string
+  ) {
     const rootState = sbp(this.config.stateSelector) as ChelRootState
     const externalContractState = rootState[externalContractID]
     const pendingWatch = externalContractState?._vm?.pendingWatch?.[contractID]?.splice(0)
@@ -1489,16 +2004,23 @@ export default sbp('sbp/selectors/register', {
       !Array.isArray(pendingWatch) ||
       // Check that the keys exist and haven't been revoked
       !pendingWatch.reduce((acc, [, id]) => {
-        return acc || (
-          has(externalContractState._vm.authorizedKeys, id) &&
-          findKeyIdByName(externalContractState, externalContractState._vm.authorizedKeys[id].name) != null
+        return (
+          acc ||
+          (has(externalContractState._vm.authorizedKeys, id) &&
+            findKeyIdByName(
+              externalContractState,
+              externalContractState._vm.authorizedKeys[id].name
+            ) != null)
         )
       }, false)
     ) {
-      console.info('[chelonia/private/syncContractAndWatchKeys]: Skipping as none of the keys to watch exist', {
-        externalContractID,
-        contractID
-      })
+      console.info(
+        '[chelonia/private/syncContractAndWatchKeys]: Skipping as none of the keys to watch exist',
+        {
+          externalContractID,
+          contractID
+        }
+      )
       return
     }
 
@@ -1513,25 +2035,45 @@ export default sbp('sbp/selectors/register', {
     const keysToUpdate: string[] = []
 
     pendingWatch.forEach(([keyName, externalId]) => {
-    // Does the key exist? If not, it has probably been removed and instead
-    // of waiting, we need to remove it ourselves
+      // Does the key exist? If not, it has probably been removed and instead
+      // of waiting, we need to remove it ourselves
       const keyId = findKeyIdByName(contractState, keyName)
       if (!keyId) {
         keysToDelete.push(externalId)
         return
       } else if (keyId !== externalId) {
-      // Or, the key has been updated and we need to update it in the external
-      // contract as well
+        // Or, the key has been updated and we need to update it in the external
+        // contract as well
         keysToUpdate.push(externalId)
       }
 
       // Add keys to watchlist as another contract is waiting on these
       // operations
       if (!contractState._volatile) {
-        this.config.reactiveSet(contractState, '_volatile', Object.create(null, { watch: { value: [[keyName, externalContractID]], configurable: true, enumerable: true, writable: true } }))
+        this.config.reactiveSet(
+          contractState,
+          '_volatile',
+          Object.create(null, {
+            watch: {
+              value: [[keyName, externalContractID]],
+              configurable: true,
+              enumerable: true,
+              writable: true
+            }
+          })
+        )
       } else {
-        if (!contractState._volatile.watch) this.config.reactiveSet(contractState._volatile, 'watch', [[keyName, externalContractID]])
-        if (Array.isArray(contractState._volatile.watch) && !contractState._volatile.watch.find((v) => v[0] === keyName && v[1] === externalContractID)) contractState._volatile.watch.push([keyName, externalContractID])
+        if (!contractState._volatile.watch) {
+          this.config.reactiveSet(contractState._volatile, 'watch', [
+            [keyName, externalContractID]
+          ])
+        }
+        if (
+          Array.isArray(contractState._volatile.watch) &&
+          !contractState._volatile.watch.find(
+            (v) => v[0] === keyName && v[1] === externalContractID
+          )
+        ) { contractState._volatile.watch.push([keyName, externalContractID]) }
       }
     })
 
@@ -1542,13 +2084,27 @@ export default sbp('sbp/selectors/register', {
         this.config.reactiveSet(externalContractState, '_volatile', Object.create(null))
       }
       if (!externalContractState._volatile!.pendingKeyRevocations) {
-        this.config.reactiveSet(externalContractState._volatile!, 'pendingKeyRevocations', Object.create(null))
+        this.config.reactiveSet(
+          externalContractState._volatile!,
+          'pendingKeyRevocations',
+          Object.create(null)
+        )
       }
-      keysToDelete.forEach((id) => this.config.reactiveSet(externalContractState._volatile!.pendingKeyRevocations!, id, 'del'))
-      keysToUpdate.forEach((id) => this.config.reactiveSet(externalContractState._volatile!.pendingKeyRevocations!, id, true))
+      keysToDelete.forEach((id) =>
+        this.config.reactiveSet(externalContractState._volatile!.pendingKeyRevocations!, id, 'del')
+      )
+      keysToUpdate.forEach((id) =>
+        this.config.reactiveSet(externalContractState._volatile!.pendingKeyRevocations!, id, true)
+      )
 
-      sbp('chelonia/private/queueEvent', externalContractID, ['chelonia/private/deleteOrRotateRevokedKeys', externalContractID]).catch((e: unknown) => {
-        console.error(`Error at deleteOrRotateRevokedKeys for contractID ${contractID} and externalContractID ${externalContractID}`, e)
+      sbp('chelonia/private/queueEvent', externalContractID, [
+        'chelonia/private/deleteOrRotateRevokedKeys',
+        externalContractID
+      ]).catch((e: unknown) => {
+        console.error(
+          `Error at deleteOrRotateRevokedKeys for contractID ${contractID} and externalContractID ${externalContractID}`,
+          e
+        )
       })
     }
   },
@@ -1565,7 +2121,10 @@ export default sbp('sbp/selectors/register', {
   //      since watching only affects new messages we receive.
   //   3. The key has been removed in the foreign contract. We also need to
   //      mirror the operation.
-  'chelonia/private/deleteOrRotateRevokedKeys': function (this: CheloniaContext, contractID: string) {
+  'chelonia/private/deleteOrRotateRevokedKeys': function (
+    this: CheloniaContext,
+    contractID: string
+  ) {
     const rootState = sbp(this.config.stateSelector) as ChelRootState
     const contractState = rootState[contractID]
     const pendingKeyRevocations = contractState?._volatile?.pendingKeyRevocations
@@ -1573,90 +2132,133 @@ export default sbp('sbp/selectors/register', {
     if (!pendingKeyRevocations || Object.keys(pendingKeyRevocations).length === 0) return
 
     // First, we handle keys that have been rotated
-    const keysToUpdate: string[] = Object.entries(pendingKeyRevocations).filter(([, v]) => v === true).map(([id]) => id)
+    const keysToUpdate: string[] = Object.entries(pendingKeyRevocations)
+      .filter(([, v]) => v === true)
+      .map(([id]) => id)
 
     // Aggregate the keys that we can update to send them in a single operation
-    const [, keyUpdateSigningKeyId, keyUpdateArgs] = keysToUpdate.reduce((acc, keyId) => {
-      const key = contractState._vm?.authorizedKeys?.[keyId]
-      if (!key || !key.foreignKey) return acc
-      const foreignKey = String(key.foreignKey)
-      const fkUrl = new URL(foreignKey)
-      const foreignContractID = fkUrl.pathname
-      const foreignKeyName = fkUrl.searchParams.get('keyName')
-      if (!foreignKeyName) throw new Error('Missing foreign key name')
-      const foreignState = rootState[foreignContractID]
-      if (!foreignState) return acc
-      const fKeyId = findKeyIdByName(foreignState, foreignKeyName)
-      if (!fKeyId) {
-        // Key was deleted; mark it for deletion
-        if (pendingKeyRevocations[keyId] === true) {
-          this.config.reactiveSet(pendingKeyRevocations, keyId, 'del')
+    const [, keyUpdateSigningKeyId, keyUpdateArgs] = keysToUpdate.reduce(
+      (acc, keyId) => {
+        const key = contractState._vm?.authorizedKeys?.[keyId]
+        if (!key || !key.foreignKey) return acc
+        const foreignKey = String(key.foreignKey)
+        const fkUrl = new URL(foreignKey)
+        const foreignContractID = fkUrl.pathname
+        const foreignKeyName = fkUrl.searchParams.get('keyName')
+        if (!foreignKeyName) throw new Error('Missing foreign key name')
+        const foreignState = rootState[foreignContractID]
+        if (!foreignState) return acc
+        const fKeyId = findKeyIdByName(foreignState, foreignKeyName)
+        if (!fKeyId) {
+          // Key was deleted; mark it for deletion
+          if (pendingKeyRevocations[keyId] === true) {
+            this.config.reactiveSet(pendingKeyRevocations, keyId, 'del')
+          }
+          return acc
         }
-        return acc
-      }
 
-      const [currentRingLevel, currentSigningKeyId, currentKeyArgs] = acc
-      const ringLevel = Math.min(currentRingLevel, key.ringLevel ?? Number.POSITIVE_INFINITY)
-      if (ringLevel >= currentRingLevel) {
-        currentKeyArgs.push({
-          name: key.name,
-          oldKeyId: keyId,
-          id: fKeyId,
-          data: foreignState._vm.authorizedKeys[fKeyId].data
-        })
-        return [currentRingLevel, currentSigningKeyId, currentKeyArgs]
-      } else if (Number.isFinite(ringLevel)) {
-        const signingKeyId = findSuitableSecretKeyId(contractState, [SPMessage.OP_KEY_UPDATE], ['sig'], ringLevel)
-        if (signingKeyId) {
+        const [currentRingLevel, currentSigningKeyId, currentKeyArgs] = acc
+        const ringLevel = Math.min(currentRingLevel, key.ringLevel ?? Number.POSITIVE_INFINITY)
+        if (ringLevel >= currentRingLevel) {
           currentKeyArgs.push({
             name: key.name,
             oldKeyId: keyId,
             id: fKeyId,
             data: foreignState._vm.authorizedKeys[fKeyId].data
           })
-          return [ringLevel, signingKeyId, currentKeyArgs]
+          return [currentRingLevel, currentSigningKeyId, currentKeyArgs]
+        } else if (Number.isFinite(ringLevel)) {
+          const signingKeyId = findSuitableSecretKeyId(
+            contractState,
+            [SPMessage.OP_KEY_UPDATE],
+            ['sig'],
+            ringLevel
+          )
+          if (signingKeyId) {
+            currentKeyArgs.push({
+              name: key.name,
+              oldKeyId: keyId,
+              id: fKeyId,
+              data: foreignState._vm.authorizedKeys[fKeyId].data
+            })
+            return [ringLevel, signingKeyId, currentKeyArgs]
+          }
         }
-      }
-      return acc
-    }, [Number.POSITIVE_INFINITY, '', [] as { name: string, oldKeyId: string, id: string, data: string }[]])
+        return acc
+      },
+      [
+        Number.POSITIVE_INFINITY,
+        '',
+        [] as { name: string; oldKeyId: string; id: string; data: string }[]
+      ]
+    )
 
     if (keyUpdateArgs.length !== 0) {
       const contractName = contractState._vm.type
 
       // This is safe to do without await because it's sending an operation
       // Using await could deadlock when retrying to send the message
-      sbp('chelonia/out/keyUpdate', { contractID, contractName, data: keyUpdateArgs, signingKeyId: keyUpdateSigningKeyId }).catch((e: unknown) => {
-        console.error(`[chelonia/private/deleteOrRotateRevokedKeys] Error sending OP_KEY_UPDATE for ${contractID}`, (e as Error).message)
+      sbp('chelonia/out/keyUpdate', {
+        contractID,
+        contractName,
+        data: keyUpdateArgs,
+        signingKeyId: keyUpdateSigningKeyId
+      }).catch((e: unknown) => {
+        console.error(
+          `[chelonia/private/deleteOrRotateRevokedKeys] Error sending OP_KEY_UPDATE for ${contractID}`,
+          (e as Error).message
+        )
       })
     }
 
     // And then, we handle keys that have been deleted
-    const keysToDelete = Object.entries(pendingKeyRevocations).filter(([, v]) => v === 'del').map(([id]) => id)
+    const keysToDelete = Object.entries(pendingKeyRevocations)
+      .filter(([, v]) => v === 'del')
+      .map(([id]) => id)
 
     // Aggregate the keys that we can delete to send them in a single operation
-    const [, keyDelSigningKeyId, keyIdsToDelete] = keysToDelete.reduce((acc, keyId) => {
-      const [currentRingLevel, currentSigningKeyId, currentKeyIds] = acc
-      const ringLevel = Math.min(currentRingLevel, contractState._vm?.authorizedKeys?.[keyId]?.ringLevel ?? Number.POSITIVE_INFINITY)
-      if (ringLevel >= currentRingLevel) {
-        currentKeyIds.push(keyId)
-        return [currentRingLevel, currentSigningKeyId, currentKeyIds]
-      } else if (Number.isFinite(ringLevel)) {
-        const signingKeyId = findSuitableSecretKeyId(contractState, [SPMessage.OP_KEY_DEL], ['sig'], ringLevel)
-        if (signingKeyId) {
+    const [, keyDelSigningKeyId, keyIdsToDelete] = keysToDelete.reduce(
+      (acc, keyId) => {
+        const [currentRingLevel, currentSigningKeyId, currentKeyIds] = acc
+        const ringLevel = Math.min(
+          currentRingLevel,
+          contractState._vm?.authorizedKeys?.[keyId]?.ringLevel ?? Number.POSITIVE_INFINITY
+        )
+        if (ringLevel >= currentRingLevel) {
           currentKeyIds.push(keyId)
-          return [ringLevel, signingKeyId, currentKeyIds]
+          return [currentRingLevel, currentSigningKeyId, currentKeyIds]
+        } else if (Number.isFinite(ringLevel)) {
+          const signingKeyId = findSuitableSecretKeyId(
+            contractState,
+            [SPMessage.OP_KEY_DEL],
+            ['sig'],
+            ringLevel
+          )
+          if (signingKeyId) {
+            currentKeyIds.push(keyId)
+            return [ringLevel, signingKeyId, currentKeyIds]
+          }
         }
-      }
-      return acc
-    }, [Number.POSITIVE_INFINITY, '', [] as string[]])
+        return acc
+      },
+      [Number.POSITIVE_INFINITY, '', [] as string[]]
+    )
 
     if (keyIdsToDelete.length !== 0) {
       const contractName = contractState._vm.type
 
       // This is safe to do without await because it's sending an operation
       // Using await could deadlock when retrying to send the message
-      sbp('chelonia/out/keyDel', { contractID, contractName, data: keyIdsToDelete, signingKeyId: keyDelSigningKeyId }).catch((e: unknown) => {
-        console.error(`[chelonia/private/deleteRevokedKeys] Error sending OP_KEY_DEL for ${contractID}`, (e as Error).message)
+      sbp('chelonia/out/keyDel', {
+        contractID,
+        contractName,
+        data: keyIdsToDelete,
+        signingKeyId: keyDelSigningKeyId
+      }).catch((e: unknown) => {
+        console.error(
+          `[chelonia/private/deleteRevokedKeys] Error sending OP_KEY_DEL for ${contractID}`,
+          (e as Error).message
+        )
       })
     }
   },
@@ -1667,10 +2269,16 @@ export default sbp('sbp/selectors/register', {
     const pending = contractState?._vm?.pendingKeyshares
     if (!pending) return
 
-    const signingKeyId = findSuitableSecretKeyId(contractState, [SPMessage.OP_ATOMIC, SPMessage.OP_KEY_REQUEST_SEEN, SPMessage.OP_KEY_SHARE], ['sig'])
+    const signingKeyId = findSuitableSecretKeyId(
+      contractState,
+      [SPMessage.OP_ATOMIC, SPMessage.OP_KEY_REQUEST_SEEN, SPMessage.OP_KEY_SHARE],
+      ['sig']
+    )
 
     if (!signingKeyId) {
-      console.log('Unable to respond to key request because there is no suitable secret key with OP_KEY_REQUEST_SEEN permission')
+      console.log(
+        'Unable to respond to key request because there is no suitable secret key with OP_KEY_REQUEST_SEEN permission'
+      )
       return
     }
 
@@ -1679,14 +2287,32 @@ export default sbp('sbp/selectors/register', {
         return undefined
       }
 
-      const [,,, [originatingContractID]] = entry as [boolean, number, string, [string, object, number, string]]
+      const [, , , [originatingContractID]] = entry as [
+        boolean,
+        number,
+        string,
+        [string, object, number, string],
+      ]
 
-      return sbp('chelonia/private/queueEvent', originatingContractID, ['chelonia/private/respondToKeyRequest', contractID, signingKeyId, hash]).catch((e: unknown) => {
-        console.error(`respondToAllKeyRequests: Error responding to key request ${hash} from ${originatingContractID} to ${contractID}`, e)
+      return sbp('chelonia/private/queueEvent', originatingContractID, [
+        'chelonia/private/respondToKeyRequest',
+        contractID,
+        signingKeyId,
+        hash
+      ]).catch((e: unknown) => {
+        console.error(
+          `respondToAllKeyRequests: Error responding to key request ${hash} from ${originatingContractID} to ${contractID}`,
+          e
+        )
       })
     })
   },
-  'chelonia/private/respondToKeyRequest': async function (this: CheloniaContext, contractID: string, signingKeyId: string, hash: string) {
+  'chelonia/private/respondToKeyRequest': async function (
+    this: CheloniaContext,
+    contractID: string,
+    signingKeyId: string,
+    hash: string
+  ) {
     const state = sbp(this.config.stateSelector) as ChelRootState
     const contractState = state[contractID]
     const entry = contractState?._vm?.pendingKeyshares?.[hash]
@@ -1696,7 +2322,12 @@ export default sbp('sbp/selectors/register', {
       return
     }
 
-    const [keyShareEncryption, height, , [originatingContractID, rv, originatingContractHeight, headJSON]] = entry as [boolean, number, string, [string, object, number, string]]
+    const [
+      keyShareEncryption,
+      height,
+      ,
+      [originatingContractID, rv, originatingContractHeight, headJSON]
+    ] = entry as [boolean, number, string, [string, object, number, string]]
     entry.pop()
 
     const krsEncryption = !!contractState._vm.authorizedKeys?.[signingKeyId]?._private
@@ -1710,162 +2341,218 @@ export default sbp('sbp/selectors/register', {
     const contractName = state.contracts[contractID].type
     const originatingContractName = originatingState._vm.type
 
-    const v = signedIncomingData<{ encryptionKeyId: string, responseKey: [string, string] }>(originatingContractID, originatingState, rv as unknown as { _signedData: [string, string, string] }, originatingContractHeight, headJSON).valueOf()
+    const v = signedIncomingData<{ encryptionKeyId: string; responseKey: [string, string] }>(
+      originatingContractID,
+      originatingState,
+      rv as unknown as { _signedData: [string, string, string] },
+      originatingContractHeight,
+      headJSON
+    ).valueOf()
 
     // 2. Verify 'data'
     const { encryptionKeyId } = v
 
-    const responseKey = encryptedIncomingData<string>(contractID, contractState, v.responseKey, height, this.transientSecretKeys, headJSON).valueOf()
+    const responseKey = encryptedIncomingData<string>(
+      contractID,
+      contractState,
+      v.responseKey,
+      height,
+      this.transientSecretKeys,
+      headJSON
+    ).valueOf()
 
     const deserializedResponseKey = deserializeKey(responseKey)
     const responseKeyId = keyId(deserializedResponseKey)
 
     // This is safe to do without await because it's sending actions
     // If we had await it could deadlock when retrying to send the event
-    Promise.resolve().then(() => {
-      if (instance !== this._instance) return
-      if (!has(originatingState._vm.authorizedKeys, responseKeyId) || originatingState._vm.authorizedKeys[responseKeyId]._notAfterHeight != null) {
-        throw new Error(`Unable to respond to key request for ${originatingContractID}. Key ${responseKeyId} is not valid.`)
-      }
-
-      // We don't need to worry about persistence (if it was an outgoing
-      // message) here as this is done from an internal side-effect.
-      sbp('chelonia/storeSecretKeys', new Secret([
-        { key: deserializedResponseKey }
-      ]))
-
-      const keys = pick(
-        state.secretKeys,
-        Object.entries(contractState._vm.authorizedKeys)
-          .filter(([, key]) => !!key.meta?.private?.shareable)
-          .map(([kId]) => kId)
-      )
-
-      if (!keys || Object.keys(keys).length === 0) {
-        console.info('respondToAllKeyRequests: no keys to share', { contractID, originatingContractID })
-        return
-      }
-
-      const keySharePayload = {
-        contractID,
-        keys: Object.entries(keys).map(([keyId, key]: [string, unknown]) => ({
-          id: keyId,
-          meta: {
-            private: {
-              content: encryptedOutgoingData(originatingContractID, encryptionKeyId, key),
-              shareable: true
-            }
-          }
-        })),
-        keyRequestHash: hash,
-        keyRequestHeight: height
-      }
-
-      // 3. Send OP_KEY_SHARE to identity contract
-      if (!contractState?._vm?.pendingKeyshares?.[hash]) {
-      // While we were getting ready, another client may have shared the keys
-        return
-      }
-
-      return keySharePayload
-    }).then((keySharePayload) => {
-      if (instance !== this._instance || !keySharePayload) return
-
-      return sbp('chelonia/out/keyShare', {
-        contractID: originatingContractID,
-        contractName: originatingContractName,
-        data: keyShareEncryption
-          ? encryptedOutgoingData(
-            originatingContractID,
-            findSuitablePublicKeyIds(originatingState, [SPMessage.OP_KEY_SHARE], ['enc'])?.[0] || '',
-            keySharePayload
-          )
-          : keySharePayload,
-        signingKeyId: responseKeyId
-      }).then((msg: SPMessage) => {
+    Promise.resolve()
+      .then(() => {
         if (instance !== this._instance) return
+        if (
+          !has(originatingState._vm.authorizedKeys, responseKeyId) ||
+          originatingState._vm.authorizedKeys[responseKeyId]._notAfterHeight != null
+        ) {
+          throw new Error(
+            `Unable to respond to key request for ${originatingContractID}. Key ${responseKeyId} is not valid.`
+          )
+        }
 
-        // 4(i). Remove originating contract and update current contract with information
-        const payload = { keyRequestHash: hash, keyShareHash: msg.hash(), success: true }
-        const connectionKeyPayload = {
-          contractID: originatingContractID,
-          keys: [
-            {
-              id: responseKeyId,
-              meta: {
-                private: {
-                  content: encryptedOutgoingData(contractID, findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_REQUEST_SEEN], ['enc'])?.[0] || '', responseKey),
-                  shareable: true
-                }
+        // We don't need to worry about persistence (if it was an outgoing
+        // message) here as this is done from an internal side-effect.
+        sbp('chelonia/storeSecretKeys', new Secret([{ key: deserializedResponseKey }]))
+
+        const keys = pick(
+          state.secretKeys,
+          Object.entries(contractState._vm.authorizedKeys)
+            .filter(([, key]) => !!key.meta?.private?.shareable)
+            .map(([kId]) => kId)
+        )
+
+        if (!keys || Object.keys(keys).length === 0) {
+          console.info('respondToAllKeyRequests: no keys to share', {
+            contractID,
+            originatingContractID
+          })
+          return
+        }
+
+        const keySharePayload = {
+          contractID,
+          keys: Object.entries(keys).map(([keyId, key]: [string, unknown]) => ({
+            id: keyId,
+            meta: {
+              private: {
+                content: encryptedOutgoingData(originatingContractID, encryptionKeyId, key),
+                shareable: true
               }
             }
-          ]
+          })),
+          keyRequestHash: hash,
+          keyRequestHeight: height
+        }
+
+        // 3. Send OP_KEY_SHARE to identity contract
+        if (!contractState?._vm?.pendingKeyshares?.[hash]) {
+          // While we were getting ready, another client may have shared the keys
+          return
+        }
+
+        return keySharePayload
+      })
+      .then((keySharePayload) => {
+        if (instance !== this._instance || !keySharePayload) return
+
+        return sbp('chelonia/out/keyShare', {
+          contractID: originatingContractID,
+          contractName: originatingContractName,
+          data: keyShareEncryption
+            ? encryptedOutgoingData(
+              originatingContractID,
+              findSuitablePublicKeyIds(
+                originatingState,
+                [SPMessage.OP_KEY_SHARE],
+                ['enc']
+              )?.[0] || '',
+              keySharePayload
+            )
+            : keySharePayload,
+          signingKeyId: responseKeyId
+        }).then((msg: SPMessage) => {
+          if (instance !== this._instance) return
+
+          // 4(i). Remove originating contract and update current contract with information
+          const payload = { keyRequestHash: hash, keyShareHash: msg.hash(), success: true }
+          const connectionKeyPayload = {
+            contractID: originatingContractID,
+            keys: [
+              {
+                id: responseKeyId,
+                meta: {
+                  private: {
+                    content: encryptedOutgoingData(
+                      contractID,
+                      findSuitablePublicKeyIds(
+                        contractState,
+                        [SPMessage.OP_KEY_REQUEST_SEEN],
+                        ['enc']
+                      )?.[0] || '',
+                      responseKey
+                    ),
+                    shareable: true
+                  }
+                }
+              }
+            ]
+          }
+
+          // This is safe to do without await because it's sending an action
+          // If we had await it could deadlock when retrying to send the event
+          sbp('chelonia/out/atomic', {
+            contractID,
+            contractName,
+            signingKeyId,
+            data: [
+              [
+                'chelonia/out/keyRequestResponse',
+                {
+                  data: krsEncryption
+                    ? encryptedOutgoingData(
+                      contractID,
+                      findSuitablePublicKeyIds(
+                        contractState,
+                        [SPMessage.OP_KEY_REQUEST_SEEN],
+                        ['enc']
+                      )?.[0] || '',
+                      payload
+                    )
+                    : payload
+                }
+              ],
+              [
+                // Upon successful key share, we want to share deserializedResponseKey
+                // with ourselves
+                'chelonia/out/keyShare',
+                {
+                  data: keyShareEncryption
+                    ? encryptedOutgoingData(
+                      contractID,
+                      findSuitablePublicKeyIds(
+                        contractState,
+                        [SPMessage.OP_KEY_SHARE],
+                        ['enc']
+                      )?.[0] || '',
+                      connectionKeyPayload
+                    )
+                    : connectionKeyPayload
+                }
+              ]
+            ]
+          }).catch((e: unknown) => {
+            console.error('Error at respondToKeyRequest while sending keyRequestResponse', e)
+          })
+        })
+      })
+      .catch((e: unknown) => {
+        console.error('Error at respondToKeyRequest', e)
+        const payload = { keyRequestHash: hash, success: false }
+
+        // 4(ii). Remove originating contract and update current contract with information
+        if (!contractState?._vm?.pendingKeyshares?.[hash]) {
+          // While we were getting ready, another client may have shared the keys
+          return
         }
 
         // This is safe to do without await because it's sending an action
         // If we had await it could deadlock when retrying to send the event
-        sbp('chelonia/out/atomic', {
+        sbp('chelonia/out/keyRequestResponse', {
           contractID,
           contractName,
           signingKeyId,
-          data: [
-            [
-              'chelonia/out/keyRequestResponse',
-              {
-                data:
-                krsEncryption
-                  ? encryptedOutgoingData(
-                    contractID,
-                    findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_REQUEST_SEEN], ['enc'])?.[0] || '',
-                    payload
-                  )
-                  : payload
-              }
-            ],
-            [
-              // Upon successful key share, we want to share deserializedResponseKey
-              // with ourselves
-              'chelonia/out/keyShare',
-              {
-                data: keyShareEncryption
-                  ? encryptedOutgoingData(
-                    contractID,
-                    findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_SHARE], ['enc'])?.[0] || '',
-                    connectionKeyPayload
-                  )
-                  : connectionKeyPayload
-              }
-            ]
-          ]
+          data: krsEncryption
+            ? encryptedOutgoingData(
+              contractID,
+              findSuitablePublicKeyIds(
+                contractState,
+                [SPMessage.OP_KEY_REQUEST_SEEN],
+                ['enc']
+              )?.[0] || '',
+              payload
+            )
+            : payload
         }).catch((e: unknown) => {
-          console.error('Error at respondToKeyRequest while sending keyRequestResponse', e)
+          console.error(
+            'Error at respondToKeyRequest while sending keyRequestResponse in error handler',
+            e
+          )
         })
       })
-    }).catch((e: unknown) => {
-      console.error('Error at respondToKeyRequest', e)
-      const payload = { keyRequestHash: hash, success: false }
-
-      // 4(ii). Remove originating contract and update current contract with information
-      if (!contractState?._vm?.pendingKeyshares?.[hash]) {
-        // While we were getting ready, another client may have shared the keys
-        return
-      }
-
-      // This is safe to do without await because it's sending an action
-      // If we had await it could deadlock when retrying to send the event
-      sbp('chelonia/out/keyRequestResponse', {
-        contractID,
-        contractName,
-        signingKeyId,
-        data: krsEncryption
-          ? encryptedOutgoingData(contractID, findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_REQUEST_SEEN], ['enc'])?.[0] || '', payload)
-          : payload
-      }).catch((e: unknown) => {
-        console.error('Error at respondToKeyRequest while sending keyRequestResponse in error handler', e)
-      })
-    })
   },
-  'chelonia/private/in/handleEvent': async function (this: CheloniaContext, contractID: string, rawMessage: string) {
+  'chelonia/private/in/handleEvent': async function (
+    this: CheloniaContext,
+    contractID: string,
+    rawMessage: string
+  ) {
     const state = sbp(this.config.stateSelector)
     const { preHandleEvent, postHandleEvent, handleEventError } = this.config.hooks
     let processingErrored = false
@@ -1874,7 +2561,11 @@ export default sbp('sbp/selectors/register', {
     // Errors in side effects result in dropped messages to be reprocessed
     try {
       // verify we're expecting to hear from this contract
-      if (!this.config.acceptAllMessages && !this.pending.some((entry) => entry?.contractID === contractID) && !this.subscriptionSet.has(contractID)) {
+      if (
+        !this.config.acceptAllMessages &&
+        !this.pending.some((entry) => entry?.contractID === contractID) &&
+        !this.subscriptionSet.has(contractID)
+      ) {
         console.warn(`[chelonia] WARN: ignoring unexpected event for ${contractID}:`, rawMessage)
         return
       }
@@ -1888,7 +2579,9 @@ export default sbp('sbp/selectors/register', {
       // access the state should do so only through the state that is passed in
       // to the call to the sideEffect, or through a call though queueInvocation
       // (so that the side effect runs after the changes are applied)
-      const contractStateCopy = state[contractID] ? cloneDeep(state[contractID]) : Object.create(null)
+      const contractStateCopy = state[contractID]
+        ? cloneDeep(state[contractID])
+        : Object.create(null)
       // Now, deserialize the messsage
       // The message is deserialized *here* and not earlier because deserialize
       // constructs objects of signedIncomingData and encryptedIncomingData
@@ -1907,12 +2600,24 @@ export default sbp('sbp/selectors/register', {
       // as we wouldn't know that the key is valid from that state, and the
       // state copy (contractStateCopy) is only written to the root state after
       // all processing has completed.
-      message = SPMessage.deserialize(rawMessage, this.transientSecretKeys, contractStateCopy, this.config.unwrapMaybeEncryptedData)
+      message = SPMessage.deserialize(
+        rawMessage,
+        this.transientSecretKeys,
+        contractStateCopy,
+        this.config.unwrapMaybeEncryptedData
+      )
       if (message.contractID() !== contractID) {
-        throw new Error(`[chelonia] Wrong contract ID. Expected ${contractID} but got ${message.contractID()}`)
+        throw new Error(
+          `[chelonia] Wrong contract ID. Expected ${contractID} but got ${message.contractID()}`
+        )
       }
-      if (!message.isFirstMessage() && (!has(state.contracts, contractID) || !has(state, contractID))) {
-        throw new ChelErrorUnrecoverable('The event is not for a first message but the contract state is missing')
+      if (
+        !message.isFirstMessage() &&
+        (!has(state.contracts, contractID) || !has(state, contractID))
+      ) {
+        throw new ChelErrorUnrecoverable(
+          'The event is not for a first message but the contract state is missing'
+        )
       }
       preHandleEvent?.(message)
       // the order the following actions are done is critically important!
@@ -1929,11 +2634,15 @@ export default sbp('sbp/selectors/register', {
       // this new information) and we must re-sync the contract. When this
       // happens, we stop processing because the state will be regenerated.
       if (state[contractID]?._volatile?.dirty) {
-        console.info(`[chelonia] Ignoring message ${message.description()} as the contract is marked as dirty`)
+        console.info(
+          `[chelonia] Ignoring message ${message.description()} as the contract is marked as dirty`
+        )
         return
       }
 
-      const internalSideEffectStack = !this.config.skipSideEffects ? [] as (({ state, message }: { state: ChelContractState, message: SPMessage }) => void)[] : undefined
+      const internalSideEffectStack = !this.config.skipSideEffects
+        ? ([] as (({ state, message }: { state: ChelContractState; message: SPMessage }) => void)[])
+        : undefined
 
       // process the mutation on the state
       // IMPORTANT: even though we 'await' processMutation, everything in your
@@ -1942,11 +2651,20 @@ export default sbp('sbp/selectors/register', {
       //            source / definitions specified by the SPMessage
       missingDecryptionKeyIdsMap.delete(message)
       try {
-        await handleEvent.processMutation.call(this, message, contractStateCopy, internalSideEffectStack)
+        await handleEvent.processMutation.call(
+          this,
+          message,
+          contractStateCopy,
+          internalSideEffectStack
+        )
       } catch (e_) {
         const e = e_ as Error
         if (e?.name === 'ChelErrorDecryptionKeyNotFound') {
-          console.warn(`[chelonia] WARN '${e.name}' in processMutation for ${message.description()}: ${e.message}`, e, message.serialize())
+          console.warn(
+            `[chelonia] WARN '${e.name}' in processMutation for ${message.description()}: ${e.message}`,
+            e,
+            message.serialize()
+          )
           if (e.cause) {
             const missingDecryptionKeyIds = missingDecryptionKeyIdsMap.get(message)
             if (missingDecryptionKeyIds) {
@@ -1956,15 +2674,25 @@ export default sbp('sbp/selectors/register', {
             }
           }
         } else {
-          console.error(`[chelonia] ERROR '${e.name}' in processMutation for ${message.description()}: ${e.message || e}`, e, message.serialize())
+          console.error(
+            `[chelonia] ERROR '${e.name}' in processMutation for ${message.description()}: ${e.message || e}`,
+            e,
+            message.serialize()
+          )
         }
         // we revert any changes to the contract state that occurred, ignoring this mutation
-        console.warn(`[chelonia] Error processing ${message.description()}: ${message.serialize()}. Any side effects will be skipped!`)
+        console.warn(
+          `[chelonia] Error processing ${message.description()}: ${message.serialize()}. Any side effects will be skipped!`
+        )
         if (this.config.strictProcessing) {
           throw e
         }
         processingErrored = e?.name !== 'ChelErrorWarning'
-        this.config.hooks.processError?.(e, message, getMsgMeta.call(this, message, contractID, contractStateCopy))
+        this.config.hooks.processError?.(
+          e,
+          message,
+          getMsgMeta.call(this, message, contractID, contractStateCopy)
+        )
         // special error that prevents the head from being updated, effectively killing the contract
         if (
           e.name === 'ChelErrorUnrecoverable' ||
@@ -1979,20 +2707,36 @@ export default sbp('sbp/selectors/register', {
       if (!processingErrored) {
         // Gets run get when skipSideEffects is false
         if (Array.isArray(internalSideEffectStack) && internalSideEffectStack.length > 0) {
-          await Promise.all(internalSideEffectStack.map(fn => Promise.resolve(fn({ state: contractStateCopy, message: message! })).catch((e_: unknown) => {
-            const e = e_ as Error
-            console.error(`[chelonia] ERROR '${e.name}' in internal side effect for ${message!.description()}: ${e.message}`, e, { message: message!.serialize() })
-          })))
+          await Promise.all(
+            internalSideEffectStack.map((fn) =>
+              Promise.resolve(fn({ state: contractStateCopy, message: message! })).catch(
+                (e_: unknown) => {
+                  const e = e_ as Error
+                  console.error(
+                    `[chelonia] ERROR '${e.name}' in internal side effect for ${message!.description()}: ${e.message}`,
+                    e,
+                    { message: message!.serialize() }
+                  )
+                }
+              )
+            )
+          )
         }
 
         if (!this.config.skipActionProcessing && !this.config.skipSideEffects) {
-          await handleEvent.processSideEffects.call(this, message, contractStateCopy)?.catch((e_: unknown) => {
-            const e = e_ as Error
-            console.error(`[chelonia] ERROR '${e.name}' in sideEffect for ${message!.description()}: ${e.message}`, e, { message: message!.serialize() })
-            // We used to revert the state and rethrow the error here, but we no longer do that
-            // see this issue for why: https://github.com/okTurtles/group-income/issues/1544
-            this.config.hooks.sideEffectError?.(e, message!)
-          })
+          await handleEvent.processSideEffects
+            .call(this, message, contractStateCopy)
+            ?.catch((e_: unknown) => {
+              const e = e_ as Error
+              console.error(
+                `[chelonia] ERROR '${e.name}' in sideEffect for ${message!.description()}: ${e.message}`,
+                e,
+                { message: message!.serialize() }
+              )
+              // We used to revert the state and rethrow the error here, but we no longer do that
+              // see this issue for why: https://github.com/okTurtles/group-income/issues/1544
+              this.config.hooks.sideEffectError?.(e, message!)
+            })
         }
       }
 
@@ -2007,10 +2751,20 @@ export default sbp('sbp/selectors/register', {
       //   3. Applying changes to rootState.contracts
       try {
         const state = sbp(this.config.stateSelector)
-        await handleEvent.applyProcessResult.call(this, { message, state, contractState: contractStateCopy, processingErrored, postHandleEvent })
+        await handleEvent.applyProcessResult.call(this, {
+          message,
+          state,
+          contractState: contractStateCopy,
+          processingErrored,
+          postHandleEvent
+        })
       } catch (e_) {
         const e = e_ as Error
-        console.error(`[chelonia] ERROR '${e.name}' for ${message.description()} marking the event as processed: ${e.message}`, e, { message: message.serialize() })
+        console.error(
+          `[chelonia] ERROR '${e.name}' for ${message.description()} marking the event as processed: ${e.message}`,
+          e,
+          { message: message.serialize() }
+        )
       }
     } catch (e_) {
       const e = e_ as Error
@@ -2030,9 +2784,13 @@ export default sbp('sbp/selectors/register', {
 }) as string[]
 
 const eventsToReingest: string[] = []
-const reprocessDebounced = debounce((contractID) => sbp('chelonia/private/out/sync', contractID, { force: true }).catch((e: unknown) => {
-  console.error(`[chelonia] Error at reprocessDebounced for ${contractID}`, e)
-}), 1000)
+const reprocessDebounced = debounce(
+  (contractID) =>
+    sbp('chelonia/private/out/sync', contractID, { force: true }).catch((e: unknown) => {
+      console.error(`[chelonia] Error at reprocessDebounced for ${contractID}`, e)
+    }),
+  1000
+)
 
 const handleEvent = {
   checkMessageOrdering (this: CheloniaContext, message: SPMessage) {
@@ -2047,7 +2805,9 @@ const handleEvent = {
     // which can be ahead of the latest message processed.
     const latestProcessedHeight = state.contracts[contractID]?.height
     if (!Number.isSafeInteger(height)) {
-      throw new ChelErrorDBBadPreviousHEAD(`Message ${hash} in contract ${contractID} has an invalid height.`)
+      throw new ChelErrorDBBadPreviousHEAD(
+        `Message ${hash} in contract ${contractID} has an invalid height.`
+      )
     }
     // Avoid re-processing already processed messages
     if (
@@ -2064,12 +2824,16 @@ const handleEvent = {
       if (!this.config.strictOrdering) {
         return false
       }
-      throw new ChelErrorAlreadyProcessed(`Message ${hash} with height ${height} in contract ${contractID} has already been processed. Current height: ${latestProcessedHeight}.`)
+      throw new ChelErrorAlreadyProcessed(
+        `Message ${hash} with height ${height} in contract ${contractID} has already been processed. Current height: ${latestProcessedHeight}.`
+      )
     }
     // If the message is from the future, add it to eventsToReingest
-    if ((latestProcessedHeight + 1) < height) {
+    if (latestProcessedHeight + 1 < height) {
       if (this.config.strictOrdering) {
-        throw new ChelErrorDBBadPreviousHEAD(`Unexpected message ${hash} with height ${height} in contract ${contractID}: height is too high. Current height: ${latestProcessedHeight}.`)
+        throw new ChelErrorDBBadPreviousHEAD(
+          `Unexpected message ${hash} with height ${height} in contract ${contractID}: height is too high. Current height: ${latestProcessedHeight}.`
+        )
       }
       // sometimes we simply miss messages, it's not clear why, but it happens
       // in rare cases. So we attempt to re-sync this contract once
@@ -2077,12 +2841,16 @@ const handleEvent = {
         throw new ChelErrorUnrecoverable('more than 100 different bad previousHEAD errors')
       }
       if (!eventsToReingest.includes(hash)) {
-        console.warn(`[chelonia] WARN bad previousHEAD for ${message.description()}, will attempt to re-sync contract to reingest message`)
+        console.warn(
+          `[chelonia] WARN bad previousHEAD for ${message.description()}, will attempt to re-sync contract to reingest message`
+        )
         eventsToReingest.push(hash)
         reprocessDebounced(contractID)
         return false // ignore the error for now
       } else {
-        console.error(`[chelonia] ERROR already attempted to reingest ${message.description()}, will not attempt again!`)
+        console.error(
+          `[chelonia] ERROR already attempted to reingest ${message.description()}, will not attempt again!`
+        )
         throw new ChelErrorDBBadPreviousHEAD(`Already attempted to reingest ${hash}`)
       }
     }
@@ -2092,12 +2860,23 @@ const handleEvent = {
       eventsToReingest.splice(reprocessIdx, 1)
     }
   },
-  async processMutation (this: CheloniaContext, message: SPMessage, state: ChelContractState, internalSideEffectStack?: (({ state, message }: { state: ChelContractState, message: SPMessage }) => void)[]) {
+  async processMutation (
+    this: CheloniaContext,
+    message: SPMessage,
+    state: ChelContractState,
+    internalSideEffectStack?: (({
+      state,
+      message
+    }: {
+      state: ChelContractState;
+      message: SPMessage;
+    }) => void)[]
+  ) {
     const contractID = message.contractID()
     if (message.isFirstMessage()) {
       // Allow having _volatile but nothing else if this is the first message,
       // as we should be starting off with a clean state
-      if (Object.keys(state).some(k => k !== '_volatile')) {
+      if (Object.keys(state).some((k) => k !== '_volatile')) {
         throw new ChelErrorUnrecoverable(`state for ${contractID} is already set`)
       }
     }
@@ -2105,7 +2884,15 @@ const handleEvent = {
   },
   processSideEffects (this: CheloniaContext, message: SPMessage, state: ChelContractState) {
     const opT = message.opType()
-    if (!([SPMessage.OP_ATOMIC, SPMessage.OP_ACTION_ENCRYPTED, SPMessage.OP_ACTION_UNENCRYPTED] as SPOpType[]).includes(opT)) {
+    if (
+      !(
+        [
+          SPMessage.OP_ATOMIC,
+          SPMessage.OP_ACTION_ENCRYPTED,
+          SPMessage.OP_ACTION_UNENCRYPTED
+        ] as SPOpType[]
+      ).includes(opT)
+    ) {
       return
     }
 
@@ -2152,7 +2939,11 @@ const handleEvent = {
     }
 
     const reducer = (acc: (SPOpActionEncrypted | SPOpActionUnencrypted)[], [opT, opV]: SPOp) => {
-      if (([SPMessage.OP_ACTION_ENCRYPTED, SPMessage.OP_ACTION_UNENCRYPTED] as SPOpType[]).includes(opT)) {
+      if (
+        ([SPMessage.OP_ACTION_ENCRYPTED, SPMessage.OP_ACTION_UNENCRYPTED] as SPOpType[]).includes(
+          opT
+        )
+      ) {
         acc.push(Object(opV))
       }
       return acc
@@ -2160,15 +2951,34 @@ const handleEvent = {
 
     const actionsOpV = msg.reduce(reducer, []) as (SPOpActionEncrypted | SPOpActionUnencrypted)[]
 
-    return Promise.allSettled(actionsOpV.map((action) => callSideEffect(action))).then((results) => {
-      const errors = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map((r) => r.reason)
-      if (errors.length > 0) {
-        console.error('Side-effect errors', contractID, errors)
-        throw new AggregateError(errors, `Error at side effects for ${contractID}`)
+    return Promise.allSettled(actionsOpV.map((action) => callSideEffect(action))).then(
+      (results) => {
+        const errors = results
+          .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+          .map((r) => r.reason)
+        if (errors.length > 0) {
+          console.error('Side-effect errors', contractID, errors)
+          throw new AggregateError(errors, `Error at side effects for ${contractID}`)
+        }
       }
-    })
+    )
   },
-  async applyProcessResult (this: CheloniaContext, { message, state, contractState, processingErrored, postHandleEvent }: { message: SPMessage, state: ChelRootState, contractState: ChelContractState, processingErrored: boolean, postHandleEvent?: { (x: SPMessage): void } | null | undefined }) {
+  async applyProcessResult (
+    this: CheloniaContext,
+    {
+      message,
+      state,
+      contractState,
+      processingErrored,
+      postHandleEvent
+    }: {
+      message: SPMessage;
+      state: ChelRootState;
+      contractState: ChelContractState;
+      processingErrored: boolean;
+      postHandleEvent?: { (x: SPMessage): void } | null | undefined;
+    }
+  ) {
     const contractID = message.contractID()
     const hash = message.hash()
     const height = message.height()
@@ -2188,7 +2998,11 @@ const handleEvent = {
       try {
         postHandleEvent?.(message)
       } catch (e) {
-        console.error(`[chelonia] ERROR '${(e as Error).name}' for ${message.description()} in event post-handling: ${(e as Error).message}`, e, { message: message.serialize() })
+        console.error(
+          `[chelonia] ERROR '${(e as Error).name}' for ${message.description()} in event post-handling: ${(e as Error).message}`,
+          e,
+          { message: message.serialize() }
+        )
       }
     }
     // whether or not there was an exception, we proceed ahead with updating the head
@@ -2218,9 +3032,13 @@ const handleEvent = {
       let missingDecryptionKeyIds = state.contracts[contractID].missingDecryptionKeyIds
       if (!missingDecryptionKeyIds) {
         missingDecryptionKeyIds = []
-        this.config.reactiveSet(state.contracts[contractID], 'missingDecryptionKeyIds', missingDecryptionKeyIds)
+        this.config.reactiveSet(
+          state.contracts[contractID],
+          'missingDecryptionKeyIds',
+          missingDecryptionKeyIds
+        )
       }
-      missingDecryptionKeyIdsForMessage.forEach(keyId => {
+      missingDecryptionKeyIdsForMessage.forEach((keyId) => {
         if (missingDecryptionKeyIds!.includes(keyId)) return
         missingDecryptionKeyIds!.push(keyId)
       })
@@ -2236,7 +3054,10 @@ const handleEvent = {
         }
       }
       this.subscriptionSet.add(contractID)
-      sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), { added: [contractID], removed: [] })
+      sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {
+        added: [contractID],
+        removed: []
+      })
     }
 
     if (!processingErrored) {

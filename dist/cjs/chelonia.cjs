@@ -37,9 +37,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     'chelonia/_init': function () {
         this.config = {
             // TODO: handle connecting to multiple servers for federation
-            get connectionURL() { throw new Error('Invalid use of connectionURL before initialization'); },
+            get connectionURL() {
+                throw new Error('Invalid use of connectionURL before initialization');
+            },
             // override!
-            set connectionURL(value) { Object.defineProperty(this, 'connectionURL', { value, writable: true }); },
+            set connectionURL(value) {
+                Object.defineProperty(this, 'connectionURL', { value, writable: true });
+            },
             stateSelector: 'chelonia/private/state', // override to integrate with, for example, vuex
             contracts: {
                 defaults: {
@@ -53,9 +57,14 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 manifests: {} // override! contract names => manifest hashes
             },
             whitelisted: (action) => !!this.whitelistedActions[action],
-            reactiveSet: (obj, key, value) => { obj[key] = value; return value; }, // example: set to Vue.set
+            reactiveSet: (obj, key, value) => {
+                obj[key] = value;
+                return value;
+            }, // example: set to Vue.set
             fetch: (...args) => fetch(...args),
-            reactiveDel: (obj, key) => { delete obj[key]; },
+            reactiveDel: (obj, key) => {
+                delete obj[key];
+            },
             // acceptAllMessages disables checking whether we are expecting a message
             // or not for processing
             acceptAllMessages: false,
@@ -115,7 +124,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         //   (1) After a call to /sync or /syncContract; or
         //   (2) After an event has been handled, if it was received on a web socket
         this.setPostSyncOp = (contractID, key, op) => {
-            this.postSyncOperations[contractID] = this.postSyncOperations[contractID] || Object.create(null);
+            this.postSyncOperations[contractID] =
+                this.postSyncOperations[contractID] || Object.create(null);
             this.postSyncOperations[contractID][key] = op;
         };
         const secretKeyGetter = (o, p) => {
@@ -191,7 +201,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         return;
                     if (!(0, encryptedData_js_1.isEncryptedData)(data)) {
                         return {
-                            encryptionKeyId: null, data
+                            encryptionKeyId: null,
+                            data
                         };
                     }
                 };
@@ -211,14 +222,14 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             (0, sbp_1.default)('chelonia/private/stopClockSync');
         }
         // wait for any pending sync operations to finish before saving
-        Object.keys(this.postSyncOperations).forEach(cID => {
+        Object.keys(this.postSyncOperations).forEach((cID) => {
             (0, sbp_1.default)('chelonia/private/enqueuePostSyncOps', cID);
         });
         await (0, sbp_1.default)('chelonia/contract/waitPublish');
         await (0, sbp_1.default)('chelonia/contract/wait');
         // do this again to catch operations that are the result of side-effects
         // or post sync ops
-        Object.keys(this.postSyncOperations).forEach(cID => {
+        Object.keys(this.postSyncOperations).forEach((cID) => {
             (0, sbp_1.default)('chelonia/private/enqueuePostSyncOps', cID);
         });
         await (0, sbp_1.default)('chelonia/contract/waitPublish');
@@ -242,7 +253,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.subscriptionSet.clear();
         (0, sbp_1.default)('chelonia/clearTransientSecretKeys');
         (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_RESET);
-        (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), { added: [], removed: removedContractIDs });
+        (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {
+            added: [],
+            removed: removedContractIDs
+        });
         if (this.pubsub) {
             (0, sbp_1.default)('chelonia/private/startClockSync');
         }
@@ -255,8 +269,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     },
     'chelonia/storeSecretKeys': function (wkeys) {
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
-        if (!rootState.secretKeys)
+        if (!rootState.secretKeys) {
             this.config.reactiveSet(rootState, 'secretKeys', Object.create(null));
+        }
         let keys = wkeys.valueOf();
         if (!keys)
             return;
@@ -304,7 +319,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             const rootState = (0, sbp_1.default)(this.config.stateSelector);
             contractIDOrState = rootState[contractIDOrState];
         }
-        return !!contractIDOrState?._volatile?.dirty || !!contractIDOrState?._volatile?.resyncing;
+        return (!!contractIDOrState?._volatile?.dirty ||
+            !!contractIDOrState?._volatile?.resyncing);
     },
     'chelonia/contract/hasKeyShareBeenRespondedBy': function (contractIDOrState, requestedToContractID, reference) {
         if (typeof contractIDOrState === 'string') {
@@ -312,7 +328,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             contractIDOrState = rootState[contractIDOrState];
         }
         const result = Object.values(contractIDOrState?._vm.authorizedKeys || {}).some((r) => {
-            return r?.meta?.keyRequest?.responded && r.meta.keyRequest.contractID === requestedToContractID && (!reference || r.meta.keyRequest.reference === reference);
+            return (r?.meta?.keyRequest?.responded &&
+                r.meta.keyRequest.contractID === requestedToContractID &&
+                (!reference || r.meta.keyRequest.reference === reference));
         });
         return result;
     },
@@ -323,7 +341,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         const result = contractIDOrState._volatile?.pendingKeyRequests
             ?.filter((r) => {
-            return r && (!requestingContractID || r.contractID === requestingContractID) && (!reference || r.reference === reference);
+            return (r &&
+                (!requestingContractID || r.contractID === requestingContractID) &&
+                (!reference || r.reference === reference));
         })
             ?.map(({ name }) => name);
         if (!result?.length)
@@ -348,7 +368,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 result[kS.contractID] = [];
             result[kS.contractID].push({ height: kS.height, hash: kS.hash });
         });
-        Object.keys(result).forEach(cID => {
+        Object.keys(result).forEach((cID) => {
             result[cID].sort((a, b) => {
                 return b.height - a.height;
             });
@@ -360,7 +380,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             const rootState = (0, sbp_1.default)(this.config.stateSelector);
             contractIDOrState = rootState[contractIDOrState];
         }
-        const op = (operation !== '*') ? [operation] : operation;
+        const op = operation !== '*' ? [operation] : operation;
         return !!(0, utils_js_1.findSuitableSecretKeyId)(contractIDOrState, op, ['sig']);
     },
     // Did sourceContractIDOrState receive an OP_KEY_SHARE to perform the given
@@ -373,7 +393,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (typeof contractIDOrState === 'string') {
             contractIDOrState = rootState[contractIDOrState];
         }
-        const op = (operation !== '*') ? [operation] : operation;
+        const op = operation !== '*' ? [operation] : operation;
         const keyId = (0, utils_js_1.findSuitableSecretKeyId)(contractIDOrState, op, ['sig']);
         return sourceContractIDOrState?._vm?.sharedKeyIds?.some((sK) => sK.id === keyId);
     },
@@ -417,15 +437,19 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const state = rootState[contractID];
         if (!state._volatile)
             this.config.reactiveSet(state, '_volatile', Object.create(null));
-        if (!state._volatile.pendingKeyRevocations)
+        if (!state._volatile.pendingKeyRevocations) {
             this.config.reactiveSet(state._volatile, 'pendingKeyRevocations', Object.create(null));
+        }
         for (const name of names) {
             const keyId = (0, utils_js_1.findKeyIdByName)(state, name);
             if (keyId) {
                 this.config.reactiveSet(state._volatile.pendingKeyRevocations, keyId, true);
             }
             else {
-                console.warn('[setPendingKeyRevocation] Unable to find keyId for name', { contractID, name });
+                console.warn('[setPendingKeyRevocation] Unable to find keyId for name', {
+                    contractID,
+                    name
+                });
             }
         }
     },
@@ -484,10 +508,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             },
             // Map message handlers to transparently handle encryption and signatures
             messageHandlers: {
-                ...(Object.fromEntries(Object.entries(options.messageHandlers || {}).map(([k, v]) => {
+                ...Object.fromEntries(Object.entries(options.messageHandlers || {}).map(([k, v]) => {
                     switch (k) {
                         case index_js_1.NOTIFICATION_TYPE.PUB:
-                            return [k, (msg) => {
+                            return [
+                                k,
+                                (msg) => {
                                     if (!msg.channelID) {
                                         console.info('[chelonia] Discarding pub event without channelID');
                                         return;
@@ -504,9 +530,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                     }).catch((e) => {
                                         console.error(`[chelonia] Error processing pub event for ${msg.channelID}`, e);
                                     });
-                                }];
+                                }
+                            ];
                         case index_js_1.NOTIFICATION_TYPE.KV:
-                            return [k, (msg) => {
+                            return [
+                                k,
+                                (msg) => {
                                     if (!msg.channelID || !msg.key) {
                                         console.info('[chelonia] Discarding kv event without channelID or key');
                                         return;
@@ -516,21 +545,28 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                         return;
                                     }
                                     (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, () => {
-                                        v.call(this.pubsub, [msg.key, parseEncryptedOrUnencryptedMessage(this, {
+                                        v.call(this.pubsub, [
+                                            msg.key,
+                                            parseEncryptedOrUnencryptedMessage(this, {
                                                 contractID: msg.channelID,
                                                 meta: msg.key,
                                                 serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
-                                            })]);
+                                            })
+                                        ]);
                                     }).catch((e) => {
                                         console.error(`[chelonia] Error processing kv event for ${msg.channelID} and key ${msg.key}`, msg, e);
                                     });
-                                }];
+                                }
+                            ];
                         case index_js_1.NOTIFICATION_TYPE.DELETION:
-                            return [k, (msg) => v.call(this.pubsub, msg.data)];
+                            return [
+                                k,
+                                (msg) => v.call(this.pubsub, msg.data)
+                            ];
                         default:
                             return [k, v];
                     }
-                }))),
+                })),
                 [index_js_1.NOTIFICATION_TYPE.ENTRY](msg) {
                     // We MUST use 'chelonia/private/in/enqueueHandleEvent' to ensure handleEvent()
                     // is called AFTER any currently-running calls to 'chelonia/private/out/sync'
@@ -608,7 +644,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     // Even though these are asynchronous calls, contracts should not
                     // call side effects from these functions
                     await contract.metadata.validate(meta, { state, ...gProxy, contractID });
-                    await contract.actions[action].validate(data, { state, ...gProxy, meta, message, contractID });
+                    await contract.actions[action].validate(data, {
+                        state,
+                        ...gProxy,
+                        meta,
+                        message,
+                        contractID
+                    });
                     // it's possible that the sideEffect stack got filled up by the call to `processMessage` from
                     // a call to `publishEvent` (when an outgoing message is being sent).
                     this.sideEffectStacks[contractID] = [];
@@ -716,18 +758,22 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // resolves when all pending actions for these contractID(s) finish
     'chelonia/contract/wait': function (contractIDs) {
         const listOfIds = contractIDs
-            ? (typeof contractIDs === 'string' ? [contractIDs] : contractIDs)
+            ? typeof contractIDs === 'string'
+                ? [contractIDs]
+                : contractIDs
             : Object.keys((0, sbp_1.default)(this.config.stateSelector).contracts);
-        return Promise.all(listOfIds.flatMap(cID => {
+        return Promise.all(listOfIds.flatMap((cID) => {
             return (0, sbp_1.default)('chelonia/queueInvocation', cID, ['chelonia/private/noop']);
         }));
     },
     // resolves when all pending *writes* for these contractID(s) finish
     'chelonia/contract/waitPublish': function (contractIDs) {
         const listOfIds = contractIDs
-            ? (typeof contractIDs === 'string' ? [contractIDs] : contractIDs)
+            ? typeof contractIDs === 'string'
+                ? [contractIDs]
+                : contractIDs
             : Object.keys((0, sbp_1.default)(this.config.stateSelector).contracts);
-        return Promise.all(listOfIds.flatMap(cID => {
+        return Promise.all(listOfIds.flatMap((cID) => {
             return (0, sbp_1.default)('chelonia/private/queueEvent', `publish:${cID}`, ['chelonia/private/noop']);
         }));
     },
@@ -756,9 +802,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     },
     'chelonia/contract/isSyncing': function (contractID, { firstSync = false } = {}) {
         const isSyncing = !!this.currentSyncs[contractID];
-        return firstSync
-            ? isSyncing && this.currentSyncs[contractID].firstSync
-            : isSyncing;
+        return firstSync ? isSyncing && this.currentSyncs[contractID].firstSync : isSyncing;
     },
     'chelonia/contract/currentSyncs': function () {
         return Object.keys(this.currentSyncs);
@@ -771,7 +815,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     'chelonia/contract/remove': function (contractIDs, { confirmRemovalCallback, permanent } = {}) {
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         const listOfIds = typeof contractIDs === 'string' ? [contractIDs] : contractIDs;
-        return Promise.all(listOfIds.map(contractID => {
+        return Promise.all(listOfIds.map((contractID) => {
             if (!rootState?.contracts?.[contractID]) {
                 return undefined;
             }
@@ -785,9 +829,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     return;
                 }
                 const rootState = (0, sbp_1.default)(this.config.stateSelector);
-                const fkContractIDs = Array.from(new Set(Object.values(rootState[contractID]?._vm?.authorizedKeys ?? {}).filter((k) => {
+                const fkContractIDs = Array.from(new Set(Object.values(rootState[contractID]?._vm?.authorizedKeys ?? {})
+                    .filter((k) => {
                     return !!k.foreignKey;
-                }).map((k) => {
+                })
+                    .map((k) => {
                     try {
                         const fkUrl = new URL(k.foreignKey);
                         return fkUrl.pathname;
@@ -795,7 +841,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     catch {
                         return undefined;
                     }
-                }).filter(Boolean)));
+                })
+                    .filter(Boolean)));
                 (0, sbp_1.default)('chelonia/private/removeImmediately', contractID, { permanent });
                 if (fkContractIDs.length) {
                     // Attempt to release all contracts that are being monitored for
@@ -917,14 +964,20 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // contract is safe to remove
         const boundCheckCanBeGarbageCollected = utils_js_1.checkCanBeGarbageCollected.bind(this);
         const idsToRemove = listOfIds.filter(boundCheckCanBeGarbageCollected);
-        return idsToRemove.length ? await (0, sbp_1.default)('chelonia/contract/remove', idsToRemove, { confirmRemovalCallback: boundCheckCanBeGarbageCollected }) : undefined;
+        return idsToRemove.length
+            ? await (0, sbp_1.default)('chelonia/contract/remove', idsToRemove, {
+                confirmRemovalCallback: boundCheckCanBeGarbageCollected
+            })
+            : undefined;
     },
     'chelonia/contract/disconnect': async function (contractID, contractIDToDisconnect) {
         const state = (0, sbp_1.default)(this.config.stateSelector);
         const contractState = state[contractID];
-        const keyIds = Object.values(contractState._vm.authorizedKeys).filter((k) => {
-            return k._notAfterHeight == null && k.meta?.keyRequest?.contractID === contractIDToDisconnect;
-        }).map(k => k.id);
+        const keyIds = Object.values(contractState._vm.authorizedKeys)
+            .filter((k) => {
+            return (k._notAfterHeight == null && k.meta?.keyRequest?.contractID === contractIDToDisconnect);
+        })
+            .map((k) => k.id);
         if (!keyIds.length)
             return;
         return await (0, sbp_1.default)('chelonia/out/keyDel', {
@@ -936,8 +989,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     },
     'chelonia/in/processMessage': function (messageOrRawMessage, state) {
         const stateCopy = (0, turtledash_1.cloneDeep)(state);
-        const message = typeof messageOrRawMessage === 'string' ? SPMessage_js_1.SPMessage.deserialize(messageOrRawMessage, this.transientSecretKeys, stateCopy, this.config.unwrapMaybeEncryptedData) : messageOrRawMessage;
-        return (0, sbp_1.default)('chelonia/private/in/processMessage', message, stateCopy).then(() => stateCopy).catch((e) => {
+        const message = typeof messageOrRawMessage === 'string'
+            ? SPMessage_js_1.SPMessage.deserialize(messageOrRawMessage, this.transientSecretKeys, stateCopy, this.config.unwrapMaybeEncryptedData)
+            : messageOrRawMessage;
+        return (0, sbp_1.default)('chelonia/private/in/processMessage', message, stateCopy)
+            .then(() => stateCopy)
+            .catch((e) => {
             console.warn(`chelonia/in/processMessage: reverting mutation ${message.description()}: ${message.serialize()}`, e);
             return state;
         });
@@ -956,7 +1013,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (local != null)
             return local;
         const url = `${this.config.connectionURL}/file/${cid}`;
-        const data = await this.config.fetch(url, { signal: this.abortController.signal }).then((0, utils_js_1.handleFetchResult)('text'));
+        const data = (await this.config
+            .fetch(url, { signal: this.abortController.signal })
+            .then((0, utils_js_1.handleFetchResult)('text')));
         const ourHash = (0, functions_js_1.createCID)(data, parsedCID.code);
         if (ourHash !== cid) {
             throw new Error(`expected hash ${cid}. Got: ${ourHash}`);
@@ -965,10 +1024,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         return data;
     },
     'chelonia/out/latestHEADInfo': function (contractID) {
-        return this.config.fetch(`${this.config.connectionURL}/latestHEADinfo/${contractID}`, {
+        return this.config
+            .fetch(`${this.config.connectionURL}/latestHEADinfo/${contractID}`, {
             cache: 'no-store',
             signal: this.abortController.signal
-        }).then((0, utils_js_1.handleFetchResult)('json'));
+        })
+            .then((0, utils_js_1.handleFetchResult)('json'));
     },
     'chelonia/out/eventsAfter': utils_js_1.eventsAfter,
     'chelonia/out/eventsBefore': function (contractID, { beforeHeight, limit, stream }) {
@@ -977,7 +1038,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         const offset = Math.max(0, beforeHeight - limit + 1);
         const eventsAfterLimit = Math.min(beforeHeight + 1, limit);
-        return (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, { sinceHeight: offset, limit: eventsAfterLimit, stream });
+        return (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, {
+            sinceHeight: offset,
+            limit: eventsAfterLimit,
+            stream
+        });
     },
     'chelonia/out/eventsBetween': function (contractID, { startHash, endHeight, offset = 0, limit = 0, stream = true }) {
         if (offset < 0) {
@@ -987,19 +1052,28 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         let reader;
         const s = new ReadableStream({
             start: async (controller) => {
-                const first = await this.config.fetch(`${this.config.connectionURL}/file/${startHash}`, { signal: this.abortController.signal }).then((0, utils_js_1.handleFetchResult)('text'));
+                const first = (await this.config
+                    .fetch(`${this.config.connectionURL}/file/${startHash}`, {
+                    signal: this.abortController.signal
+                })
+                    .then((0, utils_js_1.handleFetchResult)('text')));
                 const deserializedHEAD = SPMessage_js_1.SPMessage.deserializeHEAD(first);
                 if (deserializedHEAD.contractID !== contractID) {
                     controller.error(new Error('chelonia/out/eventsBetween: Mismatched contract ID'));
                     return;
                 }
                 const startOffset = Math.max(0, deserializedHEAD.head.height - offset);
-                const ourLimit = limit ? Math.min(endHeight - startOffset + 1, limit) : endHeight - startOffset + 1;
+                const ourLimit = limit
+                    ? Math.min(endHeight - startOffset + 1, limit)
+                    : endHeight - startOffset + 1;
                 if (ourLimit < 1) {
                     controller.close();
                     return;
                 }
-                reader = (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, { sinceHeight: startOffset, limit: ourLimit }).getReader();
+                reader = (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, {
+                    sinceHeight: startOffset,
+                    limit: ourLimit
+                }).getReader();
             },
             async pull(controller) {
                 const { done, value } = await reader.read();
@@ -1016,7 +1090,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // Workaround for <https://bugs.webkit.org/show_bug.cgi?id=215485>
         return (0, utils_js_1.collectEventStream)(s);
     },
-    'chelonia/rootState': function () { return (0, sbp_1.default)(this.config.stateSelector); },
+    'chelonia/rootState': function () {
+        return (0, sbp_1.default)(this.config.stateSelector);
+    },
     'chelonia/latestContractState': async function (contractID, options = { forceSync: false }) {
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         // return a copy of the state if we already have it, unless the only key that's in it is _volatile,
@@ -1024,12 +1100,17 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (rootState.contracts[contractID] === null) {
             throw new errors_js_1.ChelErrorResourceGone('Permanently deleted contract ' + contractID);
         }
-        if (!options.forceSync && rootState[contractID] && Object.keys(rootState[contractID]).some((x) => x !== '_volatile')) {
+        if (!options.forceSync &&
+            rootState[contractID] &&
+            Object.keys(rootState[contractID]).some((x) => x !== '_volatile')) {
             return (0, turtledash_1.cloneDeep)(rootState[contractID]);
         }
         let state = Object.create(null);
         let contractName = rootState.contracts[contractID]?.type;
-        const eventsStream = (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, { sinceHeight: 0, sinceHash: contractID });
+        const eventsStream = (0, sbp_1.default)('chelonia/out/eventsAfter', contractID, {
+            sinceHeight: 0,
+            sinceHash: contractID
+        });
         const eventsStreamReader = eventsStream.getReader();
         if (rootState[contractID])
             state._volatile = rootState[contractID]._volatile;
@@ -1057,7 +1138,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const stateCopy = state && (0, turtledash_1.cloneDeep)(state);
         if (stateCopy?._vm && height != null) {
             // Remove keys in the future
-            Object.keys(stateCopy._vm.authorizedKeys).forEach(keyId => {
+            Object.keys(stateCopy._vm.authorizedKeys).forEach((keyId) => {
                 if (stateCopy._vm.authorizedKeys[keyId]._notBeforeHeight > height) {
                     delete stateCopy._vm.authorizedKeys[keyId];
                 }
@@ -1068,7 +1149,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     'chelonia/contract/fullState': function (contractID) {
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         if (Array.isArray(contractID)) {
-            return Object.fromEntries(contractID.map(contractID => {
+            return Object.fromEntries(contractID.map((contractID) => {
                 return [
                     contractID,
                     {
@@ -1107,7 +1188,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             manifest: manifestHash
         });
         const contractID = contractMsg.hash();
-        await (0, sbp_1.default)('chelonia/private/out/publishEvent', contractMsg, (params.namespaceRegistration
+        await (0, sbp_1.default)('chelonia/private/out/publishEvent', contractMsg, params.namespaceRegistration
             ? {
                 ...publishOptions,
                 headers: {
@@ -1115,14 +1196,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     'shelter-namespace-registration': params.namespaceRegistration
                 }
             }
-            : publishOptions), hooks && {
+            : publishOptions, hooks && {
             prepublish: hooks.prepublishContract,
             postpublish: hooks.postpublishContract
         });
         await (0, sbp_1.default)('chelonia/private/out/sync', contractID);
-        const msg = await (0, sbp_1.default)(actionEncryptionKeyId
-            ? 'chelonia/out/actionEncrypted'
-            : 'chelonia/out/actionUnencrypted', {
+        const msg = await (0, sbp_1.default)(actionEncryptionKeyId ? 'chelonia/out/actionEncrypted' : 'chelonia/out/actionUnencrypted', {
             action: contractName,
             contractID,
             data: params.data,
@@ -1141,10 +1220,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             method: 'GET',
             signal: this.abortController.signal,
             headers: new Headers([
-                [
-                    'authorization',
-                    utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)
-                ]
+                ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)]
             ])
         });
         if (!response.ok) {
@@ -1170,10 +1246,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 method: 'POST',
                 signal: this.abortController.signal,
                 headers: new Headers([
-                    ['authorization',
+                    [
+                        'authorization',
                         hasToken
                             ? `bearer ${credentials[cid].token.valueOf()}`
-                            : utils_js_1.buildShelterAuthorizationHeader.call(this, credentials[cid].billableContractID)]
+                            : utils_js_1.buildShelterAuthorizationHeader.call(this, credentials[cid].billableContractID)
+                    ]
                 ])
             });
             if (!response.ok) {
@@ -1198,7 +1276,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const { atomic, originatingContractName, originatingContractID, contractName, contractID, data, hooks, publishOptions } = params;
         const originatingManifestHash = this.config.contracts.manifests[originatingContractName];
         const destinationManifestHash = this.config.contracts.manifests[contractName];
-        const originatingContract = originatingContractID ? this.manifestToContract[originatingManifestHash]?.contract : undefined;
+        const originatingContract = originatingContractID
+            ? this.manifestToContract[originatingManifestHash]?.contract
+            : undefined;
         const destinationContract = this.manifestToContract[destinationManifestHash]?.contract;
         if ((originatingContractID && !originatingContract) || !destinationContract) {
             throw new Error('Contract name not found');
@@ -1267,18 +1347,22 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             throw new Error('Contract name not found');
         }
         const state = contract.state(contractID);
-        const payload = data.map((keyId) => {
+        const payload = data
+            .map((keyId) => {
             if ((0, encryptedData_js_1.isEncryptedData)(keyId))
                 return keyId;
-            if (!(0, turtledash_1.has)(state._vm.authorizedKeys, keyId) || state._vm.authorizedKeys[keyId]._notAfterHeight != null)
+            if (!(0, turtledash_1.has)(state._vm.authorizedKeys, keyId) ||
+                state._vm.authorizedKeys[keyId]._notAfterHeight != null) {
                 return undefined;
+            }
             if (state._vm.authorizedKeys[keyId]._private) {
                 return (0, encryptedData_js_1.encryptedOutgoingData)(contractID, state._vm.authorizedKeys[keyId]._private, keyId);
             }
             else {
                 return keyId;
             }
-        }).filter(Boolean);
+        })
+            .filter(Boolean);
         let msg = SPMessage_js_1.SPMessage.createV1_0({
             contractID,
             op: [
@@ -1343,7 +1427,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             const state = contract.state(contractID);
             const originatingState = originatingContract.state(originatingContractID);
             const havePendingKeyRequest = Object.values(originatingState._vm.authorizedKeys).findIndex((k) => {
-                return k._notAfterHeight == null && k.meta?.keyRequest?.contractID === contractID && state?._volatile?.pendingKeyRequests?.some(pkr => pkr.name === k.name);
+                return (k._notAfterHeight == null &&
+                    k.meta?.keyRequest?.contractID === contractID &&
+                    state?._volatile?.pendingKeyRequests?.some((pkr) => pkr.name === k.name));
             }) !== -1;
             // If there's a pending key request for this contract, return
             if (havePendingKeyRequest) {
@@ -1360,7 +1446,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             const keyAddOp = () => (0, sbp_1.default)('chelonia/out/keyAdd', {
                 contractID: originatingContractID,
                 contractName: originatingContractName,
-                data: [{
+                data: [
+                    {
                         id: keyRequestReplyKeyId,
                         name: '#krrk-' + keyRequestReplyKeyId,
                         purpose: ['sig'],
@@ -1377,12 +1464,19 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                 shareable: false
                             },
                             keyRequest: {
-                                ...(reference && { reference: encryptKeyRequestMetadata ? (0, encryptedData_js_1.encryptedOutgoingData)(originatingContractID, encryptionKeyId, reference) : reference }),
-                                contractID: encryptKeyRequestMetadata ? (0, encryptedData_js_1.encryptedOutgoingData)(originatingContractID, encryptionKeyId, contractID) : contractID
+                                ...(reference && {
+                                    reference: encryptKeyRequestMetadata
+                                        ? (0, encryptedData_js_1.encryptedOutgoingData)(originatingContractID, encryptionKeyId, reference)
+                                        : reference
+                                }),
+                                contractID: encryptKeyRequestMetadata
+                                    ? (0, encryptedData_js_1.encryptedOutgoingData)(originatingContractID, encryptionKeyId, contractID)
+                                    : contractID
                             }
                         },
                         data: keyRequestReplyKeyP
-                    }],
+                    }
+                ],
                 signingKeyId
             }).catch((e) => {
                 console.error(`[chelonia] Error sending OP_KEY_ADD for ${originatingContractID} during key request to ${contractID}`, e);
@@ -1449,11 +1543,27 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             throw new Error('Contract name not found');
         }
         const payload = (await Promise.all(data.map(([selector, opParams]) => {
-            if (!['chelonia/out/actionEncrypted', 'chelonia/out/actionUnencrypted', 'chelonia/out/keyAdd', 'chelonia/out/keyDel', 'chelonia/out/keyUpdate', 'chelonia/out/keyRequestResponse', 'chelonia/out/keyShare'].includes(selector)) {
+            if (![
+                'chelonia/out/actionEncrypted',
+                'chelonia/out/actionUnencrypted',
+                'chelonia/out/keyAdd',
+                'chelonia/out/keyDel',
+                'chelonia/out/keyUpdate',
+                'chelonia/out/keyRequestResponse',
+                'chelonia/out/keyShare'
+            ].includes(selector)) {
                 throw new Error('Selector not allowed in OP_ATOMIC: ' + selector);
             }
-            return (0, sbp_1.default)(selector, { ...opParams, ...params, data: opParams.data, atomic: true });
-        }))).flat().filter(Boolean).map((msg) => {
+            return (0, sbp_1.default)(selector, {
+                ...opParams,
+                ...params,
+                data: opParams.data,
+                atomic: true
+            });
+        })))
+            .flat()
+            .filter(Boolean)
+            .map((msg) => {
             return [msg.opType(), msg.opValue()];
         });
         let msg = SPMessage_js_1.SPMessage.createV1_0({
@@ -1467,12 +1577,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         msg = await (0, sbp_1.default)('chelonia/private/out/publishEvent', msg, publishOptions, hooks);
         return msg;
     },
-    'chelonia/out/protocolUpgrade': async function () {
-    },
-    'chelonia/out/propSet': async function () {
-    },
-    'chelonia/out/propDel': async function () {
-    },
+    'chelonia/out/protocolUpgrade': async function () { },
+    'chelonia/out/propSet': async function () { },
+    'chelonia/out/propDel': async function () { },
     'chelonia/out/encryptedOrUnencryptedPubMessage': function ({ contractID, innerSigningKeyId, encryptionKeyId, signingKeyId, data }) {
         const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
             contractID,
@@ -1564,11 +1671,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     meta: key
                 });
                 response = await this.config.fetch(url, {
-                    headers: new Headers([[
-                            'authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)
-                        ], [
-                            'if-match', ifMatch || '""'
-                        ]
+                    headers: new Headers([
+                        ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)],
+                        ['if-match', ifMatch || '""']
                     ]),
                     method: 'POST',
                     body: JSON.stringify(serializedData),
@@ -1583,9 +1688,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // data and CID. Then, `onconflict` will be used to merge the current
                 // and new data.
                 response = await this.config.fetch(url, {
-                    headers: new Headers([[
-                            'authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)
-                        ]]),
+                    headers: new Headers([
+                        ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)]
+                    ]),
                     signal: this.abortController.signal
                 });
                 // This is only for the initial case; the logic is replicated below
@@ -1625,9 +1730,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     },
     'chelonia/kv/get': async function (contractID, key) {
         const response = await this.config.fetch(`${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`, {
-            headers: new Headers([[
-                    'authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)
-                ]]),
+            headers: new Headers([
+                ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)]
+            ]),
             signal: this.abortController.signal
         });
         if (response.status === 404) {
@@ -1672,7 +1777,8 @@ function contractNameFromAction(action) {
 function outputEncryptedOrUnencryptedMessage({ contractID, innerSigningKeyId, encryptionKeyId, signingKeyId, data, meta }) {
     const state = (0, sbp_1.default)(this.config.stateSelector)[contractID];
     const signedMessage = innerSigningKeyId
-        ? (state._vm.authorizedKeys[innerSigningKeyId] && state._vm.authorizedKeys[innerSigningKeyId]?._notAfterHeight == null)
+        ? state._vm.authorizedKeys[innerSigningKeyId] &&
+            state._vm.authorizedKeys[innerSigningKeyId]?._notAfterHeight == null
             ? (0, signedData_js_1.signedOutgoingData)(contractID, innerSigningKeyId, data, this.transientSecretKeys)
             : (0, signedData_js_1.signedOutgoingDataWithRawKey)(this.transientSecretKeys[innerSigningKeyId], data)
         : data;
@@ -1798,7 +1904,8 @@ async function outEncryptedOrUnencryptedAction(opType, params) {
     const meta = await contract.metadata.create();
     const unencMessage = { action, data, meta };
     const signedMessage = params.innerSigningKeyId
-        ? (state._vm.authorizedKeys[params.innerSigningKeyId] && state._vm.authorizedKeys[params.innerSigningKeyId]?._notAfterHeight == null)
+        ? state._vm.authorizedKeys[params.innerSigningKeyId] &&
+            state._vm.authorizedKeys[params.innerSigningKeyId]?._notAfterHeight == null
             ? (0, signedData_js_1.signedOutgoingData)(contractID, params.innerSigningKeyId, unencMessage, this.transientSecretKeys)
             : (0, signedData_js_1.signedOutgoingDataWithRawKey)(this.transientSecretKeys[params.innerSigningKeyId], unencMessage)
         : unencMessage;
