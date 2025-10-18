@@ -3,11 +3,16 @@
 // using `chelonia/*`
 import sbp from '@sbp/sbp'
 import { cloneDeep } from 'turtledash'
-import { CONTRACTS_MODIFIED, CONTRACTS_MODIFIED_READY, EVENT_HANDLED, EVENT_HANDLED_READY } from '../events.js'
+import {
+  CONTRACTS_MODIFIED,
+  CONTRACTS_MODIFIED_READY,
+  EVENT_HANDLED,
+  EVENT_HANDLED_READY
+} from '../events.js'
 
 type Context = {
   stateSelector: string;
-}
+};
 
 export default sbp('sbp/selectors/register', {
   // This selector sets up event listeners on EVENT_HANDLED and CONTRACTS_MODIFIED
@@ -27,11 +32,18 @@ export default sbp('sbp/selectors/register', {
   // 3. Each tab calls this selector once to set up event listeners on EVENT_HANDLED
   //    and CONTRACTS_MODIFIED, which will keep each tab's state updated every
   //    time Chelonia handles an event.
-  'chelonia/externalStateSetup': function (this: Context, { stateSelector, reactiveSet = Reflect.set.bind(Reflect), reactiveDel = Reflect.deleteProperty.bind(Reflect) }: {
-    stateSelector: string,
-    reactiveSet: (target: object, propertyKey: PropertyKey, value: unknown) => void,
-    reactiveDel: (target: object, propertyKey: PropertyKey) => void
-  }) {
+  'chelonia/externalStateSetup': function (
+    this: Context,
+    {
+      stateSelector,
+      reactiveSet = Reflect.set.bind(Reflect),
+      reactiveDel = Reflect.deleteProperty.bind(Reflect)
+    }: {
+      stateSelector: string;
+      reactiveSet: (target: object, propertyKey: PropertyKey, value: unknown) => void;
+      reactiveDel: (target: object, propertyKey: PropertyKey) => void;
+    }
+  ) {
     this.stateSelector = stateSelector
     sbp('okTurtles.events/on', EVENT_HANDLED, (contractID: string, message: never) => {
       // The purpose of putting things immediately into a queue is to have
@@ -43,7 +55,10 @@ export default sbp('sbp/selectors/register', {
       //      useful in the same sense that `chelonia/contract/wait` is useful
       //      (i.e., set up a barrier / sync checkpoint).
       sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
-        const { contractState, cheloniaState } = await sbp('chelonia/contract/fullState', contractID)
+        const { contractState, cheloniaState } = await sbp(
+          'chelonia/contract/fullState',
+          contractID
+        )
         const externalState = sbp(stateSelector)
         if (cheloniaState) {
           if (!externalState.contracts) {
@@ -68,37 +83,49 @@ export default sbp('sbp/selectors/register', {
       })
     })
 
-    sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (subscriptionSet: never, { added, removed, permanent }: { added: Array<string>, removed: Array<string>, permanent: boolean }) => {
-      sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
-        const states = added.length
-          ? await sbp('chelonia/contract/fullState', added)
-          : {}
-        const vuexState = sbp('state/vuex/state')
+    sbp(
+      'okTurtles.events/on',
+      CONTRACTS_MODIFIED,
+      (
+        subscriptionSet: never,
+        {
+          added,
+          removed,
+          permanent
+        }: { added: Array<string>; removed: Array<string>; permanent: boolean }
+      ) => {
+        sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
+          const states = added.length ? await sbp('chelonia/contract/fullState', added) : {}
+          const vuexState = sbp('state/vuex/state')
 
-        if (!vuexState.contracts) {
-          reactiveSet(vuexState, 'contracts', Object.create(null))
-        }
-
-        removed.forEach((contractID: string) => {
-          if (permanent) {
-            reactiveSet(vuexState.contracts, contractID, null)
-          } else {
-            reactiveDel(vuexState.contracts, contractID)
+          if (!vuexState.contracts) {
+            reactiveSet(vuexState, 'contracts', Object.create(null))
           }
-          reactiveDel(vuexState, contractID)
+
+          removed.forEach((contractID: string) => {
+            if (permanent) {
+              reactiveSet(vuexState.contracts, contractID, null)
+            } else {
+              reactiveDel(vuexState.contracts, contractID)
+            }
+            reactiveDel(vuexState, contractID)
+          })
+          for (const contractID of added) {
+            const { contractState, cheloniaState } = states[contractID]
+            if (cheloniaState) {
+              reactiveSet(vuexState.contracts, contractID, cloneDeep(cheloniaState))
+            }
+            if (contractState) {
+              reactiveSet(vuexState, contractID, cloneDeep(contractState))
+            }
+          }
+          sbp('okTurtles.events/emit', CONTRACTS_MODIFIED_READY, subscriptionSet, {
+            added,
+            removed
+          })
         })
-        for (const contractID of added) {
-          const { contractState, cheloniaState } = states[contractID]
-          if (cheloniaState) {
-            reactiveSet(vuexState.contracts, contractID, cloneDeep(cheloniaState))
-          }
-          if (contractState) {
-            reactiveSet(vuexState, contractID, cloneDeep(contractState))
-          }
-        }
-        sbp('okTurtles.events/emit', CONTRACTS_MODIFIED_READY, subscriptionSet, { added, removed })
-      })
-    })
+      }
+    )
   },
   // This function is similar in purpose to `chelonia/contract/wait`, except
   // that it's also designed to take into account delays copying Chelonia state

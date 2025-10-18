@@ -1,22 +1,40 @@
 import type { Key } from '@chelonia/crypto'
-import { CURVE25519XSALSA20POLY1305, EDWARDS25519SHA512BATCH, XSALSA20POLY1305, keyId } from '@chelonia/crypto'
+import {
+  CURVE25519XSALSA20POLY1305,
+  EDWARDS25519SHA512BATCH,
+  XSALSA20POLY1305,
+  keyId
+} from '@chelonia/crypto'
 import { serdesDeserializeSymbol, serdesSerializeSymbol, serdesTagSymbol } from '@chelonia/serdes'
 import { has } from 'turtledash'
 import type { EncryptedData } from './encryptedData.js'
-import { encryptedIncomingData, encryptedIncomingForeignData, maybeEncryptedIncomingData, unwrapMaybeEncryptedData } from './encryptedData.js'
+import {
+  encryptedIncomingData,
+  encryptedIncomingForeignData,
+  maybeEncryptedIncomingData,
+  unwrapMaybeEncryptedData
+} from './encryptedData.js'
 import { createCID, multicodes } from './functions.js'
 import type { SignedData } from './signedData.js'
-import { isRawSignedData, isSignedData, rawSignedIncomingData, signedIncomingData } from './signedData.js'
+import {
+  isRawSignedData,
+  isSignedData,
+  rawSignedIncomingData,
+  signedIncomingData
+} from './signedData.js'
 import type { ChelContractKey, ChelContractState, JSONObject, JSONType } from './types.js'
 
-export type SPKeyType = typeof EDWARDS25519SHA512BATCH | typeof CURVE25519XSALSA20POLY1305 | typeof XSALSA20POLY1305
+export type SPKeyType =
+  | typeof EDWARDS25519SHA512BATCH
+  | typeof CURVE25519XSALSA20POLY1305
+  | typeof XSALSA20POLY1305;
 
-export type SPKeyPurpose = 'enc' | 'sig' | 'sak'
+export type SPKeyPurpose = 'enc' | 'sig' | 'sak';
 
 export type SPKey = {
   id: string;
   name: string;
-  purpose: SPKeyPurpose[],
+  purpose: SPKeyPurpose[];
   ringLevel: number;
   permissions: '*' | string[];
   allowedActions?: '*' | string[];
@@ -28,29 +46,42 @@ export type SPKey = {
       content?: EncryptedData<string>;
       shareable?: boolean;
       oldKeys?: string;
-    },
+    };
     keyRequest?: {
-      contractID?: string,
-      reference?: string | EncryptedData<string>,
-    }
-  },
+      contractID?: string;
+      reference?: string | EncryptedData<string>;
+    };
+  };
   data: string;
   foreignKey?: string;
   _notBeforeHeight: number;
   _notAfterHeight?: number;
   _private?: string;
-}
+};
 // Allows server to check if the user is allowed to register this type of contract
 // TODO: rename 'type' to 'contractName':
-export type SPOpContract = { type: string; keys: (SPKey | EncryptedData<SPKey>)[]; parentContract?: string }
-export type ProtoSPOpActionUnencrypted = { action: string; data: JSONType; meta: JSONObject }
-export type SPOpActionUnencrypted = ProtoSPOpActionUnencrypted | SignedData<ProtoSPOpActionUnencrypted>
-export type SPOpActionEncrypted = EncryptedData<SPOpActionUnencrypted> // encrypted version of SPOpActionUnencrypted
-export type SPOpKeyAdd = (SPKey | EncryptedData<SPKey>)[]
-export type SPOpKeyDel = (string | EncryptedData<string>)[]
-export type SPOpPropSet = { key: string; value: JSONType }
-export type ProtoSPOpKeyShare = { contractID: string; keys: SPKey[]; foreignContractID?: string; keyRequestHash?: string, keyRequestHeight?: number }
-export type SPOpKeyShare = ProtoSPOpKeyShare | EncryptedData<ProtoSPOpKeyShare>
+export type SPOpContract = {
+  type: string;
+  keys: (SPKey | EncryptedData<SPKey>)[];
+  parentContract?: string;
+};
+export type ProtoSPOpActionUnencrypted = { action: string; data: JSONType; meta: JSONObject };
+export type SPOpActionUnencrypted =
+  | ProtoSPOpActionUnencrypted
+  | SignedData<ProtoSPOpActionUnencrypted>;
+// encrypted version of SPOpActionUnencrypted
+export type SPOpActionEncrypted = EncryptedData<SPOpActionUnencrypted>;
+export type SPOpKeyAdd = (SPKey | EncryptedData<SPKey>)[];
+export type SPOpKeyDel = (string | EncryptedData<string>)[];
+export type SPOpPropSet = { key: string; value: JSONType };
+export type ProtoSPOpKeyShare = {
+  contractID: string;
+  keys: SPKey[];
+  foreignContractID?: string;
+  keyRequestHash?: string;
+  keyRequestHeight?: number;
+};
+export type SPOpKeyShare = ProtoSPOpKeyShare | EncryptedData<ProtoSPOpKeyShare>;
 // TODO encrypted SPOpKeyRequest
 export type ProtoSPOpKeyRequest = {
   contractID: string;
@@ -58,11 +89,15 @@ export type ProtoSPOpKeyRequest = {
   replyWith: SignedData<{
     encryptionKeyId: string;
     responseKey: EncryptedData<string>;
-  }>,
+  }>;
   request: string;
-}
-export type SPOpKeyRequest = ProtoSPOpKeyRequest | EncryptedData<ProtoSPOpKeyRequest>
-export type ProtoSPOpKeyRequestSeen = { keyRequestHash: string; keyShareHash?: string; success: boolean };
+};
+export type SPOpKeyRequest = ProtoSPOpKeyRequest | EncryptedData<ProtoSPOpKeyRequest>;
+export type ProtoSPOpKeyRequestSeen = {
+  keyRequestHash: string;
+  keyShareHash?: string;
+  success: boolean;
+};
 export type SPOpKeyRequestSeen = ProtoSPOpKeyRequestSeen | EncryptedData<ProtoSPOpKeyRequestSeen>;
 export type SPKeyUpdate = {
   name: string;
@@ -80,86 +115,170 @@ export type SPKeyUpdate = {
       content?: string;
       shareable?: boolean;
       oldKeys?: string;
-    }
-  }
-}
-export type SPOpKeyUpdate = (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[]
+    };
+  };
+};
+export type SPOpKeyUpdate = (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[];
 
-export type SPOpType = 'c' | 'a' | 'ae' | 'au' | 'ka' | 'kd' | 'ku' | 'pu' | 'ps' | 'pd' | 'ks' | 'kr' | 'krs'
-type ProtoSPOpValue = SPOpContract | SPOpActionEncrypted | SPOpActionUnencrypted | SPOpKeyAdd | SPOpKeyDel | SPOpPropSet | SPOpKeyShare | SPOpKeyRequest | SPOpKeyRequestSeen | SPOpKeyUpdate
+export type SPOpType =
+  | 'c'
+  | 'a'
+  | 'ae'
+  | 'au'
+  | 'ka'
+  | 'kd'
+  | 'ku'
+  | 'pu'
+  | 'ps'
+  | 'pd'
+  | 'ks'
+  | 'kr'
+  | 'krs';
+type ProtoSPOpValue =
+  | SPOpContract
+  | SPOpActionEncrypted
+  | SPOpActionUnencrypted
+  | SPOpKeyAdd
+  | SPOpKeyDel
+  | SPOpPropSet
+  | SPOpKeyShare
+  | SPOpKeyRequest
+  | SPOpKeyRequestSeen
+  | SPOpKeyUpdate;
 export type ProtoSPOpMap = {
-  'c': SPOpContract,
-  'ae': SPOpActionEncrypted,
-  'au': SPOpActionUnencrypted,
-  'ka': SPOpKeyAdd,
-  'kd': SPOpKeyDel,
-  'ku': SPOpKeyUpdate,
-  'pu': never,
-  'ps': SPOpPropSet,
-  'pd': never,
-  'ks': SPOpKeyShare,
-  'kr': SPOpKeyRequest,
-  'krs': SPOpKeyRequestSeen
-}
+  c: SPOpContract;
+  ae: SPOpActionEncrypted;
+  au: SPOpActionUnencrypted;
+  ka: SPOpKeyAdd;
+  kd: SPOpKeyDel;
+  ku: SPOpKeyUpdate;
+  pu: never;
+  ps: SPOpPropSet;
+  pd: never;
+  ks: SPOpKeyShare;
+  kr: SPOpKeyRequest;
+  krs: SPOpKeyRequestSeen;
+};
 export type SPOpAtomic = {
-  [K in keyof ProtoSPOpMap]: [K, ProtoSPOpMap[K]]
-}[keyof ProtoSPOpMap][]
-export type SPOpValue = ProtoSPOpValue | SPOpAtomic
-export type SPOpRaw = [SPOpType, SignedData<SPOpValue>]
-export type SPOpMap = ProtoSPOpMap & { 'a': SPOpAtomic }
+  [K in keyof ProtoSPOpMap]: [K, ProtoSPOpMap[K]];
+}[keyof ProtoSPOpMap][];
+export type SPOpValue = ProtoSPOpValue | SPOpAtomic;
+export type SPOpRaw = [SPOpType, SignedData<SPOpValue>];
+export type SPOpMap = ProtoSPOpMap & { a: SPOpAtomic };
 export type SPOp = {
-  [K in keyof SPOpMap]: [K, SPOpMap[K]]
-}[keyof SPOpMap]
+  [K in keyof SPOpMap]: [K, SPOpMap[K]];
+}[keyof SPOpMap];
 
-export type SPMsgDirection = 'incoming' | 'outgoing'
-export type SPHead = { version: '1.0.0', op: SPOpType, height: number, contractID: string | null, previousKeyOp: string | null, previousHEAD: string | null, manifest: string }
-type SPMsgParams = { direction: SPMsgDirection, mapping: { key: string, value: string }; head: SPHead; signedMessageData: SignedData<SPOpValue> }
+export type SPMsgDirection = 'incoming' | 'outgoing';
+export type SPHead = {
+  version: '1.0.0';
+  op: SPOpType;
+  height: number;
+  contractID: string | null;
+  previousKeyOp: string | null;
+  previousHEAD: string | null;
+  manifest: string;
+};
+type SPMsgParams = {
+  direction: SPMsgDirection;
+  mapping: { key: string; value: string };
+  head: SPHead;
+  signedMessageData: SignedData<SPOpValue>;
+};
 
 // Takes a raw message and processes it so that EncryptedData and SignedData
 // attributes are defined
-const decryptedAndVerifiedDeserializedMessage = (head: SPHead, headJSON: string, contractID: string, parsedMessage: SPOpValue, additionalKeys: Record<string, Key | string> | undefined, state: ChelContractState): SPOpValue => {
+const decryptedAndVerifiedDeserializedMessage = (
+  head: SPHead,
+  headJSON: string,
+  contractID: string,
+  parsedMessage: SPOpValue,
+  additionalKeys: Record<string, Key | string> | undefined,
+  state: ChelContractState
+): SPOpValue => {
   const op = head.op
   const height = head.height
 
-  const message: SPOpValue = op === SPMessage.OP_ACTION_ENCRYPTED
-    ? encryptedIncomingData<SPOpActionUnencrypted>(contractID, state, parsedMessage as [string, string], height, additionalKeys, headJSON, undefined)
-    : parsedMessage
+  const message: SPOpValue =
+    op === SPMessage.OP_ACTION_ENCRYPTED
+      ? encryptedIncomingData<SPOpActionUnencrypted>(
+        contractID,
+        state,
+          parsedMessage as [string, string],
+          height,
+          additionalKeys,
+          headJSON,
+          undefined
+      )
+      : parsedMessage
 
   // If the operation is SPMessage.OP_KEY_ADD or SPMessage.OP_KEY_UPDATE,
   // extract encrypted data from key.meta?.private?.content
   if (([SPMessage.OP_KEY_ADD, SPMessage.OP_KEY_UPDATE] as SPOpType[]).includes(op as SPOpType)) {
     return (message as SPOpKeyAdd | SPOpKeyUpdate).map((key) => {
-      return maybeEncryptedIncomingData<SPKey>(contractID, state, key as SPKey, height, additionalKeys, headJSON, (key) => {
-        if (key.meta?.private?.content) {
-          key.meta.private.content = encryptedIncomingData<string>(contractID, state, key.meta.private.content as unknown as [string, string], height, additionalKeys, headJSON, (value) => {
-          // Validator function to verify the key matches its expected ID
-            const computedKeyId = keyId(value)
-            if (computedKeyId !== key.id) {
-              throw new Error(`Key ID mismatch. Expected to decrypt key ID ${key.id} but got ${computedKeyId}`)
+      return maybeEncryptedIncomingData<SPKey>(
+        contractID,
+        state,
+        key as SPKey,
+        height,
+        additionalKeys,
+        headJSON,
+        (key) => {
+          if (key.meta?.private?.content) {
+            key.meta.private.content = encryptedIncomingData<string>(
+              contractID,
+              state,
+              key.meta.private.content as unknown as [string, string],
+              height,
+              additionalKeys,
+              headJSON,
+              (value) => {
+                // Validator function to verify the key matches its expected ID
+                const computedKeyId = keyId(value)
+                if (computedKeyId !== key.id) {
+                  throw new Error(
+                    `Key ID mismatch. Expected to decrypt key ID ${key.id} but got ${computedKeyId}`
+                  )
+                }
+              }
+            )
+          }
+          // key.meta?.keyRequest?.contractID could be optionally encrypted
+          if (key.meta?.keyRequest?.reference) {
+            try {
+              key.meta.keyRequest.reference = maybeEncryptedIncomingData<string>(
+                contractID,
+                state,
+                key.meta.keyRequest.reference as string,
+                height,
+                additionalKeys,
+                headJSON
+              )?.valueOf()
+            } catch {
+              // If we couldn't decrypt it, this value is of no use to us (we
+              // can't keep track of key requests and key shares), so we delete it
+              delete key.meta.keyRequest.reference
             }
-          })
-        }
-        // key.meta?.keyRequest?.contractID could be optionally encrypted
-        if (key.meta?.keyRequest?.reference) {
-          try {
-            key.meta.keyRequest.reference = maybeEncryptedIncomingData<string>(contractID, state, key.meta.keyRequest.reference as string, height, additionalKeys, headJSON)?.valueOf()
-          } catch {
-            // If we couldn't decrypt it, this value is of no use to us (we
-            // can't keep track of key requests and key shares), so we delete it
-            delete key.meta.keyRequest.reference
+          }
+          // key.meta?.keyRequest?.contractID could be optionally encrypted
+          if (key.meta?.keyRequest?.contractID) {
+            try {
+              key.meta.keyRequest.contractID = maybeEncryptedIncomingData<string>(
+                contractID,
+                state,
+                key.meta.keyRequest.contractID,
+                height,
+                additionalKeys,
+                headJSON
+              )?.valueOf()
+            } catch {
+              // If we couldn't decrypt it, this value is of no use to us (we
+              // can't keep track of key requests and key shares), so we delete it
+              delete key.meta.keyRequest.contractID
+            }
           }
         }
-        // key.meta?.keyRequest?.contractID could be optionally encrypted
-        if (key.meta?.keyRequest?.contractID) {
-          try {
-            key.meta.keyRequest.contractID = maybeEncryptedIncomingData<string>(contractID, state, key.meta.keyRequest.contractID, height, additionalKeys, headJSON)?.valueOf()
-          } catch {
-            // If we couldn't decrypt it, this value is of no use to us (we
-            // can't keep track of key requests and key shares), so we delete it
-            delete key.meta.keyRequest.contractID
-          }
-        }
-      })
+      )
     })
   }
 
@@ -167,56 +286,114 @@ const decryptedAndVerifiedDeserializedMessage = (head: SPHead, headJSON: string,
   // extract encrypted data from keys?.[].meta?.private?.content
   if (op === SPMessage.OP_CONTRACT) {
     (message as SPOpContract).keys = (message as SPOpContract).keys?.map((key) => {
-      return maybeEncryptedIncomingData<SPKey>(contractID, state, key as SPKey, height, additionalKeys, headJSON, (key) => {
-        if (!key.meta?.private?.content) return
-        // The following two lines are commented out because this feature
-        // (using a foreign decryption contract) doesn't seem to be in use and
-        // the use case seems unclear.
-        // const decryptionFn = key.meta.private.foreignContractID ? encryptedIncomingForeignData : encryptedIncomingData
-        // const decryptionContract = key.meta.private.foreignContractID ? key.meta.private.foreignContractID : contractID
-        const decryptionFn = encryptedIncomingData
-        const decryptionContract = contractID
-        key.meta.private.content = decryptionFn<string>(decryptionContract, state as never, key.meta.private.content as unknown as [string, string], height as never, additionalKeys, headJSON, (value) => {
-          const computedKeyId = keyId(value)
-          if (computedKeyId !== key.id) {
-            throw new Error(`Key ID mismatch. Expected to decrypt key ID ${key.id} but got ${computedKeyId}`)
-          }
-        })
-      })
+      return maybeEncryptedIncomingData<SPKey>(
+        contractID,
+        state,
+        key as SPKey,
+        height,
+        additionalKeys,
+        headJSON,
+        (key) => {
+          if (!key.meta?.private?.content) return
+          // The following two lines are commented out because this feature
+          // (using a foreign decryption contract) doesn't seem to be in use and
+          // the use case seems unclear.
+          // const decryptionFn = key.meta.private.foreignContractID ? encryptedIncomingForeignData : encryptedIncomingData
+          // const decryptionContract = key.meta.private.foreignContractID ? key.meta.private.foreignContractID : contractID
+          const decryptionFn = encryptedIncomingData
+          const decryptionContract = contractID
+          key.meta.private.content = decryptionFn<string>(
+            decryptionContract,
+            state as never,
+            key.meta.private.content as unknown as [string, string],
+            height as never,
+            additionalKeys,
+            headJSON,
+            (value) => {
+              const computedKeyId = keyId(value)
+              if (computedKeyId !== key.id) {
+                throw new Error(
+                  `Key ID mismatch. Expected to decrypt key ID ${key.id} but got ${computedKeyId}`
+                )
+              }
+            }
+          )
+        }
+      )
     })
   }
 
   // If the operation is SPMessage.OP_KEY_SHARE,
   // extract encrypted data from keys?.[].meta?.private?.content
   if (op === SPMessage.OP_KEY_SHARE) {
-    return maybeEncryptedIncomingData<ProtoSPOpKeyShare>(contractID, state, message as ProtoSPOpKeyShare, height, additionalKeys, headJSON, (message) => {
-      message.keys?.forEach((key) => {
-        if (!key.meta?.private?.content) return
-        const decryptionFn = message.foreignContractID ? encryptedIncomingForeignData : encryptedIncomingData
-        const decryptionContract = message.foreignContractID || contractID
-        key.meta.private.content = decryptionFn<string>(decryptionContract, state as never, key.meta.private.content as unknown as [string, string], height as never, additionalKeys, headJSON, (value) => {
-          const computedKeyId = keyId(value)
-          if (computedKeyId !== key.id) {
-            throw new Error(`Key ID mismatch. Expected to decrypt key ID ${key.id} but got ${computedKeyId}`)
-          }
+    return maybeEncryptedIncomingData<ProtoSPOpKeyShare>(
+      contractID,
+      state,
+      message as ProtoSPOpKeyShare,
+      height,
+      additionalKeys,
+      headJSON,
+      (message) => {
+        message.keys?.forEach((key) => {
+          if (!key.meta?.private?.content) return
+          const decryptionFn = message.foreignContractID
+            ? encryptedIncomingForeignData
+            : encryptedIncomingData
+          const decryptionContract = message.foreignContractID || contractID
+          key.meta.private.content = decryptionFn<string>(
+            decryptionContract,
+            state as never,
+            key.meta.private.content as unknown as [string, string],
+            height as never,
+            additionalKeys,
+            headJSON,
+            (value) => {
+              const computedKeyId = keyId(value)
+              if (computedKeyId !== key.id) {
+                throw new Error(
+                  `Key ID mismatch. Expected to decrypt key ID ${key.id} but got ${computedKeyId}`
+                )
+              }
+            }
+          )
         })
-      })
-    })
+      }
+    )
   }
 
   // If the operation is OP_KEY_REQUEST, the payload might be EncryptedData
   // The ReplyWith attribute is SignedData
   if (op === SPMessage.OP_KEY_REQUEST) {
-    return maybeEncryptedIncomingData<ProtoSPOpKeyRequest>(contractID, state, message as ProtoSPOpKeyRequest, height, additionalKeys, headJSON, (msg) => {
-      msg.replyWith = signedIncomingData(msg.contractID, undefined, msg.replyWith as unknown as { _signedData: [string, string, string] }, msg.height, headJSON)
-    })
+    return maybeEncryptedIncomingData<ProtoSPOpKeyRequest>(
+      contractID,
+      state,
+      message as ProtoSPOpKeyRequest,
+      height,
+      additionalKeys,
+      headJSON,
+      (msg) => {
+        msg.replyWith = signedIncomingData(
+          msg.contractID,
+          undefined,
+          msg.replyWith as unknown as { _signedData: [string, string, string] },
+          msg.height,
+          headJSON
+        )
+      }
+    )
   }
 
   // If the operation is OP_ACTION_UNENCRYPTED, it may contain an inner
   // signature
   // Actions must be signed using a key for the current contract
   if (op === SPMessage.OP_ACTION_UNENCRYPTED && isRawSignedData(message)) {
-    return signedIncomingData<ProtoSPOpActionUnencrypted>(contractID, state, message, height, headJSON)
+    return signedIncomingData<ProtoSPOpActionUnencrypted>(
+      contractID,
+      state,
+      message,
+      height,
+      headJSON
+    )
   }
 
   // Inner signatures are handled by EncryptedData
@@ -226,23 +403,43 @@ const decryptedAndVerifiedDeserializedMessage = (head: SPHead, headJSON: string,
 
   if (op === SPMessage.OP_KEY_DEL) {
     return (message as SPOpKeyDel).map((key) => {
-      return maybeEncryptedIncomingData<string>(contractID, state, key as unknown as string, height, additionalKeys, headJSON, undefined)
+      return maybeEncryptedIncomingData<string>(
+        contractID,
+        state,
+        key as unknown as string,
+        height,
+        additionalKeys,
+        headJSON,
+        undefined
+      )
     })
   }
 
   if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
-    return maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeen>(contractID, state, parsedMessage as unknown as ProtoSPOpKeyRequestSeen, height, additionalKeys, headJSON, undefined)
+    return maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeen>(
+      contractID,
+      state,
+      parsedMessage as unknown as ProtoSPOpKeyRequestSeen,
+      height,
+      additionalKeys,
+      headJSON,
+      undefined
+    )
   }
 
   // If the operation is OP_ATOMIC, call this function recursively
   if (op === SPMessage.OP_ATOMIC) {
-    return (message as SPOpAtomic)
-      .map(([opT, opV]) =>
-        [
-          opT,
-          decryptedAndVerifiedDeserializedMessage({ ...head, op: opT }, headJSON, contractID, opV, additionalKeys, state)
-        ]
-      ) as SPOpAtomic
+    return (message as SPOpAtomic).map(([opT, opV]) => [
+      opT,
+      decryptedAndVerifiedDeserializedMessage(
+        { ...head, op: opT },
+        headJSON,
+        contractID,
+        opV,
+        additionalKeys,
+        state
+      )
+    ]) as SPOpAtomic
   }
 
   return message
@@ -250,7 +447,7 @@ const decryptedAndVerifiedDeserializedMessage = (head: SPHead, headJSON: string,
 
 export class SPMessage {
   // flow type annotations to make flow happy
-  _mapping: { key: string, value: string }
+  _mapping: { key: string; value: string }
   _head: SPHead
   _message!: SPOpValue
   _signedMessageData: SignedData<SPOpValue>
@@ -275,27 +472,25 @@ export class SPMessage {
   static OP_KEY_REQUEST_SEEN = 'krs' as const // key request response
 
   // eslint-disable-next-line camelcase
-  static createV1_0 (
-    {
-      contractID,
-      previousHEAD = null,
-      previousKeyOp = null,
-      // Height will be automatically set to the correct value when sending
-      // The reason to set it to Number.MAX_SAFE_INTEGER is so that we can
-      // temporarily process outgoing messages with signature validation
-      // still working
-      height = Number.MAX_SAFE_INTEGER,
-      op,
-      manifest
-    }: {
-      contractID: string | null,
-      previousHEAD?: string | null,
-      previousKeyOp?: string | null,
-      height?: number,
-      op: SPOpRaw,
-      manifest: string,
-    }
-  ): SPMessage {
+  static createV1_0 ({
+    contractID,
+    previousHEAD = null,
+    previousKeyOp = null,
+    // Height will be automatically set to the correct value when sending
+    // The reason to set it to Number.MAX_SAFE_INTEGER is so that we can
+    // temporarily process outgoing messages with signature validation
+    // still working
+    height = Number.MAX_SAFE_INTEGER,
+    op,
+    manifest
+  }: {
+    contractID: string | null;
+    previousHEAD?: string | null;
+    previousKeyOp?: string | null;
+    height?: number;
+    op: SPOpRaw;
+    manifest: string;
+  }): SPMessage {
     const head: SPHead = {
       version: '1.0.0',
       previousHEAD,
@@ -310,31 +505,42 @@ export class SPMessage {
 
   // SPMessage.cloneWith could be used when make a SPMessage object having the same id()
   // https://github.com/okTurtles/group-income/issues/1503
-  static cloneWith (
-    targetHead: SPHead,
-    targetOp: SPOpRaw,
-    sources: Partial<SPHead>
-  ): SPMessage {
+  static cloneWith (targetHead: SPHead, targetOp: SPOpRaw, sources: Partial<SPHead>): SPMessage {
     const head = Object.assign({}, targetHead, sources)
     return new this(messageToParams(head, targetOp[1]))
   }
 
-  static deserialize (value: string, additionalKeys?: Record<string, Key | string>, state?: ChelContractState, unwrapMaybeEncryptedDataFn: (data: SPKey | EncryptedData<SPKey>) => { encryptionKeyId: string | null, data: SPKey } | undefined = unwrapMaybeEncryptedData): SPMessage {
+  static deserialize (
+    value: string,
+    additionalKeys?: Record<string, Key | string>,
+    state?: ChelContractState,
+    unwrapMaybeEncryptedDataFn: (
+      data: SPKey | EncryptedData<SPKey>,
+    ) => { encryptionKeyId: string | null; data: SPKey } | undefined = unwrapMaybeEncryptedData
+  ): SPMessage {
     if (!value) throw new Error(`deserialize bad value: ${value}`)
     const { head: headJSON, ...parsedValue } = JSON.parse(value)
     const head = JSON.parse(headJSON)
-    const contractID = head.op === SPMessage.OP_CONTRACT ? createCID(value, multicodes.SHELTER_CONTRACT_DATA) : head.contractID
+    const contractID =
+      head.op === SPMessage.OP_CONTRACT
+        ? createCID(value, multicodes.SHELTER_CONTRACT_DATA)
+        : head.contractID
 
     // Special case for OP_CONTRACT, since the keys are not yet present in the
     // state
     if (!state?._vm?.authorizedKeys && head.op === SPMessage.OP_CONTRACT) {
       const value = rawSignedIncomingData<SPOpContract>(parsedValue)
-      const authorizedKeys = Object.fromEntries(value.valueOf()?.keys.map(wk => {
-        const k = unwrapMaybeEncryptedDataFn(wk)
-        if (!k) return null
-        return [k.data.id, k.data] as [string, ChelContractKey]
-      // eslint-disable-next-line no-use-before-define
-      }).filter(Boolean as unknown as (x: unknown) => x is [string, ChelContractKey]))
+      const authorizedKeys = Object.fromEntries(
+        value
+          .valueOf()
+          ?.keys.map((wk) => {
+            const k = unwrapMaybeEncryptedDataFn(wk)
+            if (!k) return null
+            return [k.data.id, k.data] as [string, ChelContractKey]
+          })
+          // eslint-disable-next-line no-use-before-define
+          .filter(Boolean as unknown as ((x: unknown) => x is [string, ChelContractKey]))
+      )
       state = {
         _vm: {
           type: head.type,
@@ -344,8 +550,20 @@ export class SPMessage {
     }
 
     const signedMessageData = signedIncomingData<SPOpValue>(
-      contractID, state, parsedValue, head.height, headJSON,
-      (message) => decryptedAndVerifiedDeserializedMessage(head, headJSON, contractID, message, additionalKeys, state!)
+      contractID,
+      state,
+      parsedValue,
+      head.height,
+      headJSON,
+      (message) =>
+        decryptedAndVerifiedDeserializedMessage(
+          head,
+          headJSON,
+          contractID,
+          message,
+          additionalKeys,
+          state!
+        )
     )
 
     return new this({
@@ -356,7 +574,13 @@ export class SPMessage {
     })
   }
 
-  static deserializeHEAD (value: string): { head: SPHead; hash: string; contractID: string; isFirstMessage: boolean; description: () => string } {
+  static deserializeHEAD (value: string): {
+    head: SPHead;
+    hash: string;
+    contractID: string;
+    isFirstMessage: boolean;
+    description: () => string;
+  } {
     if (!value) throw new Error(`deserialize bad value: ${value}`)
     let head: SPHead, hash: string
     const result = {
@@ -400,7 +624,7 @@ export class SPMessage {
     const validate = (type: string, message: SPOpValue) => {
       switch (type) {
         case SPMessage.OP_CONTRACT:
-          if (!this.isFirstMessage() || !atomicTopLevel) throw new Error('OP_CONTRACT: must be first message')
+          if (!this.isFirstMessage() || !atomicTopLevel) { throw new Error('OP_CONTRACT: must be first message') }
           break
         case SPMessage.OP_ATOMIC:
           if (!atomicTopLevel) {
@@ -415,14 +639,14 @@ export class SPMessage {
         case SPMessage.OP_KEY_ADD:
         case SPMessage.OP_KEY_DEL:
         case SPMessage.OP_KEY_UPDATE:
-          if (!Array.isArray(message)) throw new TypeError('OP_KEY_{ADD|DEL|UPDATE} must be of an array type')
+          if (!Array.isArray(message)) { throw new TypeError('OP_KEY_{ADD|DEL|UPDATE} must be of an array type') }
           break
         case SPMessage.OP_KEY_SHARE:
         case SPMessage.OP_KEY_REQUEST:
         case SPMessage.OP_KEY_REQUEST_SEEN:
         case SPMessage.OP_ACTION_ENCRYPTED:
         case SPMessage.OP_ACTION_UNENCRYPTED:
-        // nothing for now
+          // nothing for now
           break
         default:
           throw new Error(`unsupported op: ${type}`)
@@ -456,8 +680,8 @@ export class SPMessage {
       // Did decryption succeed? (unwrapMaybeEncryptedData will return undefined
       // on failure)
       if (data?.data) {
-      // The data inside could be signed. In this case, we unwrap that to get
-      // to the inner contents
+        // The data inside could be signed. In this case, we unwrap that to get
+        // to the inner contents
         if (isSignedData(data.data)) {
           this._innerSigningKeyId = data.data.signingKeyId
           this._decryptedValue = data.data.valueOf()
@@ -481,21 +705,37 @@ export class SPMessage {
     return this._innerSigningKeyId
   }
 
-  head (): SPHead { return this._head }
+  head (): SPHead {
+    return this._head
+  }
 
-  message (): SPOpValue { return this._message }
+  message (): SPOpValue {
+    return this._message
+  }
 
-  op (): SPOp { return [this.head().op, this.message()] as SPOp }
+  op (): SPOp {
+    return [this.head().op, this.message()] as SPOp
+  }
 
-  rawOp (): SPOpRaw { return [this.head().op, this._signedMessageData] }
+  rawOp (): SPOpRaw {
+    return [this.head().op, this._signedMessageData]
+  }
 
-  opType (): SPOpType { return this.head().op }
+  opType (): SPOpType {
+    return this.head().op
+  }
 
-  opValue (): SPOpValue { return this.message() }
+  opValue (): SPOpValue {
+    return this.message()
+  }
 
-  signingKeyId (): string { return this._signedMessageData.signingKeyId }
+  signingKeyId (): string {
+    return this._signedMessageData.signingKeyId
+  }
 
-  manifest (): string { return this.head().manifest }
+  manifest (): string {
+    return this.head().manifest
+  }
 
   description (): string {
     const type = this.opType()
@@ -513,17 +753,29 @@ export class SPMessage {
     return `${desc}|${this.hash()} of ${this.contractID()}>`
   }
 
-  isFirstMessage (): boolean { return !this.head().contractID }
+  isFirstMessage (): boolean {
+    return !this.head().contractID
+  }
 
-  contractID (): string { return this.head().contractID || this.hash() }
+  contractID (): string {
+    return this.head().contractID || this.hash()
+  }
 
-  serialize (): string { return this._mapping.value }
+  serialize (): string {
+    return this._mapping.value
+  }
 
-  hash (): string { return this._mapping.key }
+  hash (): string {
+    return this._mapping.key
+  }
 
-  previousKeyOp (): string | null { return this._head.previousKeyOp }
+  previousKeyOp (): string | null {
+    return this._head.previousKeyOp
+  }
 
-  height (): number { return this._head.height }
+  height (): number {
+    return this._head.height
+  }
 
   id (): string {
     // TODO: Schedule for later removal
@@ -540,9 +792,11 @@ export class SPMessage {
     let value: SPOpValue
     return !!(
       (keyOps as SPOpType[]).includes(this.opType()) ||
-      (this.opType() === SPMessage.OP_ATOMIC && Array.isArray(value = this.opValue()) && (value as SPOpAtomic).some(([opT]) => {
-        return (keyOps as SPOpType[]).includes(opT)
-      }))
+      (this.opType() === SPMessage.OP_ATOMIC &&
+        Array.isArray((value = this.opValue())) &&
+        (value as SPOpAtomic).some(([opT]) => {
+          return (keyOps as SPOpType[]).includes(opT)
+        }))
     )
   }
 
@@ -554,7 +808,12 @@ export class SPMessage {
     return [m.serialize(), m.direction(), m.decryptedValue(), m.innerSigningKeyId()]
   }
 
-  static [serdesDeserializeSymbol] ([serialized, direction, decryptedValue, innerSigningKeyId]: [string, SPMsgDirection, object, string]) {
+  static [serdesDeserializeSymbol] ([serialized, direction, decryptedValue, innerSigningKeyId]: [
+    string,
+    SPMsgDirection,
+    object,
+    string,
+  ]) {
     const m = SPMessage.deserialize(serialized)
     m._direction = direction
     m._decryptedValue = decryptedValue
@@ -573,7 +832,7 @@ function messageToParams (head: SPHead, message: SignedData<SPOpValue>): SPMsgPa
   //       So to get around this we save the serialized string upon creation
   //       and keep a copy of it (instead of regenerating it as needed).
   //       https://github.com/okTurtles/group-income/pull/1513#discussion_r1142809095
-  let mapping: { key: string, value: string }
+  let mapping: { key: string; value: string }
   return {
     direction: has(message, 'recreate') ? 'outgoing' : 'incoming',
     // Lazy computation of mapping to prevent us from serializing outgoing
@@ -597,4 +856,9 @@ function messageToParams (head: SPHead, message: SignedData<SPOpValue>): SPMsgPa
 }
 
 // Operations that affect valid keys
-const keyOps = [SPMessage.OP_CONTRACT, SPMessage.OP_KEY_ADD, SPMessage.OP_KEY_DEL, SPMessage.OP_KEY_UPDATE]
+const keyOps = [
+  SPMessage.OP_CONTRACT,
+  SPMessage.OP_KEY_ADD,
+  SPMessage.OP_KEY_DEL,
+  SPMessage.OP_KEY_UPDATE
+]

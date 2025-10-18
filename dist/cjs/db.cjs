@@ -21,7 +21,8 @@ const checkKey = (key) => {
     // Disallow unprintable characters, slashes, and TAB.
     // Also disallow characters not allowed by Windows:
     // <https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file>
-    if (/[\x00-\x1f\x7f\t\\/<>:"|?*]/.test(key)) { // eslint-disable-line no-control-regex
+    // eslint-disable-next-line no-control-regex
+    if (/[\x00-\x1f\x7f\t\\/<>:"|?*]/.test(key)) {
         throw new Error(`bad key: ${JSON.stringify(key)}`);
     }
 };
@@ -40,7 +41,7 @@ const parsePrefixableKey = (key) => {
 exports.parsePrefixableKey = parsePrefixableKey;
 exports.prefixHandlers = {
     // Decode buffers, but don't transform other values.
-    '': (value) => buffer_1.Buffer.isBuffer(value) ? value.toString('utf8') : value,
+    '': (value) => (buffer_1.Buffer.isBuffer(value) ? value.toString('utf8') : value),
     'any:': (value) => value
     /*
     // 2025-03-24: Commented out because it's not used; currently, only `any:`
@@ -71,13 +72,13 @@ const dbPrimitiveSelectors = process.env.LIGHTWEIGHT_CLIENT === 'true'
             if (!id)
                 return Promise.resolve();
             const state = (0, sbp_1.default)('chelonia/rootState').contracts[id];
-            const value = (state?.HEAD
+            const value = state?.HEAD
                 ? JSON.stringify({
                     HEAD: state.HEAD,
                     height: state.height,
                     previousKeyOp: state.previousKeyOp
                 })
-                : undefined);
+                : undefined;
             return Promise.resolve(value);
         },
         'chelonia.db/set': function () {
@@ -141,7 +142,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // because addEntry contains multiple awaits - we want to make sure it gets executed
         // "atomically" to minimize the chance of a contract fork
         return (0, sbp_1.default)('okTurtles.eventQueue/queueEvent', `chelonia/db/${entry.contractID()}`, [
-            'chelonia/private/db/addEntry', entry
+            'chelonia/private/db/addEntry',
+            entry
         ]);
     },
     // NEVER call this directly yourself! _always_ call 'chelonia/db/addEntry' instead
@@ -167,7 +169,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     console.error(`[chelonia.db] bad previousKeyOp: ${entryPreviousKeyOp}! Expected: ${contractPreviousKeyOp} for contractID: ${contractID}`);
                     throw new errors_js_1.ChelErrorDBBadPreviousHEAD(`bad previousKeyOp: ${entryPreviousKeyOp}. Expected ${contractPreviousKeyOp} for contractID: ${contractID}`);
                 }
-                else if (!Number.isSafeInteger(entryHeight) || entryHeight !== (contractHeight + 1)) {
+                else if (!Number.isSafeInteger(entryHeight) || entryHeight !== contractHeight + 1) {
                     console.error(`[chelonia.db] bad height: ${entryHeight}! Expected: ${contractHeight + 1} for contractID: ${contractID}`);
                     throw new errors_js_1.ChelErrorDBBadPreviousHEAD(`[chelonia.db] bad height: ${entryHeight}! Expected: ${contractHeight + 1} for contractID: ${contractID}`);
                 }

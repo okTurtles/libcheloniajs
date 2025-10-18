@@ -98,18 +98,18 @@ export type SPOpKeyUpdate = (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[];
 export type SPOpType = 'c' | 'a' | 'ae' | 'au' | 'ka' | 'kd' | 'ku' | 'pu' | 'ps' | 'pd' | 'ks' | 'kr' | 'krs';
 type ProtoSPOpValue = SPOpContract | SPOpActionEncrypted | SPOpActionUnencrypted | SPOpKeyAdd | SPOpKeyDel | SPOpPropSet | SPOpKeyShare | SPOpKeyRequest | SPOpKeyRequestSeen | SPOpKeyUpdate;
 export type ProtoSPOpMap = {
-    'c': SPOpContract;
-    'ae': SPOpActionEncrypted;
-    'au': SPOpActionUnencrypted;
-    'ka': SPOpKeyAdd;
-    'kd': SPOpKeyDel;
-    'ku': SPOpKeyUpdate;
-    'pu': never;
-    'ps': SPOpPropSet;
-    'pd': never;
-    'ks': SPOpKeyShare;
-    'kr': SPOpKeyRequest;
-    'krs': SPOpKeyRequestSeen;
+    c: SPOpContract;
+    ae: SPOpActionEncrypted;
+    au: SPOpActionUnencrypted;
+    ka: SPOpKeyAdd;
+    kd: SPOpKeyDel;
+    ku: SPOpKeyUpdate;
+    pu: never;
+    ps: SPOpPropSet;
+    pd: never;
+    ks: SPOpKeyShare;
+    kr: SPOpKeyRequest;
+    krs: SPOpKeyRequestSeen;
 };
 export type SPOpAtomic = {
     [K in keyof ProtoSPOpMap]: [K, ProtoSPOpMap[K]];
@@ -117,7 +117,7 @@ export type SPOpAtomic = {
 export type SPOpValue = ProtoSPOpValue | SPOpAtomic;
 export type SPOpRaw = [SPOpType, SignedData<SPOpValue>];
 export type SPOpMap = ProtoSPOpMap & {
-    'a': SPOpAtomic;
+    a: SPOpAtomic;
 };
 export type SPOp = {
     [K in keyof SPOpMap]: [K, SPOpMap[K]];
@@ -210,6 +210,11 @@ export declare class SPMessage {
     isKeyOp(): boolean;
     static get [serdesTagSymbol](): string;
     static [serdesSerializeSymbol](m: SPMessage): unknown[];
-    static [serdesDeserializeSymbol]([serialized, direction, decryptedValue, innerSigningKeyId]: [string, SPMsgDirection, object, string]): SPMessage;
+    static [serdesDeserializeSymbol]([serialized, direction, decryptedValue, innerSigningKeyId]: [
+        string,
+        SPMsgDirection,
+        object,
+        string
+    ]): SPMessage;
 }
 export {};

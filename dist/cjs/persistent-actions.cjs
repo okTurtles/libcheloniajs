@@ -73,9 +73,10 @@ class PersistentAction {
         const anyAttemptLeft = options.maxAttempts > status.failedAttemptsSoFar;
         if (!anyAttemptLeft)
             status.resolved = true;
-        status.nextRetry = anyAttemptLeft && !status.resolved
-            ? new Date(Date.now() + options.retrySeconds * 1e3).toISOString()
-            : '';
+        status.nextRetry =
+            anyAttemptLeft && !status.resolved
+                ? new Date(Date.now() + options.retrySeconds * 1e3).toISOString()
+                : '';
         // Perform any optional SBP invocation.
         // The event has to be fired first for the action to be immediately removed from the list.
         (0, sbp_1.default)('okTurtles.events/emit', events_js_1.PERSISTENT_ACTION_FAILURE, { error, id });
@@ -143,7 +144,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.databaseKey = databaseKey;
         for (const key in options) {
             if (key in defaultOptions) {
-                defaultOptions[key] = options[key];
+                defaultOptions[key] =
+                    options[key];
             }
             else {
                 throw new TypeError(`${tag} Unknown option: ${key}`);
@@ -194,7 +196,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // TODO: add some delay between actions so as not to spam the server,
     // or have a way to issue them all at once in a single network call.
     'chelonia.persistentActions/retryAll'() {
-        return Promise.allSettled(Object.keys(this.actionsByID).map(id => (0, sbp_1.default)('chelonia.persistentActions/forceRetry', id)));
+        return Promise.allSettled(Object.keys(this.actionsByID).map((id) => (0, sbp_1.default)('chelonia.persistentActions/forceRetry', id)));
     },
     // Updates the database version of the attempting action list.
     'chelonia.persistentActions/save'() {
@@ -202,8 +204,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         return (0, sbp_1.default)('chelonia.db/set', this.databaseKey, JSON.stringify(Object.values(this.actionsByID)));
     },
     'chelonia.persistentActions/status'() {
-        return Object.values(this.actionsByID)
-            .map((action) => ({ id: action.id, invocation: action.invocation, ...action.status }));
+        return Object.values(this.actionsByID).map((action) => ({
+            id: action.id,
+            invocation: action.invocation,
+            ...action.status
+        }));
     },
     // Pauses every currently loaded action, and removes them from memory.
     // Note: persistent storage is not affected, so that these actions can be later loaded again and retried.

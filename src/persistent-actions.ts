@@ -1,50 +1,54 @@
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
-import { PERSISTENT_ACTION_FAILURE, PERSISTENT_ACTION_SUCCESS, PERSISTENT_ACTION_TOTAL_FAILURE } from './events.js'
+import {
+  PERSISTENT_ACTION_FAILURE,
+  PERSISTENT_ACTION_SUCCESS,
+  PERSISTENT_ACTION_TOTAL_FAILURE
+} from './events.js'
 
 // Using `Symbol` to prevent enumeration; this avoids JSON serialization.
 const timer = Symbol('timer')
 
-type SbpInvocation = Parameters<typeof sbp>
-export type UUIDV4 = `${string}-${string}-${string}-${string}-${string}`
+type SbpInvocation = Parameters<typeof sbp>;
+export type UUIDV4 = `${string}-${string}-${string}-${string}-${string}`;
 
 type PersistentActionOptions = {
-  errorInvocation?: SbpInvocation,
+  errorInvocation?: SbpInvocation;
   // Maximum number of tries, default: Infinity.
-  maxAttempts: number,
+  maxAttempts: number;
   // How many seconds to wait between retries.
-  retrySeconds: number,
-  skipCondition?: SbpInvocation,
-  totalFailureInvocation?: SbpInvocation
-}
+  retrySeconds: number;
+  skipCondition?: SbpInvocation;
+  totalFailureInvocation?: SbpInvocation;
+};
 
 export type PersistentActionStatus = {
-  attempting: boolean,
-  failedAttemptsSoFar: number,
-  lastError: string,
-  nextRetry: string,
-  resolved: boolean
-}
+  attempting: boolean;
+  failedAttemptsSoFar: number;
+  lastError: string;
+  nextRetry: string;
+  resolved: boolean;
+};
 
 export type PersistentActionError = {
-  id: UUIDV4,
-  error: Error
-}
+  id: UUIDV4;
+  error: Error;
+};
 
 export type PersistentActionSuccess = {
-  id: UUIDV4,
-  result: unknown
-}
+  id: UUIDV4;
+  result: unknown;
+};
 
 export type PersistentActionSbpStatus = {
-  id: UUIDV4,
-  invocation: SbpInvocation,
-  attempting: boolean,
-  failedAttemptsSoFar: number,
-  lastError: string,
-  nextRetry: string,
-  resolved: boolean
-}
+  id: UUIDV4;
+  invocation: SbpInvocation;
+  attempting: boolean;
+  failedAttemptsSoFar: number;
+  lastError: string;
+  nextRetry: string;
+  resolved: boolean;
+};
 
 const coerceToError = (arg: unknown): Error => {
   if (arg && arg instanceof Error) return arg
@@ -62,7 +66,7 @@ export class PersistentAction {
   id: UUIDV4
   invocation: SbpInvocation
   options: PersistentActionOptions
-  status: PersistentActionStatus
+  status: PersistentActionStatus;
   [timer]?: ReturnType<typeof setTimeout>
 
   constructor (invocation: SbpInvocation, options: Partial<PersistentActionOptions> = {}) {
@@ -109,9 +113,10 @@ export class PersistentAction {
     status.lastError = error.message
     const anyAttemptLeft = options.maxAttempts > status.failedAttemptsSoFar
     if (!anyAttemptLeft) status.resolved = true
-    status.nextRetry = anyAttemptLeft && !status.resolved
-      ? new Date(Date.now() + options.retrySeconds * 1e3).toISOString()
-      : ''
+    status.nextRetry =
+      anyAttemptLeft && !status.resolved
+        ? new Date(Date.now() + options.retrySeconds * 1e3).toISOString()
+        : ''
     // Perform any optional SBP invocation.
     // The event has to be fired first for the action to be immediately removed from the list.
     sbp('okTurtles.events/emit', PERSISTENT_ACTION_FAILURE, { error, id })
@@ -151,10 +156,10 @@ export class PersistentAction {
 // SBP API
 
 type PersistentActionContext = {
-  actionsByID: Record<UUIDV4, PersistentAction>
-  checkDatabaseKey: () => void
-  databaseKey: string
-}
+  actionsByID: Record<UUIDV4, PersistentAction>;
+  checkDatabaseKey: () => void;
+  databaseKey: string;
+};
 
 export default sbp('sbp/selectors/register', {
   'chelonia.persistentActions/_init' (this: PersistentActionContext): void {
@@ -172,7 +177,10 @@ export default sbp('sbp/selectors/register', {
 
   // Cancels a specific action by its ID.
   // The action won't be retried again, but an async action cannot be aborted if its promise is stil attempting.
-  async 'chelonia.persistentActions/cancel' (this: PersistentActionContext, id: UUIDV4): Promise<void> {
+  async 'chelonia.persistentActions/cancel' (
+    this: PersistentActionContext,
+    id: UUIDV4
+  ): Promise<void> {
     if (id in this.actionsByID) {
       this.actionsByID[id].cancel()
       // Note: this renders the `.status` update in `.cancel()` meainingless, as
@@ -185,18 +193,28 @@ export default sbp('sbp/selectors/register', {
   },
 
   // TODO: validation
-  'chelonia.persistentActions/configure' (this: PersistentActionContext, { databaseKey, options = {} }: { databaseKey: string; options: Partial<PersistentActionOptions> }): void {
+  'chelonia.persistentActions/configure' (
+    this: PersistentActionContext,
+    {
+      databaseKey,
+      options = {}
+    }: { databaseKey: string; options: Partial<PersistentActionOptions> }
+  ): void {
     this.databaseKey = databaseKey
     for (const key in options) {
       if (key in defaultOptions) {
-        (defaultOptions as Record<string, unknown>)[key] = options[key as keyof PersistentActionOptions]
+        (defaultOptions as Record<string, unknown>)[key] =
+          options[key as keyof PersistentActionOptions]
       } else {
         throw new TypeError(`${tag} Unknown option: ${key}`)
       }
     }
   },
 
-  'chelonia.persistentActions/enqueue' (this: PersistentActionContext, ...args: (SbpInvocation | { invocation: SbpInvocation } & PersistentActionOptions)[]): UUIDV4[] {
+  'chelonia.persistentActions/enqueue' (
+    this: PersistentActionContext,
+    ...args: (SbpInvocation | ({ invocation: SbpInvocation } & PersistentActionOptions))[]
+  ): UUIDV4[] {
     const ids: UUIDV4[] = []
     for (const arg of args) {
       const action = Array.isArray(arg)
@@ -220,7 +238,10 @@ export default sbp('sbp/selectors/register', {
   // - 'status.failedAttemptsSoFar' will still be increased upon failure.
   // - Does nothing if a retry is already running.
   // - Does nothing if the action has already been resolved, rejected or cancelled.
-  'chelonia.persistentActions/forceRetry' (this: PersistentActionContext, id: UUIDV4): void | Promise<void> {
+  'chelonia.persistentActions/forceRetry' (
+    this: PersistentActionContext,
+    id: UUIDV4
+  ): void | Promise<void> {
     if (id in this.actionsByID) {
       return this.actionsByID[id].attempt()
     }
@@ -244,7 +265,7 @@ export default sbp('sbp/selectors/register', {
   // or have a way to issue them all at once in a single network call.
   'chelonia.persistentActions/retryAll' (this: PersistentActionContext) {
     return Promise.allSettled(
-      Object.keys(this.actionsByID).map(id => sbp('chelonia.persistentActions/forceRetry', id))
+      Object.keys(this.actionsByID).map((id) => sbp('chelonia.persistentActions/forceRetry', id))
     )
   },
 
@@ -259,8 +280,11 @@ export default sbp('sbp/selectors/register', {
   },
 
   'chelonia.persistentActions/status' (this: PersistentActionContext): PersistentActionSbpStatus[] {
-    return Object.values(this.actionsByID)
-      .map((action: PersistentAction) => ({ id: action.id, invocation: action.invocation, ...action.status }))
+    return Object.values(this.actionsByID).map((action: PersistentAction) => ({
+      id: action.id,
+      invocation: action.invocation,
+      ...action.status
+    }))
   },
 
   // Pauses every currently loaded action, and removes them from memory.

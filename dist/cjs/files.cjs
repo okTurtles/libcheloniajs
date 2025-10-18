@@ -20,18 +20,19 @@ const utils_js_1 = require("./utils.cjs");
 // This part only checks for client-side support. Later, when we try uploading
 // a file for the first time, we'll check if requests work, as streams are not
 // supported in HTTP/1.1 and lower versions.
-let supportsRequestStreams = typeof window !== 'object' || (() => {
-    let duplexAccessed = false;
-    const hasContentType = new Request('', {
-        body: new ReadableStream(),
-        method: 'POST',
-        get duplex() {
-            duplexAccessed = true;
-            return 'half';
-        }
-    }).headers.has('content-type');
-    return duplexAccessed && !hasContentType;
-})();
+let supportsRequestStreams = typeof window !== 'object' ||
+    (() => {
+        let duplexAccessed = false;
+        const hasContentType = new Request('', {
+            body: new ReadableStream(),
+            method: 'POST',
+            get duplex() {
+                duplexAccessed = true;
+                return 'half';
+            }
+        }).headers.has('content-type');
+        return duplexAccessed && !hasContentType;
+    })();
 const streamToUint8Array = async (s) => {
     const reader = s.getReader();
     const chunks = [];
@@ -56,16 +57,24 @@ const ArrayBufferToUint8ArrayStream = async function (connectionURL, s) {
     // Even if the browser supports streams, some browsers (e.g., Chrome) also
     // require that the server support HTTP/2
     if (supportsRequestStreams === true) {
-        await this.config.fetch(`${connectionURL}/streams-test`, {
+        await this.config
+            .fetch(`${connectionURL}/streams-test`, {
             method: 'POST',
-            body: new ReadableStream({ start(c) { c.enqueue(buffer_1.Buffer.from('ok')); c.close(); } }),
+            body: new ReadableStream({
+                start(c) {
+                    c.enqueue(buffer_1.Buffer.from('ok'));
+                    c.close();
+                }
+            }),
             duplex: 'half'
-        }).then((r) => {
+        })
+            .then((r) => {
             if (!r.ok)
                 throw new Error('Unexpected response');
             // supportsRequestStreams is tri-state
             supportsRequestStreams = 2;
-        }).catch(() => {
+        })
+            .catch(() => {
             console.info('files: Disabling streams support because the streams test failed');
             supportsRequestStreams = false;
         });
@@ -104,9 +113,7 @@ const fileStream = (chelonia, manifest) => {
     const dataGenerator = async function* () {
         let readSize = 0;
         for (const chunk of manifest.chunks) {
-            if (!Array.isArray(chunk) ||
-                typeof chunk[0] !== 'number' ||
-                typeof chunk[1] !== 'string') {
+            if (!Array.isArray(chunk) || typeof chunk[0] !== 'number' || typeof chunk[1] !== 'string') {
                 throw new Error('Invalid chunk descriptor');
             }
             const chunkResponse = await chelonia.config.fetch(`${chelonia.config.connectionURL}/file/${chunk[1]}`, {
@@ -126,8 +133,9 @@ const fileStream = (chelonia, manifest) => {
             readSize += chunkBinary.byteLength;
             if (readSize > manifest.size)
                 throw new Error('read size exceeds declared size');
-            if ((0, functions_js_1.createCID)((0, bytes_1.coerce)(chunkBinary), functions_js_1.multicodes.SHELTER_FILE_CHUNK) !== chunk[1])
+            if ((0, functions_js_1.createCID)((0, bytes_1.coerce)(chunkBinary), functions_js_1.multicodes.SHELTER_FILE_CHUNK) !== chunk[1]) {
                 throw new Error('mismatched chunk hash');
+            }
             yield chunkBinary;
         }
         // Now that we're done, we check to see if we read the correct size
@@ -207,7 +215,8 @@ exports.aes256gcmHandlers = {
         }
         const IKM = buffer_1.Buffer.from(IKMb64, 'base64');
         const keyId = (0, functions_js_1.blake32Hash)('aes256gcm-keyId' + (0, functions_js_1.blake32Hash)(IKM)).slice(-8);
-        if (!manifest['cipher-params'] || !manifest['cipher-params'].keyId) {
+        if (!manifest['cipher-params'] ||
+            !manifest['cipher-params'].keyId) {
             throw new Error('Missing cipher-params');
         }
         if (keyId !== manifest['cipher-params'].keyId) {
@@ -308,7 +317,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // The indirect call to Math.random (`(0, Math.random)`) is to explicitly
             // mark that we intend on using Math.random, even though it's not a
             // CSPRNG, so that it's not reported as a bug in by static analysis tools.
-            : new Array(36).fill('').map(() => 'abcdefghijklmnopqrstuvwxyz'[(0, Math.random)() * 26 | 0]).join('');
+            : new Array(36)
+                .fill('')
+                .map(() => 'abcdefghijklmnopqrstuvwxyz'[((0, Math.random)() * 26) | 0])
+                .join('');
         const stream = (0, encodeMultipartMessage_1.default)(boundary, transferParts);
         const deletionToken = 'deletionToken' + (0, crypto_1.generateSalt)();
         const deletionTokenHash = (0, functions_js_1.blake32Hash)(deletionToken);
@@ -317,7 +329,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             signal: this.abortController.signal,
             body: await ArrayBufferToUint8ArrayStream.call(this, this.config.connectionURL, stream),
             headers: new Headers([
-                ...(billableContractID ? [['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, billableContractID)]] : []),
+                ...(billableContractID
+                    ? [['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, billableContractID)]]
+                    : []),
                 ['content-type', `multipart/form-data; boundary=${boundary}`],
                 ['shelter-deletion-token-digest', deletionTokenHash]
             ]),
@@ -344,8 +358,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             throw new Error('Unable to retrieve manifest');
         }
         const manifestBinary = await manifestResponse.arrayBuffer();
-        if ((0, functions_js_1.createCID)((0, bytes_1.coerce)(manifestBinary), functions_js_1.multicodes.SHELTER_FILE_MANIFEST) !== manifestCid)
+        if ((0, functions_js_1.createCID)((0, bytes_1.coerce)(manifestBinary), functions_js_1.multicodes.SHELTER_FILE_MANIFEST) !== manifestCid) {
             throw new Error('mismatched manifest hash');
+        }
         const manifest = JSON.parse(buffer_1.Buffer.from(manifestBinary).toString());
         if (typeof manifest !== 'object')
             throw new Error('manifest format is invalid');
@@ -380,10 +395,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 method: 'POST',
                 signal: this.abortController.signal,
                 headers: new Headers([
-                    ['authorization',
+                    [
+                        'authorization',
                         hasToken
                             ? `bearer ${credentials[cid].token.valueOf()}`
-                            : utils_js_1.buildShelterAuthorizationHeader.call(this, credentials[cid].billableContractID)]
+                            : utils_js_1.buildShelterAuthorizationHeader.call(this, credentials[cid].billableContractID)
+                    ]
                 ])
             });
             if (!response.ok) {

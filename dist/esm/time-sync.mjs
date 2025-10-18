@@ -19,7 +19,9 @@ const syncServerTime = async function () {
     // Get our current monotonic time
     const startTime = performance.now();
     // Now, ask the server for the time
-    const time = await this.config.fetch(`${this.config.connectionURL}/time`, { signal: this.abortController.signal });
+    const time = await this.config.fetch(`${this.config.connectionURL}/time`, {
+        signal: this.abortController.signal
+    });
     const requestTimeElapsed = performance.now();
     if (requestTimeElapsed - startTime > 8000) {
         throw new Error('Error fetching server time: request took too long');
@@ -27,7 +29,7 @@ const syncServerTime = async function () {
     // If the request didn't succeed, report it
     if (!time.ok)
         throw new Error('Error fetching server time');
-    const serverTime = (new Date(await time.text())).valueOf();
+    const serverTime = new Date(await time.text()).valueOf();
     // If the value could not be parsed, report that as well
     if (Number.isNaN(serverTime))
         throw new Error('Unable to parse server time');
@@ -55,13 +57,16 @@ export default sbp('sbp/selectors/register', {
                 return;
             const timeout = setTimeout(() => {
                 // Get the server time
-                syncServerTime.call(this).then(() => {
+                syncServerTime
+                    .call(this)
+                    .then(() => {
                     // Mark the process as finished
                     if (resyncTimeout === timeout)
                         resyncTimeout = null;
                     // And then restart the listener
                     resync();
-                }).catch(e => {
+                })
+                    .catch((e) => {
                     // If there was an error, log it and possibly attempt again
                     if (resyncTimeout === timeout) {
                         // In this case, it was the current task that failed
@@ -86,7 +91,7 @@ export default sbp('sbp/selectors/register', {
         watchdog = setInterval(() => {
             const wallNow = Date.now();
             const monotonicNow = performance.now();
-            const difference = Math.abs(Math.abs((wallNow - wallLast)) - Math.abs((monotonicNow - monotonicLast)));
+            const difference = Math.abs(Math.abs(wallNow - wallLast) - Math.abs(monotonicNow - monotonicLast));
             // Tolerate up to a 10ms difference
             if (difference > 10) {
                 if (resyncTimeout != null)

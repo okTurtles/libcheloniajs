@@ -11,15 +11,23 @@ import { b64ToStr } from './functions.mjs';
 import { isSignedData } from './signedData.mjs';
 const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10) || Infinity;
 const copiedExistingData = Symbol('copiedExistingData');
-export const findKeyIdByName = (state, name) => state._vm?.authorizedKeys && Object.values((state._vm.authorizedKeys)).find((k) => k.name === name && k._notAfterHeight == null)?.id;
-export const findForeignKeysByContractID = (state, contractID) => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys)))).filter((k) => k._notAfterHeight == null && k.foreignKey?.includes(contractID)).map(k => k.id);
-export const findRevokedKeyIdsByName = (state, name) => state._vm?.authorizedKeys && ((Object.values((state._vm.authorizedKeys) || {}))).filter((k) => k.name === name && k._notAfterHeight != null).map(k => k.id);
+export const findKeyIdByName = (state, name) => state._vm?.authorizedKeys &&
+    Object.values(state._vm.authorizedKeys).find((k) => k.name === name && k._notAfterHeight == null)
+        ?.id;
+export const findForeignKeysByContractID = (state, contractID) => state._vm?.authorizedKeys &&
+    Object.values(state._vm.authorizedKeys)
+        .filter((k) => k._notAfterHeight == null && k.foreignKey?.includes(contractID))
+        .map((k) => k.id);
+export const findRevokedKeyIdsByName = (state, name) => state._vm?.authorizedKeys &&
+    Object.values(state._vm.authorizedKeys || {})
+        .filter((k) => k.name === name && k._notAfterHeight != null)
+        .map((k) => k.id);
 export const findSuitableSecretKeyId = (state, permissions, purposes, ringLevel, allowedActions) => {
-    return state._vm?.authorizedKeys &&
-        Object.values((state._vm.authorizedKeys))
+    return (state._vm?.authorizedKeys &&
+        Object.values(state._vm.authorizedKeys)
             .filter((k) => {
-            return k._notAfterHeight == null &&
-                (k.ringLevel <= (ringLevel ?? Number.POSITIVE_INFINITY)) &&
+            return (k._notAfterHeight == null &&
+                k.ringLevel <= (ringLevel ?? Number.POSITIVE_INFINITY) &&
                 sbp('chelonia/haveSecretKey', k.id) &&
                 (Array.isArray(permissions)
                     ? permissions.reduce((acc, permission) => acc && (k.permissions === '*' || k.permissions.includes(permission)), true)
@@ -27,9 +35,11 @@ export const findSuitableSecretKeyId = (state, permissions, purposes, ringLevel,
                 purposes.reduce((acc, purpose) => acc && k.purpose.includes(purpose), true) &&
                 (Array.isArray(allowedActions)
                     ? allowedActions.reduce((acc, action) => acc && (k.allowedActions === '*' || !!k.allowedActions?.includes(action)), true)
-                    : allowedActions ? allowedActions === k.allowedActions : true);
+                    : allowedActions
+                        ? allowedActions === k.allowedActions
+                        : true));
         })
-            .sort((a, b) => b.ringLevel - a.ringLevel)[0]?.id;
+            .sort((a, b) => b.ringLevel - a.ringLevel)[0]?.id);
 };
 export const findContractIDByForeignKeyId = (state, keyId) => {
     let fk;
@@ -43,22 +53,23 @@ export const findContractIDByForeignKeyId = (state, keyId) => {
 };
 // TODO: Resolve inviteKey being added (doesn't have krs permission)
 export const findSuitablePublicKeyIds = (state, permissions, purposes, ringLevel) => {
-    return state._vm?.authorizedKeys &&
-        Object.values((state._vm.authorizedKeys)).filter((k) => (k._notAfterHeight == null) &&
-            (k.ringLevel <= (ringLevel ?? Number.POSITIVE_INFINITY)) &&
+    return (state._vm?.authorizedKeys &&
+        Object.values(state._vm.authorizedKeys)
+            .filter((k) => k._notAfterHeight == null &&
+            k.ringLevel <= (ringLevel ?? Number.POSITIVE_INFINITY) &&
             (Array.isArray(permissions)
                 ? permissions.reduce((acc, permission) => acc && (k.permissions === '*' || k.permissions.includes(permission)), true)
                 : permissions === k.permissions) &&
             purposes.reduce((acc, purpose) => acc && k.purpose.includes(purpose), true))
             .sort((a, b) => b.ringLevel - a.ringLevel)
-            .map((k) => k.id);
+            .map((k) => k.id));
 };
 const validateActionPermissions = (msg, signingKey, state, opT, opV) => {
     const data = isSignedData(opV)
         ? opV.valueOf()
         : opV;
-    if (signingKey.allowedActions !== '*' && (!Array.isArray(signingKey.allowedActions) ||
-        !signingKey.allowedActions.includes(data.action))) {
+    if (signingKey.allowedActions !== '*' &&
+        (!Array.isArray(signingKey.allowedActions) || !signingKey.allowedActions.includes(data.action))) {
         logEvtError(msg, `Signing key ${signingKey.id} is not allowed for action ${data.action}`);
         return false;
     }
@@ -80,8 +91,9 @@ const validateActionPermissions = (msg, signingKey, state, opT, opV) => {
             logEvtError(msg, `Signing key ${s.signingKeyId} is missing permissions for operation ${opT}`);
             return false;
         }
-        if (innerSigningKey.allowedActions !== '*' && (!Array.isArray(innerSigningKey.allowedActions) ||
-            !innerSigningKey.allowedActions.includes(data.action + '#inner'))) {
+        if (innerSigningKey.allowedActions !== '*' &&
+            (!Array.isArray(innerSigningKey.allowedActions) ||
+                !innerSigningKey.allowedActions.includes(data.action + '#inner'))) {
             logEvtError(msg, `Signing key ${innerSigningKey.id} is not allowed for action ${data.action}`);
             return false;
         }
@@ -94,8 +106,7 @@ export const validateKeyPermissions = (msg, config, state, signingKeyId, opT, op
         !Array.isArray(signingKey.purpose) ||
         !signingKey.purpose.includes('sig') ||
         (signingKey.permissions !== '*' &&
-            (!Array.isArray(signingKey.permissions) ||
-                !signingKey.permissions.includes(opT)))) {
+            (!Array.isArray(signingKey.permissions) || !signingKey.permissions.includes(opT)))) {
         logEvtError(msg, `Signing key ${signingKeyId} is missing permissions for operation ${opT}`);
         return false;
     }
@@ -111,12 +122,20 @@ export const validateKeyPermissions = (msg, config, state, signingKeyId, opT, op
     return true;
 };
 export const validateKeyAddPermissions = function (contractID, signingKey, state, v, skipPrivateCheck) {
-    const signingKeyPermissions = Array.isArray(signingKey.permissions) ? new Set(signingKey.permissions) : signingKey.permissions;
-    const signingKeyAllowedActions = Array.isArray(signingKey.allowedActions) ? new Set(signingKey.allowedActions) : signingKey.allowedActions;
-    if (!state._vm?.authorizedKeys?.[signingKey.id])
-        throw new Error('Singing key for OP_KEY_ADD or OP_KEY_UPDATE must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id);
+    const signingKeyPermissions = Array.isArray(signingKey.permissions)
+        ? new Set(signingKey.permissions)
+        : signingKey.permissions;
+    const signingKeyAllowedActions = Array.isArray(signingKey.allowedActions)
+        ? new Set(signingKey.allowedActions)
+        : signingKey.allowedActions;
+    if (!state._vm?.authorizedKeys?.[signingKey.id]) {
+        throw new Error('Singing key for OP_KEY_ADD or OP_KEY_UPDATE must exist in _vm.authorizedKeys. contractID=' +
+            contractID +
+            ' signingKeyId=' +
+            signingKey.id);
+    }
     const localSigningKey = state._vm.authorizedKeys[signingKey.id];
-    v.forEach(wk => {
+    v.forEach((wk) => {
         const data = this.config.unwrapMaybeEncryptedData(wk);
         if (!data)
             return;
@@ -125,26 +144,41 @@ export const validateKeyAddPermissions = function (contractID, signingKey, state
             throw new Error('Signing key is private but it tried adding a public key');
         }
         if (!Number.isSafeInteger(k.ringLevel) || k.ringLevel < localSigningKey.ringLevel) {
-            throw new Error('Signing key has ringLevel ' + localSigningKey.ringLevel + ' but attempted to add or update a key with ringLevel ' + k.ringLevel);
+            throw new Error('Signing key has ringLevel ' +
+                localSigningKey.ringLevel +
+                ' but attempted to add or update a key with ringLevel ' +
+                k.ringLevel);
         }
         if (signingKeyPermissions !== '*') {
-            if (!Array.isArray(k.permissions) || !k.permissions.reduce((acc, cv) => acc && signingKeyPermissions.has(cv), true)) {
-                throw new Error('Unable to add or update a key with more permissions than the signing key. signingKey permissions: ' + String(signingKey?.permissions) + '; key add permissions: ' + String(k.permissions));
+            if (!Array.isArray(k.permissions) ||
+                !k.permissions.reduce((acc, cv) => acc && signingKeyPermissions.has(cv), true)) {
+                throw new Error('Unable to add or update a key with more permissions than the signing key. signingKey permissions: ' +
+                    String(signingKey?.permissions) +
+                    '; key add permissions: ' +
+                    String(k.permissions));
             }
         }
         if (signingKeyAllowedActions !== '*' && k.allowedActions) {
-            if (!signingKeyAllowedActions || !Array.isArray(k.allowedActions) || !k.allowedActions.reduce((acc, cv) => acc && signingKeyAllowedActions.has(cv), true)) {
-                throw new Error('Unable to add or update a key with more allowed actions than the signing key. signingKey allowed actions: ' + String(signingKey?.allowedActions) + '; key add allowed actions: ' + String(k.allowedActions));
+            if (!signingKeyAllowedActions ||
+                !Array.isArray(k.allowedActions) ||
+                !k.allowedActions.reduce((acc, cv) => acc && signingKeyAllowedActions.has(cv), true)) {
+                throw new Error('Unable to add or update a key with more allowed actions than the signing key. signingKey allowed actions: ' +
+                    String(signingKey?.allowedActions) +
+                    '; key add allowed actions: ' +
+                    String(k.allowedActions));
             }
         }
     });
 };
 export const validateKeyDelPermissions = function (contractID, signingKey, state, v) {
-    if (!state._vm?.authorizedKeys?.[signingKey.id])
-        throw new Error('Singing key for OP_KEY_DEL must exist in _vm.authorizedKeys. contractID=' + contractID + ' signingKeyId=' + signingKey.id);
+    if (!state._vm?.authorizedKeys?.[signingKey.id]) {
+        throw new Error('Singing key for OP_KEY_DEL must exist in _vm.authorizedKeys. contractID=' +
+            contractID +
+            ' signingKeyId=' +
+            signingKey.id);
+    }
     const localSigningKey = state._vm.authorizedKeys[signingKey.id];
-    v
-        .forEach((wid) => {
+    v.forEach((wid) => {
         const data = this.config.unwrapMaybeEncryptedData(wid);
         if (!data)
             return;
@@ -160,13 +194,17 @@ export const validateKeyDelPermissions = function (contractID, signingKey, state
             throw new Error('_private attribute must be preserved');
         }
         if (!Number.isSafeInteger(k.ringLevel) || k.ringLevel < localSigningKey.ringLevel) {
-            throw new Error('Signing key has ringLevel ' + localSigningKey.ringLevel + ' but attempted to remove a key with ringLevel ' + k.ringLevel);
+            throw new Error('Signing key has ringLevel ' +
+                localSigningKey.ringLevel +
+                ' but attempted to remove a key with ringLevel ' +
+                k.ringLevel);
         }
     });
 };
 export const validateKeyUpdatePermissions = function (contractID, signingKey, state, v) {
     const updatedMap = Object.create(null);
-    const keys = v.map((wuk) => {
+    const keys = v
+        .map((wuk) => {
         const data = this.config.unwrapMaybeEncryptedData(wuk);
         if (!data)
             return undefined;
@@ -184,7 +222,7 @@ export const validateKeyUpdatePermissions = function (contractID, signingKey, st
         if (!uk.id !== !uk.data) {
             throw new Error('Both or none of the id and data attributes must be provided. Old key ID: ' + uk.oldKeyId);
         }
-        if (uk.data && existingKey.meta?.private && !(uk.meta?.private)) {
+        if (uk.data && existingKey.meta?.private && !uk.meta?.private) {
             throw new Error('Missing private key. Old key ID: ' + uk.oldKeyId);
         }
         if (uk.id && uk.id !== uk.oldKeyId) {
@@ -196,7 +234,10 @@ export const validateKeyUpdatePermissions = function (contractID, signingKey, st
         // `chelonia/in/processMessage`: cloning `_notAfterHeight` will break key
         // rotations, since the new key will have the same expiration value as the
         // old key (the new key is supposed to have no expiration height).
-        const updatedKey = omit(existingKey, ['_notAfterHeight', '_notBeforeHeight']);
+        const updatedKey = omit(existingKey, [
+            '_notAfterHeight',
+            '_notBeforeHeight'
+        ]);
         // Set the corresponding updated attributes
         if (uk.permissions) {
             updatedKey.permissions = uk.permissions;
@@ -220,8 +261,9 @@ export const validateKeyUpdatePermissions = function (contractID, signingKey, st
             updatedKey.data = uk.data;
         }
         return updatedKey;
+    })
         // eslint-disable-next-line no-use-before-define
-    }).filter(Boolean);
+        .filter(Boolean);
     validateKeyAddPermissions.call(this, contractID, signingKey, state, keys, true);
     return [keys, updatedMap];
 };
@@ -231,12 +273,14 @@ export const keyAdditionProcessor = function (_msg, hash, keys, state, contractI
     const storeSecretKey = (key, decryptedKey) => {
         const decryptedDeserializedKey = deserializeKey(decryptedKey);
         const transient = !!key.meta?.private?.transient;
-        sbp('chelonia/storeSecretKeys', new Secret([{
+        sbp('chelonia/storeSecretKeys', new Secret([
+            {
                 key: decryptedDeserializedKey,
                 // We always set this to true because this could be done from
                 // an outgoing message
                 transient: true
-            }]));
+            }
+        ]));
         if (!transient) {
             keysToPersist.push({ key: decryptedDeserializedKey, transient });
         }
@@ -251,8 +295,7 @@ export const keyAdditionProcessor = function (_msg, hash, keys, state, contractI
         // copiedExistingData refers to key data that have been copied from an
         // existing key on OP_KEY_UPDATE. These shouldn't be processed.
         if (key.meta?.private?.content && !has(key.meta, copiedExistingData)) {
-            if (key.id &&
-                !sbp('chelonia/haveSecretKey', key.id, !key.meta.private.transient)) {
+            if (key.id && !sbp('chelonia/haveSecretKey', key.id, !key.meta.private.transient)) {
                 const decryptedKeyResult = this.config.unwrapMaybeEncryptedData(key.meta.private.content);
                 // Ignore data that couldn't be decrypted
                 if (decryptedKeyResult) {
@@ -286,9 +329,10 @@ export const keyAdditionProcessor = function (_msg, hash, keys, state, contractI
         if (key.name.startsWith('#inviteKey-')) {
             if (!state._vm.invites)
                 state._vm.invites = Object.create(null);
-            const inviteSecret = decryptedKey || (has(this.transientSecretKeys, key.id)
-                ? serializeKey(this.transientSecretKeys[key.id], true)
-                : undefined);
+            const inviteSecret = decryptedKey ||
+                (has(this.transientSecretKeys, key.id)
+                    ? serializeKey(this.transientSecretKeys[key.id], true)
+                    : undefined);
             state._vm.invites[key.id] = {
                 status: INVITE_STATUS.VALID,
                 initialQuantity: key.meta.quantity,
@@ -299,7 +343,8 @@ export const keyAdditionProcessor = function (_msg, hash, keys, state, contractI
             };
         }
         // Is this KEY operation the result of requesting keys for another contract?
-        if (key.meta?.keyRequest?.contractID && findSuitableSecretKeyId(state, [SPMessage.OP_KEY_ADD], ['sig'])) {
+        if (key.meta?.keyRequest?.contractID &&
+            findSuitableSecretKeyId(state, [SPMessage.OP_KEY_ADD], ['sig'])) {
             const data = this.config.unwrapMaybeEncryptedData(key.meta.keyRequest.contractID);
             // Are we subscribed to this contract?
             // If we are not subscribed to the contract, we don't set pendingKeyRequests because we don't need that contract's state
@@ -320,8 +365,9 @@ export const keyAdditionProcessor = function (_msg, hash, keys, state, contractI
                             // don't need to set pendingKeyRequests.
                             return;
                         }
-                        if (!has(rootState, keyRequestContractID))
+                        if (!has(rootState, keyRequestContractID)) {
                             this.config.reactiveSet(rootState, keyRequestContractID, Object.create(null));
+                        }
                         const targetState = rootState[keyRequestContractID];
                         if (!targetState._volatile) {
                             this.config.reactiveSet(targetState, '_volatile', Object.create(null));
@@ -339,8 +385,17 @@ export const keyAdditionProcessor = function (_msg, hash, keys, state, contractI
                         // Mark the contract for which keys were requested as pending keys
                         // The hash (of the current message) is added to this dictionary
                         // for cross-referencing puposes.
-                        targetState._volatile.pendingKeyRequests.push({ contractID, name: key.name, hash, reference: reference?.data });
-                        this.setPostSyncOp(contractID, 'pending-keys-for-' + keyRequestContractID, ['okTurtles.events/emit', CONTRACT_IS_PENDING_KEY_REQUESTS, { contractID: keyRequestContractID }]);
+                        targetState._volatile.pendingKeyRequests.push({
+                            contractID,
+                            name: key.name,
+                            hash,
+                            reference: reference?.data
+                        });
+                        this.setPostSyncOp(contractID, 'pending-keys-for-' + keyRequestContractID, [
+                            'okTurtles.events/emit',
+                            CONTRACT_IS_PENDING_KEY_REQUESTS,
+                            { contractID: keyRequestContractID }
+                        ]);
                     }).catch((e) => {
                         // Using console.error instead of logEvtError because this
                         // is a side-effect and not relevant for outgoing messages
@@ -360,13 +415,18 @@ export const keyAdditionProcessor = function (_msg, hash, keys, state, contractI
 };
 export const subscribeToForeignKeyContracts = function (contractID, state) {
     try {
-        Object.values(state._vm.authorizedKeys).filter((key) => !!((key)).foreignKey && findKeyIdByName(state, ((key)).name) != null).forEach((key) => {
+        Object.values(state._vm.authorizedKeys)
+            .filter((key) => !!key.foreignKey && findKeyIdByName(state, key.name) != null)
+            .forEach((key) => {
             const foreignKey = String(key.foreignKey);
             const fkUrl = new URL(foreignKey);
             const foreignContract = fkUrl.pathname;
             const foreignKeyName = fkUrl.searchParams.get('keyName');
             if (!foreignContract || !foreignKeyName) {
-                console.warn('Invalid foreign key: missing contract or key name', { contractID, keyId: key.id });
+                console.warn('Invalid foreign key: missing contract or key name', {
+                    contractID,
+                    keyId: key.id
+                });
                 return;
             }
             const rootState = sbp(this.config.stateSelector);
@@ -377,17 +437,23 @@ export const subscribeToForeignKeyContracts = function (contractID, state) {
                 return;
             // If the key is already being watched, do nothing
             if (Array.isArray(rootState?.[foreignContract]?._volatile?.watch)) {
-                if (rootState[foreignContract]._volatile.watch.find((v) => v[0] === key.name && v[1] === contractID))
+                if (rootState[foreignContract]._volatile.watch.find((v) => v[0] === key.name && v[1] === contractID)) {
                     return;
+                }
             }
-            if (!has(state._vm, 'pendingWatch'))
+            if (!has(state._vm, 'pendingWatch')) {
                 this.config.reactiveSet(state._vm, 'pendingWatch', Object.create(null));
-            if (!has(state._vm.pendingWatch, foreignContract))
+            }
+            if (!has(state._vm.pendingWatch, foreignContract)) {
                 this.config.reactiveSet(state._vm.pendingWatch, foreignContract, []);
+            }
             if (!state._vm.pendingWatch[foreignContract].find(([n]) => n === foreignKeyName)) {
                 state._vm.pendingWatch[foreignContract].push([foreignKeyName, key.id]);
             }
-            this.setPostSyncOp(contractID, `watchForeignKeys-${contractID}`, ['chelonia/private/watchForeignKeys', contractID]);
+            this.setPostSyncOp(contractID, `watchForeignKeys-${contractID}`, [
+                'chelonia/private/watchForeignKeys',
+                contractID
+            ]);
         });
     }
     catch (e) {
@@ -423,7 +489,8 @@ export const recreateEvent = (entry, state, contractsState, disableAutoDedup) =>
                     throw new Error('Invalid message format');
                 newOpV = opV.filter((k) => {
                     const kId = k.valueOf().id;
-                    return !has(state._vm.authorizedKeys, kId) || state._vm.authorizedKeys[kId]._notAfterHeight != null;
+                    return (!has(state._vm.authorizedKeys, kId) ||
+                        state._vm.authorizedKeys[kId]._notAfterHeight != null);
                 });
                 // Has this key already been added? (i.e., present in authorizedKeys)
                 if (newOpV.length === 0) {
@@ -439,7 +506,8 @@ export const recreateEvent = (entry, state, contractsState, disableAutoDedup) =>
                 // Has this key already been removed? (i.e., no longer in authorizedKeys)
                 newOpV = opV.filter((keyId) => {
                     const kId = Object(keyId).valueOf();
-                    return has(state._vm.authorizedKeys, kId) && state._vm.authorizedKeys[kId]._notAfterHeight == null;
+                    return (has(state._vm.authorizedKeys, kId) &&
+                        state._vm.authorizedKeys[kId]._notAfterHeight == null);
                 });
                 if (newOpV.length === 0) {
                     console.info('Omitting empty OP_KEY_DEL', { head });
@@ -455,7 +523,9 @@ export const recreateEvent = (entry, state, contractsState, disableAutoDedup) =>
                 newOpV = opV.filter((k) => {
                     const oKId = k.valueOf().oldKeyId;
                     const nKId = k.valueOf().id;
-                    return nKId == null || (has(state._vm.authorizedKeys, oKId) && state._vm.authorizedKeys[oKId]._notAfterHeight == null);
+                    return (nKId == null ||
+                        (has(state._vm.authorizedKeys, oKId) &&
+                            state._vm.authorizedKeys[oKId]._notAfterHeight == null));
                 });
                 if (newOpV.length === 0) {
                     console.info('Omitting empty OP_KEY_UPDATE', { head });
@@ -467,11 +537,14 @@ export const recreateEvent = (entry, state, contractsState, disableAutoDedup) =>
             else if (opT === SPMessage.OP_ATOMIC) {
                 if (!Array.isArray(opV))
                     throw new Error('Invalid message format');
-                newOpV = opV.map(([t, v]) => [t, recreateOperationInternal(t, v)]).filter(([, v]) => !!v);
+                newOpV = opV
+                    .map(([t, v]) => [t, recreateOperationInternal(t, v)])
+                    .filter(([, v]) => !!v);
                 if (newOpV.length === 0) {
                     console.info('Omitting empty OP_ATOMIC', { head });
                 }
-                else if (newOpV.length === opV.length && newOpV.reduce((acc, cv, i) => acc && cv === opV[i], true)) {
+                else if (newOpV.length === opV.length &&
+                    newOpV.reduce((acc, cv, i) => acc && cv === opV[i], true)) {
                     return opV;
                 }
                 else {
@@ -498,7 +571,11 @@ export const recreateEvent = (entry, state, contractsState, disableAutoDedup) =>
     if (!newRawOpV)
         return;
     const newOp = [opT, newRawOpV];
-    entry = SPMessage.cloneWith(head, newOp, { previousKeyOp, previousHEAD, height: previousHeight + 1 });
+    entry = SPMessage.cloneWith(head, newOp, {
+        previousKeyOp,
+        previousHEAD,
+        height: previousHeight + 1
+    });
     return entry;
 };
 export const getContractIDfromKeyId = (contractID, signingKeyId, state) => {
@@ -520,8 +597,9 @@ export function eventsAfter(contractID, { sinceHeight, limit, sinceHash, stream 
         const eventsResponse = await this.config.fetch(lastUrl, { signal });
         if (!eventsResponse.ok) {
             const msg = `${eventsResponse.status}: ${eventsResponse.statusText}`;
-            if (eventsResponse.status === 404 || eventsResponse.status === 410)
+            if (eventsResponse.status === 404 || eventsResponse.status === 410) {
                 throw new ChelErrorResourceGone(msg, { cause: eventsResponse.status });
+            }
             throw new ChelErrorUnexpectedHttpResponseCode(msg, { cause: eventsResponse.status });
         }
         if (!eventsResponse.body)
@@ -566,7 +644,8 @@ export function eventsAfter(contractID, { sinceHeight, limit, sinceHash, stream 
                         }
                         case 'read-eos': // End of stream case
                         case 'read-new-response': // Just started reading a new response
-                        case 'read': { // Reading from the response stream
+                        case 'read': {
+                            // Reading from the response stream
                             const { done, value } = await eventsStreamReader.read();
                             // If done, determine if the stream should close or fetch more
                             // data by making a new request
@@ -714,7 +793,7 @@ export function eventsAfter(contractID, { sinceHeight, limit, sinceHash, stream 
             }
             catch (e) {
                 console.error('[eventsAfter] Error', { lastUrl }, e);
-                eventsStreamReader?.cancel('Error during pull').catch(e2 => {
+                eventsStreamReader?.cancel('Error during pull').catch((e2) => {
                     console.error('Error canceling underlying event stream reader on error', e, e2);
                 });
                 throw e;
@@ -786,11 +865,17 @@ export const checkCanBeGarbageCollected = function (id) {
     const rootState = sbp(this.config.stateSelector);
     return (
     // Check persistent references
-    (!has(rootState.contracts, id) || !rootState.contracts[id] || !has(rootState.contracts[id], 'references')) &&
+    (!has(rootState.contracts, id) ||
+        !rootState.contracts[id] ||
+        !has(rootState.contracts[id], 'references')) &&
         // Check ephemeral references
-        !has(this.ephemeralReferenceCount, id)) &&
+        !has(this.ephemeralReferenceCount, id) &&
         // Check foreign keys (i.e., that no keys from this contract are being watched)
-        (!has(rootState, id) || !has(rootState[id], '_volatile') || !has(rootState[id]._volatile, 'watch') || rootState[id]._volatile.watch.length === 0 || rootState[id]._volatile.watch.filter(([, cID]) => this.subscriptionSet.has(cID)).length === 0);
+        (!has(rootState, id) ||
+            !has(rootState[id], '_volatile') ||
+            !has(rootState[id]._volatile, 'watch') ||
+            rootState[id]._volatile.watch.length === 0 ||
+            rootState[id]._volatile.watch.filter(([, cID]) => this.subscriptionSet.has(cID)).length === 0));
 };
 export const collectEventStream = async (s) => {
     const reader = s.getReader();
@@ -819,8 +904,9 @@ export const handleFetchResult = (type) => {
             const msg = `${r.status}: ${r.statusText}`;
             // 410 is sometimes special (for example, it can mean that a contract or
             // a file been deleted)
-            if (r.status === 404 || r.status === 410)
+            if (r.status === 404 || r.status === 410) {
                 throw new ChelErrorResourceGone(msg, { cause: r.status });
+            }
             throw new ChelErrorUnexpectedHttpResponseCode(msg, { cause: r.status });
         }
         return r[type]();

@@ -66,9 +66,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         });
         (0, sbp_1.default)('okTurtles.events/on', events_js_1.CONTRACTS_MODIFIED, (subscriptionSet, { added, removed, permanent }) => {
             (0, sbp_1.default)('okTurtles.eventQueue/queueEvent', events_js_1.EVENT_HANDLED, async () => {
-                const states = added.length
-                    ? await (0, sbp_1.default)('chelonia/contract/fullState', added)
-                    : {};
+                const states = added.length ? await (0, sbp_1.default)('chelonia/contract/fullState', added) : {};
                 const vuexState = (0, sbp_1.default)('state/vuex/state');
                 if (!vuexState.contracts) {
                     reactiveSet(vuexState, 'contracts', Object.create(null));
@@ -91,7 +89,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         reactiveSet(vuexState, contractID, (0, turtledash_1.cloneDeep)(contractState));
                     }
                 }
-                (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CONTRACTS_MODIFIED_READY, subscriptionSet, { added, removed });
+                (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CONTRACTS_MODIFIED_READY, subscriptionSet, {
+                    added,
+                    removed
+                });
             });
         });
     },
