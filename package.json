@@ -1,6 +1,6 @@
 {
   "name": "@chelonia/lib",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "description": "Library for building Chelonia applications",
   "main": "dist/cjs/index.cjs",
   "types": "dist/cjs/index.d.cts",

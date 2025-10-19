@@ -1031,6 +1031,16 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         })
             .then((0, utils_js_1.handleFetchResult)('json'));
     },
+    'chelonia/out/deserializedHEAD': async function (hash, { contractID } = {}) {
+        const message = await (0, sbp_1.default)('chelonia/out/fetchResource', hash, {
+            code: functions_js_1.multicodes.SHELTER_CONTRACT_DATA
+        });
+        const deserializedHEAD = SPMessage_js_1.SPMessage.deserializeHEAD(message);
+        if (deserializedHEAD.contractID !== contractID) {
+            throw new Error('chelonia/out/deserializedHEAD: Mismatched contract ID');
+        }
+        return deserializedHEAD;
+    },
     'chelonia/out/eventsAfter': utils_js_1.eventsAfter,
     'chelonia/out/eventsBefore': function (contractID, { beforeHeight, limit, stream }) {
         if (limit <= 0) {
@@ -1052,16 +1062,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         let reader;
         const s = new ReadableStream({
             start: async (controller) => {
-                const first = (await this.config
-                    .fetch(`${this.config.connectionURL}/file/${startHash}`, {
-                    signal: this.abortController.signal
-                })
-                    .then((0, utils_js_1.handleFetchResult)('text')));
-                const deserializedHEAD = SPMessage_js_1.SPMessage.deserializeHEAD(first);
-                if (deserializedHEAD.contractID !== contractID) {
-                    controller.error(new Error('chelonia/out/eventsBetween: Mismatched contract ID'));
-                    return;
-                }
+                const deserializedHEAD = await (0, sbp_1.default)('chelonia/out/deserializedHEAD', startHash, { contractID });
                 const startOffset = Math.max(0, deserializedHEAD.head.height - offset);
                 const ourLimit = limit
                     ? Math.min(endHeight - startOffset + 1, limit)

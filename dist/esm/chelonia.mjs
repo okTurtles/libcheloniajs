@@ -2,7 +2,7 @@ import '@sbp/okturtles.eventqueue';
 import '@sbp/okturtles.events';
 import sbp from '@sbp/sbp';
 import { cloneDeep, delay, difference, has, intersection, merge, randomHexString, randomIntFromRange } from 'turtledash';
-import { createCID, parseCID } from './functions.mjs';
+import { createCID, multicodes, parseCID } from './functions.mjs';
 import { Buffer } from 'buffer';
 import { NOTIFICATION_TYPE, createClient } from './pubsub/index.mjs';
 import { EDWARDS25519SHA512BATCH, deserializeKey, keyId, keygen, serializeKey } from '@chelonia/crypto';
@@ -1025,6 +1025,16 @@ export default sbp('sbp/selectors/register', {
         })
             .then(handleFetchResult('json'));
     },
+    'chelonia/out/deserializedHEAD': async function (hash, { contractID } = {}) {
+        const message = await sbp('chelonia/out/fetchResource', hash, {
+            code: multicodes.SHELTER_CONTRACT_DATA
+        });
+        const deserializedHEAD = SPMessage.deserializeHEAD(message);
+        if (deserializedHEAD.contractID !== contractID) {
+            throw new Error('chelonia/out/deserializedHEAD: Mismatched contract ID');
+        }
+        return deserializedHEAD;
+    },
     'chelonia/out/eventsAfter': eventsAfter,
     'chelonia/out/eventsBefore': function (contractID, { beforeHeight, limit, stream }) {
         if (limit <= 0) {
@@ -1046,16 +1056,7 @@ export default sbp('sbp/selectors/register', {
         let reader;
         const s = new ReadableStream({
             start: async (controller) => {
-                const first = (await this.config
-                    .fetch(`${this.config.connectionURL}/file/${startHash}`, {
-                    signal: this.abortController.signal
-                })
-                    .then(handleFetchResult('text')));
-                const deserializedHEAD = SPMessage.deserializeHEAD(first);
-                if (deserializedHEAD.contractID !== contractID) {
-                    controller.error(new Error('chelonia/out/eventsBetween: Mismatched contract ID'));
-                    return;
-                }
+                const deserializedHEAD = await sbp('chelonia/out/deserializedHEAD', startHash, { contractID });
                 const startOffset = Math.max(0, deserializedHEAD.head.height - offset);
                 const ourLimit = limit
                     ? Math.min(endHeight - startOffset + 1, limit)
