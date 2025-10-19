@@ -1032,11 +1032,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             .then((0, utils_js_1.handleFetchResult)('json'));
     },
     'chelonia/out/deserializedHEAD': async function (hash, { contractID } = {}) {
+        // contractID is optional because this selector could be used for looking up
+        // a contractID given a hash.
         const message = await (0, sbp_1.default)('chelonia/out/fetchResource', hash, {
             code: functions_js_1.multicodes.SHELTER_CONTRACT_DATA
         });
         const deserializedHEAD = SPMessage_js_1.SPMessage.deserializeHEAD(message);
-        if (deserializedHEAD.contractID !== contractID) {
+        if (contractID && deserializedHEAD.contractID !== contractID) {
             throw new Error('chelonia/out/deserializedHEAD: Mismatched contract ID');
         }
         return deserializedHEAD;
@@ -1054,7 +1056,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             stream
         });
     },
-    'chelonia/out/eventsBetween': function (contractID, { startHash, endHeight, offset = 0, limit = 0, stream = true }) {
+    'chelonia/out/eventsBetween': function (contractID, { startHash, endHeight = Number.POSITIVE_INFINITY, offset = 0, limit = 0, stream = true }) {
         if (offset < 0) {
             console.error('[chelonia] invalid params error: "offset" needs to be positive integer or zero');
             return;

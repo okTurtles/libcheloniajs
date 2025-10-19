@@ -1461,12 +1461,16 @@ export default sbp('sbp/selectors/register', {
       })
       .then(handleFetchResult('json'))
   },
-  'chelonia/out/deserializedHEAD': async function (this: CheloniaContext, hash: string, { contractID }: { contractID?: string } = {}) {
+  'chelonia/out/deserializedHEAD': async function (
+    this: CheloniaContext, hash: string, { contractID }: { contractID?: string } = {}
+  ) {
+    // contractID is optional because this selector could be used for looking up
+    // a contractID given a hash.
     const message = await sbp('chelonia/out/fetchResource', hash, {
       code: multicodes.SHELTER_CONTRACT_DATA
     })
     const deserializedHEAD = SPMessage.deserializeHEAD(message)
-    if (deserializedHEAD.contractID !== contractID) {
+    if (contractID && deserializedHEAD.contractID !== contractID) {
       throw new Error('chelonia/out/deserializedHEAD: Mismatched contract ID')
     }
     return deserializedHEAD
@@ -1493,7 +1497,7 @@ export default sbp('sbp/selectors/register', {
     contractID: string,
     {
       startHash,
-      endHeight,
+      endHeight = Number.POSITIVE_INFINITY,
       offset = 0,
       limit = 0,
       stream = true
