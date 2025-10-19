@@ -29,9 +29,9 @@ export declare const PUSH_SERVER_ACTION_TYPE: Readonly<{
     DELETE_SUBSCRIPTION: "delete-subscription";
     SEND_PUSH_NOTIFICATION: "send-push-notification";
 }>;
-export type NotificationTypeEnum = typeof NOTIFICATION_TYPE[keyof typeof NOTIFICATION_TYPE];
-export type RequestTypeEnum = typeof REQUEST_TYPE[keyof typeof REQUEST_TYPE];
-export type ResponseTypeEnum = typeof RESPONSE_TYPE[keyof typeof RESPONSE_TYPE];
+export type NotificationTypeEnum = (typeof NOTIFICATION_TYPE)[keyof typeof NOTIFICATION_TYPE];
+export type RequestTypeEnum = (typeof REQUEST_TYPE)[keyof typeof REQUEST_TYPE];
+export type ResponseTypeEnum = (typeof RESPONSE_TYPE)[keyof typeof RESPONSE_TYPE];
 type TimeoutID = ReturnType<typeof setTimeout>;
 export type Options = {
     logPingMessages: boolean;

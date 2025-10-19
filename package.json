@@ -229,9 +229,9 @@
     }
   },
   "scripts": {
-    "test": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => console.error(\"ERROR\", e));' src/index.test.ts",
-    "build:esm": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => console.error(\"ERROR\", e));' buildHelper.ts esm",
-    "build:cjs": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => console.error(\"ERROR\", e));' buildHelper.ts cjs",
+    "test": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' src/index.test.ts",
+    "build:esm": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' buildHelper.ts esm",
+    "build:cjs": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' buildHelper.ts cjs",
     "build": "npm run build:esm && npm run build:cjs",
     "lint": "eslint .",
     "clean": "rm -f dist/*"
@@ -283,7 +283,10 @@
     "extends": [
       "plugin:@typescript-eslint/recommended",
       "standard"
-    ]
+    ],
+    "rules": {
+      "max-len": ["error", { "code" : 100, "comments": 150, "ignoreTemplateLiterals": true, "ignoreStrings": true } ]
+    }
   },
   "eslintIgnore": [
     "dist/*",

@@ -55,7 +55,9 @@ const buildInternal = async (opts: Opts) => {
     })
   })
   await new Promise<void>((resolve, reject) => {
-    const rename = fork(new URL('./renameFiles.mjs', import.meta.url), opts.renameFileArgs, { stdio: 'inherit' })
+    const rename = fork(
+      new URL('./renameFiles.mjs', import.meta.url), opts.renameFileArgs, { stdio: 'inherit' }
+    )
     rename.on('close', (code) => {
       if (code !== 0) {
         reject(new Error(`[rename] code ${code}`))

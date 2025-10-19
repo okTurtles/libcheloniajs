@@ -6,41 +6,52 @@ import { test } from 'node:test'
 
 import './db.js'
 
-import { PERSISTENT_ACTION_FAILURE, PERSISTENT_ACTION_SUCCESS, PERSISTENT_ACTION_TOTAL_FAILURE } from './events.js'
+import {
+  PERSISTENT_ACTION_FAILURE,
+  PERSISTENT_ACTION_SUCCESS,
+  PERSISTENT_ACTION_TOTAL_FAILURE
+} from './events.js'
 import './persistent-actions.js'
-import type { PersistentActionError, PersistentActionSbpStatus, PersistentActionSuccess, UUIDV4 } from './persistent-actions.js'
+import type {
+  PersistentActionError,
+  PersistentActionSbpStatus,
+  PersistentActionSuccess,
+  UUIDV4
+} from './persistent-actions.js'
 
 // Necessary to avoid 'JSON.stringify' errors since Node timeouts are circular objects, whereas browser timeouts are just integers.
 setTimeout(() => {}).constructor.prototype.toJSON = () => undefined
 
 sbp('sbp/selectors/register', {
-  call <A, R, T extends (...args: A[]) => R>(fn: T, ...args: A[]) {
+  call<A, R, T extends (...args: A[]) => R>(fn: T, ...args: A[]) {
     return fn(...args)
   },
-  log <T> (msg: T) {
+  log<T> (msg: T) {
     console.log(msg)
   },
-  rejectAfter100ms <T> (arg: T) {
+  rejectAfter100ms<T> (arg: T) {
     return new Promise<never>((resolve, reject) => {
       setTimeout(() => reject(arg), 100)
     })
   },
-  resolveAfter100ms <T> (arg: T) {
+  resolveAfter100ms<T> (arg: T) {
     return new Promise<T>((resolve) => {
       setTimeout(() => resolve(arg), 100)
     })
   },
-  returnImmediately <T> (arg: T) {
+  returnImmediately<T> (arg: T) {
     return arg
   },
-  throwImmediately <T> (arg: T) {
+  throwImmediately<T> (arg: T) {
     throw arg
   }
 })
 
 const createRandomError = () => new Error(`Bad number: ${String(Math.random())}`)
-const getActionStatus = (id: string): PersistentActionSbpStatus => sbp('chelonia.persistentActions/status').find((obj: PersistentActionSbpStatus) => obj.id === id)
-const isActionRemoved = (id: string) => !sbp('chelonia.persistentActions/status').find((obj: PersistentActionSbpStatus) => obj.id === id)
+const getActionStatus = (id: string): PersistentActionSbpStatus =>
+  sbp('chelonia.persistentActions/status').find((obj: PersistentActionSbpStatus) => obj.id === id)
+const isActionRemoved = (id: string) =>
+  !sbp('chelonia.persistentActions/status').find((obj: PersistentActionSbpStatus) => obj.id === id)
 
 // Custom `configure` options for tests.
 // Mocha has a default 2000ms test timeout, therefore we'll use short delays.
@@ -108,24 +119,33 @@ test('Test persistent actions', async (t) => {
       ['returnImmediately', randomNumbers[1]]
     ]
     const ids = sbp('chelonia.persistentActions/enqueue', ...invocations) as UUIDV4[]
-    await Promise.all(ids.map((id, index) => new Promise<void>((resolve, reject) => {
-      // Registers a success handler for each received id.
-      sbp('okTurtles.events/on', PERSISTENT_ACTION_SUCCESS, function handler (details: PersistentActionSuccess) {
-        if (details.id !== id) return
-        try {
-          // Check the action has actually been called and its result is correct.
-          assert.strictEqual(details.result, randomNumbers[index])
-          // Check the action has been correctly removed.
-          assert(isActionRemoved(id))
-          // Wait a little to make sure the action isn't going to be retried.
-          setTimeout(resolve, (testOptions.retrySeconds + 1) * 1e3)
-        } catch (err) {
-          reject(err)
-        } finally {
-          sbp('okTurtles.events/off', PERSISTENT_ACTION_SUCCESS, handler)
-        }
-      })
-    })))
+    await Promise.all(
+      ids.map(
+        (id, index) =>
+          new Promise<void>((resolve, reject) => {
+            // Registers a success handler for each received id.
+            sbp(
+              'okTurtles.events/on',
+              PERSISTENT_ACTION_SUCCESS,
+              function handler (details: PersistentActionSuccess) {
+                if (details.id !== id) return
+                try {
+                  // Check the action has actually been called and its result is correct.
+                  assert.strictEqual(details.result, randomNumbers[index])
+                  // Check the action has been correctly removed.
+                  assert(isActionRemoved(id))
+                  // Wait a little to make sure the action isn't going to be retried.
+                  setTimeout(resolve, (testOptions.retrySeconds + 1) * 1e3)
+                } catch (err) {
+                  reject(err)
+                } finally {
+                  sbp('okTurtles.events/off', PERSISTENT_ACTION_SUCCESS, handler)
+                }
+              }
+            )
+          })
+      )
+    )
   })
 
   await test('should emit a failure event and schedule a retry', function () {
@@ -143,7 +163,9 @@ test('Test persistent actions', async (t) => {
           assert.strictEqual(status.lastError, ourError.message)
           assert.strictEqual(status.resolved, false)
           // Check a retry has been scheduled.
-          assert(new Date(status.nextRetry).getTime() - Date.now() <= testOptions.retrySeconds * 1e3)
+          assert(
+            new Date(status.nextRetry).getTime() - Date.now() <= testOptions.retrySeconds * 1e3
+          )
           resolve()
         } catch (err) {
           reject(err)
@@ -178,30 +200,46 @@ test('Test persistent actions', async (t) => {
 
     return new Promise<void>((resolve, reject) => {
       let failureEventCounter = 0
-      sbp('okTurtles.events/on', PERSISTENT_ACTION_FAILURE, (details: { error: Error, id: string }) => {
-        if (details.id !== id) return
-        failureEventCounter++
-        try {
-          assert(failureEventCounter <= testOptions.maxAttempts, '1')
-          // Check the event handler was called before the corresponding SBP invocation.
-          assert.strictEqual(failureEventCounter, errorInvocationSpy.mock.callCount() + 1, '2')
-          assert.strictEqual(details.error.message, (ourError as Error)?.message ?? ourError, '3')
-        } catch (err) {
-          reject(err)
+      sbp(
+        'okTurtles.events/on',
+        PERSISTENT_ACTION_FAILURE,
+        (details: { error: Error; id: string }) => {
+          if (details.id !== id) return
+          failureEventCounter++
+          try {
+            assert(failureEventCounter <= testOptions.maxAttempts, '1')
+            // Check the event handler was called before the corresponding SBP invocation.
+            assert.strictEqual(failureEventCounter, errorInvocationSpy.mock.callCount() + 1, '2')
+            assert.strictEqual(
+              details.error.message,
+              (ourError as Error)?.message ?? ourError,
+              '3'
+            )
+          } catch (err) {
+            reject(err)
+          }
         }
-      })
-      sbp('okTurtles.events/on', PERSISTENT_ACTION_TOTAL_FAILURE, (details: { error: Error, id: string }) => {
-        if (details.id !== id) return
-        try {
-          assert.strictEqual(failureEventCounter, testOptions.maxAttempts, '3')
-          assert.strictEqual(errorInvocationSpy.mock.callCount(), testOptions.maxAttempts, '4')
-          assert.strictEqual(details.error.message, (ourError as Error)?.message ?? ourError, '5')
-          assert(isActionRemoved(id), '6')
-          resolve()
-        } catch (err) {
-          reject(err)
+      )
+      sbp(
+        'okTurtles.events/on',
+        PERSISTENT_ACTION_TOTAL_FAILURE,
+        (details: { error: Error; id: string }) => {
+          if (details.id !== id) return
+          try {
+            assert.strictEqual(failureEventCounter, testOptions.maxAttempts, '3')
+            assert.strictEqual(errorInvocationSpy.mock.callCount(), testOptions.maxAttempts, '4')
+            assert.strictEqual(
+              details.error.message,
+              (ourError as Error)?.message ?? ourError,
+              '5'
+            )
+            assert(isActionRemoved(id), '6')
+            resolve()
+          } catch (err) {
+            reject(err)
+          }
         }
-      })
+      )
     })
   }
 

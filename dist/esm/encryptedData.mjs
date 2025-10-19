@@ -22,7 +22,9 @@ export const isEncryptedData = (o) => {
 // TODO: Check for permissions and allowedActions; this requires passing some
 // additional context
 const encryptData = function (stateOrContractID, eKeyId, data, additionalData) {
-    const state = typeof stateOrContractID === 'string' ? rootStateFn()[stateOrContractID] : stateOrContractID;
+    const state = typeof stateOrContractID === 'string'
+        ? rootStateFn()[stateOrContractID]
+        : stateOrContractID;
     // Has the key been revoked? If so, attempt to find an authorized key by the same name
     const designatedKey = state?._vm?.authorizedKeys?.[eKeyId];
     if (!designatedKey?.purpose.includes('enc')) {
@@ -98,7 +100,10 @@ const decryptData = function (state, height, data, additionalKeys, additionalDat
     // any new attack vectors or venues that were not already available using
     // different means.
     const designatedKey = state._vm?.authorizedKeys?.[eKeyId];
-    if (!designatedKey || (height > designatedKey._notAfterHeight) || (height < designatedKey._notBeforeHeight) || !designatedKey.purpose.includes('enc')) {
+    if (!designatedKey ||
+        height > designatedKey._notAfterHeight ||
+        height < designatedKey._notBeforeHeight ||
+        !designatedKey.purpose.includes('enc')) {
         throw new ChelErrorUnexpected(`Key ${eKeyId} is unauthorized or expired for the current contract`);
     }
     const deserializedKey = typeof key === 'string' ? deserializeKey(key) : key;
@@ -113,8 +118,9 @@ const decryptData = function (state, height, data, additionalKeys, additionalDat
     }
 };
 export const encryptedOutgoingData = (stateOrContractID, eKeyId, data) => {
-    if (!stateOrContractID || data === undefined || !eKeyId)
+    if (!stateOrContractID || data === undefined || !eKeyId) {
         throw new TypeError('Invalid invocation');
+    }
     const boundStringValueFn = encryptData.bind(null, stateOrContractID, eKeyId, data);
     return wrapper({
         get encryptionKeyId() {
@@ -281,7 +287,9 @@ export const encryptedDataKeyId = (data) => {
     return data[0];
 };
 export const isRawEncryptedData = (data) => {
-    if (!Array.isArray(data) || data.length !== 2 || data.map(v => typeof v).filter(v => v !== 'string').length !== 0) {
+    if (!Array.isArray(data) ||
+        data.length !== 2 ||
+        data.map((v) => typeof v).filter((v) => v !== 'string').length !== 0) {
         return false;
     }
     return true;

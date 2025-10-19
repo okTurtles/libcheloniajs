@@ -61,9 +61,7 @@ export default sbp('sbp/selectors/register', {
         });
         sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (subscriptionSet, { added, removed, permanent }) => {
             sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
-                const states = added.length
-                    ? await sbp('chelonia/contract/fullState', added)
-                    : {};
+                const states = added.length ? await sbp('chelonia/contract/fullState', added) : {};
                 const vuexState = sbp('state/vuex/state');
                 if (!vuexState.contracts) {
                     reactiveSet(vuexState, 'contracts', Object.create(null));
@@ -86,7 +84,10 @@ export default sbp('sbp/selectors/register', {
                         reactiveSet(vuexState, contractID, cloneDeep(contractState));
                     }
                 }
-                sbp('okTurtles.events/emit', CONTRACTS_MODIFIED_READY, subscriptionSet, { added, removed });
+                sbp('okTurtles.events/emit', CONTRACTS_MODIFIED_READY, subscriptionSet, {
+                    added,
+                    removed
+                });
             });
         });
     },

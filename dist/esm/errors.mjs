@@ -1,18 +1,22 @@
 // ugly boilerplate because JavaScript is stupid
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
-export const ChelErrorGenerator = (name, base = Error) => ((class extends base {
+export const ChelErrorGenerator = (name, base = Error) => class extends base {
     constructor(...params) {
         super(...params);
         this.name = name; // string literal so minifier doesn't overwrite
         // Polyfill for cause property
         if (params[1]?.cause !== this.cause) {
-            Object.defineProperty(this, 'cause', { configurable: true, writable: true, value: params[1]?.cause });
+            Object.defineProperty(this, 'cause', {
+                configurable: true,
+                writable: true,
+                value: params[1]?.cause
+            });
         }
         if (Error.captureStackTrace) {
             Error.captureStackTrace(this, this.constructor);
         }
     }
-}));
+};
 export const ChelErrorWarning = ChelErrorGenerator('ChelErrorWarning');
 export const ChelErrorAlreadyProcessed = ChelErrorGenerator('ChelErrorAlreadyProcessed');
 export const ChelErrorDBBadPreviousHEAD = ChelErrorGenerator('ChelErrorDBBadPreviousHEAD');

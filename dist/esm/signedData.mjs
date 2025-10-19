@@ -22,7 +22,9 @@ export const isSignedData = (o) => {
 // TODO: Check for permissions and allowedActions; this requires passing some
 // additional context
 const signData = function (stateOrContractID, sKeyId, data, extraFields, additionalKeys, additionalData) {
-    const state = typeof stateOrContractID === 'string' ? rootStateFn()[stateOrContractID] : stateOrContractID;
+    const state = typeof stateOrContractID === 'string'
+        ? rootStateFn()[stateOrContractID]
+        : stateOrContractID;
     if (!additionalData) {
         throw new ChelErrorSignatureError('Signature additional data must be provided');
     }
@@ -58,11 +60,7 @@ const signData = function (stateOrContractID, sKeyId, data, extraFields, additio
     const payloadToSign = blake32Hash(`${blake32Hash(additionalData)}${blake32Hash(serializedData)}`);
     return {
         ...extraFields,
-        _signedData: [
-            serializedData,
-            keyId(deserializedKey),
-            sign(deserializedKey, payloadToSign)
-        ]
+        _signedData: [serializedData, keyId(deserializedKey), sign(deserializedKey, payloadToSign)]
     };
 };
 // TODO: Check for permissions and allowedActions; this requires passing the
@@ -79,12 +77,19 @@ const verifySignatureData = function (state, height, data, additionalData) {
     }
     const [serializedMessage, sKeyId, signature] = data._signedData;
     const designatedKey = state._vm?.authorizedKeys?.[sKeyId];
-    if (!designatedKey || (height > designatedKey._notAfterHeight) || (height < designatedKey._notBeforeHeight) || !designatedKey.purpose.includes('sig')) {
+    if (!designatedKey ||
+        height > designatedKey._notAfterHeight ||
+        height < designatedKey._notBeforeHeight ||
+        !designatedKey.purpose.includes('sig')) {
         // These errors (ChelErrorSignatureKeyUnauthorized) are serious and
         // indicate a bug. Make them fatal when running integration tests
         // (otherwise, they get swallowed and shown as a notification)
         if (process.env.CI) {
-            console.error(`Key ${sKeyId} is unauthorized or expired for the current contract`, { designatedKey, height, state: JSON.parse(JSON.stringify(sbp('state/vuex/state'))) });
+            console.error(`Key ${sKeyId} is unauthorized or expired for the current contract`, {
+                designatedKey,
+                height,
+                state: JSON.parse(JSON.stringify(sbp('state/vuex/state')))
+            });
             // An unhandled promise rejection will cause Cypress to fail
             Promise.reject(new ChelErrorSignatureKeyUnauthorized(`Key ${sKeyId} is unauthorized or expired for the current contract`));
         }
@@ -103,8 +108,9 @@ const verifySignatureData = function (state, height, data, additionalData) {
     }
 };
 export const signedOutgoingData = (stateOrContractID, sKeyId, data, additionalKeys) => {
-    if (!stateOrContractID || data === undefined || !sKeyId)
+    if (!stateOrContractID || data === undefined || !sKeyId) {
         throw new TypeError('Invalid invocation');
+    }
     if (!additionalKeys) {
         additionalKeys = rootStateFn().secretKeys;
     }
@@ -153,7 +159,9 @@ export const signedOutgoingDataWithRawKey = (key, data) => {
         }
     };
     const extraFields = Object.create(null);
-    const boundStringValueFn = signData.bind(null, state, sKeyId, data, extraFields, { [sKeyId]: key });
+    const boundStringValueFn = signData.bind(null, state, sKeyId, data, extraFields, {
+        [sKeyId]: key
+    });
     const serializefn = (additionalData) => boundStringValueFn(additionalData || '');
     return wrapper({
         get signingKeyId() {
@@ -215,7 +223,7 @@ export const signedIncomingData = (contractID, state, data, height, additionalDa
             return this.serialize;
         },
         get get() {
-            return (k) => k !== '_signedData' ? data[k] : undefined;
+            return (k) => (k !== '_signedData' ? data[k] : undefined);
         }
     });
 };
@@ -226,7 +234,14 @@ export const signedDataKeyId = (data) => {
     return data._signedData[1];
 };
 export const isRawSignedData = (data) => {
-    if (!data || typeof data !== 'object' || !has(data, '_signedData') || !Array.isArray(data._signedData) || data._signedData.length !== 3 || data._signedData.map(v => typeof v).filter(v => v !== 'string').length !== 0) {
+    if (!data ||
+        typeof data !== 'object' ||
+        !has(data, '_signedData') ||
+        !Array.isArray(data._signedData) ||
+        data._signedData.length !== 3 ||
+        data._signedData
+            .map((v) => typeof v)
+            .filter((v) => v !== 'string').length !== 0) {
         return false;
     }
     return true;
@@ -264,7 +279,7 @@ export const rawSignedIncomingData = (data) => {
             return this.serialize;
         },
         get get() {
-            return (k) => k !== '_signedData' ? data[k] : undefined;
+            return (k) => (k !== '_signedData' ? data[k] : undefined);
         }
     });
 };

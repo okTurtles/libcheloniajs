@@ -270,9 +270,19 @@ export type ChelContractState = {
             keyRequestHash?: string;
             keyRequestHeight?: number;
         }[];
-        pendingKeyshares?: Record<string, [isPrivate: boolean, height: number, signingKeyId: string] | [isPrivate: boolean, height: number, signingKeyId: string, [string, {
-            _signedData: [string, string, string];
-        }, number, string]]>;
+        pendingKeyshares?: Record<string, [isPrivate: boolean, height: number, signingKeyId: string] | [
+            isPrivate: boolean,
+            height: number,
+            signingKeyId: string,
+            [
+                string,
+                {
+                    _signedData: [string, string, string];
+                },
+                number,
+                string
+            ]
+        ]>;
         props?: Record<string, JSONType>;
     };
     _volatile?: {
