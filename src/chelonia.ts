@@ -728,7 +728,9 @@ export default sbp('sbp/selectors/register', {
     const state = rootState[contractID]
 
     if (!state._volatile) this.config.reactiveSet(state, '_volatile', Object.create(null))
-    if (!state._volatile.pendingKeyRevocations) { this.config.reactiveSet(state._volatile, 'pendingKeyRevocations', Object.create(null)) }
+    if (!state._volatile.pendingKeyRevocations) {
+      this.config.reactiveSet(state._volatile, 'pendingKeyRevocations', Object.create(null))
+    }
 
     for (const name of names) {
       const keyId = findKeyIdByName(state, name)

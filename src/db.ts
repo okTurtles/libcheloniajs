@@ -153,10 +153,9 @@ export default sbp('sbp/selectors/register', {
   'chelonia/db/addEntry': function (entry: SPMessage): Promise<string> {
     // because addEntry contains multiple awaits - we want to make sure it gets executed
     // "atomically" to minimize the chance of a contract fork
-    return sbp('okTurtles.eventQueue/queueEvent', `chelonia/db/${entry.contractID()}`, [
-      'chelonia/private/db/addEntry',
-      entry
-    ])
+    return sbp('okTurtles.eventQueue/queueEvent', `chelonia/db/${entry.contractID()}`,
+      ['chelonia/private/db/addEntry', entry]
+    )
   },
   // NEVER call this directly yourself! _always_ call 'chelonia/db/addEntry' instead
   'chelonia/private/db/addEntry': async function (entry: SPMessage): Promise<string> {
