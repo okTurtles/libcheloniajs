@@ -11,7 +11,7 @@ import {
   randomHexString,
   randomIntFromRange
 } from 'turtledash'
-import { createCID, parseCID } from './functions.js'
+import { createCID, multicodes, parseCID } from './functions.js'
 import { Buffer } from 'buffer'
 import { NOTIFICATION_TYPE, createClient } from './pubsub/index.js'
 import type {
@@ -1461,6 +1461,20 @@ export default sbp('sbp/selectors/register', {
       })
       .then(handleFetchResult('json'))
   },
+  'chelonia/out/deserializedHEAD': async function (
+    this: CheloniaContext, hash: string, { contractID }: { contractID?: string } = {}
+  ) {
+    // contractID is optional because this selector could be used for looking up
+    // a contractID given a hash.
+    const message = await sbp('chelonia/out/fetchResource', hash, {
+      code: multicodes.SHELTER_CONTRACT_DATA
+    })
+    const deserializedHEAD = SPMessage.deserializeHEAD(message)
+    if (contractID && deserializedHEAD.contractID !== contractID) {
+      throw new Error('chelonia/out/deserializedHEAD: Mismatched contract ID')
+    }
+    return deserializedHEAD
+  },
   'chelonia/out/eventsAfter': eventsAfter,
   'chelonia/out/eventsBefore': function (
     this: CheloniaContext,
@@ -1483,7 +1497,7 @@ export default sbp('sbp/selectors/register', {
     contractID: string,
     {
       startHash,
-      endHeight,
+      endHeight = Number.POSITIVE_INFINITY,
       offset = 0,
       limit = 0,
       stream = true
@@ -1498,16 +1512,7 @@ export default sbp('sbp/selectors/register', {
     let reader: ReadableStreamDefaultReader<string>
     const s = new ReadableStream({
       start: async (controller) => {
-        const first = (await this.config
-          .fetch(`${this.config.connectionURL}/file/${startHash}`, {
-            signal: this.abortController.signal
-          })
-          .then(handleFetchResult('text'))) as unknown as string
-        const deserializedHEAD = SPMessage.deserializeHEAD(first)
-        if (deserializedHEAD.contractID !== contractID) {
-          controller.error(new Error('chelonia/out/eventsBetween: Mismatched contract ID'))
-          return
-        }
+        const deserializedHEAD = await sbp('chelonia/out/deserializedHEAD', startHash, { contractID })
         const startOffset = Math.max(0, deserializedHEAD.head.height - offset)
         const ourLimit = limit
           ? Math.min(endHeight - startOffset + 1, limit)
