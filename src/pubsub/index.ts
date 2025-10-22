@@ -285,7 +285,7 @@ export function createMessage (
   type: string,
   data: JSONType,
   meta?: object | null | undefined
-): { type: string; data: JSONType; [x: string]: unknown } {
+): { type: string; data: JSONType; [x: string]: JSONType } {
   const message = { ...meta, type, data }
   let string: string
   const stringify = function (this: typeof message) {

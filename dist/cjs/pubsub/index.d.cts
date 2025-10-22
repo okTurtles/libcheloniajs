@@ -183,7 +183,7 @@ export declare function createClient(url: string, options?: Partial<Options>): P
 export declare function createMessage(type: string, data: JSONType, meta?: object | null | undefined): {
     type: string;
     data: JSONType;
-    [x: string]: unknown;
+    [x: string]: JSONType;
 };
 export declare function createKvMessage(channelID: string, key: string, data: JSONType): string;
 export declare function createPubMessage(channelID: string, data: JSONType): string;
