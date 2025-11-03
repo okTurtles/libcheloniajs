@@ -57,7 +57,7 @@ export const prefixHandlers: Record<string, (value: unknown) => unknown> = {
 
 // NOTE: To enable persistence of log use 'sbp/selectors/overwrite'
 //       to overwrite the following selectors:
-sbp('sbp/selectors/unsafe', ['chelonia.db/get', 'chelonia.db/set', 'chelonia.db/delete'])
+sbp('sbp/selectors/unsafe', ['chelonia.db/get', 'chelonia.db/set', 'chelonia.db/delete', 'chelonia.db/iterKeys', 'chelonia.db/keyCount'])
 // NOTE: MAKE SURE TO CALL 'sbp/selectors/lock' after overwriting them!
 
 // When using a lightweight client, the client doesn't keep a copy of messages
@@ -87,6 +87,12 @@ const dbPrimitiveSelectors =
         },
         'chelonia.db/delete': function (): Promise<true> {
           return Promise.resolve(true)
+        },
+        'chelonia.db/iterKeys': async function * (): AsyncIterator<string> {
+          // empty
+        },
+        'chelonia.db/keyCount': function (): Promise<number> {
+          return Promise.resolve(0)
         }
       }
     : {
@@ -112,6 +118,12 @@ const dbPrimitiveSelectors =
         // eslint-disable-next-line require-await
         'chelonia.db/delete': async function (key: string): Promise<boolean> {
           return sbp('okTurtles.data/delete', key)
+        },
+        'chelonia.db/iterKeys': async function * (): AsyncIterator<string> {
+          yield * sbp('okTurtles.data/iterKeys') as IterableIterator<string>
+        },
+        'chelonia.db/keyCount': function (): Promise<number> {
+          return Promise.resolve(sbp('okTurtles.data/keyCount'))
         }
       }
 

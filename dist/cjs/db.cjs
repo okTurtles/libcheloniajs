@@ -57,7 +57,7 @@ exports.prefixHandlers = {
 };
 // NOTE: To enable persistence of log use 'sbp/selectors/overwrite'
 //       to overwrite the following selectors:
-(0, sbp_1.default)('sbp/selectors/unsafe', ['chelonia.db/get', 'chelonia.db/set', 'chelonia.db/delete']);
+(0, sbp_1.default)('sbp/selectors/unsafe', ['chelonia.db/get', 'chelonia.db/set', 'chelonia.db/delete', 'chelonia.db/iterKeys', 'chelonia.db/keyCount']);
 // NOTE: MAKE SURE TO CALL 'sbp/selectors/lock' after overwriting them!
 // When using a lightweight client, the client doesn't keep a copy of messages
 // in the DB. Therefore, `chelonia.db/*` selectors are mostly turned into no-ops.
@@ -86,6 +86,12 @@ const dbPrimitiveSelectors = process.env.LIGHTWEIGHT_CLIENT === 'true'
         },
         'chelonia.db/delete': function () {
             return Promise.resolve(true);
+        },
+        'chelonia.db/iterKeys': async function* () {
+            // empty
+        },
+        'chelonia.db/keyCount': function () {
+            return Promise.resolve(0);
         }
     }
     : {
@@ -106,6 +112,12 @@ const dbPrimitiveSelectors = process.env.LIGHTWEIGHT_CLIENT === 'true'
         // eslint-disable-next-line require-await
         'chelonia.db/delete': async function (key) {
             return (0, sbp_1.default)('okTurtles.data/delete', key);
+        },
+        'chelonia.db/iterKeys': async function* () {
+            yield* (0, sbp_1.default)('okTurtles.data/iterKeys');
+        },
+        'chelonia.db/keyCount': function () {
+            return Promise.resolve((0, sbp_1.default)('okTurtles.data/keyCount'));
         }
     };
 exports.default = (0, sbp_1.default)('sbp/selectors/register', {
