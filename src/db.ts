@@ -88,7 +88,6 @@ const dbPrimitiveSelectors =
         'chelonia.db/delete': function (): Promise<true> {
           return Promise.resolve(true)
         },
-        // eslint-disable-next-line require-await
         'chelonia.db/iterKeys': async function * (): AsyncIterator<string> {
           // empty
         },
@@ -120,9 +119,8 @@ const dbPrimitiveSelectors =
         'chelonia.db/delete': async function (key: string): Promise<boolean> {
           return sbp('okTurtles.data/delete', key)
         },
-        // eslint-disable-next-line require-await
-        'chelonia.db/iterKeys': async function * () {
-          yield * sbp('okTurtles.data/iterKeys')
+        'chelonia.db/iterKeys': async function * (): AsyncIterator<string> {
+          yield * sbp('okTurtles.data/iterKeys') as IterableIterator<string>
         },
         'chelonia.db/keyCount': function (): Promise<number> {
           return Promise.resolve(sbp('okTurtles.data/keyCount'))

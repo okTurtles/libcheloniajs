@@ -87,7 +87,6 @@ const dbPrimitiveSelectors = process.env.LIGHTWEIGHT_CLIENT === 'true'
         'chelonia.db/delete': function () {
             return Promise.resolve(true);
         },
-        // eslint-disable-next-line require-await
         'chelonia.db/iterKeys': async function* () {
             // empty
         },
@@ -114,7 +113,6 @@ const dbPrimitiveSelectors = process.env.LIGHTWEIGHT_CLIENT === 'true'
         'chelonia.db/delete': async function (key) {
             return (0, sbp_1.default)('okTurtles.data/delete', key);
         },
-        // eslint-disable-next-line require-await
         'chelonia.db/iterKeys': async function* () {
             yield* (0, sbp_1.default)('okTurtles.data/iterKeys');
         },
