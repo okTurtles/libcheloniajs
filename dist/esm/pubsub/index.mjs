@@ -219,6 +219,9 @@ const defaultClientEventHandlers = {
         // If we should reconnect then consider our current subscriptions as pending again,
         // waiting to be restored upon reconnection.
         if (client.shouldReconnect) {
+            // `runWithRetry` will (later) use reference equality to determine freshness.
+            // An empty object serves this purpose, and, by setting it to a different
+            // value, any pending checks will see that the connection is stale.
             const instance = {};
             for (const [channelID] of client.pendingSubscriptionMap) {
                 client.pendingSubscriptionMap.set(channelID, instance);
@@ -420,7 +423,6 @@ const defaultMessageHandlers = {
                 console.debug(`[pubsub] Unsubscribed from ${channelID}`);
                 client.pendingUnsubscriptionMap.delete(channelID);
                 client.subscriptionSet.delete(channelID);
-                client.kvFilter.delete(channelID);
                 break;
             }
             case REQUEST_TYPE.KV_FILTER: {
@@ -598,6 +600,8 @@ const publicMethods = {
     sub(channelID) {
         const client = this;
         if (!client.pendingSubscriptionMap.has(channelID) && !client.subscriptionSet.has(channelID)) {
+            // `runWithRetry` will use reference equality to determine freshness.
+            // An empty object serves this purpose.
             const instance = {};
             client.pendingSubscriptionMap.set(channelID, instance);
             client.pendingUnsubscriptionMap.delete(channelID);
@@ -633,7 +637,11 @@ const publicMethods = {
      */
     unsub(channelID) {
         const client = this;
-        if (!client.pendingUnsubscriptionMap.has(channelID)) {
+        if (!client.pendingUnsubscriptionMap.has(channelID) &&
+            (client.subscriptionSet.has(channelID) ||
+                client.pendingSubscriptionMap.has(channelID))) {
+            // `runWithRetry` will use reference equality to determine freshness.
+            // An empty object serves this purpose.
             const instance = {};
             client.pendingSubscriptionMap.delete(channelID);
             client.pendingUnsubscriptionMap.set(channelID, instance);
