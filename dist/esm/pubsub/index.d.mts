@@ -44,6 +44,8 @@ export type Options = {
     reconnectOnTimeout: boolean;
     reconnectionDelayGrowFactor: number;
     timeout: number;
+    maxOpRetries: number;
+    opRetryInterval: number;
     manual?: boolean;
     handlers?: Partial<ClientEventHandlers>;
     messageHandlers?: Partial<MessageHandlers>;
@@ -63,8 +65,8 @@ export type PubSubClient = {
     messageHandlers: MessageHandlers;
     nextConnectionAttemptDelayID: TimeoutID | undefined;
     options: Options;
-    pendingSubscriptionSet: Set<string>;
-    pendingUnsubscriptionSet: Set<string>;
+    pendingSubscriptionMap: Map<string, object>;
+    pendingUnsubscriptionMap: Map<string, object>;
     pingTimeoutID: TimeoutID | undefined;
     shouldReconnect: boolean;
     socket: WebSocket | null;

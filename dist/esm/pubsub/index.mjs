@@ -44,7 +44,9 @@ const defaultOptions = {
     // respond because of a failed authentication.
     reconnectOnTimeout: false,
     reconnectionDelayGrowFactor: 2,
-    timeout: 60000
+    timeout: 60000,
+    maxOpRetries: 4,
+    opRetryInterval: 2000
 };
 // ====== Event name constants ====== //
 export const PUBSUB_ERROR = 'pubsub-error';
@@ -53,6 +55,37 @@ export const PUBSUB_RECONNECTION_FAILED = 'pubsub-reconnection-failed';
 export const PUBSUB_RECONNECTION_SCHEDULED = 'pubsub-reconnection-scheduled';
 export const PUBSUB_RECONNECTION_SUCCEEDED = 'pubsub-reconnection-succeeded';
 export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded';
+// ====== Helpers ====== //
+function runWithRetry(client, channelID, type, instance) {
+    let attemptNo = 0;
+    const { socket, options } = client;
+    const send = () => {
+        // 1. Closure check: ensure socket instance hasn't been replaced
+        if (client.socket !== socket || socket?.readyState !== WebSocket.OPEN)
+            return;
+        // 2. Cancellation check
+        const currentInstance = type === REQUEST_TYPE.SUB
+            ? client.pendingSubscriptionMap.get(channelID)
+            : client.pendingUnsubscriptionMap.get(channelID);
+        if (currentInstance !== instance)
+            return;
+        // 3. Send logic
+        const kvFilter = client.kvFilter.get(channelID);
+        const payload = (type === REQUEST_TYPE.SUB && kvFilter)
+            ? { channelID, kvFilter }
+            : { channelID };
+        socket.send(createRequest(type, payload));
+        // 4. Schedule retry
+        setTimeout(() => {
+            if (++attemptNo > options.maxOpRetries) {
+                console.warn(`Giving up ${type} for channel`, channelID);
+                return;
+            }
+            send();
+        }, options.opRetryInterval * attemptNo);
+    };
+    send();
+}
 // ====== API ====== //
 /**
  * Creates a pubsub client instance.
@@ -86,8 +119,8 @@ export function createClient(url, options = {}) {
         nextConnectionAttemptDelayID: undefined,
         options: { ...defaultOptions, ...options },
         // Requested subscriptions for which we didn't receive a response yet.
-        pendingSubscriptionSet: new Set(),
-        pendingUnsubscriptionSet: new Set(),
+        pendingSubscriptionMap: new Map(),
+        pendingUnsubscriptionMap: new Map(),
         pingTimeoutID: undefined,
         shouldReconnect: true,
         // The underlying WebSocket object.
@@ -186,16 +219,20 @@ const defaultClientEventHandlers = {
         // If we should reconnect then consider our current subscriptions as pending again,
         // waiting to be restored upon reconnection.
         if (client.shouldReconnect) {
+            const instance = {};
             client.subscriptionSet.forEach((channelID) => {
                 // Skip contracts from which we had to unsubscribe anyway.
-                if (!client.pendingUnsubscriptionSet.has(channelID)) {
-                    client.pendingSubscriptionSet.add(channelID);
+                if (!client.pendingUnsubscriptionMap.has(channelID)) {
+                    client.pendingSubscriptionMap.set(channelID, instance);
                 }
             });
+            for (const [channelID] of client.pendingSubscriptionMap) {
+                client.pendingSubscriptionMap.set(channelID, instance);
+            }
         }
         // We are no longer subscribed to any contracts since we are now disconnected.
         client.subscriptionSet.clear();
-        client.pendingUnsubscriptionSet.clear();
+        client.pendingUnsubscriptionMap.clear();
         if (client.shouldReconnect && client.options.reconnectOnDisconnection) {
             if (client.failedConnectionAttempts > client.options.maxRetries) {
                 sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_FAILED, client);
@@ -286,10 +323,9 @@ const defaultClientEventHandlers = {
             }, options.pingTimeout);
         }
         // Send any pending subscription request.
-        client.pendingSubscriptionSet.forEach((channelID) => {
-            const kvFilter = this.kvFilter.get(channelID);
-            client.socket?.send(createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }));
-        });
+        for (const [channelID, instance] of client.pendingSubscriptionMap) {
+            runWithRetry(client, channelID, REQUEST_TYPE.SUB, instance);
+        }
         // There should be no pending unsubscription since we just got connected.
     },
     'reconnection-attempt'() {
@@ -353,12 +389,12 @@ const defaultMessageHandlers = {
         switch (type) {
             case REQUEST_TYPE.SUB: {
                 console.warn(`[pubsub] Could not subscribe to ${channelID}: ${reason}`);
-                client.pendingSubscriptionSet.delete(channelID);
+                client.pendingSubscriptionMap.delete(channelID);
                 break;
             }
             case REQUEST_TYPE.UNSUB: {
                 console.warn(`[pubsub] Could not unsubscribe from ${channelID}: ${reason}`);
-                client.pendingUnsubscriptionSet.delete(channelID);
+                client.pendingUnsubscriptionMap.delete(channelID);
                 break;
             }
             case REQUEST_TYPE.PUSH_ACTION: {
@@ -375,14 +411,14 @@ const defaultMessageHandlers = {
         const client = this;
         switch (type) {
             case REQUEST_TYPE.SUB: {
-                client.pendingSubscriptionSet.delete(channelID);
+                client.pendingSubscriptionMap.delete(channelID);
                 client.subscriptionSet.add(channelID);
                 sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, client, { channelID });
                 break;
             }
             case REQUEST_TYPE.UNSUB: {
                 console.debug(`[pubsub] Unsubscribed from ${channelID}`);
-                client.pendingUnsubscriptionSet.delete(channelID);
+                client.pendingUnsubscriptionMap.delete(channelID);
                 client.subscriptionSet.delete(channelID);
                 client.kvFilter.delete(channelID);
                 break;
@@ -492,8 +528,8 @@ const publicMethods = {
         client.clearAllTimers();
         // Update property values.
         // Note: do not clear 'client.options'.
-        client.pendingSubscriptionSet.clear();
-        client.pendingUnsubscriptionSet.clear();
+        client.pendingSubscriptionMap.clear();
+        client.pendingUnsubscriptionMap.clear();
         client.subscriptionSet.clear();
         // Remove global event listeners.
         if (typeof self === 'object' && self instanceof EventTarget) {
@@ -561,14 +597,11 @@ const publicMethods = {
      */
     sub(channelID) {
         const client = this;
-        const { socket } = this;
-        if (!client.pendingSubscriptionSet.has(channelID)) {
-            client.pendingSubscriptionSet.add(channelID);
-            client.pendingUnsubscriptionSet.delete(channelID);
-            if (socket?.readyState === WebSocket.OPEN) {
-                const kvFilter = client.kvFilter.get(channelID);
-                socket.send(createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID }));
-            }
+        if (!client.pendingSubscriptionMap.has(channelID) && !client.subscriptionSet.has(channelID)) {
+            const instance = {};
+            client.pendingSubscriptionMap.set(channelID, instance);
+            client.pendingUnsubscriptionMap.delete(channelID);
+            runWithRetry(client, channelID, REQUEST_TYPE.SUB, instance);
         }
     },
     /**
@@ -600,13 +633,12 @@ const publicMethods = {
      */
     unsub(channelID) {
         const client = this;
-        const { socket } = this;
-        if (!client.pendingUnsubscriptionSet.has(channelID)) {
-            client.pendingSubscriptionSet.delete(channelID);
-            client.pendingUnsubscriptionSet.add(channelID);
-            if (socket?.readyState === WebSocket.OPEN) {
-                socket.send(createRequest(REQUEST_TYPE.UNSUB, { channelID }));
-            }
+        if (!client.pendingUnsubscriptionMap.has(channelID)) {
+            const instance = {};
+            client.pendingSubscriptionMap.delete(channelID);
+            client.pendingUnsubscriptionMap.set(channelID, instance);
+            client.kvFilter.delete(channelID);
+            runWithRetry(client, channelID, REQUEST_TYPE.UNSUB, instance);
         }
     }
 };
