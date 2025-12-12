@@ -153,7 +153,9 @@ type MessageHandlers = {
       };
     },
   ): void;
-  [RESPONSE_TYPE.OK](this: PubSubClient, msg: { data: { type: string; channelID: string } }): void;
+  [RESPONSE_TYPE.OK](this: PubSubClient, msg: { data:
+    { type: string; channelID: string; kvFilter?: string[] }
+  }): void;
 };
 
 export type PubMessage = {
@@ -217,7 +219,7 @@ function runWithRetry (
     if (client.socket !== socket || socket?.readyState !== WebSocket.OPEN) return
 
     // 2. Cancellation check
-    const currentInstance = type === REQUEST_TYPE.SUB
+    const currentInstance = ([REQUEST_TYPE.SUB, REQUEST_TYPE.KV_FILTER] as string[]).includes(type)
       ? client.pendingSubscriptionMap.get(channelID)
       : client.pendingUnsubscriptionMap.get(channelID)
 
@@ -225,7 +227,9 @@ function runWithRetry (
 
     // 3. Send logic
     const kvFilter = client.kvFilter.get(channelID)
-    const payload: JSONType = (type === REQUEST_TYPE.SUB && kvFilter)
+    const payload: JSONType = (
+      kvFilter && ([REQUEST_TYPE.SUB, REQUEST_TYPE.KV_FILTER] as string[]).includes(type)
+    )
       ? { channelID, kvFilter }
       : { channelID }
 
@@ -615,7 +619,7 @@ const defaultMessageHandlers: MessageHandlers = {
     }
   },
 
-  [RESPONSE_TYPE.OK] ({ data: { type, channelID } }) {
+  [RESPONSE_TYPE.OK] ({ data: { type, channelID, kvFilter } }) {
     const client = this
 
     switch (type) {
@@ -623,6 +627,27 @@ const defaultMessageHandlers: MessageHandlers = {
         client.pendingSubscriptionMap.delete(channelID)
         client.subscriptionSet.add(channelID)
         sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, client, { channelID })
+        const ourKvFilter = client.kvFilter.get(channelID)
+        // If we don't have a KV filter and the server does, or vice versa,
+        // send a message to set the KV filter
+        if (!ourKvFilter !== !kvFilter) {
+          this.setKvFilter(channelID, ourKvFilter)
+        } else if (ourKvFilter && kvFilter) {
+          // If both have a KV filter, set the KV filter if they differ
+          if (ourKvFilter.length !== kvFilter.length) {
+            // Fast path: different length must mean the filter is different
+            this.setKvFilter(channelID, ourKvFilter)
+          } else {
+            const sortedA = [...ourKvFilter].sort()
+            const sortedB = [...kvFilter].sort()
+            for (let i = 0; i < sortedA.length; i++) {
+              if (sortedA[i] !== sortedB[i]) {
+                this.setKvFilter(channelID, ourKvFilter)
+                break
+              }
+            }
+          }
+        }
         break
       }
       case REQUEST_TYPE.UNSUB: {
@@ -632,6 +657,8 @@ const defaultMessageHandlers: MessageHandlers = {
         break
       }
       case REQUEST_TYPE.KV_FILTER: {
+        client.pendingSubscriptionMap.delete(channelID)
+        client.subscriptionSet.add(channelID)
         console.debug(`[pubsub] Set KV filter for ${channelID}`)
         break
       }
@@ -864,7 +891,6 @@ const publicMethods: {
    */
   setKvFilter (channelID: string, kvFilter?: string[]) {
     const client = this
-    const { socket } = this
 
     if (kvFilter) {
       client.kvFilter.set(channelID, kvFilter)
@@ -872,12 +898,11 @@ const publicMethods: {
       client.kvFilter.delete(channelID)
     }
 
-    if (client.subscriptionSet.has(channelID)) {
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(
-          createRequest(REQUEST_TYPE.KV_FILTER, kvFilter ? { channelID, kvFilter } : { channelID })
-        )
-      }
+    if (client.subscriptionSet.has(channelID) && !client.pendingUnsubscriptionMap.has(channelID)) {
+      const instance = {}
+      // Re-use `client.pendingSubscriptionMap` for KV_FILTER
+      client.pendingSubscriptionMap.set(channelID, instance)
+      runWithRetry(client, channelID, REQUEST_TYPE.KV_FILTER, instance)
     }
   },
 
