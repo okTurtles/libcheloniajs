@@ -236,7 +236,7 @@ function runWithRetry (
         return
       }
       send()
-    }, options.opRetryInterval * attemptNo)
+    }, options.opRetryInterval * (attemptNo + 1))
   }
 
   send()
@@ -395,15 +395,15 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     // waiting to be restored upon reconnection.
     if (client.shouldReconnect) {
       const instance = {}
+      for (const [channelID] of client.pendingSubscriptionMap) {
+        client.pendingSubscriptionMap.set(channelID, instance)
+      }
       client.subscriptionSet.forEach((channelID) => {
         // Skip contracts from which we had to unsubscribe anyway.
         if (!client.pendingUnsubscriptionMap.has(channelID)) {
           client.pendingSubscriptionMap.set(channelID, instance)
         }
       })
-      for (const [channelID] of client.pendingSubscriptionMap) {
-        client.pendingSubscriptionMap.set(channelID, instance)
-      }
     }
     // We are no longer subscribed to any contracts since we are now disconnected.
     client.subscriptionSet.clear()
