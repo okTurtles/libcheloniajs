@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-this-alias */
 import '@sbp/okturtles.events';
 import sbp from '@sbp/sbp';
+import { randomIntFromRange } from 'turtledash';
 // ====== Enums ====== //
 export const NOTIFICATION_TYPE = Object.freeze({
     ENTRY: 'entry',
@@ -72,7 +73,18 @@ class TieredMap extends Map {
         return submap.set(k2, v);
     }
     tDelete(k1, k2) {
-        return !!this.get(k1)?.delete(k2);
+        const submap = this.get(k1);
+        if (submap) {
+            const result = submap.delete(k2);
+            if (submap.size === 0) {
+                this.delete(k1);
+            }
+            return result;
+        }
+        return false;
+    }
+    tClear(k1) {
+        this.delete(k1);
     }
 }
 const isKvFilterFresh = (ourKvFilter, theirKvFilter) => {
@@ -128,9 +140,13 @@ function runWithRetry(client, channelID, type, getPayload) {
         const payload = getPayload();
         socket.send(createRequest(type, payload));
         // 4. Schedule retry
+        // Randomness / jitter to prevent bursts
+        const minDelay = (attemptNo - 1) * options.opRetryInterval;
+        const maxDelay = attemptNo * options.opRetryInterval;
+        const delay = randomIntFromRange(minDelay, maxDelay);
         setTimeout(() => {
             send();
-        }, options.opRetryInterval * attemptNo);
+        }, delay);
     };
     send();
 }
@@ -286,8 +302,8 @@ const defaultClientEventHandlers = {
         }
         // We are no longer subscribed to any contracts since we are now disconnected.
         client.subscriptionSet.clear();
-        client.pendingOperations.get(REQUEST_TYPE.UNSUB)?.clear();
-        client.pendingOperations.get(REQUEST_TYPE.KV_FILTER)?.clear();
+        client.pendingOperations.tClear(REQUEST_TYPE.UNSUB);
+        client.pendingOperations.tClear(REQUEST_TYPE.KV_FILTER);
         if (client.shouldReconnect && client.options.reconnectOnDisconnection) {
             if (client.failedConnectionAttempts > client.options.maxRetries) {
                 sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_FAILED, client);
@@ -471,28 +487,46 @@ const defaultMessageHandlers = {
         const client = this;
         switch (type) {
             case REQUEST_TYPE.SUB: {
-                client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID);
-                client.subscriptionSet.add(channelID);
-                sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, client, { channelID });
-                const ourKvFilter = client.kvFilter.get(channelID);
-                if (!isKvFilterFresh(ourKvFilter, kvFilter)) {
-                    this.setKvFilter(channelID, ourKvFilter);
+                if (client.pendingOperations.tHas(REQUEST_TYPE.SUB, channelID)) {
+                    client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID);
+                    client.subscriptionSet.add(channelID);
+                    sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, client, { channelID });
+                    const ourKvFilter = client.kvFilter.get(channelID);
+                    if (!isKvFilterFresh(ourKvFilter, kvFilter)) {
+                        console.debug(`[pubsub] Subscribed to ${channelID}, need to set new KV filter`);
+                        this.setKvFilter(channelID, ourKvFilter);
+                    }
+                }
+                else {
+                    console.debug(`[pubsub] Received unexpected sub for ${channelID}`);
                 }
                 break;
             }
             case REQUEST_TYPE.UNSUB: {
-                console.debug(`[pubsub] Unsubscribed from ${channelID}`);
-                client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID);
-                client.subscriptionSet.delete(channelID);
+                if (client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, channelID)) {
+                    console.debug(`[pubsub] Unsubscribed from ${channelID}`);
+                    client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID);
+                    client.subscriptionSet.delete(channelID);
+                }
+                else {
+                    console.debug(`[pubsub] Received unexpected unsub for ${channelID}`);
+                }
                 break;
             }
             case REQUEST_TYPE.KV_FILTER: {
-                client.subscriptionSet.add(channelID);
-                const ourKvFilter = client.kvFilter.get(channelID);
-                if (isKvFilterFresh(ourKvFilter, kvFilter)) {
-                    client.pendingOperations.tDelete(REQUEST_TYPE.KV_FILTER, channelID);
+                if (client.pendingOperations.tHas(REQUEST_TYPE.KV_FILTER, channelID)) {
+                    const ourKvFilter = client.kvFilter.get(channelID);
+                    if (isKvFilterFresh(ourKvFilter, kvFilter)) {
+                        console.debug(`[pubsub] Set KV filter for ${channelID}`, kvFilter);
+                        client.pendingOperations.tDelete(REQUEST_TYPE.KV_FILTER, channelID);
+                    }
+                    else {
+                        console.debug(`[pubsub] Received stale KV filter ack for ${channelID}`, kvFilter, ourKvFilter);
+                    }
                 }
-                console.debug(`[pubsub] Set KV filter for ${channelID}`);
+                else {
+                    console.debug(`[pubsub] Received unexpected kv-filter for ${channelID}`);
+                }
                 break;
             }
             default: {

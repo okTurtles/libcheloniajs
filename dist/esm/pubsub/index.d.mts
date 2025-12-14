@@ -169,6 +169,7 @@ declare class TieredMap<K, L, V> extends Map<K, Map<L, V>> {
     tHas(k1: K, k2: L): boolean;
     tSet(k1: K, k2: L, v: V): Map<L, V>;
     tDelete(k1: K, k2: L): boolean;
+    tClear(k1: K): void;
 }
 /**
  * Creates a pubsub client instance.
