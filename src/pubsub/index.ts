@@ -251,6 +251,7 @@ const isKvFilterFresh = (
     return false
   } else if (ourKvFilter && theirKvFilter) {
     // If both have a KV filter, set the KV filter if they differ
+    //   (XOR: return false if exactly one of them is truthy)
     if (ourKvFilter.length !== theirKvFilter.length) {
       // Fast path: different length must mean the filter is different
       return false
@@ -312,9 +313,7 @@ function runWithRetry (
     const minDelay = (attemptNo - 1) * options.opRetryInterval
     const jitter = randomIntFromRange(0, options.opRetryInterval)
     const delay = Math.min(200, minDelay) + jitter
-    setTimeout(() => {
-      send()
-    }, delay)
+    setTimeout(send, delay)
   }
 
   send()

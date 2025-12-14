@@ -106,6 +106,7 @@ const isKvFilterFresh = (ourKvFilter, theirKvFilter) => {
     }
     else if (ourKvFilter && theirKvFilter) {
         // If both have a KV filter, set the KV filter if they differ
+        //   (XOR: return false if exactly one of them is truthy)
         if (ourKvFilter.length !== theirKvFilter.length) {
             // Fast path: different length must mean the filter is different
             return false;
@@ -155,9 +156,7 @@ function runWithRetry(client, channelID, type, getPayload) {
         const minDelay = (attemptNo - 1) * options.opRetryInterval;
         const jitter = (0, turtledash_1.randomIntFromRange)(0, options.opRetryInterval);
         const delay = Math.min(200, minDelay) + jitter;
-        setTimeout(() => {
-            send();
-        }, delay);
+        setTimeout(send, delay);
     };
     send();
 }
