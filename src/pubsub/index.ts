@@ -87,8 +87,8 @@ export type PubSubClient = {
   messageHandlers: MessageHandlers;
   nextConnectionAttemptDelayID: TimeoutID | undefined;
   options: Options;
-  pendingSubscriptionMap: Map<string, object>;
-  pendingUnsubscriptionMap: Map<string, object>;
+  // eslint-disable-next-line no-use-before-define
+  pendingOperations: TieredMap<RequestTypeEnum, string, object>;
   pingTimeoutID: TimeoutID | undefined;
   shouldReconnect: boolean;
   socket: WebSocket | null;
@@ -205,44 +205,99 @@ export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded'
 
 // ====== Helpers ====== //
 
+class TieredMap <K, L, V> extends Map<K, Map<L, V>> {
+  tGet (k1: K, k2: L): V | undefined {
+    return this.get(k1)?.get(k2)
+  }
+
+  tHas (k1: K, k2: L): boolean {
+    return !!this.get(k1)?.has(k2)
+  }
+
+  tSet (k1: K, k2: L, v: V): Map<L, V> {
+    let submap = this.get(k1)
+    if (!submap) {
+      submap = new Map<L, V>()
+      this.set(k1, submap)
+    }
+    return submap.set(k2, v)
+  }
+
+  tDelete (k1: K, k2: L): boolean {
+    return !!this.get(k1)?.delete(k2)
+  }
+}
+
+const isKvFilterFresh = (
+  ourKvFilter: Readonly<string[]> | null | undefined,
+  theirKvFilter: Readonly<string[]> | null | undefined
+): boolean => {
+  // If we don't have a KV filter and the server does, or vice versa,
+  // the filter isn't fresh
+  if (!ourKvFilter !== !theirKvFilter) {
+    return false
+  } else if (ourKvFilter && theirKvFilter) {
+    // If both have a KV filter, set the KV filter if they differ
+    if (ourKvFilter.length !== theirKvFilter.length) {
+      // Fast path: different length must mean the filter is different
+      return false
+    } else {
+      const sortedA = [...ourKvFilter].sort()
+      const sortedB = [...theirKvFilter].sort()
+      for (let i = 0; i < sortedA.length; i++) {
+        if (sortedA[i] !== sortedB[i]) {
+          return false
+        }
+      }
+    }
+  }
+
+  return true
+}
+
+const pubPayloadFactory = (client: PubSubClient, channelID: string) => () => {
+  const kvFilter = client.kvFilter.get(channelID)
+  return kvFilter ? { kvFilter, channelID } : { channelID } as JSONObject
+}
+
 function runWithRetry (
   client: PubSubClient,
   channelID: string,
   type: RequestTypeEnum,
-  instance: object
+  getPayload: () => JSONObject
 ) {
   let attemptNo = 0
   const { socket, options } = client
+  // `runWithRetry` will use reference equality to determine freshness.
+  // An empty object serves this purpose.
+  const instance = {}
+
+  client.pendingOperations.tSet(type, channelID, instance)
 
   const send = () => {
     // 1. Closure check: ensure socket instance hasn't been replaced
     if (client.socket !== socket || socket?.readyState !== WebSocket.OPEN) return
 
-    // 2. Cancellation check
-    const currentInstance = ([REQUEST_TYPE.SUB, REQUEST_TYPE.KV_FILTER] as string[]).includes(type)
-      ? client.pendingSubscriptionMap.get(channelID)
-      : client.pendingUnsubscriptionMap.get(channelID)
-
+    // 2a. Cancellation check
+    const currentInstance = client.pendingOperations.tGet(type, channelID)
     if (currentInstance !== instance) return
 
+    // 2b. Retries check
+    if (attemptNo++ > options.maxOpRetries) {
+      console.warn(`Giving up ${type} for channel`, channelID)
+      client.pendingOperations.tDelete(type, channelID)
+      return
+    }
+
     // 3. Send logic
-    const kvFilter = client.kvFilter.get(channelID)
-    const payload: JSONType = (
-      kvFilter && ([REQUEST_TYPE.SUB, REQUEST_TYPE.KV_FILTER] as string[]).includes(type)
-    )
-      ? { channelID, kvFilter }
-      : { channelID }
+    const payload = getPayload()
 
     socket.send(createRequest(type, payload))
 
     // 4. Schedule retry
     setTimeout(() => {
-      if (++attemptNo > options.maxOpRetries) {
-        console.warn(`Giving up ${type} for channel`, channelID)
-        return
-      }
       send()
-    }, options.opRetryInterval * (attemptNo + 1))
+    }, options.opRetryInterval * attemptNo)
   }
 
   send()
@@ -281,9 +336,7 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
     messageHandlers: { ...defaultMessageHandlers, ...options.messageHandlers },
     nextConnectionAttemptDelayID: undefined,
     options: { ...defaultOptions, ...options },
-    // Requested subscriptions for which we didn't receive a response yet.
-    pendingSubscriptionMap: new Map(),
-    pendingUnsubscriptionMap: new Map(),
+    pendingOperations: new TieredMap(),
     pingTimeoutID: undefined,
     shouldReconnect: true,
     // The underlying WebSocket object.
@@ -401,22 +454,28 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     // waiting to be restored upon reconnection.
     if (client.shouldReconnect) {
       // `runWithRetry` will (later) use reference equality to determine freshness.
-      // An empty object serves this purpose, and, by setting it to a different
-      // value, any pending checks will see that the connection is stale.
-      const instance = {}
-      for (const [channelID] of client.pendingSubscriptionMap) {
-        client.pendingSubscriptionMap.set(channelID, instance)
+      // In order to abort current send attempts, but still being able to restore
+      // existing subscriptions upon reconnection, we set pendingSubscriptionMap
+      // to a different instance value. Deleting values from
+      // `pendingSubscriptionMap` could also work, but then we'd need to save
+      // the list of existing keys somewhere else.
+      const pendingSubscriptionMap = client.pendingOperations.get(REQUEST_TYPE.SUB)
+      if (pendingSubscriptionMap) {
+        for (const [channelID] of pendingSubscriptionMap) {
+          pendingSubscriptionMap.set(channelID, {})
+        }
       }
       client.subscriptionSet.forEach((channelID) => {
         // Skip contracts from which we had to unsubscribe anyway.
-        if (!client.pendingUnsubscriptionMap.has(channelID)) {
-          client.pendingSubscriptionMap.set(channelID, instance)
+        if (!client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, channelID)) {
+          client.pendingOperations.tSet(REQUEST_TYPE.SUB, channelID, {})
         }
       })
     }
     // We are no longer subscribed to any contracts since we are now disconnected.
     client.subscriptionSet.clear()
-    client.pendingUnsubscriptionMap.clear()
+    client.pendingOperations.get(REQUEST_TYPE.UNSUB)?.clear()
+    client.pendingOperations.get(REQUEST_TYPE.KV_FILTER)?.clear()
 
     if (client.shouldReconnect && client.options.reconnectOnDisconnection) {
       if (client.failedConnectionAttempts > client.options.maxRetries) {
@@ -517,8 +576,8 @@ const defaultClientEventHandlers: ClientEventHandlers = {
       }, options.pingTimeout)
     }
     // Send any pending subscription request.
-    for (const [channelID, instance] of client.pendingSubscriptionMap) {
-      runWithRetry(client, channelID, REQUEST_TYPE.SUB, instance)
+    for (const [channelID] of client.pendingOperations.get(REQUEST_TYPE.SUB) || []) {
+      runWithRetry(client, channelID, REQUEST_TYPE.SUB, pubPayloadFactory(client, channelID))
     }
     // There should be no pending unsubscription since we just got connected.
   },
@@ -598,12 +657,12 @@ const defaultMessageHandlers: MessageHandlers = {
     switch (type) {
       case REQUEST_TYPE.SUB: {
         console.warn(`[pubsub] Could not subscribe to ${channelID}: ${reason}`)
-        client.pendingSubscriptionMap.delete(channelID)
+        client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID)
         break
       }
       case REQUEST_TYPE.UNSUB: {
         console.warn(`[pubsub] Could not unsubscribe from ${channelID}: ${reason}`)
-        client.pendingUnsubscriptionMap.delete(channelID)
+        client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)
         break
       }
       case REQUEST_TYPE.PUSH_ACTION: {
@@ -611,6 +670,11 @@ const defaultMessageHandlers: MessageHandlers = {
         console.warn(
           `[pubsub] Received ERROR for PUSH_ACTION request with the action type '${actionType}' and the following message: ${message}`
         )
+        break
+      }
+      case REQUEST_TYPE.KV_FILTER: {
+        console.warn(`[pubsub] Could not set KV filter for ${channelID}: ${reason}`)
+        client.pendingOperations.tDelete(REQUEST_TYPE.KV_FILTER, channelID)
         break
       }
       default: {
@@ -624,41 +688,27 @@ const defaultMessageHandlers: MessageHandlers = {
 
     switch (type) {
       case REQUEST_TYPE.SUB: {
-        client.pendingSubscriptionMap.delete(channelID)
+        client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID)
         client.subscriptionSet.add(channelID)
         sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, client, { channelID })
         const ourKvFilter = client.kvFilter.get(channelID)
-        // If we don't have a KV filter and the server does, or vice versa,
-        // send a message to set the KV filter
-        if (!ourKvFilter !== !kvFilter) {
+        if (!isKvFilterFresh(ourKvFilter, kvFilter)) {
           this.setKvFilter(channelID, ourKvFilter)
-        } else if (ourKvFilter && kvFilter) {
-          // If both have a KV filter, set the KV filter if they differ
-          if (ourKvFilter.length !== kvFilter.length) {
-            // Fast path: different length must mean the filter is different
-            this.setKvFilter(channelID, ourKvFilter)
-          } else {
-            const sortedA = [...ourKvFilter].sort()
-            const sortedB = [...kvFilter].sort()
-            for (let i = 0; i < sortedA.length; i++) {
-              if (sortedA[i] !== sortedB[i]) {
-                this.setKvFilter(channelID, ourKvFilter)
-                break
-              }
-            }
-          }
         }
         break
       }
       case REQUEST_TYPE.UNSUB: {
         console.debug(`[pubsub] Unsubscribed from ${channelID}`)
-        client.pendingUnsubscriptionMap.delete(channelID)
+        client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)
         client.subscriptionSet.delete(channelID)
         break
       }
       case REQUEST_TYPE.KV_FILTER: {
-        client.pendingSubscriptionMap.delete(channelID)
         client.subscriptionSet.add(channelID)
+        const ourKvFilter = client.kvFilter.get(channelID)
+        if (isKvFilterFresh(ourKvFilter, kvFilter)) {
+          client.pendingOperations.tDelete(REQUEST_TYPE.KV_FILTER, channelID)
+        }
         console.debug(`[pubsub] Set KV filter for ${channelID}`)
         break
       }
@@ -790,8 +840,7 @@ const publicMethods: {
     client.clearAllTimers()
     // Update property values.
     // Note: do not clear 'client.options'.
-    client.pendingSubscriptionMap.clear()
-    client.pendingUnsubscriptionMap.clear()
+    client.pendingOperations.clear()
     client.subscriptionSet.clear()
     // Remove global event listeners.
     if (typeof self === 'object' && self instanceof EventTarget) {
@@ -875,14 +924,18 @@ const publicMethods: {
   sub (channelID: string) {
     const client = this
 
-    if (!client.pendingSubscriptionMap.has(channelID) && !client.subscriptionSet.has(channelID)) {
-      // `runWithRetry` will use reference equality to determine freshness.
-      // An empty object serves this purpose.
-      const instance = {}
-      client.pendingSubscriptionMap.set(channelID, instance)
-      client.pendingUnsubscriptionMap.delete(channelID)
+    // In order to send subscribe to the server, we need to not be already
+    // subscribed (meaning that we've sent REQUEST_TYPE.SUB, confirmed by it
+    // either being a pending operation or having it in `subscriptionSet`).
+    // Whether we've sent an unsubscription request and whether it's been
+    // confirmed isn't relevant.
+    if (
+      !client.pendingOperations.tHas(REQUEST_TYPE.SUB, channelID) &&
+      !client.subscriptionSet.has(channelID)
+    ) {
+      client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)
 
-      runWithRetry(client, channelID, REQUEST_TYPE.SUB, instance)
+      runWithRetry(client, channelID, REQUEST_TYPE.SUB, pubPayloadFactory(client, channelID))
     }
   },
 
@@ -898,11 +951,19 @@ const publicMethods: {
       client.kvFilter.delete(channelID)
     }
 
-    if (client.subscriptionSet.has(channelID) && !client.pendingUnsubscriptionMap.has(channelID)) {
-      const instance = {}
-      // Re-use `client.pendingSubscriptionMap` for KV_FILTER
-      client.pendingSubscriptionMap.set(channelID, instance)
-      runWithRetry(client, channelID, REQUEST_TYPE.KV_FILTER, instance)
+    // In order to send KV filter to the server, we need to first be subscribed
+    // (meaning that we've sent REQUEST_TYPE.SUB, confirmed by it either being
+    // a pending operation or having it in `subscriptionSet`), and we also want
+    // to ensure that we've not already sent REQUEST_TYPE.UNSUB.
+    // Note that KV filter requires that a subscription exists for it to work,
+    // and therefore we don't send anything if the subscription is pending
+    // (unconfirmed). Instead, setting the KV filter in these cases will
+    // be done in the `RESPONSE_TYPE.OK` function for REQUEST_TYPE.SUB.
+    if (
+      client.subscriptionSet.has(channelID) &&
+      !client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, channelID)
+    ) {
+      runWithRetry(client, channelID, REQUEST_TYPE.KV_FILTER, pubPayloadFactory(client, channelID))
     }
   },
 
@@ -918,21 +979,21 @@ const publicMethods: {
   unsub (channelID: string) {
     const client = this
 
+    // In order to send unsubscribe to the server, we need to first be subscribed
+    // (meaning that we've sent REQUEST_TYPE.SUB, confirmed by it either being
+    // a pending operation or having it in `subscriptionSet`), and we also want
+    // to ensure that we've not already sent REQUEST_TYPE.UNSUB.
     if (
-      !client.pendingUnsubscriptionMap.has(channelID) &&
+      !client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, channelID) &&
       (
         client.subscriptionSet.has(channelID) ||
-        client.pendingSubscriptionMap.has(channelID)
+        client.pendingOperations.tHas(REQUEST_TYPE.SUB, channelID)
       )
     ) {
-      // `runWithRetry` will use reference equality to determine freshness.
-      // An empty object serves this purpose.
-      const instance = {}
-      client.pendingSubscriptionMap.delete(channelID)
-      client.pendingUnsubscriptionMap.set(channelID, instance)
+      client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID)
       client.kvFilter.delete(channelID)
 
-      runWithRetry(client, channelID, REQUEST_TYPE.UNSUB, instance)
+      runWithRetry(client, channelID, REQUEST_TYPE.UNSUB, () => ({ channelID }))
     }
   }
 }
