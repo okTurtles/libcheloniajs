@@ -132,7 +132,7 @@ function runWithRetry(client, channelID, type, getPayload) {
             return;
         // 2b. Retries check
         if (attemptNo++ > options.maxOpRetries) {
-            console.warn(`Giving up ${type} for channel`, channelID);
+            console.warn(`[pubsub] Giving up ${type} for channel`, channelID);
             client.pendingOperations.tDelete(type, channelID);
             return;
         }
@@ -142,8 +142,8 @@ function runWithRetry(client, channelID, type, getPayload) {
         // 4. Schedule retry
         // Randomness / jitter to prevent bursts
         const minDelay = (attemptNo - 1) * options.opRetryInterval;
-        const maxDelay = attemptNo * options.opRetryInterval;
-        const delay = randomIntFromRange(minDelay, maxDelay);
+        const jitter = randomIntFromRange(0, options.opRetryInterval);
+        const delay = Math.min(200, minDelay) + jitter;
         setTimeout(() => {
             send();
         }, delay);
