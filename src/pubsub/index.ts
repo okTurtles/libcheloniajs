@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-this-alias */
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
+import { randomIntFromRange } from 'turtledash'
 import type { JSONObject, JSONType } from '../types.js'
 
 // ====== Enums ====== //
@@ -57,6 +58,10 @@ export type Options = {
   reconnectOnTimeout: boolean;
   reconnectionDelayGrowFactor: number;
   timeout: number;
+  // Maximum retry attempts after initial send (maxOpRetries + 1 total attempts)
+  maxOpRetries: number;
+  // Base interval between retries (linear backoff)
+  opRetryInterval: number;
   manual?: boolean;
   // eslint-disable-next-line no-use-before-define
   handlers?: Partial<ClientEventHandlers>;
@@ -83,8 +88,8 @@ export type PubSubClient = {
   messageHandlers: MessageHandlers;
   nextConnectionAttemptDelayID: TimeoutID | undefined;
   options: Options;
-  pendingSubscriptionSet: Set<string>;
-  pendingUnsubscriptionSet: Set<string>;
+  // eslint-disable-next-line no-use-before-define
+  pendingOperations: TieredMap<RequestTypeEnum, string, object>;
   pingTimeoutID: TimeoutID | undefined;
   shouldReconnect: boolean;
   socket: WebSocket | null;
@@ -149,7 +154,9 @@ type MessageHandlers = {
       };
     },
   ): void;
-  [RESPONSE_TYPE.OK](this: PubSubClient, msg: { data: { type: string; channelID: string } }): void;
+  [RESPONSE_TYPE.OK](this: PubSubClient, msg: { data:
+    { type: string; channelID: string; kvFilter?: string[] }
+  }): void;
 };
 
 export type PubMessage = {
@@ -183,7 +190,9 @@ const defaultOptions: Options = {
   // respond because of a failed authentication.
   reconnectOnTimeout: false,
   reconnectionDelayGrowFactor: 2,
-  timeout: 60000
+  timeout: 60000,
+  maxOpRetries: 4,
+  opRetryInterval: 2000
 }
 
 // ====== Event name constants ====== //
@@ -194,6 +203,121 @@ export const PUBSUB_RECONNECTION_FAILED = 'pubsub-reconnection-failed'
 export const PUBSUB_RECONNECTION_SCHEDULED = 'pubsub-reconnection-scheduled'
 export const PUBSUB_RECONNECTION_SUCCEEDED = 'pubsub-reconnection-succeeded'
 export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded'
+
+// ====== Helpers ====== //
+
+class TieredMap <K, L, V> extends Map<K, Map<L, V>> {
+  tGet (k1: K, k2: L): V | undefined {
+    return this.get(k1)?.get(k2)
+  }
+
+  tHas (k1: K, k2: L): boolean {
+    return !!this.get(k1)?.has(k2)
+  }
+
+  tSet (k1: K, k2: L, v: V): Map<L, V> {
+    let submap = this.get(k1)
+    if (!submap) {
+      submap = new Map<L, V>()
+      this.set(k1, submap)
+    }
+    return submap.set(k2, v)
+  }
+
+  tDelete (k1: K, k2: L): boolean {
+    const submap = this.get(k1)
+    if (submap) {
+      const result = submap.delete(k2)
+      if (submap.size === 0) {
+        this.delete(k1)
+      }
+      return result
+    }
+    return false
+  }
+
+  tClear (k1: K) {
+    this.delete(k1)
+  }
+}
+
+const isKvFilterFresh = (
+  ourKvFilter: Readonly<string[]> | null | undefined,
+  theirKvFilter: Readonly<string[]> | null | undefined
+): boolean => {
+  // If we don't have a KV filter and the server does, or vice versa,
+  // the filter isn't fresh
+  if (!ourKvFilter !== !theirKvFilter) {
+    return false
+  } else if (ourKvFilter && theirKvFilter) {
+    // If both have a KV filter, set the KV filter if they differ
+    //   (XOR: return false if exactly one of them is truthy)
+    if (ourKvFilter.length !== theirKvFilter.length) {
+      // Fast path: different length must mean the filter is different
+      return false
+    } else {
+      const sortedA = [...ourKvFilter].sort()
+      const sortedB = [...theirKvFilter].sort()
+      for (let i = 0; i < sortedA.length; i++) {
+        if (sortedA[i] !== sortedB[i]) {
+          return false
+        }
+      }
+    }
+  }
+
+  return true
+}
+
+const pubPayloadFactory = (client: PubSubClient, channelID: string) => () => {
+  const kvFilter = client.kvFilter.get(channelID)
+  return kvFilter ? { kvFilter, channelID } : { channelID } as JSONObject
+}
+
+function runWithRetry (
+  client: PubSubClient,
+  channelID: string,
+  type: RequestTypeEnum,
+  getPayload: () => JSONObject
+) {
+  let attemptNo = 0
+  const { socket, options } = client
+  // `runWithRetry` will use reference equality to determine freshness.
+  // An empty object serves this purpose.
+  const instance = {}
+
+  client.pendingOperations.tSet(type, channelID, instance)
+
+  const send = () => {
+    // 1. Closure check: ensure socket instance hasn't been replaced
+    if (client.socket !== socket || socket?.readyState !== WebSocket.OPEN) return
+
+    // 2a. Cancellation check
+    const currentInstance = client.pendingOperations.tGet(type, channelID)
+    if (currentInstance !== instance) return
+
+    // 2b. Retries check
+    if (attemptNo++ > options.maxOpRetries) {
+      console.warn(`[pubsub] Giving up ${type} for channel`, channelID)
+      client.pendingOperations.tDelete(type, channelID)
+      return
+    }
+
+    // 3. Send logic
+    const payload = getPayload()
+
+    socket.send(createRequest(type, payload))
+
+    // 4. Schedule retry
+    // Randomness / jitter to prevent bursts
+    const minDelay = (attemptNo - 1) * options.opRetryInterval
+    const jitter = randomIntFromRange(0, options.opRetryInterval)
+    const delay = Math.min(200, minDelay) + jitter
+    setTimeout(send, delay)
+  }
+
+  send()
+}
 
 // ====== API ====== //
 
@@ -228,9 +352,7 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
     messageHandlers: { ...defaultMessageHandlers, ...options.messageHandlers },
     nextConnectionAttemptDelayID: undefined,
     options: { ...defaultOptions, ...options },
-    // Requested subscriptions for which we didn't receive a response yet.
-    pendingSubscriptionSet: new Set(),
-    pendingUnsubscriptionSet: new Set(),
+    pendingOperations: new TieredMap(),
     pingTimeoutID: undefined,
     shouldReconnect: true,
     // The underlying WebSocket object.
@@ -347,16 +469,29 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     // If we should reconnect then consider our current subscriptions as pending again,
     // waiting to be restored upon reconnection.
     if (client.shouldReconnect) {
+      // `runWithRetry` will (later) use reference equality to determine freshness.
+      // In order to abort current send attempts, but still being able to restore
+      // existing subscriptions upon reconnection, we set pendingSubscriptionMap
+      // to a different instance value. Deleting values from
+      // `pendingSubscriptionMap` could also work, but then we'd need to save
+      // the list of existing keys somewhere else.
+      const pendingSubscriptionMap = client.pendingOperations.get(REQUEST_TYPE.SUB)
+      if (pendingSubscriptionMap) {
+        for (const [channelID] of pendingSubscriptionMap) {
+          pendingSubscriptionMap.set(channelID, {})
+        }
+      }
       client.subscriptionSet.forEach((channelID) => {
         // Skip contracts from which we had to unsubscribe anyway.
-        if (!client.pendingUnsubscriptionSet.has(channelID)) {
-          client.pendingSubscriptionSet.add(channelID)
+        if (!client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, channelID)) {
+          client.pendingOperations.tSet(REQUEST_TYPE.SUB, channelID, {})
         }
       })
     }
     // We are no longer subscribed to any contracts since we are now disconnected.
     client.subscriptionSet.clear()
-    client.pendingUnsubscriptionSet.clear()
+    client.pendingOperations.tClear(REQUEST_TYPE.UNSUB)
+    client.pendingOperations.tClear(REQUEST_TYPE.KV_FILTER)
 
     if (client.shouldReconnect && client.options.reconnectOnDisconnection) {
       if (client.failedConnectionAttempts > client.options.maxRetries) {
@@ -457,12 +592,9 @@ const defaultClientEventHandlers: ClientEventHandlers = {
       }, options.pingTimeout)
     }
     // Send any pending subscription request.
-    client.pendingSubscriptionSet.forEach((channelID) => {
-      const kvFilter = this.kvFilter.get(channelID)
-      client.socket?.send(
-        createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID })
-      )
-    })
+    for (const [channelID] of client.pendingOperations.get(REQUEST_TYPE.SUB) || []) {
+      runWithRetry(client, channelID, REQUEST_TYPE.SUB, pubPayloadFactory(client, channelID))
+    }
     // There should be no pending unsubscription since we just got connected.
   },
 
@@ -541,12 +673,12 @@ const defaultMessageHandlers: MessageHandlers = {
     switch (type) {
       case REQUEST_TYPE.SUB: {
         console.warn(`[pubsub] Could not subscribe to ${channelID}: ${reason}`)
-        client.pendingSubscriptionSet.delete(channelID)
+        client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID)
         break
       }
       case REQUEST_TYPE.UNSUB: {
         console.warn(`[pubsub] Could not unsubscribe from ${channelID}: ${reason}`)
-        client.pendingUnsubscriptionSet.delete(channelID)
+        client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)
         break
       }
       case REQUEST_TYPE.PUSH_ACTION: {
@@ -556,31 +688,58 @@ const defaultMessageHandlers: MessageHandlers = {
         )
         break
       }
+      case REQUEST_TYPE.KV_FILTER: {
+        console.warn(`[pubsub] Could not set KV filter for ${channelID}: ${reason}`)
+        client.pendingOperations.tDelete(REQUEST_TYPE.KV_FILTER, channelID)
+        break
+      }
       default: {
         console.error(`[pubsub] Malformed response: invalid request type ${type}`)
       }
     }
   },
 
-  [RESPONSE_TYPE.OK] ({ data: { type, channelID } }) {
+  [RESPONSE_TYPE.OK] ({ data: { type, channelID, kvFilter } }) {
     const client = this
 
     switch (type) {
       case REQUEST_TYPE.SUB: {
-        client.pendingSubscriptionSet.delete(channelID)
-        client.subscriptionSet.add(channelID)
-        sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, client, { channelID })
+        if (client.pendingOperations.tHas(REQUEST_TYPE.SUB, channelID)) {
+          client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID)
+          client.subscriptionSet.add(channelID)
+          sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, client, { channelID })
+          const ourKvFilter = client.kvFilter.get(channelID)
+          if (!isKvFilterFresh(ourKvFilter, kvFilter)) {
+            console.debug(`[pubsub] Subscribed to ${channelID}, need to set new KV filter`)
+            this.setKvFilter(channelID, ourKvFilter)
+          }
+        } else {
+          console.debug(`[pubsub] Received unexpected sub for ${channelID}`)
+        }
         break
       }
       case REQUEST_TYPE.UNSUB: {
-        console.debug(`[pubsub] Unsubscribed from ${channelID}`)
-        client.pendingUnsubscriptionSet.delete(channelID)
-        client.subscriptionSet.delete(channelID)
-        client.kvFilter.delete(channelID)
+        if (client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, channelID)) {
+          console.debug(`[pubsub] Unsubscribed from ${channelID}`)
+          client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)
+          client.subscriptionSet.delete(channelID)
+        } else {
+          console.debug(`[pubsub] Received unexpected unsub for ${channelID}`)
+        }
         break
       }
       case REQUEST_TYPE.KV_FILTER: {
-        console.debug(`[pubsub] Set KV filter for ${channelID}`)
+        if (client.pendingOperations.tHas(REQUEST_TYPE.KV_FILTER, channelID)) {
+          const ourKvFilter = client.kvFilter.get(channelID)
+          if (isKvFilterFresh(ourKvFilter, kvFilter)) {
+            console.debug(`[pubsub] Set KV filter for ${channelID}`, kvFilter)
+            client.pendingOperations.tDelete(REQUEST_TYPE.KV_FILTER, channelID)
+          } else {
+            console.debug(`[pubsub] Received stale KV filter ack for ${channelID}`, kvFilter, ourKvFilter)
+          }
+        } else {
+          console.debug(`[pubsub] Received unexpected kv-filter for ${channelID}`)
+        }
         break
       }
       default: {
@@ -711,8 +870,7 @@ const publicMethods: {
     client.clearAllTimers()
     // Update property values.
     // Note: do not clear 'client.options'.
-    client.pendingSubscriptionSet.clear()
-    client.pendingUnsubscriptionSet.clear()
+    client.pendingOperations.clear()
     client.subscriptionSet.clear()
     // Remove global event listeners.
     if (typeof self === 'object' && self instanceof EventTarget) {
@@ -795,18 +953,19 @@ const publicMethods: {
    */
   sub (channelID: string) {
     const client = this
-    const { socket } = this
 
-    if (!client.pendingSubscriptionSet.has(channelID)) {
-      client.pendingSubscriptionSet.add(channelID)
-      client.pendingUnsubscriptionSet.delete(channelID)
+    // In order to send subscribe to the server, we need to not be already
+    // subscribed (meaning that we've sent REQUEST_TYPE.SUB, confirmed by it
+    // either being a pending operation or having it in `subscriptionSet`).
+    // Whether we've sent an unsubscription request and whether it's been
+    // confirmed isn't relevant.
+    if (
+      !client.pendingOperations.tHas(REQUEST_TYPE.SUB, channelID) &&
+      !client.subscriptionSet.has(channelID)
+    ) {
+      client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)
 
-      if (socket?.readyState === WebSocket.OPEN) {
-        const kvFilter = client.kvFilter.get(channelID)
-        socket.send(
-          createRequest(REQUEST_TYPE.SUB, kvFilter ? { channelID, kvFilter } : { channelID })
-        )
-      }
+      runWithRetry(client, channelID, REQUEST_TYPE.SUB, pubPayloadFactory(client, channelID))
     }
   },
 
@@ -815,7 +974,6 @@ const publicMethods: {
    */
   setKvFilter (channelID: string, kvFilter?: string[]) {
     const client = this
-    const { socket } = this
 
     if (kvFilter) {
       client.kvFilter.set(channelID, kvFilter)
@@ -823,12 +981,19 @@ const publicMethods: {
       client.kvFilter.delete(channelID)
     }
 
-    if (client.subscriptionSet.has(channelID)) {
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(
-          createRequest(REQUEST_TYPE.KV_FILTER, kvFilter ? { channelID, kvFilter } : { channelID })
-        )
-      }
+    // In order to send KV filter to the server, we need to first be subscribed
+    // (meaning that we've sent REQUEST_TYPE.SUB, confirmed by it either being
+    // a pending operation or having it in `subscriptionSet`), and we also want
+    // to ensure that we've not already sent REQUEST_TYPE.UNSUB.
+    // Note that KV filter requires that a subscription exists for it to work,
+    // and therefore we don't send anything if the subscription is pending
+    // (unconfirmed). Instead, setting the KV filter in these cases will
+    // be done in the `RESPONSE_TYPE.OK` function for REQUEST_TYPE.SUB.
+    if (
+      client.subscriptionSet.has(channelID) &&
+      !client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, channelID)
+    ) {
+      runWithRetry(client, channelID, REQUEST_TYPE.KV_FILTER, pubPayloadFactory(client, channelID))
     }
   },
 
@@ -843,15 +1008,22 @@ const publicMethods: {
    */
   unsub (channelID: string) {
     const client = this
-    const { socket } = this
 
-    if (!client.pendingUnsubscriptionSet.has(channelID)) {
-      client.pendingSubscriptionSet.delete(channelID)
-      client.pendingUnsubscriptionSet.add(channelID)
+    // In order to send unsubscribe to the server, we need to first be subscribed
+    // (meaning that we've sent REQUEST_TYPE.SUB, confirmed by it either being
+    // a pending operation or having it in `subscriptionSet`), and we also want
+    // to ensure that we've not already sent REQUEST_TYPE.UNSUB.
+    if (
+      !client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, channelID) &&
+      (
+        client.subscriptionSet.has(channelID) ||
+        client.pendingOperations.tHas(REQUEST_TYPE.SUB, channelID)
+      )
+    ) {
+      client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID)
+      client.kvFilter.delete(channelID)
 
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(createRequest(REQUEST_TYPE.UNSUB, { channelID }))
-      }
+      runWithRetry(client, channelID, REQUEST_TYPE.UNSUB, () => ({ channelID }))
     }
   }
 }

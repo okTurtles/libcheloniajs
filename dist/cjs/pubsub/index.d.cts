@@ -44,6 +44,8 @@ export type Options = {
     reconnectOnTimeout: boolean;
     reconnectionDelayGrowFactor: number;
     timeout: number;
+    maxOpRetries: number;
+    opRetryInterval: number;
     manual?: boolean;
     handlers?: Partial<ClientEventHandlers>;
     messageHandlers?: Partial<MessageHandlers>;
@@ -63,8 +65,7 @@ export type PubSubClient = {
     messageHandlers: MessageHandlers;
     nextConnectionAttemptDelayID: TimeoutID | undefined;
     options: Options;
-    pendingSubscriptionSet: Set<string>;
-    pendingUnsubscriptionSet: Set<string>;
+    pendingOperations: TieredMap<RequestTypeEnum, string, object>;
     pingTimeoutID: TimeoutID | undefined;
     shouldReconnect: boolean;
     socket: WebSocket | null;
@@ -136,6 +137,7 @@ type MessageHandlers = {
         data: {
             type: string;
             channelID: string;
+            kvFilter?: string[];
         };
     }): void;
 };
@@ -162,6 +164,13 @@ export declare const PUBSUB_RECONNECTION_FAILED = "pubsub-reconnection-failed";
 export declare const PUBSUB_RECONNECTION_SCHEDULED = "pubsub-reconnection-scheduled";
 export declare const PUBSUB_RECONNECTION_SUCCEEDED = "pubsub-reconnection-succeeded";
 export declare const PUBSUB_SUBSCRIPTION_SUCCEEDED = "pubsub-subscription-succeeded";
+declare class TieredMap<K, L, V> extends Map<K, Map<L, V>> {
+    tGet(k1: K, k2: L): V | undefined;
+    tHas(k1: K, k2: L): boolean;
+    tSet(k1: K, k2: L, v: V): Map<L, V>;
+    tDelete(k1: K, k2: L): boolean;
+    tClear(k1: K): void;
+}
 /**
  * Creates a pubsub client instance.
  *
