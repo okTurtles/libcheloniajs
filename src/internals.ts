@@ -942,22 +942,24 @@ export default sbp('sbp/selectors/register', {
     this: CheloniaContext,
     contractID: string,
     message: SPMessage,
-    state: ChelContractState,
-    atomicIndex?: number
+    state: ChelContractState
   ) {
     if (this.config.skipActionProcessing) return
     const rootState = sbp('chelonia/rootState')
-    const contractName = rootState.contracts[contractID].type || state._vm?.type
+    const contractName = rootState.contracts[contractID]?.type || state._vm?.type
+    if (!contractName) return
     const manifestHash = message.manifest()
     const hook = `${manifestHash}/${contractName}/hook/${message.opType()}`
     // Check if a hook is defined
     if (sbp('sbp/selectors/fn', hook)) {
       // And call it
       try {
-        sbp(hook, { contractID, message, state, atomicIndex })
+        // Note: Errors here should not stop processing, since running these
+        // hooks is optionl (for example, they aren't run on the server)
+        sbp(hook, { contractID, message, state })
       } catch (e) {
         console.error(
-          `[chelonia/private/operationHook] Error at operation hook for ${contractID}`,
+          `[${hook}] hook error for message ${message.hash()} on contract ${contractID}:`,
           e
         )
       }
@@ -1030,7 +1032,6 @@ export default sbp('sbp/selectors/register', {
               throw new Error('Inside OP_ATOMIC: no matching signing key was defined')
             }
             await (opFns[u[0]] as (x: unknown) => Promise<void>)(u[1])
-            sbp('chelonia/private/operationHook', contractID, message, state, i)
           } catch (e_) {
             const e = e_ as Error
             if (e && typeof e === 'object') {
