@@ -519,7 +519,7 @@ export default sbp('sbp/selectors/register', {
       // pass in globals that we want access to by default in the sandbox
       // note: you can undefine these by setting them to undefined in exposedGlobals
       crypto: {
-        getRandomValues: <T extends ArrayBufferView | null>(v: T) =>
+        getRandomValues: <T extends ArrayBufferView>(v: T) =>
           globalThis.crypto.getRandomValues<T>(v)
       },
       ...(typeof window === 'object' &&
@@ -941,26 +941,25 @@ export default sbp('sbp/selectors/register', {
   'chelonia/private/operationHook': function (
     this: CheloniaContext,
     contractID: string,
-    contractName: string,
     message: SPMessage,
     state: ChelContractState,
     atomicIndex?: number
   ) {
     if (this.config.skipActionProcessing) return
-    const manifestHash = this.config.contracts.manifests[contractName]
-    if (manifestHash) {
-      const hook = `${manifestHash}/${contractName}/hook/${message.opType()}`
-      // Check if a hook is defined
-      if (sbp('sbp/selectors/fn', hook)) {
-        // And call it
-        try {
-          sbp(hook, { contractID, message, state, atomicIndex })
-        } catch (e) {
-          console.error(
-            `[chelonia/private/operationHook] Error at operation hook for ${contractID}`,
-            e
-          )
-        }
+    const rootState = sbp('chelonia/rootState')
+    const contractName = rootState.contracts[contractID].type || state._vm?.type
+    const manifestHash = message.manifest()
+    const hook = `${manifestHash}/${contractName}/hook/${message.opType()}`
+    // Check if a hook is defined
+    if (sbp('sbp/selectors/fn', hook)) {
+      // And call it
+      try {
+        sbp(hook, { contractID, message, state, atomicIndex })
+      } catch (e) {
+        console.error(
+          `[chelonia/private/operationHook] Error at operation hook for ${contractID}`,
+          e
+        )
       }
     }
   },
@@ -1031,7 +1030,7 @@ export default sbp('sbp/selectors/register', {
               throw new Error('Inside OP_ATOMIC: no matching signing key was defined')
             }
             await (opFns[u[0]] as (x: unknown) => Promise<void>)(u[1])
-            sbp('chelonia/private/operationHook', contractID, contractName, message, state, i)
+            sbp('chelonia/private/operationHook', contractID, message, state, i)
           } catch (e_) {
             const e = e_ as Error
             if (e && typeof e === 'object') {
@@ -1745,26 +1744,26 @@ export default sbp('sbp/selectors/register', {
       },
       [SPMessage.OP_PROTOCOL_UPGRADE]: notImplemented
     }
-    const rootState = sbp(this.config.stateSelector) as ChelRootState
-    // Having rootState.contracts[contractID] is not enough to determine we
-    // have previously synced this contract, as reference counts are also
-    // stored there. Hence, we check for the presence of 'type'
-    if (!contractName) {
-      contractName =
-        has(rootState.contracts, contractID) &&
-        rootState.contracts[contractID] &&
-        has(rootState.contracts[contractID], 'type')
-          ? rootState.contracts[contractID].type
-          : opT === SPMessage.OP_CONTRACT
-            ? (opV as SPOpContract).type
-            : ''
-    }
-    if (!contractName) {
-      throw new Error(
-        `Unable to determine the name for a contract and refusing to load it (contract ID was ${contractID} and its manifest hash was ${manifestHash})`
-      )
-    }
     if (!this.config.skipActionProcessing && !this.manifestToContract[manifestHash]) {
+      const rootState = sbp(this.config.stateSelector) as ChelRootState
+      // Having rootState.contracts[contractID] is not enough to determine we
+      // have previously synced this contract, as reference counts are also
+      // stored there. Hence, we check for the presence of 'type'
+      if (!contractName) {
+        contractName =
+          has(rootState.contracts, contractID) &&
+          rootState.contracts[contractID] &&
+          has(rootState.contracts[contractID], 'type')
+            ? rootState.contracts[contractID].type
+            : opT === SPMessage.OP_CONTRACT
+              ? (opV as SPOpContract).type
+              : ''
+      }
+      if (!contractName) {
+        throw new Error(
+          `Unable to determine the name for a contract and refusing to load it (contract ID was ${contractID} and its manifest hash was ${manifestHash})`
+        )
+      }
       await sbp('chelonia/private/loadManifest', contractName, manifestHash)
     }
     let processOp = true
@@ -1809,7 +1808,7 @@ export default sbp('sbp/selectors/register', {
     }
     if (processOp) {
       await (opFns[opT] as (op: unknown) => Promise<void>)(opV)
-      sbp('chelonia/private/operationHook', contractID, contractName, message, state)
+      sbp('chelonia/private/operationHook', contractID, message, state)
       config.postOp?.(message, state)
       config[`postOp_${opT}`]?.(message, state) // hack to fix syntax highlighting `
     }
