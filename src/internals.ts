@@ -519,7 +519,7 @@ export default sbp('sbp/selectors/register', {
       // pass in globals that we want access to by default in the sandbox
       // note: you can undefine these by setting them to undefined in exposedGlobals
       crypto: {
-        getRandomValues: <T extends ArrayBufferView | null>(v: T) =>
+        getRandomValues: <T extends ArrayBufferView>(v: T) =>
           globalThis.crypto.getRandomValues<T>(v)
       },
       ...(typeof window === 'object' &&
@@ -937,6 +937,33 @@ export default sbp('sbp/selectors/register', {
       'pendingKeyRequests',
       targetState._volatile.pendingKeyRequests.filter((pkr) => pkr?.name !== signingKey.name)
     )
+  },
+  'chelonia/private/operationHook': function (
+    this: CheloniaContext,
+    contractID: string,
+    message: SPMessage,
+    state: ChelContractState
+  ) {
+    if (this.config.skipActionProcessing) return
+    const rootState = sbp('chelonia/rootState')
+    const contractName = rootState.contracts[contractID]?.type || state._vm?.type
+    if (!contractName) return
+    const manifestHash = message.manifest()
+    const hook = `${manifestHash}/${contractName}/hook/${message.opType()}`
+    // Check if a hook is defined
+    if (sbp('sbp/selectors/fn', hook)) {
+      // And call it
+      try {
+        // Note: Errors here should not stop processing, since running these
+        // hooks is optionl (for example, they aren't run on the server)
+        sbp(hook, { contractID, message, state })
+      } catch (e) {
+        console.error(
+          `[${hook}] hook error for message ${message.hash()} on contract ${contractID}:`,
+          e
+        )
+      }
+    }
   },
   'chelonia/private/in/processMessage': async function (
     this: CheloniaContext,
@@ -1782,6 +1809,7 @@ export default sbp('sbp/selectors/register', {
     }
     if (processOp) {
       await (opFns[opT] as (op: unknown) => Promise<void>)(opV)
+      sbp('chelonia/private/operationHook', contractID, message, state)
       config.postOp?.(message, state)
       config[`postOp_${opT}`]?.(message, state) // hack to fix syntax highlighting `
     }

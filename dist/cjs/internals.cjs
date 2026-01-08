@@ -718,6 +718,28 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             return;
         this.config.reactiveSet(targetState._volatile, 'pendingKeyRequests', targetState._volatile.pendingKeyRequests.filter((pkr) => pkr?.name !== signingKey.name));
     },
+    'chelonia/private/operationHook': function (contractID, message, state) {
+        if (this.config.skipActionProcessing)
+            return;
+        const rootState = (0, sbp_1.default)('chelonia/rootState');
+        const contractName = rootState.contracts[contractID]?.type || state._vm?.type;
+        if (!contractName)
+            return;
+        const manifestHash = message.manifest();
+        const hook = `${manifestHash}/${contractName}/hook/${message.opType()}`;
+        // Check if a hook is defined
+        if ((0, sbp_1.default)('sbp/selectors/fn', hook)) {
+            // And call it
+            try {
+                // Note: Errors here should not stop processing, since running these
+                // hooks is optionl (for example, they aren't run on the server)
+                (0, sbp_1.default)(hook, { contractID, message, state });
+            }
+            catch (e) {
+                console.error(`[${hook}] hook error for message ${message.hash()} on contract ${contractID}:`, e);
+            }
+        }
+    },
     'chelonia/private/in/processMessage': async function (message, state, internalSideEffectStack, contractName) {
         const [opT, opV] = message.op();
         const hash = message.hash();
@@ -1368,6 +1390,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         if (processOp) {
             await opFns[opT](opV);
+            (0, sbp_1.default)('chelonia/private/operationHook', contractID, message, state);
             config.postOp?.(message, state);
             config[`postOp_${opT}`]?.(message, state); // hack to fix syntax highlighting `
         }
