@@ -177,6 +177,29 @@ const keyRotationHelper = (contractID, state, config, updatedKeysMap, requiredPe
         });
     });
 };
+const deleteKeyHelper = (state, height, keyIds) => {
+    const allIdsForNames = Object.values(state._vm.authorizedKeys)
+        .reduce((acc, { id, name }) => {
+        if (!acc[name]) {
+            acc[name] = [id];
+        }
+        else {
+            acc[name].push(id);
+        }
+        return acc;
+    }, Object.create(null));
+    for (const keyId of keyIds) {
+        const name = state._vm.authorizedKeys[keyId].name;
+        // Clear pending revocations for all keys with the same name
+        // to handle key rotation scenarios where multiple keys exist
+        for (const id of allIdsForNames[name]) {
+            if ((0, turtledash_1.has)(state._volatile.pendingKeyRevocations, id)) {
+                delete state._volatile.pendingKeyRevocations[id];
+            }
+        }
+        state._vm.authorizedKeys[keyId]._notAfterHeight = height;
+    }
+};
 // export const FERAL_FUNCTION = Function
 exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     //     DO NOT CALL ANY OF THESE YOURSELF!
@@ -1230,12 +1253,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     }
                     return true;
                 });
+                deleteKeyHelper(state, height, keyIds);
                 keyIds.forEach((keyId) => {
                     const key = state._vm.authorizedKeys[keyId];
-                    state._vm.authorizedKeys[keyId]._notAfterHeight = height;
-                    if ((0, turtledash_1.has)(state._volatile.pendingKeyRevocations, keyId)) {
-                        delete state._volatile.pendingKeyRevocations[keyId];
-                    }
                     // Are we deleting a foreign key? If so, we also need to remove
                     // the operation from (1) _volatile.watch (on the other contract)
                     // and (2) pendingWatch
@@ -1301,12 +1321,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 }
                 const [updatedKeys, updatedMap] = utils_js_1.validateKeyUpdatePermissions.call(self, contractID, signingKey, state, v);
                 const keysToDelete = Object.values(updatedMap);
-                for (const keyId of keysToDelete) {
-                    if ((0, turtledash_1.has)(state._volatile.pendingKeyRevocations, keyId)) {
-                        delete state._volatile.pendingKeyRevocations[keyId];
-                    }
-                    state._vm.authorizedKeys[keyId]._notAfterHeight = height;
-                }
+                deleteKeyHelper(state, height, keysToDelete);
                 for (const key of updatedKeys) {
                     if (!(0, turtledash_1.has)(state._vm.authorizedKeys, key.id)) {
                         key._notBeforeHeight = height;
@@ -1665,14 +1680,23 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const pendingKeyRevocations = contractState?._volatile?.pendingKeyRevocations;
         if (!pendingKeyRevocations || Object.keys(pendingKeyRevocations).length === 0)
             return;
+        const activeForeignKeyIds = Object.fromEntries(Object.values(contractState._vm.authorizedKeys)
+            .filter(({ foreignKey, _notAfterHeight }) => foreignKey != null && _notAfterHeight == null)
+            .map(({ foreignKey, id }) => [foreignKey, id]));
         // First, we handle keys that have been rotated
         const keysToUpdate = Object.entries(pendingKeyRevocations)
             .filter(([, v]) => v === true)
             .map(([id]) => id);
+        // Set to prevent duplicates
+        const affectedKeyIds = new Set();
         // Aggregate the keys that we can update to send them in a single operation
         const [, keyUpdateSigningKeyId, keyUpdateArgs] = keysToUpdate.reduce((acc, keyId) => {
-            const key = contractState._vm?.authorizedKeys?.[keyId];
-            if (!key || !key.foreignKey)
+            const pkrKey = contractState._vm?.authorizedKeys?.[keyId];
+            if (!pkrKey || !pkrKey.foreignKey)
+                return acc;
+            const activeKeyId = activeForeignKeyIds[pkrKey.foreignKey];
+            const key = contractState._vm.authorizedKeys[activeKeyId];
+            if (affectedKeyIds.has(key.id))
                 return acc;
             const foreignKey = String(key.foreignKey);
             const fkUrl = new URL(foreignKey);
@@ -1691,12 +1715,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 }
                 return acc;
             }
+            else if (fKeyId === key.id) {
+                // Key has already been rotated
+                this.config.reactiveDel(pendingKeyRevocations, keyId);
+                return acc;
+            }
             const [currentRingLevel, currentSigningKeyId, currentKeyArgs] = acc;
             const ringLevel = Math.min(currentRingLevel, key.ringLevel ?? Number.POSITIVE_INFINITY);
             if (ringLevel >= currentRingLevel) {
+                affectedKeyIds.add(key.id);
                 currentKeyArgs.push({
                     name: key.name,
-                    oldKeyId: keyId,
+                    oldKeyId: key.id,
                     id: fKeyId,
                     data: foreignState._vm.authorizedKeys[fKeyId].data
                 });
@@ -1705,9 +1735,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             else if (Number.isFinite(ringLevel)) {
                 const signingKeyId = (0, utils_js_1.findSuitableSecretKeyId)(contractState, [SPMessage_js_1.SPMessage.OP_KEY_UPDATE], ['sig'], ringLevel);
                 if (signingKeyId) {
+                    affectedKeyIds.add(key.id);
                     currentKeyArgs.push({
                         name: key.name,
-                        oldKeyId: keyId,
+                        oldKeyId: key.id,
                         id: fKeyId,
                         data: foreignState._vm.authorizedKeys[fKeyId].data
                     });
@@ -1738,16 +1769,24 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             .filter(([, v]) => v === 'del')
             .map(([id]) => id);
         // Aggregate the keys that we can delete to send them in a single operation
-        const [, keyDelSigningKeyId, keyIdsToDelete] = keysToDelete.reduce((acc, keyId) => {
+        const [, keyDelSigningKeyId, keyIdsToDelete] = keysToDelete.reduce((acc, pkrKeyId) => {
+            const pkrKey = contractState._vm?.authorizedKeys?.[pkrKeyId];
+            if (!pkrKey || !pkrKey.foreignKey)
+                return acc;
+            const keyId = activeForeignKeyIds[pkrKey.foreignKey];
+            if (affectedKeyIds.has(keyId))
+                return acc;
             const [currentRingLevel, currentSigningKeyId, currentKeyIds] = acc;
             const ringLevel = Math.min(currentRingLevel, contractState._vm?.authorizedKeys?.[keyId]?.ringLevel ?? Number.POSITIVE_INFINITY);
             if (ringLevel >= currentRingLevel) {
+                affectedKeyIds.add(keyId);
                 currentKeyIds.push(keyId);
                 return [currentRingLevel, currentSigningKeyId, currentKeyIds];
             }
             else if (Number.isFinite(ringLevel)) {
                 const signingKeyId = (0, utils_js_1.findSuitableSecretKeyId)(contractState, [SPMessage_js_1.SPMessage.OP_KEY_DEL], ['sig'], ringLevel);
                 if (signingKeyId) {
+                    affectedKeyIds.add(keyId);
                     currentKeyIds.push(keyId);
                     return [ringLevel, signingKeyId, currentKeyIds];
                 }
