@@ -280,6 +280,14 @@ const keyRotationHelper = <T>(
   })
 }
 
+/**
+ * Helper function to delete keys from the state and clear related pending revocations.
+ * Handles key rotation scenarios by clearing pending revocations for all keys with the same name.
+ *
+ * @param state - The contract state to modify
+ * @param height - The height at which the keys should be marked as deleted
+ * @param keyIds - Array of key IDs to delete
+ */
 const deleteKeyHelper = (state: ChelContractState, height: number, keyIds: string[]) => {
   const allIdsForNames = Object.values(state._vm.authorizedKeys)
     .reduce((acc, { id, name }) => {
@@ -1776,8 +1784,8 @@ export default sbp('sbp/selectors/register', {
               contractID
             ]).catch((e: unknown) => {
               console.error(
-          `Error at deleteOrRotateRevokedKeys for contractID ${contractID} at OP_KEY_UPDATE with ${hash}`,
-          e
+                `Error at deleteOrRotateRevokedKeys for contractID ${contractID} at OP_KEY_UPDATE with ${hash}`,
+                e
               )
             })
           })
@@ -2249,6 +2257,7 @@ export default sbp('sbp/selectors/register', {
         const pkrKey = contractState._vm?.authorizedKeys?.[keyId]
         if (!pkrKey || !pkrKey.foreignKey) return acc
         const activeKeyId = activeForeignKeyIds[pkrKey.foreignKey]
+        if (!activeKeyId) return acc
         const key = contractState._vm.authorizedKeys[activeKeyId]
         if (affectedKeyIds.has(key.id)) return acc
         const foreignKey = String(key.foreignKey)
@@ -2338,7 +2347,7 @@ export default sbp('sbp/selectors/register', {
         const pkrKey = contractState._vm?.authorizedKeys?.[pkrKeyId]
         if (!pkrKey || !pkrKey.foreignKey) return acc
         const keyId = activeForeignKeyIds[pkrKey.foreignKey]
-        if (affectedKeyIds.has(keyId)) return acc
+        if (!keyId || affectedKeyIds.has(keyId)) return acc
         const [currentRingLevel, currentSigningKeyId, currentKeyIds] = acc
         const ringLevel = Math.min(
           currentRingLevel,

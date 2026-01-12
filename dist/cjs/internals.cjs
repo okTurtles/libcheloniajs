@@ -177,6 +177,14 @@ const keyRotationHelper = (contractID, state, config, updatedKeysMap, requiredPe
         });
     });
 };
+/**
+ * Helper function to delete keys from the state and clear related pending revocations.
+ * Handles key rotation scenarios by clearing pending revocations for all keys with the same name.
+ *
+ * @param state - The contract state to modify
+ * @param height - The height at which the keys should be marked as deleted
+ * @param keyIds - Array of key IDs to delete
+ */
 const deleteKeyHelper = (state, height, keyIds) => {
     const allIdsForNames = Object.values(state._vm.authorizedKeys)
         .reduce((acc, { id, name }) => {
@@ -1744,6 +1752,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             if (!pkrKey || !pkrKey.foreignKey)
                 return acc;
             const activeKeyId = activeForeignKeyIds[pkrKey.foreignKey];
+            if (!activeKeyId)
+                return acc;
             const key = contractState._vm.authorizedKeys[activeKeyId];
             if (affectedKeyIds.has(key.id))
                 return acc;
@@ -1823,7 +1833,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             if (!pkrKey || !pkrKey.foreignKey)
                 return acc;
             const keyId = activeForeignKeyIds[pkrKey.foreignKey];
-            if (affectedKeyIds.has(keyId))
+            if (!keyId || affectedKeyIds.has(keyId))
                 return acc;
             const [currentRingLevel, currentSigningKeyId, currentKeyIds] = acc;
             const ringLevel = Math.min(currentRingLevel, contractState._vm?.authorizedKeys?.[keyId]?.ringLevel ?? Number.POSITIVE_INFINITY);
