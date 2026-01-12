@@ -1322,13 +1322,53 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 const [updatedKeys, updatedMap] = utils_js_1.validateKeyUpdatePermissions.call(self, contractID, signingKey, state, v);
                 const keysToDelete = Object.values(updatedMap);
                 deleteKeyHelper(state, height, keysToDelete);
+                let canMirrorOperationsUpToRingLevel = NaN;
+                let hasOutOfSyncKeys = false;
                 for (const key of updatedKeys) {
                     if (!(0, turtledash_1.has)(state._vm.authorizedKeys, key.id)) {
                         key._notBeforeHeight = height;
                         state._vm.authorizedKeys[key.id] = (0, turtledash_1.cloneDeep)(key);
                     }
+                    // If this is a foreign key, it may be out of sync
+                    if (key.foreignKey != null) {
+                        if (!(key.ringLevel >= canMirrorOperationsUpToRingLevel)) {
+                            const signingKey = (0, utils_js_1.findSuitableSecretKeyId)(state, [SPMessage_js_1.SPMessage.OP_KEY_DEL], ['sig'], key.ringLevel);
+                            if (signingKey) {
+                                canMirrorOperationsUpToRingLevel = key.ringLevel;
+                            }
+                        }
+                        const fkUrl = new URL(key.foreignKey);
+                        const foreignContractID = fkUrl.pathname;
+                        const foreignKeyName = fkUrl.searchParams.get('keyName');
+                        if (!foreignKeyName)
+                            throw new Error('Missing foreign key name');
+                        const foreignState = (0, sbp_1.default)('chelonia/contract/state', foreignContractID);
+                        if (foreignState) {
+                            const fKeyId = (0, utils_js_1.findKeyIdByName)(foreignState, foreignKeyName);
+                            if (!fKeyId) {
+                                // Key was deleted; mark it for deletion
+                                self.config.reactiveSet(state._volatile.pendingKeyRevocations, key.id, 'del');
+                                hasOutOfSyncKeys = true;
+                            }
+                            else if (fKeyId !== key.id) {
+                                // Key still needs to be rotated
+                                self.config.reactiveSet(state._volatile.pendingKeyRevocations, key.id, true);
+                                hasOutOfSyncKeys = true;
+                            }
+                        }
+                    }
                 }
                 utils_js_1.keyAdditionProcessor.call(self, message, hash, updatedKeys, state, contractID, signingKey, internalSideEffectStack);
+                if (Number.isFinite(canMirrorOperationsUpToRingLevel) && hasOutOfSyncKeys) {
+                    internalSideEffectStack?.push(() => {
+                        (0, sbp_1.default)('chelonia/private/queueEvent', contractID, [
+                            'chelonia/private/deleteOrRotateRevokedKeys',
+                            contractID
+                        ]).catch((e) => {
+                            console.error(`Error at deleteOrRotateRevokedKeys for contractID ${contractID} at OP_KEY_UPDATE with ${hash}`, e);
+                        });
+                    });
+                }
                 // Check state._volatile.watch for contracts that should be
                 // mirroring this operation
                 if (Array.isArray(state._volatile?.watch)) {
@@ -1559,9 +1599,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         Object.entries(pendingWatch).forEach(([contractID, keys]) => {
             if (!Array.isArray(keys) ||
                 // Check that the keys exist and haven't been revoked
-                !keys.reduce((acc, [, id]) => {
-                    return acc || (0, turtledash_1.has)(externalContractState._vm.authorizedKeys, id);
-                }, false)) {
+                !keys.some(([, id]) => {
+                    return (0, turtledash_1.has)(externalContractState._vm.authorizedKeys, id);
+                })) {
                 console.info('[chelonia/private/watchForeignKeys]: Skipping as none of the keys to watch exist', {
                     externalContractID,
                     contractID
@@ -1586,11 +1626,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // unnecessarily subscribing to the contract
         if (!Array.isArray(pendingWatch) ||
             // Check that the keys exist and haven't been revoked
-            !pendingWatch.reduce((acc, [, id]) => {
-                return (acc ||
-                    ((0, turtledash_1.has)(externalContractState._vm.authorizedKeys, id) &&
-                        (0, utils_js_1.findKeyIdByName)(externalContractState, externalContractState._vm.authorizedKeys[id].name) != null));
-            }, false)) {
+            !pendingWatch.some(([, id]) => {
+                return ((0, turtledash_1.has)(externalContractState._vm.authorizedKeys, id) &&
+                    (0, utils_js_1.findKeyIdByName)(externalContractState, externalContractState._vm.authorizedKeys[id].name) != null);
+            })) {
             console.info('[chelonia/private/syncContractAndWatchKeys]: Skipping as none of the keys to watch exist', {
                 externalContractID,
                 contractID
