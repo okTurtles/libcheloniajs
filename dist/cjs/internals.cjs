@@ -907,14 +907,24 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     if (key.id && key.meta?.private?.content) {
                         if (!(0, turtledash_1.has)(state._vm, 'sharedKeyIds'))
                             state._vm.sharedKeyIds = [];
-                        if (!state._vm.sharedKeyIds.some((sK) => sK.id === key.id)) {
+                        const sharedKeyId = state._vm.sharedKeyIds.find((sK) => sK.id === key.id);
+                        if (!sharedKeyId) {
                             state._vm.sharedKeyIds.push({
                                 id: key.id,
                                 contractID: v.contractID,
+                                foreignContractIDs: v.foreignContractID ? [[v.foreignContractID, height]] : [],
                                 height,
                                 keyRequestHash: v.keyRequestHash,
                                 keyRequestHeight: v.keyRequestHeight
                             });
+                        }
+                        else if (v.foreignContractID) {
+                            if (!sharedKeyId.foreignContractIDs) {
+                                sharedKeyId.foreignContractIDs = [[v.foreignContractID, height]];
+                            }
+                            else {
+                                sharedKeyId.foreignContractIDs.push([v.foreignContractID, height]);
+                            }
                         }
                     }
                 }

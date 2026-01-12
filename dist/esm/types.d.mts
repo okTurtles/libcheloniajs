@@ -267,6 +267,7 @@ export type ChelContractState = {
             id: string;
             contractID: string;
             height: number;
+            foreignContractIDs?: [string, number][];
             keyRequestHash?: string;
             keyRequestHeight?: number;
         }[];

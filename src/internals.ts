@@ -1187,14 +1187,22 @@ export default sbp('sbp/selectors/register', {
         for (const key of v.keys) {
           if (key.id && key.meta?.private?.content) {
             if (!has(state._vm, 'sharedKeyIds')) state._vm.sharedKeyIds = []
-            if (!state._vm.sharedKeyIds!.some((sK) => sK.id === key.id)) {
- state._vm.sharedKeyIds!.push({
-   id: key.id,
-   contractID: v.contractID,
-   height,
-   keyRequestHash: v.keyRequestHash,
-   keyRequestHeight: v.keyRequestHeight
- })
+            const sharedKeyId = state._vm.sharedKeyIds!.find((sK) => sK.id === key.id)
+            if (!sharedKeyId) {
+              state._vm.sharedKeyIds!.push({
+                id: key.id,
+                contractID: v.contractID,
+                foreignContractIDs: v.foreignContractID ? [[v.foreignContractID, height]] : [],
+                height,
+                keyRequestHash: v.keyRequestHash,
+                keyRequestHeight: v.keyRequestHeight
+              })
+            } else if (v.foreignContractID) {
+              if (!sharedKeyId.foreignContractIDs) {
+                sharedKeyId.foreignContractIDs = [[v.foreignContractID, height]]
+              } else {
+                sharedKeyId.foreignContractIDs.push([v.foreignContractID, height])
+              }
             }
           }
         }
