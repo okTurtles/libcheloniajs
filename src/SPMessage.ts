@@ -91,13 +91,19 @@ export type ProtoSPOpKeyRequest = {
     responseKey: EncryptedData<string>;
   }>;
   request: string;
+  // List of contract IDs that should not respond to this key request.
+  // This allows users to exclude malicious actors from responding.
+  excludeFrom?: string[];
 };
 export type SPOpKeyRequest = ProtoSPOpKeyRequest | EncryptedData<ProtoSPOpKeyRequest>;
-export type ProtoSPOpKeyRequestSeen = {
+// Raw key request seen data without inner signature
+export type RawSPOpKeyRequestSeen = {
   keyRequestHash: string;
   keyShareHash?: string;
   success: boolean;
 };
+// ProtoSPOpKeyRequestSeen supports optional inner signature for attribution
+export type ProtoSPOpKeyRequestSeen = RawSPOpKeyRequestSeen | SignedData<RawSPOpKeyRequestSeen>;
 export type SPOpKeyRequestSeen = ProtoSPOpKeyRequestSeen | EncryptedData<ProtoSPOpKeyRequestSeen>;
 export type SPKeyUpdate = {
   name: string;
@@ -415,7 +421,23 @@ const decryptedAndVerifiedDeserializedMessage = (
     })
   }
 
+  // If the operation is OP_KEY_REQUEST_SEEN, it may be encrypted and/or
+  // contain an inner signature for attribution.
+  // For encrypted messages, inner signatures are handled by encryptedIncomingData.
+  // For non-encrypted messages with inner signatures, we handle them here.
   if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
+    // Check if the message is a non-encrypted signed message
+    if (isRawSignedData(parsedMessage)) {
+      return signedIncomingData<RawSPOpKeyRequestSeen>(
+        contractID,
+        state,
+        parsedMessage as unknown as { _signedData: [string, string, string] },
+        height,
+        headJSON
+      )
+    }
+    // Otherwise, handle as potentially encrypted data
+    // (inner signatures in encrypted data are handled by encryptedIncomingData)
     return maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeen>(
       contractID,
       state,
