@@ -1376,6 +1376,15 @@ export default sbp('sbp/selectors/register', {
       })
       : undefined
   },
+  // Higher level function to automatically retain / release a contract
+  'chelonia/contract/withRetained': async function (contractIDs: string | string[], callback: () => unknown) {
+    await sbp('chelonia/contract/retain', contractIDs, { ephemeral: true })
+    try {
+      return await callback()
+    } finally {
+      await sbp('chelonia/contract/release', contractIDs, { ephemeral: true })
+    }
+  },
   'chelonia/contract/disconnect': async function (
     this: CheloniaContext,
     contractID: string,
@@ -1995,9 +2004,8 @@ export default sbp('sbp/selectors/register', {
     if (!contract) {
       throw new Error('Contract name not found')
     }
-    const rootState = sbp(this.config.stateSelector)
-    try {
-      await sbp('chelonia/contract/retain', contractID, { ephemeral: true })
+    return await sbp('chelonia/contract/withRetained', contractID, async () => {
+      const rootState = sbp(this.config.stateSelector)
       const state = contract.state(contractID)
       const originatingState = originatingContract.state(originatingContractID)
 
@@ -2121,9 +2129,7 @@ export default sbp('sbp/selectors/register', {
         }
       })
       return msg
-    } finally {
-      await sbp('chelonia/contract/release', contractID, { ephemeral: true })
-    }
+    })
   },
   'chelonia/out/keyRequestResponse': async function (
     this: CheloniaContext,
