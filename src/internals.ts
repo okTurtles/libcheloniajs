@@ -1195,11 +1195,14 @@ export default sbp('sbp/selectors/register', {
         for (const key of v.keys) {
           if (key.id && key.meta?.private?.content) {
             if (!has(state._vm, 'sharedKeyIds')) state._vm.sharedKeyIds = []
+            // Set or update sharedKeyIds information
             const sharedKeyId = state._vm.sharedKeyIds!.find((sK) => sK.id === key.id)
             if (!sharedKeyId) {
               state._vm.sharedKeyIds!.push({
                 id: key.id,
+                // Contract ID this key is for
                 contractID: v.contractID,
+                // Contract ID used for encrypting the key
                 foreignContractIDs: v.foreignContractID ? [[v.foreignContractID, height]] : [],
                 height,
                 keyRequestHash: v.keyRequestHash,
@@ -1777,6 +1780,7 @@ export default sbp('sbp/selectors/register', {
           internalSideEffectStack
         )
 
+        // If we're able to rotate foreign keys and we need to, do so
         if (Number.isFinite(canMirrorOperationsUpToRingLevel) && hasOutOfSyncKeys) {
           internalSideEffectStack?.push(() => {
             sbp('chelonia/private/queueEvent', contractID, [
@@ -2235,6 +2239,7 @@ export default sbp('sbp/selectors/register', {
 
     if (!pendingKeyRevocations || Object.keys(pendingKeyRevocations).length === 0) return
 
+    // Map of foreign keys to their ID (URI -> key id)
     const activeForeignKeyIds = Object.fromEntries(
       Object.values(contractState._vm.authorizedKeys)
         .filter(({ foreignKey, _notAfterHeight }) =>
