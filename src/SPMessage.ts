@@ -119,6 +119,7 @@ export type SPOpKeyRequestSeenInnerV2 = |
   EncryptedData<ProtoSPOpKeyRequestSeenInnerV2>;
 export type SPOpKeyRequestSeenV2 = {
   keyRequestHash: string;
+  skipInviteAccounting?: boolean;
   innerData: SPOpKeyRequestSeenInnerV2
 };
 export type SPOpKeyRequestSeen = SPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2;

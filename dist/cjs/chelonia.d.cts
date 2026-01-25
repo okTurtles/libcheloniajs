@@ -117,6 +117,8 @@ export type ChelKeyRequestParams = {
     permissions?: '*' | string[];
     allowedActions?: '*' | string[];
     reference?: string;
+    request?: string;
+    keyRequestResponseId?: string;
     hooks?: {
         prepublishContract?: (msg: SPMessage) => void;
         prepublish?: (msg: SPMessage) => Promise<void>;

@@ -1,6 +1,6 @@
 import { deserializeKey, keyId, verifySignature } from '@chelonia/crypto'
 import sbp, { domainFromSelector } from '@sbp/sbp'
-import { cloneDeep, debounce, delay, has, pick, randomIntFromRange } from 'turtledash'
+import { cloneDeep, debounce, delay, has, randomIntFromRange } from 'turtledash'
 import type {
   ProtoSPOpActionUnencrypted,
   ProtoSPOpKeyRequestSeenInnerV2,
@@ -1515,7 +1515,11 @@ export default sbp('sbp/selectors/register', {
           const pending = state._vm.pendingKeyshares[hash]
           delete state._vm.pendingKeyshares[hash]
 
-          if (state._vm?.invites?.[pending[2]]?.quantity != null) {
+          if (
+            data.encryptionKeyId != null &&
+            !(v as SPOpKeyRequestSeenV2).skipInviteAccounting &&
+            state._vm?.invites?.[pending[2]]?.quantity != null
+          ) {
             if (state._vm.invites[pending[2]].quantity > 0) {
               if (--state._vm.invites[pending[2]].quantity <= 0) {
                 state._vm.invites[pending[2]].status = INVITE_STATUS.USED
@@ -2455,7 +2459,7 @@ export default sbp('sbp/selectors/register', {
     ] = entry as [boolean, number, string, [string, object, number, string]]
     entry.pop()
 
-    const krsEncryption = !!contractState._vm.authorizedKeys?.[signingKeyId]?._private
+    const krsEncryption = keyShareEncryption
 
     // 1. Sync (originating) identity contract
 
@@ -2507,13 +2511,14 @@ export default sbp('sbp/selectors/register', {
         // message) here as this is done from an internal side-effect.
         sbp('chelonia/storeSecretKeys', new Secret([{ key: deserializedResponseKey }]))
 
-        let keys: Record<string, string> | undefined
+        let keyIds: string[] | undefined
+        let skipInviteAccounting: boolean | undefined
 
         if (request == null || request === '*') {
           if (contractState._vm?.invites?.[inviteId]?.expires != null) {
             if (contractState._vm.invites[inviteId].expires < Date.now()) {
               console.error(
-                'Ignoring OP_KEY_REQUEST because it expired at ' +
+                '[respondToKeyRequest] Ignoring OP_KEY_REQUEST because it expired at ' +
                 contractState._vm.invites[inviteId].expires +
                 ': ' +
                 originatingContractID
@@ -2522,19 +2527,16 @@ export default sbp('sbp/selectors/register', {
             }
           }
 
-          keys = pick(
-            state.secretKeys,
-            Object.entries(contractState._vm.authorizedKeys)
-              .filter(([, key]) => !!key.meta?.private?.shareable)
-              .map(([kId]) => kId)
-          )
+          keyIds = Object.entries(contractState._vm.authorizedKeys)
+            .filter(([, key]) => !!key.meta?.private?.shareable)
+            .map(([kId]) => kId)
         } else {
           const contractName = state.contracts[contractID]?.type || contractState._vm?.type
           if (!contractName) return
           const hook = `${manifestHash}/${contractName}/keyRequest`
           if (sbp('sbp/selectors/fn', hook)) {
             try {
-              keys = await sbp(hook, {
+              const result = await sbp(hook, {
                 contractID,
                 request,
                 state: contractState,
@@ -2544,8 +2546,10 @@ export default sbp('sbp/selectors/register', {
                 originatingContractID,
                 originatingContractHeight
               })
+              keyIds = result.keyIds
+              skipInviteAccounting = result.skipInviteAccounting
             } catch (e) {
-              console.info('respondToAllKeyRequests: no keys to share (hook errored)', {
+              console.info('[respondToKeyRequest] no keys to share (hook errored)', {
                 contractID,
                 originatingContractID,
                 inviteId,
@@ -2555,7 +2559,7 @@ export default sbp('sbp/selectors/register', {
               return
             }
           } else {
-            console.info('respondToAllKeyRequests: no keys to share (hook not defined)', {
+            console.info('[respondToKeyRequest] no keys to share (hook not defined)', {
               contractID,
               originatingContractID,
               inviteId,
@@ -2565,23 +2569,40 @@ export default sbp('sbp/selectors/register', {
           }
         }
 
-        if (!keys || Object.keys(keys).length === 0) {
-          console.info('respondToAllKeyRequests: no keys to share (empty key list)', {
+        if (!Array.isArray(keyIds)) {
+          console.info('[respondToKeyRequest] no keys to share', {
             contractID,
             originatingContractID,
             inviteId,
             request
           })
           return
+        } else if (keyIds.length === 0) {
+          return [null, skipInviteAccounting]
+        }
+
+        for (let i = 0; i < keyIds.length; i++) {
+          if (!state.secretKeys[keyIds[i]]) {
+            console.info('[respondToKeyRequest] missing key id', {
+              contractID,
+              originatingContractID,
+              inviteId,
+              request,
+              keyId: keyIds[i]
+            })
+            return
+          }
         }
 
         const keySharePayload = {
           contractID,
-          keys: Object.entries(keys).map(([keyId, key]) => ({
+          keys: keyIds.map((keyId) => ({
             id: keyId,
             meta: {
               private: {
-                content: encryptedOutgoingData(originatingContractID, encryptionKeyId, key),
+                content: encryptedOutgoingData(
+                  originatingContractID, encryptionKeyId, state.secretKeys[keyId]
+                ),
                 shareable: true
               }
             }
@@ -2596,12 +2617,13 @@ export default sbp('sbp/selectors/register', {
           return
         }
 
-        return keySharePayload
+        return [keySharePayload, skipInviteAccounting] as [typeof keySharePayload, boolean]
       })
-      .then((keySharePayload) => {
-        if (instance !== this._instance || !keySharePayload) return
+      .then(async (value) => {
+        if (instance !== this._instance || !value) return
+        const [keySharePayload, skipInviteAccounting] = value
 
-        return sbp('chelonia/out/keyShare', {
+        const msg = keySharePayload && await sbp('chelonia/out/keyShare', {
           contractID: originatingContractID,
           contractName: originatingContractName,
           data: keyShareEncryption
@@ -2616,82 +2638,83 @@ export default sbp('sbp/selectors/register', {
             )
             : keySharePayload,
           signingKeyId: responseKeyId
-        }).then((msg: SPMessage) => {
-          if (instance !== this._instance) return
+        })
 
-          // 4(i). Remove originating contract and update current contract with information
-          const innerPayload = { keyShareHash: msg.hash(), success: true }
-          const connectionKeyPayload = {
-            contractID: originatingContractID,
-            keys: [
+        if (instance !== this._instance) return
+
+        // 4(i). Remove originating contract and update current contract with information
+        const innerPayload = { keyShareHash: msg?.hash(), success: true }
+        const connectionKeyPayload = {
+          contractID: originatingContractID,
+          keys: [
+            {
+              id: responseKeyId,
+              meta: {
+                private: {
+                  content: encryptedOutgoingData(
+                    contractID,
+                    findSuitablePublicKeyIds(
+                      contractState,
+                      [SPMessage.OP_KEY_REQUEST_SEEN],
+                      ['enc']
+                    )?.[0] || '',
+                    responseKey
+                  ),
+                  shareable: true
+                }
+              }
+            }
+          ]
+        }
+
+        // This is safe to do without await because it's sending an action
+        // If we had await it could deadlock when retrying to send the event
+        sbp('chelonia/out/atomic', {
+          contractID,
+          contractName,
+          signingKeyId,
+          data: [
+            [
+              'chelonia/out/keyRequestResponse',
               {
-                id: responseKeyId,
-                meta: {
-                  private: {
-                    content: encryptedOutgoingData(
+                data: {
+                  keyRequestHash: hash,
+                  skipInviteAccounting,
+                  innerData: krsEncryption
+                    ? encryptedOutgoingData(
                       contractID,
                       findSuitablePublicKeyIds(
                         contractState,
                         [SPMessage.OP_KEY_REQUEST_SEEN],
                         ['enc']
                       )?.[0] || '',
-                      responseKey
-                    ),
-                    shareable: true
-                  }
+                      innerPayload
+                    )
+                    : innerPayload
                 }
               }
+            ],
+            [
+              // Upon successful key share, we want to share deserializedResponseKey
+              // with ourselves
+              'chelonia/out/keyShare',
+              {
+                data: keyShareEncryption
+                  ? encryptedOutgoingData(
+                    contractID,
+                    findSuitablePublicKeyIds(
+                      contractState,
+                      [SPMessage.OP_KEY_SHARE],
+                      ['enc']
+                    )?.[0] || '',
+                    connectionKeyPayload
+                  )
+                  : connectionKeyPayload
+              }
             ]
-          }
-
-          // This is safe to do without await because it's sending an action
-          // If we had await it could deadlock when retrying to send the event
-          sbp('chelonia/out/atomic', {
-            contractID,
-            contractName,
-            signingKeyId,
-            data: [
-              [
-                'chelonia/out/keyRequestResponse',
-                {
-                  data: {
-                    keyRequestHash: hash,
-                    innerData: krsEncryption
-                      ? encryptedOutgoingData(
-                        contractID,
-                        findSuitablePublicKeyIds(
-                          contractState,
-                          [SPMessage.OP_KEY_REQUEST_SEEN],
-                          ['enc']
-                        )?.[0] || '',
-                        innerPayload
-                      )
-                      : innerPayload
-                  }
-                }
-              ],
-              [
-                // Upon successful key share, we want to share deserializedResponseKey
-                // with ourselves
-                'chelonia/out/keyShare',
-                {
-                  data: keyShareEncryption
-                    ? encryptedOutgoingData(
-                      contractID,
-                      findSuitablePublicKeyIds(
-                        contractState,
-                        [SPMessage.OP_KEY_SHARE],
-                        ['enc']
-                      )?.[0] || '',
-                      connectionKeyPayload
-                    )
-                    : connectionKeyPayload
-                }
-              ]
-            ]
-          }).catch((e: unknown) => {
-            console.error('Error at respondToKeyRequest while sending keyRequestResponse', e)
-          })
+          ]
+        }).catch((e: unknown) => {
+          console.error('Error at respondToKeyRequest while sending keyRequestResponse', e)
         })
       })
       .catch((e: unknown) => {
