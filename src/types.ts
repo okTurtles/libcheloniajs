@@ -278,7 +278,7 @@ export type ChelContractState = {
     pendingWatch?: Record<string, [fkName: string, fkId: string][]>;
     keyshares?: Record<
       string,
-      { success: boolean; contractID: string; height: number; hash?: string }
+      { success?: boolean; contractID: string; height: number; hash?: string }
     >;
     sharedKeyIds?: {
       id: string;
@@ -296,6 +296,14 @@ export type ChelContractState = {
           height: number,
           signingKeyId: string,
           [string, { _signedData: [string, string, string] }, number, string],
+        ]
+      | [
+          isPrivate: boolean,
+          height: number,
+          signingKeyId: string,
+          [string, { _signedData: [string, string, string] }, number, string],
+          request: string,
+          manifest: string,
         ]
     >;
     props?: Record<string, JSONType>;
@@ -327,6 +335,7 @@ export type ChelRootState = {
       missingDecryptionKeyIds?: string[];
     }
   >;
+  secretKeys: Record<string, string>;
 };
 
 export type Response = {

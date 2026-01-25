@@ -69,12 +69,31 @@ export type ProtoSPOpKeyRequest = {
     request: string;
 };
 export type SPOpKeyRequest = ProtoSPOpKeyRequest | EncryptedData<ProtoSPOpKeyRequest>;
-export type ProtoSPOpKeyRequestSeen = {
+export type ProtoSPOpKeyReRequest = {
+    contractID: string;
+    height: number;
+    replyWith: SignedData<{
+        encryptionKeyId: string;
+        responseKey: EncryptedData<string>;
+    }>;
+};
+export type SPOpKeyReRequest = ProtoSPOpKeyReRequest | EncryptedData<ProtoSPOpKeyReRequest>;
+export type ProtoSPOpKeyRequestSeenV1 = {
     keyRequestHash: string;
     keyShareHash?: string;
     success: boolean;
 };
-export type SPOpKeyRequestSeen = ProtoSPOpKeyRequestSeen | EncryptedData<ProtoSPOpKeyRequestSeen>;
+export type SPOpKeyRequestSeenV1 = ProtoSPOpKeyRequestSeenV1 | EncryptedData<ProtoSPOpKeyRequestSeenV1>;
+export type ProtoSPOpKeyRequestSeenInnerV2 = {
+    keyShareHash?: string;
+    success: boolean;
+};
+export type SPOpKeyRequestSeenInnerV2 = ProtoSPOpKeyRequestSeenInnerV2 | EncryptedData<ProtoSPOpKeyRequestSeenInnerV2>;
+export type SPOpKeyRequestSeenV2 = {
+    keyRequestHash: string;
+    innerData: SPOpKeyRequestSeenInnerV2;
+};
+export type SPOpKeyRequestSeen = SPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2;
 export type SPKeyUpdate = {
     name: string;
     id?: string;
@@ -95,7 +114,7 @@ export type SPKeyUpdate = {
     };
 };
 export type SPOpKeyUpdate = (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[];
-export type SPOpType = 'c' | 'a' | 'ae' | 'au' | 'ka' | 'kd' | 'ku' | 'pu' | 'ps' | 'pd' | 'ks' | 'kr' | 'krs';
+export type SPOpType = 'c' | 'a' | 'ae' | 'au' | 'ka' | 'kd' | 'ku' | 'pu' | 'ps' | 'pd' | 'ks' | 'kr' | 'krr' | 'krs';
 type ProtoSPOpValue = SPOpContract | SPOpActionEncrypted | SPOpActionUnencrypted | SPOpKeyAdd | SPOpKeyDel | SPOpPropSet | SPOpKeyShare | SPOpKeyRequest | SPOpKeyRequestSeen | SPOpKeyUpdate;
 export type ProtoSPOpMap = {
     c: SPOpContract;
@@ -166,6 +185,7 @@ export declare class SPMessage {
     static OP_ATOMIC: "a";
     static OP_KEY_SHARE: "ks";
     static OP_KEY_REQUEST: "kr";
+    static OP_KEY_RE_REQUEST: "krr";
     static OP_KEY_REQUEST_SEEN: "krs";
     static createV1_0({ contractID, previousHEAD, previousKeyOp, height, op, manifest }: {
         contractID: string | null;

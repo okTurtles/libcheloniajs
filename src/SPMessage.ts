@@ -102,12 +102,26 @@ export type ProtoSPOpKeyReRequest = {
   }>;
 };
 export type SPOpKeyReRequest = ProtoSPOpKeyReRequest | EncryptedData<ProtoSPOpKeyReRequest>;
-export type ProtoSPOpKeyRequestSeen = {
+export type ProtoSPOpKeyRequestSeenV1 = {
   keyRequestHash: string;
   keyShareHash?: string;
   success: boolean;
 };
-export type SPOpKeyRequestSeen = ProtoSPOpKeyRequestSeen | EncryptedData<ProtoSPOpKeyRequestSeen>;
+export type SPOpKeyRequestSeenV1 = |
+  ProtoSPOpKeyRequestSeenV1 |
+  EncryptedData<ProtoSPOpKeyRequestSeenV1>;
+export type ProtoSPOpKeyRequestSeenInnerV2 = {
+  keyShareHash?: string;
+  success: boolean;
+};
+export type SPOpKeyRequestSeenInnerV2 = |
+  ProtoSPOpKeyRequestSeenInnerV2 |
+  EncryptedData<ProtoSPOpKeyRequestSeenInnerV2>;
+export type SPOpKeyRequestSeenV2 = {
+  keyRequestHash: string;
+  innerData: SPOpKeyRequestSeenInnerV2
+};
+export type SPOpKeyRequestSeen = SPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2;
 export type SPKeyUpdate = {
   name: string;
   id?: string;
@@ -153,7 +167,7 @@ type ProtoSPOpValue =
   | SPOpPropSet
   | SPOpKeyShare
   | SPOpKeyRequest
-  | SPOpKeyReRequest
+//  | SPOpKeyReRequest
   | SPOpKeyRequestSeen
   | SPOpKeyUpdate;
 export type ProtoSPOpMap = {
@@ -168,7 +182,7 @@ export type ProtoSPOpMap = {
   pd: never;
   ks: SPOpKeyShare;
   kr: SPOpKeyRequest;
-  krr: SPOpKeyReRequest;
+//  krr: SPOpKeyReRequest;
   krs: SPOpKeyRequestSeen;
 };
 export type SPOpAtomic = {
@@ -428,15 +442,29 @@ const decryptedAndVerifiedDeserializedMessage = (
   }
 
   if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
-    return maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeen>(
+    return maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2>(
       contractID,
       state,
-      parsedMessage as unknown as ProtoSPOpKeyRequestSeen,
+      parsedMessage as unknown as ProtoSPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2,
       height,
       additionalKeys,
       headJSON,
-      undefined
-    )
+      (data) => {
+        if (data === parsedMessage) {
+          const dataV2 = data as SPOpKeyRequestSeenV2
+          if (dataV2.innerData) {
+            dataV2.innerData = maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeenInnerV2>(
+              contractID,
+              state,
+              dataV2.innerData as unknown as ProtoSPOpKeyRequestSeenInnerV2,
+              height,
+              additionalKeys,
+              headJSON
+            )
+          }
+        }
+      }
+    ) as SPOpKeyRequestSeen
   }
 
   // If the operation is OP_ATOMIC, call this function recursively

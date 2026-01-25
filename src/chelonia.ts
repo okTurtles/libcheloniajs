@@ -2033,13 +2033,15 @@ export default sbp('sbp/selectors/register', {
       const originatingState = originatingContract.state(originatingContractID)
 
       const havePendingKeyRequest =
-        Object.values(originatingState._vm.authorizedKeys).findIndex((k: ChelContractKey) => {
+        Object.values(originatingState._vm.authorizedKeys).some((k: ChelContractKey) => {
           return (
             k._notAfterHeight == null &&
             k.meta?.keyRequest?.contractID === contractID &&
-            state?._volatile?.pendingKeyRequests?.some((pkr) => pkr.name === k.name)
+            state?._volatile?.pendingKeyRequests?.some(
+              (pkr) => pkr.name === k.name && pkr.reference === reference
+            )
           )
-        }) !== -1
+        })
 
       // If there's a pending key request for this contract, return
       if (havePendingKeyRequest) {
@@ -2188,13 +2190,15 @@ export default sbp('sbp/selectors/register', {
       const originatingState = originatingContract.state(originatingContractID)
 
       const havePendingKeyRequest =
-        Object.values(originatingState._vm.authorizedKeys).findIndex((k: ChelContractKey) => {
+        Object.values(originatingState._vm.authorizedKeys).some((k: ChelContractKey) => {
           return (
             k._notAfterHeight == null &&
             k.meta?.keyRequest?.contractID === contractID &&
-            state?._volatile?.pendingKeyRequests?.some((pkr) => pkr.name === k.name)
+            state?._volatile?.pendingKeyRequests?.some(
+              (pkr) => pkr.name === k.name && pkr.reference === reference
+            )
           )
-        }) !== -1
+        })
 
       // If there's a pending key request for this contract, return
       if (havePendingKeyRequest) {
@@ -2227,9 +2231,9 @@ export default sbp('sbp/selectors/register', {
           signedOutgoingData<SPOpValue>(
             contractID,
             params.signingKeyId,
-            encryptKeyRequestMetadata
+            (encryptKeyRequestMetadata
               ? (encryptedOutgoingData(contractID, innerEncryptionKeyId, payload) as SPOpValue)
-              : payload,
+              : payload) as unknown as SPOpValue,
             this.transientSecretKeys
           )
         ],

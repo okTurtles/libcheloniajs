@@ -99,7 +99,7 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
     }
     // If the operation is OP_KEY_REQUEST, the payload might be EncryptedData
     // The ReplyWith attribute is SignedData
-    if (op === SPMessage.OP_KEY_REQUEST) {
+    if (op === SPMessage.OP_KEY_REQUEST || op === SPMessage.OP_KEY_RE_REQUEST) {
         return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, message, height, additionalKeys, headJSON, (msg) => {
             msg.replyWith = (0, signedData_js_1.signedIncomingData)(msg.contractID, undefined, msg.replyWith, msg.height, headJSON);
         });
@@ -120,7 +120,14 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
         });
     }
     if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
-        return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, parsedMessage, height, additionalKeys, headJSON, undefined);
+        return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, parsedMessage, height, additionalKeys, headJSON, (data) => {
+            if (data === parsedMessage) {
+                const dataV2 = data;
+                if (dataV2.innerData) {
+                    dataV2.innerData = (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, dataV2.innerData, height, additionalKeys, headJSON);
+                }
+            }
+        });
     }
     // If the operation is OP_ATOMIC, call this function recursively
     if (op === SPMessage.OP_ATOMIC) {
@@ -154,6 +161,7 @@ class SPMessage {
     static OP_ATOMIC = 'a'; // atomic op
     static OP_KEY_SHARE = 'ks'; // key share
     static OP_KEY_REQUEST = 'kr'; // key request
+    static OP_KEY_RE_REQUEST = 'krr'; // key re-request
     static OP_KEY_REQUEST_SEEN = 'krs'; // key request response
     // eslint-disable-next-line camelcase
     static createV1_0({ contractID, previousHEAD = null, previousKeyOp = null, 

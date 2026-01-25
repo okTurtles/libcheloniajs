@@ -964,6 +964,16 @@ export default sbp('sbp/selectors/register', {
             })
             : undefined;
     },
+    // Higher level function to automatically retain / release a contract
+    'chelonia/contract/withRetained': async function (contractIDs, callback) {
+        await sbp('chelonia/contract/retain', contractIDs, { ephemeral: true });
+        try {
+            return await callback();
+        }
+        finally {
+            await sbp('chelonia/contract/release', contractIDs, { ephemeral: true });
+        }
+    },
     'chelonia/contract/disconnect': async function (contractID, contractIDToDisconnect) {
         const state = sbp(this.config.stateSelector);
         const contractState = state[contractID];
@@ -1418,16 +1428,15 @@ export default sbp('sbp/selectors/register', {
         if (!contract) {
             throw new Error('Contract name not found');
         }
-        const rootState = sbp(this.config.stateSelector);
-        try {
-            await sbp('chelonia/contract/retain', contractID, { ephemeral: true });
+        return await sbp('chelonia/contract/withRetained', contractID, async () => {
+            const rootState = sbp(this.config.stateSelector);
             const state = contract.state(contractID);
             const originatingState = originatingContract.state(originatingContractID);
-            const havePendingKeyRequest = Object.values(originatingState._vm.authorizedKeys).findIndex((k) => {
+            const havePendingKeyRequest = Object.values(originatingState._vm.authorizedKeys).some((k) => {
                 return (k._notAfterHeight == null &&
                     k.meta?.keyRequest?.contractID === contractID &&
-                    state?._volatile?.pendingKeyRequests?.some((pkr) => pkr.name === k.name));
-            }) !== -1;
+                    state?._volatile?.pendingKeyRequests?.some((pkr) => pkr.name === k.name && pkr.reference === reference));
+            });
             // If there's a pending key request for this contract, return
             if (havePendingKeyRequest) {
                 return;
@@ -1506,10 +1515,56 @@ export default sbp('sbp/selectors/register', {
                 }
             });
             return msg;
+        });
+    },
+    'chelonia/out/keyReRequest': async function (params) {
+        const { originatingContractID, originatingContractName, contractID, contractName, hooks, publishOptions, innerSigningKeyId, encryptionKeyId, innerEncryptionKeyId, encryptKeyRequestMetadata, reference } = params;
+        // `encryptKeyRequestMetadata` is optional because it could be desirable
+        // sometimes to allow anyone to audit OP_KEY_REQUEST and OP_KEY_SHARE
+        // operations. If `encryptKeyRequestMetadata` were always true, it would
+        // be harder in these situations to see interactions between two contracts.
+        const manifestHash = this.config.contracts.manifests[contractName];
+        const originatingManifestHash = this.config.contracts.manifests[originatingContractName];
+        const contract = this.manifestToContract[manifestHash]?.contract;
+        const originatingContract = this.manifestToContract[originatingManifestHash]?.contract;
+        if (!contract) {
+            throw new Error('Contract name not found');
         }
-        finally {
-            await sbp('chelonia/contract/release', contractID, { ephemeral: true });
-        }
+        return await sbp('chelonia/contract/withRetained', contractID, async () => {
+            const rootState = sbp(this.config.stateSelector);
+            const state = contract.state(contractID);
+            const originatingState = originatingContract.state(originatingContractID);
+            const havePendingKeyRequest = Object.values(originatingState._vm.authorizedKeys).some((k) => {
+                return (k._notAfterHeight == null &&
+                    k.meta?.keyRequest?.contractID === contractID &&
+                    state?._volatile?.pendingKeyRequests?.some((pkr) => pkr.name === k.name && pkr.reference === reference));
+            });
+            // If there's a pending key request for this contract, return
+            if (havePendingKeyRequest) {
+                return;
+            }
+            const keyRequestReplyKeyS = ''; // TODO
+            const payload = {
+                contractID: originatingContractID,
+                height: rootState.contracts[originatingContractID].height,
+                replyWith: signedOutgoingData(originatingContractID, innerSigningKeyId, {
+                    encryptionKeyId,
+                    responseKey: encryptedOutgoingData(contractID, innerEncryptionKeyId, keyRequestReplyKeyS)
+                }, this.transientSecretKeys)
+            };
+            let msg = SPMessage.createV1_0({
+                contractID,
+                op: [
+                    SPMessage.OP_KEY_RE_REQUEST,
+                    signedOutgoingData(contractID, params.signingKeyId, (encryptKeyRequestMetadata
+                        ? encryptedOutgoingData(contractID, innerEncryptionKeyId, payload)
+                        : payload), this.transientSecretKeys)
+                ],
+                manifest: manifestHash
+            });
+            msg = await sbp('chelonia/private/out/publishEvent', msg, publishOptions, hooks);
+            return msg;
+        });
     },
     'chelonia/out/keyRequestResponse': async function (params) {
         const { atomic, contractID, contractName, data, hooks, publishOptions } = params;
