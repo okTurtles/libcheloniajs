@@ -93,15 +93,6 @@ export type ProtoSPOpKeyRequest = {
   request: string;
 };
 export type SPOpKeyRequest = ProtoSPOpKeyRequest | EncryptedData<ProtoSPOpKeyRequest>;
-export type ProtoSPOpKeyReRequest = {
-  contractID: string;
-  height: number;
-  replyWith: SignedData<{
-    encryptionKeyId: string;
-    responseKey: EncryptedData<string>;
-  }>;
-};
-export type SPOpKeyReRequest = ProtoSPOpKeyReRequest | EncryptedData<ProtoSPOpKeyReRequest>;
 export type ProtoSPOpKeyRequestSeenV1 = {
   keyRequestHash: string;
   keyShareHash?: string;
@@ -157,7 +148,6 @@ export type SPOpType =
   | 'pd'
   | 'ks'
   | 'kr'
-  | 'krr'
   | 'krs';
 type ProtoSPOpValue =
   | SPOpContract
@@ -168,7 +158,6 @@ type ProtoSPOpValue =
   | SPOpPropSet
   | SPOpKeyShare
   | SPOpKeyRequest
-//  | SPOpKeyReRequest
   | SPOpKeyRequestSeen
   | SPOpKeyUpdate;
 export type ProtoSPOpMap = {
@@ -183,7 +172,6 @@ export type ProtoSPOpMap = {
   pd: never;
   ks: SPOpKeyShare;
   kr: SPOpKeyRequest;
-//  krr: SPOpKeyReRequest;
   krs: SPOpKeyRequestSeen;
 };
 export type SPOpAtomic = {
@@ -390,7 +378,7 @@ const decryptedAndVerifiedDeserializedMessage = (
 
   // If the operation is OP_KEY_REQUEST, the payload might be EncryptedData
   // The ReplyWith attribute is SignedData
-  if (op === SPMessage.OP_KEY_REQUEST || op === SPMessage.OP_KEY_RE_REQUEST) {
+  if (op === SPMessage.OP_KEY_REQUEST) {
     return maybeEncryptedIncomingData<ProtoSPOpKeyRequest>(
       contractID,
       state,
@@ -510,7 +498,6 @@ export class SPMessage {
   static OP_ATOMIC = 'a' as const // atomic op
   static OP_KEY_SHARE = 'ks' as const // key share
   static OP_KEY_REQUEST = 'kr' as const // key request
-  static OP_KEY_RE_REQUEST = 'krr' as const // key re-request
   static OP_KEY_REQUEST_SEEN = 'krs' as const // key request response
 
   // eslint-disable-next-line camelcase

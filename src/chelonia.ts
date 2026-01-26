@@ -23,7 +23,6 @@ import type {
   SPOpKeyDel,
   SPOpKeyRequest,
   SPOpKeyRequestSeen,
-  SPOpKeyReRequest,
   SPOpKeyShare,
   SPOpKeyUpdate,
   SPOpValue
@@ -216,28 +215,6 @@ export type ChelKeyRequestParams = {
   reference?: string;
   request?: string;
   keyRequestResponseId?: string;
-  hooks?: {
-    prepublishContract?: (msg: SPMessage) => void;
-    prepublish?: (msg: SPMessage) => Promise<void>;
-    postpublish?: (msg: SPMessage) => Promise<void>;
-  };
-  publishOptions?: PublishOptions;
-  atomic: boolean;
-};
-
-export type ChelKeyReRequestParams = {
-  originatingContractID: string;
-  originatingContractName: string;
-  contractName: string;
-  contractID: string;
-  signingKeyId: string;
-  innerSigningKeyId: string;
-  encryptionKeyId: string;
-  innerEncryptionKeyId: string;
-  encryptKeyRequestMetadata?: boolean;
-  // Arbitrary data the requester can use as reference (e.g., the hash
-  // of the user-initiated action that triggered this key request)
-  reference?: string;
   hooks?: {
     prepublishContract?: (msg: SPMessage) => void;
     prepublish?: (msg: SPMessage) => Promise<void>;
@@ -2184,93 +2161,6 @@ export default sbp('sbp/selectors/register', {
           )
         }
       })
-      return msg
-    })
-  },
-  'chelonia/out/keyReRequest': async function (
-    this: CheloniaContext,
-    params: ChelKeyRequestParams
-  ): Promise<SPMessage | null | undefined> {
-    const {
-      originatingContractID,
-      originatingContractName,
-      contractID,
-      contractName,
-      hooks,
-      publishOptions,
-      innerSigningKeyId,
-      encryptionKeyId,
-      innerEncryptionKeyId,
-      encryptKeyRequestMetadata,
-      reference
-    } = params
-    // `encryptKeyRequestMetadata` is optional because it could be desirable
-    // sometimes to allow anyone to audit OP_KEY_REQUEST and OP_KEY_SHARE
-    // operations. If `encryptKeyRequestMetadata` were always true, it would
-    // be harder in these situations to see interactions between two contracts.
-    const manifestHash = this.config.contracts.manifests[contractName]
-    const originatingManifestHash = this.config.contracts.manifests[originatingContractName]
-    const contract = this.manifestToContract[manifestHash]?.contract
-    const originatingContract = this.manifestToContract[originatingManifestHash]?.contract
-    if (!contract) {
-      throw new Error('Contract name not found')
-    }
-    return await sbp('chelonia/contract/withRetained', contractID, async () => {
-      const rootState = sbp(this.config.stateSelector)
-      const state = contract.state(contractID)
-      const originatingState = originatingContract.state(originatingContractID)
-
-      const havePendingKeyRequest =
-        Object.values(originatingState._vm.authorizedKeys).some((k: ChelContractKey) => {
-          return (
-            k._notAfterHeight == null &&
-            k.meta?.keyRequest?.contractID === contractID &&
-            state?._volatile?.pendingKeyRequests?.some(
-              (pkr) => pkr.name === k.name && pkr.reference === reference
-            )
-          )
-        })
-
-      // If there's a pending key request for this contract, return
-      if (havePendingKeyRequest) {
-        return
-      }
-
-      const keyRequestReplyKeyS = '' // TODO
-
-      const payload = {
-        contractID: originatingContractID,
-        height: rootState.contracts[originatingContractID].height,
-        replyWith: signedOutgoingData(
-          originatingContractID,
-          innerSigningKeyId,
-          {
-            encryptionKeyId,
-            responseKey: encryptedOutgoingData(
-              contractID,
-              innerEncryptionKeyId,
-              keyRequestReplyKeyS
-            )
-          },
-          this.transientSecretKeys
-        )
-      } as SPOpKeyReRequest
-      let msg = SPMessage.createV1_0({
-        contractID,
-        op: [
-          SPMessage.OP_KEY_RE_REQUEST,
-          signedOutgoingData<SPOpValue>(
-            contractID,
-            params.signingKeyId,
-            (encryptKeyRequestMetadata
-              ? (encryptedOutgoingData(contractID, innerEncryptionKeyId, payload) as SPOpValue)
-              : payload) as unknown as SPOpValue,
-            this.transientSecretKeys
-          )
-        ],
-        manifest: manifestHash
-      })
-      msg = await sbp('chelonia/private/out/publishEvent', msg, publishOptions, hooks)
       return msg
     })
   },

@@ -127,25 +127,6 @@ export type ChelKeyRequestParams = {
     publishOptions?: PublishOptions;
     atomic: boolean;
 };
-export type ChelKeyReRequestParams = {
-    originatingContractID: string;
-    originatingContractName: string;
-    contractName: string;
-    contractID: string;
-    signingKeyId: string;
-    innerSigningKeyId: string;
-    encryptionKeyId: string;
-    innerEncryptionKeyId: string;
-    encryptKeyRequestMetadata?: boolean;
-    reference?: string;
-    hooks?: {
-        prepublishContract?: (msg: SPMessage) => void;
-        prepublish?: (msg: SPMessage) => Promise<void>;
-        postpublish?: (msg: SPMessage) => Promise<void>;
-    };
-    publishOptions?: PublishOptions;
-    atomic: boolean;
-};
 export type ChelKeyRequestResponseParams = {
     contractName: string;
     contractID: string;

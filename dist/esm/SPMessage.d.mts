@@ -69,15 +69,6 @@ export type ProtoSPOpKeyRequest = {
     request: string;
 };
 export type SPOpKeyRequest = ProtoSPOpKeyRequest | EncryptedData<ProtoSPOpKeyRequest>;
-export type ProtoSPOpKeyReRequest = {
-    contractID: string;
-    height: number;
-    replyWith: SignedData<{
-        encryptionKeyId: string;
-        responseKey: EncryptedData<string>;
-    }>;
-};
-export type SPOpKeyReRequest = ProtoSPOpKeyReRequest | EncryptedData<ProtoSPOpKeyReRequest>;
 export type ProtoSPOpKeyRequestSeenV1 = {
     keyRequestHash: string;
     keyShareHash?: string;
@@ -115,7 +106,7 @@ export type SPKeyUpdate = {
     };
 };
 export type SPOpKeyUpdate = (SPKeyUpdate | EncryptedData<SPKeyUpdate>)[];
-export type SPOpType = 'c' | 'a' | 'ae' | 'au' | 'ka' | 'kd' | 'ku' | 'pu' | 'ps' | 'pd' | 'ks' | 'kr' | 'krr' | 'krs';
+export type SPOpType = 'c' | 'a' | 'ae' | 'au' | 'ka' | 'kd' | 'ku' | 'pu' | 'ps' | 'pd' | 'ks' | 'kr' | 'krs';
 type ProtoSPOpValue = SPOpContract | SPOpActionEncrypted | SPOpActionUnencrypted | SPOpKeyAdd | SPOpKeyDel | SPOpPropSet | SPOpKeyShare | SPOpKeyRequest | SPOpKeyRequestSeen | SPOpKeyUpdate;
 export type ProtoSPOpMap = {
     c: SPOpContract;
@@ -186,7 +177,6 @@ export declare class SPMessage {
     static OP_ATOMIC: "a";
     static OP_KEY_SHARE: "ks";
     static OP_KEY_REQUEST: "kr";
-    static OP_KEY_RE_REQUEST: "krr";
     static OP_KEY_REQUEST_SEEN: "krs";
     static createV1_0({ contractID, previousHEAD, previousKeyOp, height, op, manifest }: {
         contractID: string | null;
