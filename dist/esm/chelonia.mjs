@@ -1449,6 +1449,8 @@ export default sbp('sbp/selectors/register', {
                     state?._volatile?.pendingKeyRequests?.some((pkr) => pkr.name === k.name && pkr.reference === reference));
             });
             // If there's a pending key request for this contract, return
+            // TODO: This won't work if re-using a request key using keyRequestResponseId
+            // because `_volatile.pendingKeyRequests` only gets set on `OP_KEY_ADD`.
             if (havePendingKeyRequest) {
                 return;
             }
