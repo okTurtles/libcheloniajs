@@ -971,11 +971,11 @@ export function eventsAfter (
                     if (height !== sinceHeight || (sinceHash && sinceHash !== hash)) {
                       if (height === sinceHeight && sinceHash && sinceHash !== hash) {
                         throw new ChelErrorForkedChain(
-                          `Forked chain: hash(${hash}) !== since(${sinceHash})`
+                          `Forked chain ${contractID}: hash(${hash}) !== since(${sinceHash})`
                         )
                       } else {
                         throw new Error(
-                          `Unexpected data: hash(${hash}) !== since(${sinceHash || ''}) or height(${height}) !== since(${sinceHeight})`
+                           `Unexpected data in ${contractID}: hash(${hash}) !== since(${sinceHash || ''}) or height(${height}) !== since(${sinceHeight})`
                         )
                       }
                     }
