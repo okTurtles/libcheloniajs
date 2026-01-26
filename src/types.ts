@@ -62,6 +62,7 @@ export type CheloniaConfig = {
   // Similarly, future events will not be reingested and will throw
   // with ChelErrorDBBadPreviousHEAD
   strictOrdering: boolean;
+  saveMessageMetadata: boolean;
   connectionOptions: {
     maxRetries: number;
     reconnectOnTimeout: boolean;

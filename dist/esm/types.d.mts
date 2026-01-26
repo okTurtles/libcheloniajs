@@ -43,6 +43,7 @@ export type CheloniaConfig = {
     skipSideEffects: boolean;
     strictProcessing: boolean;
     strictOrdering: boolean;
+    saveMessageMetadata: boolean;
     connectionOptions: {
         maxRetries: number;
         reconnectOnTimeout: boolean;

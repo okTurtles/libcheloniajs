@@ -79,6 +79,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // Similarly, future events will not be reingested and will throw
             // with ChelErrorDBBadPreviousHEAD
             strictOrdering: false,
+            saveMessageMetadata: false,
             connectionOptions: {
                 maxRetries: Infinity, // See https://github.com/okTurtles/group-income/issues/1183
                 reconnectOnTimeout: true // can be enabled since we are not doing auth via web sockets
@@ -432,9 +433,17 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const keyId = (0, utils_js_1.findSuitableSecretKeyId)(contractIDOrState, permissions, purposes, ringLevel, allowedActions);
         return keyId;
     },
-    'chelonia/contract/setPendingKeyRevocation': function (contractID, names) {
-        const rootState = (0, sbp_1.default)(this.config.stateSelector);
-        const state = rootState[contractID];
+    'chelonia/contract/setPendingKeyRevocation': function (contractIDOrState, names, keyIds) {
+        let state;
+        let contractID;
+        if (typeof contractIDOrState === 'string') {
+            const rootState = (0, sbp_1.default)(this.config.stateSelector);
+            contractID = contractIDOrState;
+            state = rootState[contractIDOrState];
+        }
+        else {
+            state = contractIDOrState;
+        }
         if (!state._volatile)
             this.config.reactiveSet(state, '_volatile', Object.create(null));
         if (!state._volatile.pendingKeyRevocations) {
@@ -443,6 +452,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         for (const name of names) {
             const keyId = (0, utils_js_1.findKeyIdByName)(state, name);
             if (keyId) {
+                if (keyIds && !keyIds.includes(keyId))
+                    continue;
                 this.config.reactiveSet(state._volatile.pendingKeyRevocations, keyId, true);
             }
             else {

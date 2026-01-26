@@ -5,4 +5,5 @@ export declare const SERVER: {
     skipDecryptionAttempts: boolean;
     strictProcessing: boolean;
     strictOrdering: boolean;
+    saveMessageMetadata: boolean;
 };

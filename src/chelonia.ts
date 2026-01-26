@@ -335,6 +335,7 @@ export default sbp('sbp/selectors/register', {
       // Similarly, future events will not be reingested and will throw
       // with ChelErrorDBBadPreviousHEAD
       strictOrdering: false,
+      saveMessageMetadata: false,
       connectionOptions: {
         maxRetries: Infinity, // See https://github.com/okTurtles/group-income/issues/1183
         reconnectOnTimeout: true // can be enabled since we are not doing auth via web sockets
@@ -746,21 +747,30 @@ export default sbp('sbp/selectors/register', {
   },
   'chelonia/contract/setPendingKeyRevocation': function (
     this: CheloniaContext,
-    contractID: string,
-    names: string[]
+    contractIDOrState: string,
+    names: string[],
+    keyIds?: string[]
   ) {
-    const rootState = sbp(this.config.stateSelector)
-    const state = rootState[contractID]
+    let state: ChelContractState
+    let contractID: string | undefined
+    if (typeof contractIDOrState === 'string') {
+      const rootState = sbp(this.config.stateSelector)
+      contractID = contractIDOrState
+      state = rootState[contractIDOrState]
+    } else {
+      state = contractIDOrState
+    }
 
     if (!state._volatile) this.config.reactiveSet(state, '_volatile', Object.create(null))
-    if (!state._volatile.pendingKeyRevocations) {
-      this.config.reactiveSet(state._volatile, 'pendingKeyRevocations', Object.create(null))
+    if (!state._volatile!.pendingKeyRevocations) {
+      this.config.reactiveSet(state._volatile!, 'pendingKeyRevocations', Object.create(null))
     }
 
     for (const name of names) {
       const keyId = findKeyIdByName(state, name)
       if (keyId) {
-        this.config.reactiveSet(state._volatile.pendingKeyRevocations, keyId, true)
+        if (keyIds && !keyIds.includes(keyId)) continue
+        this.config.reactiveSet(state._volatile!.pendingKeyRevocations!, keyId, true)
       } else {
         console.warn('[setPendingKeyRevocation] Unable to find keyId for name', {
           contractID,
