@@ -1516,8 +1516,12 @@ export default sbp('sbp/selectors/register', {
           delete state._vm.pendingKeyshares[hash]
 
           if (
-            data.encryptionKeyId != null &&
-            !(v as SPOpKeyRequestSeenV2).skipInviteAccounting &&
+            (
+              // If it's V1
+              !(data.encryptionKeyId == null && has(v, 'innerData')) ||
+              // Or V2 and skipInviteAccounting is false
+              !(v as SPOpKeyRequestSeenV2).skipInviteAccounting
+            ) &&
             state._vm?.invites?.[pending[2]]?.quantity != null
           ) {
             if (state._vm.invites[pending[2]].quantity > 0) {

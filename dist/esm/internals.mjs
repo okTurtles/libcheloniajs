@@ -1147,8 +1147,11 @@ export default sbp('sbp/selectors/register', {
                     const hash = v.keyRequestHash;
                     const pending = state._vm.pendingKeyshares[hash];
                     delete state._vm.pendingKeyshares[hash];
-                    if (data.encryptionKeyId != null &&
-                        !v.skipInviteAccounting &&
+                    if ((
+                    // If it's V1
+                    !(data.encryptionKeyId == null && has(v, 'innerData')) ||
+                        // Or V2 and skipInviteAccounting is false
+                        !v.skipInviteAccounting) &&
                         state._vm?.invites?.[pending[2]]?.quantity != null) {
                         if (state._vm.invites[pending[2]].quantity > 0) {
                             if (--state._vm.invites[pending[2]].quantity <= 0) {
