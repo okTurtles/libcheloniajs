@@ -1159,8 +1159,8 @@ export default sbp('sbp/selectors/register', {
                             }
                         }
                         else {
-                            logEvtError(message, 'Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
-                                pending[4]?.[0] || '(unknown)' + ' with key ID ' + pending[2]);
+                            logEvtError(message, `Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: 
+                ${pending[4]?.[0] || '(unknown)'} with key ID ${pending[2]}`);
                             return;
                         }
                     }
