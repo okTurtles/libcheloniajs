@@ -723,10 +723,10 @@ export function eventsAfter(contractID, { sinceHeight, limit, sinceHash, stream 
                                         const height = SPMessage.deserializeHEAD(currentEvent).head.height;
                                         if (height !== sinceHeight || (sinceHash && sinceHash !== hash)) {
                                             if (height === sinceHeight && sinceHash && sinceHash !== hash) {
-                                                throw new ChelErrorForkedChain(`Forked chain: hash(${hash}) !== since(${sinceHash})`);
+                                                throw new ChelErrorForkedChain(`Forked chain ${contractID}: hash(${hash}) !== since(${sinceHash})`);
                                             }
                                             else {
-                                                throw new Error(`Unexpected data: hash(${hash}) !== since(${sinceHash || ''}) or height(${height}) !== since(${sinceHeight})`);
+                                                throw new Error(`Unexpected data in ${contractID}: hash(${hash}) !== since(${sinceHash || ''}) or height(${height}) !== since(${sinceHeight})`);
                                             }
                                         }
                                     }
