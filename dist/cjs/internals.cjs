@@ -757,19 +757,32 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (!contractName)
             return;
         const manifestHash = message.manifest();
-        const hook = `${manifestHash}/${contractName}/hook/${message.opType()}`;
-        // Check if a hook is defined
-        if ((0, sbp_1.default)('sbp/selectors/fn', hook)) {
-            // And call it
-            try {
-                // Note: Errors here should not stop processing, since running these
-                // hooks is optionl (for example, they aren't run on the server)
-                (0, sbp_1.default)(hook, { contractID, message, state });
+        const callHook = (op, atomic) => {
+            const hook = `${manifestHash}/${contractName}/_postOpHook/${op}`;
+            // Check if a hook is defined
+            if ((0, sbp_1.default)('sbp/selectors/fn', hook)) {
+                // And call it
+                try {
+                    // Note: Errors here should not stop processing, since running these
+                    // hooks is optionl (for example, they aren't run on the server)
+                    (0, sbp_1.default)(hook, { contractID, message, state, atomic });
+                }
+                catch (e) {
+                    console.error(`[${hook}] hook error for message ${message.hash()} on contract ${contractID}:`, e);
+                }
             }
-            catch (e) {
-                console.error(`[${hook}] hook error for message ${message.hash()} on contract ${contractID}:`, e);
+        };
+        if (message.opType() === SPMessage_js_1.SPMessage.OP_ATOMIC) {
+            const opsSet = new Set();
+            for (const [op] of message.opValue()) {
+                // Only call hook once per opcode
+                if (opsSet.has(op))
+                    continue;
+                opsSet.add(op);
+                callHook(op);
             }
         }
+        callHook(message.opType());
     },
     'chelonia/private/in/processMessage': async function (message, state, internalSideEffectStack, contractName) {
         const [opT, opV] = message.op();
@@ -1956,7 +1969,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 const contractName = state.contracts[contractID]?.type || contractState._vm?.type;
                 if (!contractName)
                     return;
-                const hook = `${manifestHash}/${contractName}/keyRequest`;
+                const hook = `${manifestHash}/${contractName}/_responseOptionsForKeyRequest`;
                 if ((0, sbp_1.default)('sbp/selectors/fn', hook)) {
                     try {
                         const result = await (0, sbp_1.default)(hook, {
