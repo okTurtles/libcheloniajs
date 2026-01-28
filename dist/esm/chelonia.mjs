@@ -166,6 +166,8 @@ export default sbp('sbp/selectors/register', {
         // process of syncing for the first time. After sync completes for the
         // first time, they are removed from pending and added to subscriptionSet
         this.pending = [];
+        const rootState = sbp(this.config.stateSelector);
+        rootState.secretKeys = Object.create(null);
     },
     'chelonia/config': function () {
         return {
@@ -239,6 +241,7 @@ export default sbp('sbp/selectors/register', {
         // Remove all contracts, including all contracts from pending
         reactiveClearObject(rootState, this.config.reactiveDel);
         this.config.reactiveSet(rootState, 'contracts', Object.create(null));
+        this.config.reactiveSet(rootState, 'secretKeys', Object.create(null));
         clearObject(this.ephemeralReferenceCount);
         this.pending.splice(0);
         clearObject(this.currentSyncs);
