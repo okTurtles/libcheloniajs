@@ -1981,8 +1981,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                             originatingContractID,
                             originatingContractHeight
                         });
-                        keyIds = result.keyIds;
-                        skipInviteAccounting = result.skipInviteAccounting;
+                        if (result) {
+                            keyIds = result.keyIds;
+                            skipInviteAccounting = result.skipInviteAccounting;
+                        }
                     }
                     catch (e) {
                         console.info('[respondToKeyRequest] no keys to share (hook errored)', {
