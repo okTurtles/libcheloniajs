@@ -2473,7 +2473,6 @@ export default sbp('sbp/selectors/register', {
       inviteId,
       [originatingContractID, rv, originatingContractHeight, headJSON]
     ] = entry as [boolean, number, string, [string, object, number, string]]
-    entry.pop()
 
     const krsEncryption = keyShareEncryption
 
@@ -2549,10 +2548,10 @@ export default sbp('sbp/selectors/register', {
         } else {
           const contractName = state.contracts[contractID]?.type || contractState._vm?.type
           if (!contractName) return
-          const hook = `${manifestHash}/${contractName}/_responseOptionsForKeyRequest`
-          if (sbp('sbp/selectors/fn', hook)) {
+          const method = `${manifestHash}/${contractName}/_responseOptionsForKeyRequest`
+          if (sbp('sbp/selectors/fn', method)) {
             try {
-              const result = await sbp(hook, {
+              const result = await sbp(method, {
                 contractID,
                 request,
                 state: contractState,

@@ -1886,7 +1886,6 @@ export default sbp('sbp/selectors/register', {
             return;
         }
         const [keyShareEncryption, height, inviteId, [originatingContractID, rv, originatingContractHeight, headJSON]] = entry;
-        entry.pop();
         const krsEncryption = keyShareEncryption;
         // 1. Sync (originating) identity contract
         await sbp('chelonia/private/in/syncContract', originatingContractID);
@@ -1934,10 +1933,10 @@ export default sbp('sbp/selectors/register', {
                 const contractName = state.contracts[contractID]?.type || contractState._vm?.type;
                 if (!contractName)
                     return;
-                const hook = `${manifestHash}/${contractName}/_responseOptionsForKeyRequest`;
-                if (sbp('sbp/selectors/fn', hook)) {
+                const method = `${manifestHash}/${contractName}/_responseOptionsForKeyRequest`;
+                if (sbp('sbp/selectors/fn', method)) {
                     try {
-                        const result = await sbp(hook, {
+                        const result = await sbp(method, {
                             contractID,
                             request,
                             state: contractState,
