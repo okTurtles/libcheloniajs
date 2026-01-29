@@ -62,6 +62,7 @@ export type CheloniaConfig = {
   // Similarly, future events will not be reingested and will throw
   // with ChelErrorDBBadPreviousHEAD
   strictOrdering: boolean;
+  saveMessageMetadata: boolean;
   connectionOptions: {
     maxRetries: number;
     reconnectOnTimeout: boolean;
@@ -278,12 +279,13 @@ export type ChelContractState = {
     pendingWatch?: Record<string, [fkName: string, fkId: string][]>;
     keyshares?: Record<
       string,
-      { success: boolean; contractID: string; height: number; hash?: string }
+      { success?: boolean; contractID: string; height: number; hash?: string }
     >;
     sharedKeyIds?: {
       id: string;
       contractID: string;
       height: number;
+      foreignContractIDs?: [string, number][];
       keyRequestHash?: string;
       keyRequestHeight?: number;
     }[];
@@ -295,6 +297,14 @@ export type ChelContractState = {
           height: number,
           signingKeyId: string,
           [string, { _signedData: [string, string, string] }, number, string],
+        ]
+      | [
+          isPrivate: boolean,
+          height: number,
+          signingKeyId: string,
+          [string, { _signedData: [string, string, string] }, number, string],
+          request: string,
+          manifest: string,
         ]
     >;
     props?: Record<string, JSONType>;
@@ -326,6 +336,7 @@ export type ChelRootState = {
       missingDecryptionKeyIds?: string[];
     }
   >;
+  secretKeys: Record<string, string>;
 };
 
 export type Response = {

@@ -120,7 +120,14 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
         });
     }
     if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
-        return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, parsedMessage, height, additionalKeys, headJSON, undefined);
+        return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, parsedMessage, height, additionalKeys, headJSON, (data) => {
+            if (data === parsedMessage) {
+                const dataV2 = data;
+                if (dataV2.innerData) {
+                    dataV2.innerData = (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, dataV2.innerData, height, additionalKeys, headJSON);
+                }
+            }
+        });
     }
     // If the operation is OP_ATOMIC, call this function recursively
     if (op === SPMessage.OP_ATOMIC) {

@@ -135,7 +135,8 @@ export default sbp('sbp/selectors/register', {
 
     return JSON.parse(entryMetaJson)
   },
-  'chelonia/db/setEntryMeta': async (contractID: string, height: number, entryMeta: object) => {
+  async 'chelonia/db/setEntryMeta' (this: CheloniaContext, contractID: string, height: number, entryMeta: object) {
+    if (!this.config.saveMessageMetadata) return
     const entryMetaJson = JSON.stringify(entryMeta)
     await sbp('chelonia.db/set', `_private_hidx=${contractID}#${height}`, entryMetaJson)
   },

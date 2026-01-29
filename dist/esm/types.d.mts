@@ -43,6 +43,7 @@ export type CheloniaConfig = {
     skipSideEffects: boolean;
     strictProcessing: boolean;
     strictOrdering: boolean;
+    saveMessageMetadata: boolean;
     connectionOptions: {
         maxRetries: number;
         reconnectOnTimeout: boolean;
@@ -258,7 +259,7 @@ export type ChelContractState = {
         type: string;
         pendingWatch?: Record<string, [fkName: string, fkId: string][]>;
         keyshares?: Record<string, {
-            success: boolean;
+            success?: boolean;
             contractID: string;
             height: number;
             hash?: string;
@@ -267,6 +268,7 @@ export type ChelContractState = {
             id: string;
             contractID: string;
             height: number;
+            foreignContractIDs?: [string, number][];
             keyRequestHash?: string;
             keyRequestHeight?: number;
         }[];
@@ -282,6 +284,20 @@ export type ChelContractState = {
                 number,
                 string
             ]
+        ] | [
+            isPrivate: boolean,
+            height: number,
+            signingKeyId: string,
+            [
+                string,
+                {
+                    _signedData: [string, string, string];
+                },
+                number,
+                string
+            ],
+            request: string,
+            manifest: string
         ]>;
         props?: Record<string, JSONType>;
     };
@@ -308,6 +324,7 @@ export type ChelRootState = {
         previousKeyOp: string;
         missingDecryptionKeyIds?: string[];
     }>;
+    secretKeys: Record<string, string>;
 };
 export type Response = {
     type: ResType;

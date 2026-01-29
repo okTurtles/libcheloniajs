@@ -69,12 +69,23 @@ export type ProtoSPOpKeyRequest = {
     request: string;
 };
 export type SPOpKeyRequest = ProtoSPOpKeyRequest | EncryptedData<ProtoSPOpKeyRequest>;
-export type ProtoSPOpKeyRequestSeen = {
+export type ProtoSPOpKeyRequestSeenV1 = {
     keyRequestHash: string;
     keyShareHash?: string;
     success: boolean;
 };
-export type SPOpKeyRequestSeen = ProtoSPOpKeyRequestSeen | EncryptedData<ProtoSPOpKeyRequestSeen>;
+export type SPOpKeyRequestSeenV1 = ProtoSPOpKeyRequestSeenV1 | EncryptedData<ProtoSPOpKeyRequestSeenV1>;
+export type ProtoSPOpKeyRequestSeenInnerV2 = {
+    keyShareHash?: string;
+    success: boolean;
+};
+export type SPOpKeyRequestSeenInnerV2 = ProtoSPOpKeyRequestSeenInnerV2 | EncryptedData<ProtoSPOpKeyRequestSeenInnerV2>;
+export type SPOpKeyRequestSeenV2 = {
+    keyRequestHash: string;
+    skipInviteAccounting?: boolean;
+    innerData: SPOpKeyRequestSeenInnerV2;
+};
+export type SPOpKeyRequestSeen = SPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2;
 export type SPKeyUpdate = {
     name: string;
     id?: string;

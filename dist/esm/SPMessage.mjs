@@ -117,7 +117,14 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
         });
     }
     if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
-        return maybeEncryptedIncomingData(contractID, state, parsedMessage, height, additionalKeys, headJSON, undefined);
+        return maybeEncryptedIncomingData(contractID, state, parsedMessage, height, additionalKeys, headJSON, (data) => {
+            if (data === parsedMessage) {
+                const dataV2 = data;
+                if (dataV2.innerData) {
+                    dataV2.innerData = maybeEncryptedIncomingData(contractID, state, dataV2.innerData, height, additionalKeys, headJSON);
+                }
+            }
+        });
     }
     // If the operation is OP_ATOMIC, call this function recursively
     if (op === SPMessage.OP_ATOMIC) {
