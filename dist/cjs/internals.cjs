@@ -779,7 +779,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 if (opsSet.has(op))
                     continue;
                 opsSet.add(op);
-                callHook(op);
+                callHook(op, true);
             }
         }
         callHook(message.opType());

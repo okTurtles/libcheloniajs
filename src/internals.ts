@@ -1006,7 +1006,7 @@ export default sbp('sbp/selectors/register', {
         // Only call hook once per opcode
         if (opsSet.has(op)) continue
         opsSet.add(op)
-        callHook(op)
+        callHook(op, true)
       }
     }
     callHook(message.opType())

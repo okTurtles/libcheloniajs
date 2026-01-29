@@ -744,7 +744,7 @@ export default sbp('sbp/selectors/register', {
                 if (opsSet.has(op))
                     continue;
                 opsSet.add(op);
-                callHook(op);
+                callHook(op, true);
             }
         }
         callHook(message.opType());
