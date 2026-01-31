@@ -1328,6 +1328,15 @@ export default sbp('sbp/selectors/register', {
                         key._notBeforeHeight = height;
                         state._vm.authorizedKeys[key.id] = cloneDeep(key);
                     }
+                    else {
+                        state._vm.authorizedKeys[key.id] = {
+                            ...state._vm.authorizedKeys[key.id],
+                            ...(key.purpose ? { purpose: key.purpose } : {}),
+                            ...(key.permissions ? { permissions: key.permissions } : {}),
+                            ...(key.allowedActions ? { allowedActions: key.allowedActions } : {}),
+                            ...(key.meta ? { meta: key.meta } : {})
+                        };
+                    }
                     // If this is a foreign key, it may be out of sync
                     if (key.foreignKey != null) {
                         if (!(key.ringLevel >= canMirrorOperationsUpToRingLevel)) {
