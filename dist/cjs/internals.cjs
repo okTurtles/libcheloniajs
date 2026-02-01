@@ -459,7 +459,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.manifestToContract[manifestHash] = {
             slim: contractInfo === body.contractSlim,
             info: contractInfo,
-            contract: this.defContract
+            contract: this.defContract,
+            name: contractName
         };
     },
     // Warning: avoid using this unless you know what you're doing. Prefer using /remove.
@@ -752,11 +753,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     'chelonia/private/operationHook': function (contractID, message, state) {
         if (this.config.skipActionProcessing)
             return;
-        const rootState = (0, sbp_1.default)('chelonia/rootState');
-        const contractName = rootState.contracts[contractID]?.type || state._vm?.type;
+        const manifestHash = message.manifest();
+        const contractName = this.manifestToContract[manifestHash]?.name;
         if (!contractName)
             return;
-        const manifestHash = message.manifest();
         const callHook = (op, atomic) => {
             const hook = `${manifestHash}/${contractName}/_postOpHook/${op}`;
             // Check if a hook is defined
@@ -1208,7 +1208,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         }
                         else {
                             (0, utils_js_1.logEvtError)(message, `Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: 
-                ${pending[4]?.[0] || '(unknown)'} with key ID ${pending[2]}`);
+                ${pending[3]?.[0] || '(unknown)'} with key ID ${pending[2]}`);
                             return;
                         }
                     }
@@ -1973,8 +1973,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     .filter(([, key]) => !!key.meta?.private?.shareable)
                     .map(([kId]) => kId);
             }
-            else {
-                const contractName = state.contracts[contractID]?.type || contractState._vm?.type;
+            else if (manifestHash) {
+                const contractName = this.manifestToContract[manifestHash]?.name;
                 if (!contractName)
                     return;
                 const method = `${manifestHash}/${contractName}/_responseOptionsForKeyRequest`;

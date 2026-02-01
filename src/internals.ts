@@ -46,7 +46,7 @@ import {
   EVENT_PUBLISHING_ERROR
 } from './events.js'
 import { multicodes } from './functions.js'
-import { isSignedData, signedIncomingData } from './signedData.js'
+import { isSignedData, type RawSignedData, signedIncomingData } from './signedData.js'
 import {
   ChelContractKey,
   ChelContractManifest,
@@ -631,7 +631,8 @@ export default sbp('sbp/selectors/register', {
     this.manifestToContract[manifestHash] = {
       slim: contractInfo === body.contractSlim,
       info: contractInfo,
-      contract: this.defContract
+      contract: this.defContract,
+      name: contractName
     }
   },
   // Warning: avoid using this unless you know what you're doing. Prefer using /remove.
@@ -979,10 +980,9 @@ export default sbp('sbp/selectors/register', {
     state: ChelContractState
   ) {
     if (this.config.skipActionProcessing) return
-    const rootState = sbp('chelonia/rootState')
-    const contractName = rootState.contracts[contractID]?.type || state._vm?.type
-    if (!contractName) return
     const manifestHash = message.manifest()
+    const contractName = this.manifestToContract[manifestHash]?.name
+    if (!contractName) return
     const callHook = (op: string, atomic?: boolean) => {
       const hook = `${manifestHash}/${contractName}/_postOpHook/${op}`
       // Check if a hook is defined
@@ -1544,7 +1544,7 @@ export default sbp('sbp/selectors/register', {
               logEvtError(
                 message,
                 `Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: 
-                ${pending[4]?.[0] || '(unknown)'} with key ID ${pending[2]}`
+                ${pending[3]?.[0] || '(unknown)'} with key ID ${pending[2]}`
               )
               return
             }
@@ -2496,7 +2496,7 @@ export default sbp('sbp/selectors/register', {
     const v = signedIncomingData<{ encryptionKeyId: string; responseKey: [string, string] }>(
       originatingContractID,
       originatingState,
-      rv as unknown as { _signedData: [string, string, string] },
+      rv as unknown as RawSignedData,
       originatingContractHeight,
       headJSON
     ).valueOf()
@@ -2553,8 +2553,8 @@ export default sbp('sbp/selectors/register', {
           keyIds = Object.entries(contractState._vm.authorizedKeys)
             .filter(([, key]) => !!key.meta?.private?.shareable)
             .map(([kId]) => kId)
-        } else {
-          const contractName = state.contracts[contractID]?.type || contractState._vm?.type
+        } else if (manifestHash) {
+          const contractName = this.manifestToContract[manifestHash]?.name
           if (!contractName) return
           const method = `${manifestHash}/${contractName}/_responseOptionsForKeyRequest`
           if (sbp('sbp/selectors/fn', method)) {

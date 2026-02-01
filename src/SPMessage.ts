@@ -15,7 +15,7 @@ import {
   unwrapMaybeEncryptedData
 } from './encryptedData.js'
 import { createCID, multicodes } from './functions.js'
-import type { SignedData } from './signedData.js'
+import type { RawSignedData, SignedData } from './signedData.js'
 import {
   isRawSignedData,
   isSignedData,
@@ -390,7 +390,7 @@ const decryptedAndVerifiedDeserializedMessage = (
         msg.replyWith = signedIncomingData(
           msg.contractID,
           undefined,
-          msg.replyWith as unknown as { _signedData: [string, string, string] },
+          msg.replyWith as unknown as RawSignedData,
           msg.height,
           headJSON
         )

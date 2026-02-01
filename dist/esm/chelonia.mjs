@@ -167,7 +167,7 @@ export default sbp('sbp/selectors/register', {
         // first time, they are removed from pending and added to subscriptionSet
         this.pending = [];
         const rootState = sbp(this.config.stateSelector);
-        rootState.secretKeys = Object.create(null);
+        rootState.secretKeys = rootState.secretKeys || Object.create(null);
     },
     'chelonia/config': function () {
         return {
@@ -1460,6 +1460,9 @@ export default sbp('sbp/selectors/register', {
             let keyRequestReplyKeyS;
             let keyAddOp;
             if (keyRequestResponseId) {
+                // Use an exisiting key (i.e., avoid sending OP_KEY_ADD)
+                // TODO: This option currently breaks `pendingKeyRequests` due to this
+                // being set on `OP_KEY_ADD`.
                 if (!originatingState._vm.authorizedKeys[keyRequestResponseId] ||
                     originatingState._vm.authorizedKeys[keyRequestResponseId]._notAfterHeight != null) {
                     throw new Error(`Contract ID ${originatingContractID} is missing key or it has expired: ${keyRequestResponseId}`);

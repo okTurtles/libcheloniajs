@@ -58,6 +58,7 @@ import './internals.js'
 import type { PublishOptions } from './internals.js'
 import {
   isSignedData,
+  type RawSignedData,
   signedIncomingData,
   signedOutgoingData,
   signedOutgoingDataWithRawKey
@@ -405,7 +406,7 @@ export default sbp('sbp/selectors/register', {
     // first time, they are removed from pending and added to subscriptionSet
     this.pending = []
     const rootState = sbp(this.config.stateSelector)
-    rootState.secretKeys = Object.create(null)
+    rootState.secretKeys = rootState.secretKeys || Object.create(null)
   },
   'chelonia/config': function (this: CheloniaContext) {
     return {
@@ -822,10 +823,7 @@ export default sbp('sbp/selectors/register', {
                 return [
                   k,
                   (msg: {
-                    data?: {
-                      height: string;
-                      _signedData: [string, string, string];
-                    };
+                    data?: RawSignedData<{ height: string }>;
                     channelID: string;
                   }) => {
                     if (!msg.channelID) {
@@ -2048,6 +2046,9 @@ export default sbp('sbp/selectors/register', {
       let keyAddOp: () => Promise<void>
 
       if (keyRequestResponseId) {
+        // Use an exisiting key (i.e., avoid sending OP_KEY_ADD)
+        // TODO: This option currently breaks `pendingKeyRequests` due to this
+        // being set on `OP_KEY_ADD`.
         if (
           !originatingState._vm.authorizedKeys[keyRequestResponseId] ||
           originatingState._vm.authorizedKeys[keyRequestResponseId]._notAfterHeight != null
@@ -2486,7 +2487,7 @@ export default sbp('sbp/selectors/register', {
       meta
     }: {
       contractID: string;
-      serializedData: { height: string; _signedData: [string, string, string] };
+      serializedData: RawSignedData<{ height: string }>;
       meta?: string | null | undefined;
     }
   ) {
@@ -2548,7 +2549,7 @@ function parseEncryptedOrUnencryptedMessage<T> (
     meta
   }: {
     contractID: string;
-    serializedData: { height: string; _signedData: [string, string, string] };
+    serializedData: RawSignedData<{ height: string }>;
     meta?: string | null | undefined;
   }
 ): ParsedEncryptedOrUnencryptedMessage<T> {

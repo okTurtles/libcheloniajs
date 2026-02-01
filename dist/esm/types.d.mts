@@ -3,6 +3,7 @@ import type sbp from '@sbp/sbp';
 import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.mjs';
 import type { EncryptedData } from './encryptedData.mjs';
 import type { PubSubClient } from './pubsub/index.mjs';
+import type { SignedDataContext } from './signedData.mjs';
 export type JSONType = null | string | number | boolean | JSONObject | JSONArray;
 export interface JSONObject {
     [x: string]: JSONType;
@@ -156,6 +157,7 @@ export type CheloniaContext = {
         slim: boolean;
         info: string;
         contract: CheloniaContractCtx;
+        name: string;
     }>;
     whitelistedActions: Record<string, true>;
     currentSyncs: Record<string, {
@@ -276,26 +278,12 @@ export type ChelContractState = {
             isPrivate: boolean,
             height: number,
             signingKeyId: string,
-            [
-                string,
-                {
-                    _signedData: [string, string, string];
-                },
-                number,
-                string
-            ]
+            SignedDataContext
         ] | [
             isPrivate: boolean,
             height: number,
             signingKeyId: string,
-            [
-                string,
-                {
-                    _signedData: [string, string, string];
-                },
-                number,
-                string
-            ],
+            SignedDataContext,
             request: string,
             manifest: string
         ]>;
