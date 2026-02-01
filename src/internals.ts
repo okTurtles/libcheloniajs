@@ -1457,10 +1457,43 @@ export default sbp('sbp/selectors/register', {
         const v = data?.data || {
           contractID: '(private)',
           replyWith: { context: undefined },
-          request: '*'
+          request: '(private)'
         }
 
         const originatingContractID = v.contractID
+
+        // We can only do these early checks for '*' requests, since accounting
+        // happens when OP_KEY_REQUEST_SEEN is observed
+        if (
+          v.request === '*' &&
+          state._vm?.invites?.[signingKeyId]
+        ) {
+          if (
+            state._vm.invites[signingKeyId].quantity != null &&
+            state._vm.invites[signingKeyId].quantity
+          ) {
+            logEvtError(
+              message,
+              'Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
+                originatingContractID
+            )
+            return
+          }
+
+          if (
+            state._vm.invites[signingKeyId].expires != null &&
+            state._vm.invites[signingKeyId].expires < Date.now()
+          ) {
+            logEvtError(
+              message,
+              'Ignoring OP_KEY_REQUEST because it expired at ' +
+                state._vm.invites[signingKeyId].expires +
+                ': ' +
+                originatingContractID
+            )
+            return
+          }
+        }
 
         // If skipping processing or if the message is outgoing, there isn't
         // anything else to do
@@ -1536,8 +1569,8 @@ export default sbp('sbp/selectors/register', {
             ) &&
             state._vm?.invites?.[pending[2]]?.quantity != null
           ) {
-            if (state._vm.invites[pending[2]].quantity > 0) {
-              if (--state._vm.invites[pending[2]].quantity <= 0) {
+            if (state._vm.invites[pending[2]].quantity! > 0) {
+              if (--state._vm.invites[pending[2]].quantity! <= 0) {
                 state._vm.invites[pending[2]].status = INVITE_STATUS.USED
               }
             } else {
@@ -2441,15 +2474,13 @@ export default sbp('sbp/selectors/register', {
         return undefined
       }
 
-      const [, , , [originatingContractID], request, manifest] = entry
+      const [, , , [originatingContractID]] = entry
 
       return sbp('chelonia/private/queueEvent', originatingContractID, [
         'chelonia/private/respondToKeyRequest',
         contractID,
         signingKeyId,
-        hash,
-        request,
-        manifest
+        hash
       ]).catch((e: unknown) => {
         console.error(
           `respondToAllKeyRequests: Error responding to key request ${hash} from ${originatingContractID} to ${contractID}`,
@@ -2462,9 +2493,7 @@ export default sbp('sbp/selectors/register', {
     this: CheloniaContext,
     contractID: string,
     signingKeyId: string,
-    hash: string,
-    request?: string,
-    manifestHash?: string
+    hash: string
   ) {
     const state = sbp(this.config.stateSelector) as ChelRootState
     const contractState = state[contractID]
@@ -2479,8 +2508,10 @@ export default sbp('sbp/selectors/register', {
       keyShareEncryption,
       height,
       inviteId,
-      [originatingContractID, rv, originatingContractHeight, headJSON]
-    ] = entry as [boolean, number, string, [string, object, number, string]]
+      [originatingContractID, rv, originatingContractHeight, headJSON],
+      request,
+      manifestHash
+    ] = entry
 
     const krsEncryption = keyShareEncryption
 

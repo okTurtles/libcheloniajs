@@ -252,9 +252,9 @@ export type ChelContractState = {
         authorizedKeys: Record<string, ChelContractKey>;
         invites?: Record<string, {
             status: string;
-            initialQuantity: number;
-            quantity: number;
-            expires: number;
+            initialQuantity?: number;
+            quantity?: number;
+            expires?: number;
             inviteSecret: string;
             responses: string[];
         }>;

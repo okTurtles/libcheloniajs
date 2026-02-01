@@ -270,9 +270,9 @@ export type ChelContractState = {
       string,
       {
         status: string;
-        initialQuantity: number;
-        quantity: number;
-        expires: number;
+        initialQuantity?: number;
+        quantity?: number;
+        expires?: number;
         inviteSecret: string;
         responses: string[];
       }

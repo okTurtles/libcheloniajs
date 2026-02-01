@@ -1140,9 +1140,28 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 const v = data?.data || {
                     contractID: '(private)',
                     replyWith: { context: undefined },
-                    request: '*'
+                    request: '(private)'
                 };
                 const originatingContractID = v.contractID;
+                // We can only do these early checks for '*' requests, since accounting
+                // happens when OP_KEY_REQUEST_SEEN is observed
+                if (v.request === '*' &&
+                    state._vm?.invites?.[signingKeyId]) {
+                    if (state._vm.invites[signingKeyId].quantity != null &&
+                        state._vm.invites[signingKeyId].quantity) {
+                        (0, utils_js_1.logEvtError)(message, 'Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
+                            originatingContractID);
+                        return;
+                    }
+                    if (state._vm.invites[signingKeyId].expires != null &&
+                        state._vm.invites[signingKeyId].expires < Date.now()) {
+                        (0, utils_js_1.logEvtError)(message, 'Ignoring OP_KEY_REQUEST because it expired at ' +
+                            state._vm.invites[signingKeyId].expires +
+                            ': ' +
+                            originatingContractID);
+                        return;
+                    }
+                }
                 // If skipping processing or if the message is outgoing, there isn't
                 // anything else to do
                 if (config.skipActionProcessing || direction === 'outgoing') {
@@ -1908,20 +1927,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 6)) {
                 return undefined;
             }
-            const [, , , [originatingContractID], request, manifest] = entry;
+            const [, , , [originatingContractID]] = entry;
             return (0, sbp_1.default)('chelonia/private/queueEvent', originatingContractID, [
                 'chelonia/private/respondToKeyRequest',
                 contractID,
                 signingKeyId,
-                hash,
-                request,
-                manifest
+                hash
             ]).catch((e) => {
                 console.error(`respondToAllKeyRequests: Error responding to key request ${hash} from ${originatingContractID} to ${contractID}`, e);
             });
         });
     },
-    'chelonia/private/respondToKeyRequest': async function (contractID, signingKeyId, hash, request, manifestHash) {
+    'chelonia/private/respondToKeyRequest': async function (contractID, signingKeyId, hash) {
         const state = (0, sbp_1.default)(this.config.stateSelector);
         const contractState = state[contractID];
         const entry = contractState?._vm?.pendingKeyshares?.[hash];
@@ -1929,7 +1946,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 6)) {
             return;
         }
-        const [keyShareEncryption, height, inviteId, [originatingContractID, rv, originatingContractHeight, headJSON]] = entry;
+        const [keyShareEncryption, height, inviteId, [originatingContractID, rv, originatingContractHeight, headJSON], request, manifestHash] = entry;
         const krsEncryption = keyShareEncryption;
         // 1. Sync (originating) identity contract
         await (0, sbp_1.default)('chelonia/private/in/syncContract', originatingContractID);

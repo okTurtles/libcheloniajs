@@ -728,7 +728,7 @@ export default sbp('sbp/selectors/register', {
   },
   'chelonia/contract/setPendingKeyRevocation': function (
     this: CheloniaContext,
-    contractIDOrState: string,
+    contractIDOrState: string | ChelContractState,
     names: string[],
     keyIds?: string[]
   ) {
