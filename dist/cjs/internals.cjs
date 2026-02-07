@@ -1137,7 +1137,25 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 const data = config.unwrapMaybeEncryptedData(wv);
                 // If we're unable to decrypt the OP_KEY_REQUEST, then still
                 // proceed to do accounting of invites
-                const v = data?.data || {
+                let skipInviteAccounting = false;
+                let encryptedRequest = false;
+                // Handle both V1 and V2
+                const v = (() => {
+                    if (!data)
+                        return;
+                    if (!data.encryptionKeyId && (0, turtledash_1.has)(data.data, 'innerData')) {
+                        // It's V2
+                        skipInviteAccounting = !!data.data.skipInviteAccounting;
+                        const innerData = config.unwrapMaybeEncryptedData(data.data.innerData);
+                        encryptedRequest = !!innerData?.encryptionKeyId;
+                        return innerData?.data;
+                    }
+                    else {
+                        // It's V1
+                        encryptedRequest = !!data.encryptionKeyId;
+                        return data.data;
+                    }
+                })() || {
                     contractID: '(private)',
                     replyWith: { context: undefined },
                     request: '(private)'
@@ -1145,11 +1163,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 const originatingContractID = v.contractID;
                 // We can only do these early checks for '*' requests, since accounting
                 // happens when OP_KEY_REQUEST_SEEN is observed
-                if (v.request === '*' &&
-                    state._vm?.invites?.[signingKeyId]) {
+                if (state._vm?.invites?.[signingKeyId] &&
+                    !skipInviteAccounting) {
                     if (state._vm.invites[signingKeyId].quantity != null &&
-                        state._vm.invites[signingKeyId].quantity) {
-                        (0, utils_js_1.logEvtError)(message, 'Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
+                        (--state._vm.invites[signingKeyId].quantity <= 0)) {
+                        state._vm.invites[signingKeyId].status = constants_js_1.INVITE_STATUS.USED;
+                        (0, utils_js_1.logEvtError)(message, '[processMessage] Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
                             originatingContractID);
                         return;
                     }
@@ -1183,14 +1202,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     ? [
                         // Full-encryption (i.e., KRS encryption) requires that this request
                         // was encrypted and that the invite is marked as private
-                        !!data?.encryptionKeyId,
+                        encryptedRequest,
                         message.height(),
                         signingKeyId,
                         context,
                         v.request,
-                        message.manifest()
+                        message.manifest(),
+                        skipInviteAccounting
                     ]
-                    : [!!data?.encryptionKeyId, message.height(), signingKeyId];
+                    : [encryptedRequest, message.height(), signingKeyId];
                 // Call 'chelonia/private/respondToAllKeyRequests' after sync
                 if (data) {
                     internalSideEffectStack?.push(() => {
@@ -1214,24 +1234,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     const hash = v.keyRequestHash;
                     const pending = state._vm.pendingKeyshares[hash];
                     delete state._vm.pendingKeyshares[hash];
-                    if ((
-                    // If it's V1
-                    !(data.encryptionKeyId == null && (0, turtledash_1.has)(v, 'innerData')) ||
-                        // Or V2 and skipInviteAccounting is false
-                        !v.skipInviteAccounting) &&
-                        state._vm?.invites?.[pending[2]]?.quantity != null) {
-                        if (state._vm.invites[pending[2]].quantity > 0) {
-                            if (--state._vm.invites[pending[2]].quantity <= 0) {
-                                state._vm.invites[pending[2]].status = constants_js_1.INVITE_STATUS.USED;
-                            }
-                        }
-                        else {
-                            (0, utils_js_1.logEvtError)(message, `Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: 
-                ${pending[3]?.[0] || '(unknown)'} with key ID ${pending[2]}`);
-                            return;
-                        }
-                    }
-                    if (pending.length !== 4 && pending.length !== 6)
+                    if (pending.length !== 4 && pending.length !== 7)
                         return;
                     // If we were able to respond, clean up responders
                     const keyId = pending[2];
@@ -1924,7 +1927,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             return;
         }
         Object.entries(pending).map(([hash, entry]) => {
-            if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 6)) {
+            if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 7)) {
                 return undefined;
             }
             const [, , , [originatingContractID]] = entry;
@@ -1943,10 +1946,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const contractState = state[contractID];
         const entry = contractState?._vm?.pendingKeyshares?.[hash];
         const instance = this._instance;
-        if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 6)) {
+        if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 7)) {
             return;
         }
-        const [keyShareEncryption, height, inviteId, [originatingContractID, rv, originatingContractHeight, headJSON], request, manifestHash] = entry;
+        const [keyShareEncryption, height, inviteId, [originatingContractID, rv, originatingContractHeight, headJSON], request, manifestHash, requestedSkipInviteAccounting] = entry;
         const krsEncryption = keyShareEncryption;
         // 1. Sync (originating) identity contract
         await (0, sbp_1.default)('chelonia/private/in/syncContract', originatingContractID);
@@ -2082,6 +2085,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             if (instance !== this._instance || !value)
                 return;
             const [keySharePayload, skipInviteAccounting] = value;
+            if (!!requestedSkipInviteAccounting !== !!skipInviteAccounting) {
+                console.error(`Error at respondToKeyRequest: mismatched result for skipInviteAccounting (${!!requestedSkipInviteAccounting} !== ${!!skipInviteAccounting}) for ${contractID}`);
+                throw new Error('Mismatched skipInviteAccounting');
+            }
             const msg = keySharePayload && await (0, sbp_1.default)('chelonia/out/keyShare', {
                 contractID: originatingContractID,
                 contractName: originatingContractName,
@@ -2158,6 +2165,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 signingKeyId,
                 data: {
                     keyRequestHash: hash,
+                    skipInviteAccounting: requestedSkipInviteAccounting,
                     innerData: krsEncryption
                         ? (0, encryptedData_js_1.encryptedOutgoingData)(contractID, (0, utils_js_1.findSuitablePublicKeyIds)(contractState, [SPMessage_js_1.SPMessage.OP_KEY_REQUEST_SEEN], ['enc'])?.[0] || '', innerPayload)
                         : innerPayload

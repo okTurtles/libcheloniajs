@@ -3,6 +3,7 @@ import sbp, { domainFromSelector } from '@sbp/sbp'
 import { cloneDeep, debounce, delay, has, randomIntFromRange } from 'turtledash'
 import type {
   ProtoSPOpActionUnencrypted,
+  ProtoSPOpKeyRequestInnerV2,
   ProtoSPOpKeyRequestSeenInnerV2,
   SPKey,
   SPOp,
@@ -15,6 +16,7 @@ import type {
   SPOpKeyRequest,
   SPOpKeyRequestSeen,
   SPOpKeyRequestSeenV2,
+  SPOpKeyRequestV2,
   SPOpKeyShare,
   SPOpKeyUpdate,
   SPOpMap,
@@ -1454,7 +1456,25 @@ export default sbp('sbp/selectors/register', {
 
         // If we're unable to decrypt the OP_KEY_REQUEST, then still
         // proceed to do accounting of invites
-        const v = data?.data || {
+        let skipInviteAccounting = false
+        let encryptedRequest = false
+        // Handle both V1 and V2
+        const v = (() => {
+          if (!data) return
+          if (!data.encryptionKeyId && has(data.data, 'innerData')) {
+            // It's V2
+            skipInviteAccounting = !!(data.data as SPOpKeyRequestV2).skipInviteAccounting
+            const innerData = config.unwrapMaybeEncryptedData(
+              (data.data as SPOpKeyRequestV2).innerData
+            )
+            encryptedRequest = !!innerData?.encryptionKeyId
+            return innerData?.data
+          } else {
+            // It's V1
+            encryptedRequest = !!data.encryptionKeyId
+            return data.data as ProtoSPOpKeyRequestInnerV2
+          }
+        })() || {
           contractID: '(private)',
           replyWith: { context: undefined },
           request: '(private)'
@@ -1465,16 +1485,17 @@ export default sbp('sbp/selectors/register', {
         // We can only do these early checks for '*' requests, since accounting
         // happens when OP_KEY_REQUEST_SEEN is observed
         if (
-          v.request === '*' &&
-          state._vm?.invites?.[signingKeyId]
+          state._vm?.invites?.[signingKeyId] &&
+          !skipInviteAccounting
         ) {
           if (
             state._vm.invites[signingKeyId].quantity != null &&
-            state._vm.invites[signingKeyId].quantity
+            (--state._vm.invites[signingKeyId].quantity <= 0)
           ) {
+            state._vm.invites[signingKeyId].status = INVITE_STATUS.USED
             logEvtError(
               message,
-              'Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
+              '[processMessage] Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
                 originatingContractID
             )
             return
@@ -1526,14 +1547,15 @@ export default sbp('sbp/selectors/register', {
           ? [
               // Full-encryption (i.e., KRS encryption) requires that this request
               // was encrypted and that the invite is marked as private
-              !!data?.encryptionKeyId,
+              encryptedRequest,
               message.height(),
               signingKeyId,
               context,
               v.request,
-              message.manifest()
+              message.manifest(),
+              skipInviteAccounting
             ]
-          : [!!data?.encryptionKeyId, message.height(), signingKeyId]
+          : [encryptedRequest, message.height(), signingKeyId]
 
         // Call 'chelonia/private/respondToAllKeyRequests' after sync
         if (data) {
@@ -1560,30 +1582,7 @@ export default sbp('sbp/selectors/register', {
           const pending = state._vm.pendingKeyshares[hash]
           delete state._vm.pendingKeyshares[hash]
 
-          if (
-            (
-              // If it's V1
-              !(data.encryptionKeyId == null && has(v, 'innerData')) ||
-              // Or V2 and skipInviteAccounting is false
-              !(v as SPOpKeyRequestSeenV2).skipInviteAccounting
-            ) &&
-            state._vm?.invites?.[pending[2]]?.quantity != null
-          ) {
-            if (state._vm.invites[pending[2]].quantity! > 0) {
-              if (--state._vm.invites[pending[2]].quantity! <= 0) {
-                state._vm.invites[pending[2]].status = INVITE_STATUS.USED
-              }
-            } else {
-              logEvtError(
-                message,
-                `Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: 
-                ${pending[3]?.[0] || '(unknown)'} with key ID ${pending[2]}`
-              )
-              return
-            }
-          }
-
-          if (pending.length !== 4 && pending.length !== 6) return
+          if (pending.length !== 4 && pending.length !== 7) return
 
           // If we were able to respond, clean up responders
           const keyId = pending[2]
@@ -2470,7 +2469,7 @@ export default sbp('sbp/selectors/register', {
     }
 
     Object.entries(pending).map(([hash, entry]) => {
-      if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 6)) {
+      if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 7)) {
         return undefined
       }
 
@@ -2500,7 +2499,7 @@ export default sbp('sbp/selectors/register', {
     const entry = contractState?._vm?.pendingKeyshares?.[hash]
     const instance = this._instance
 
-    if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 6)) {
+    if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 7)) {
       return
     }
 
@@ -2510,7 +2509,8 @@ export default sbp('sbp/selectors/register', {
       inviteId,
       [originatingContractID, rv, originatingContractHeight, headJSON],
       request,
-      manifestHash
+      manifestHash,
+      requestedSkipInviteAccounting
     ] = entry
 
     const krsEncryption = keyShareEncryption
@@ -2679,6 +2679,11 @@ export default sbp('sbp/selectors/register', {
         if (instance !== this._instance || !value) return
         const [keySharePayload, skipInviteAccounting] = value
 
+        if (!!requestedSkipInviteAccounting !== !!skipInviteAccounting) {
+          console.error(`Error at respondToKeyRequest: mismatched result for skipInviteAccounting (${!!requestedSkipInviteAccounting} !== ${!!skipInviteAccounting}) for ${contractID}`)
+          throw new Error('Mismatched skipInviteAccounting')
+        }
+
         const msg = keySharePayload && await sbp('chelonia/out/keyShare', {
           contractID: originatingContractID,
           contractName: originatingContractName,
@@ -2791,6 +2796,7 @@ export default sbp('sbp/selectors/register', {
           signingKeyId,
           data: {
             keyRequestHash: hash,
+            skipInviteAccounting: requestedSkipInviteAccounting,
             innerData: krsEncryption
               ? encryptedOutgoingData(
                 contractID,

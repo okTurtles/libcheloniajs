@@ -15,13 +15,13 @@ import { createCID, multicodes, parseCID } from './functions.js'
 import { Buffer } from 'buffer'
 import { NOTIFICATION_TYPE, createClient } from './pubsub/index.js'
 import type {
+  ProtoSPOpKeyRequestInnerV2,
   SPKey,
   SPKeyPurpose,
   SPOpActionUnencrypted,
   SPOpContract,
   SPOpKeyAdd,
   SPOpKeyDel,
-  SPOpKeyRequest,
   SPOpKeyRequestSeen,
   SPOpKeyShare,
   SPOpKeyUpdate,
@@ -216,6 +216,7 @@ export type ChelKeyRequestParams = {
   reference?: string;
   request?: string;
   keyRequestResponseId?: string;
+  skipInviteAccounting?: boolean;
   hooks?: {
     prepublishContract?: (msg: SPMessage) => void;
     prepublish?: (msg: SPMessage) => Promise<void>;
@@ -2006,7 +2007,8 @@ export default sbp('sbp/selectors/register', {
       encryptKeyRequestMetadata,
       reference,
       request,
-      keyRequestResponseId
+      keyRequestResponseId,
+      skipInviteAccounting
     } = params
     // `encryptKeyRequestMetadata` is optional because it could be desirable
     // sometimes to allow anyone to audit OP_KEY_REQUEST and OP_KEY_SHARE
@@ -2142,7 +2144,7 @@ export default sbp('sbp/selectors/register', {
           this.transientSecretKeys
         ),
         request: request ?? '*'
-      } as SPOpKeyRequest
+      } as ProtoSPOpKeyRequestInnerV2
       let msg = SPMessage.createV1_0({
         contractID,
         op: [
@@ -2150,9 +2152,12 @@ export default sbp('sbp/selectors/register', {
           signedOutgoingData<SPOpValue>(
             contractID,
             params.signingKeyId,
-            encryptKeyRequestMetadata
-              ? (encryptedOutgoingData(contractID, innerEncryptionKeyId, payload) as SPOpValue)
-              : payload,
+            {
+              ...(skipInviteAccounting && { skipInviteAccounting: true }),
+              innerData: encryptKeyRequestMetadata
+                ? encryptedOutgoingData(contractID, innerEncryptionKeyId, payload)
+                : payload
+            },
             this.transientSecretKeys
           )
         ],

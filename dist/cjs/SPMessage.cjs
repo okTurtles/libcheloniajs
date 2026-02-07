@@ -100,8 +100,16 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
     // If the operation is OP_KEY_REQUEST, the payload might be EncryptedData
     // The ReplyWith attribute is SignedData
     if (op === SPMessage.OP_KEY_REQUEST) {
-        return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, message, height, additionalKeys, headJSON, (msg) => {
-            msg.replyWith = (0, signedData_js_1.signedIncomingData)(msg.contractID, undefined, msg.replyWith, msg.height, headJSON);
+        return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, message, height, additionalKeys, headJSON, (msg, id) => {
+            if (!id && (0, turtledash_1.has)(msg, 'innerData')) {
+                msg.innerData =
+                    (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, msg.innerData, height, additionalKeys, headJSON, (innerMsg) => {
+                        innerMsg.replyWith = (0, signedData_js_1.signedIncomingData)(innerMsg.contractID, undefined, innerMsg.replyWith, innerMsg.height, headJSON);
+                    });
+            }
+            else {
+                msg.replyWith = (0, signedData_js_1.signedIncomingData)(msg.contractID, undefined, msg.replyWith, msg.height, headJSON);
+            }
         });
     }
     // If the operation is OP_ACTION_UNENCRYPTED, it may contain an inner

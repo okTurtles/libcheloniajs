@@ -119,6 +119,7 @@ export type ChelKeyRequestParams = {
     reference?: string;
     request?: string;
     keyRequestResponseId?: string;
+    skipInviteAccounting?: boolean;
     hooks?: {
         prepublishContract?: (msg: SPMessage) => void;
         prepublish?: (msg: SPMessage) => Promise<void>;

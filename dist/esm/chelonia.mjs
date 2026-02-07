@@ -1430,7 +1430,7 @@ export default sbp('sbp/selectors/register', {
         return msg;
     },
     'chelonia/out/keyRequest': async function (params) {
-        const { originatingContractID, originatingContractName, contractID, contractName, hooks, publishOptions, innerSigningKeyId, encryptionKeyId, innerEncryptionKeyId, encryptKeyRequestMetadata, reference, request, keyRequestResponseId } = params;
+        const { originatingContractID, originatingContractName, contractID, contractName, hooks, publishOptions, innerSigningKeyId, encryptionKeyId, innerEncryptionKeyId, encryptKeyRequestMetadata, reference, request, keyRequestResponseId, skipInviteAccounting } = params;
         // `encryptKeyRequestMetadata` is optional because it could be desirable
         // sometimes to allow anyone to audit OP_KEY_REQUEST and OP_KEY_SHARE
         // operations. If `encryptKeyRequestMetadata` were always true, it would
@@ -1535,9 +1535,12 @@ export default sbp('sbp/selectors/register', {
                 contractID,
                 op: [
                     SPMessage.OP_KEY_REQUEST,
-                    signedOutgoingData(contractID, params.signingKeyId, encryptKeyRequestMetadata
-                        ? encryptedOutgoingData(contractID, innerEncryptionKeyId, payload)
-                        : payload, this.transientSecretKeys)
+                    signedOutgoingData(contractID, params.signingKeyId, {
+                        ...(skipInviteAccounting && { skipInviteAccounting: true }),
+                        innerData: encryptKeyRequestMetadata
+                            ? encryptedOutgoingData(contractID, innerEncryptionKeyId, payload)
+                            : payload
+                    }, this.transientSecretKeys)
                 ],
                 manifest: manifestHash
             });

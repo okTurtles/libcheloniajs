@@ -59,7 +59,7 @@ export type ProtoSPOpKeyShare = {
     keyRequestHeight?: number;
 };
 export type SPOpKeyShare = ProtoSPOpKeyShare | EncryptedData<ProtoSPOpKeyShare>;
-export type ProtoSPOpKeyRequest = {
+export type ProtoSPOpKeyRequestV1 = {
     contractID: string;
     height: number;
     replyWith: SignedData<{
@@ -68,7 +68,21 @@ export type ProtoSPOpKeyRequest = {
     }>;
     request: string;
 };
-export type SPOpKeyRequest = ProtoSPOpKeyRequest | EncryptedData<ProtoSPOpKeyRequest>;
+export type ProtoSPOpKeyRequestInnerV2 = {
+    contractID: string;
+    height: number;
+    replyWith: SignedData<{
+        encryptionKeyId: string;
+        responseKey: EncryptedData<string>;
+    }>;
+    request: string;
+};
+export type SPOpKeyRequestV1 = ProtoSPOpKeyRequestV1 | EncryptedData<ProtoSPOpKeyRequestV1>;
+export type SPOpKeyRequestV2 = {
+    skipInviteAccounting?: boolean;
+    innerData: ProtoSPOpKeyRequestInnerV2 | EncryptedData<ProtoSPOpKeyRequestInnerV2>;
+};
+export type SPOpKeyRequest = SPOpKeyRequestV1 | SPOpKeyRequestV2;
 export type ProtoSPOpKeyRequestSeenV1 = {
     keyRequestHash: string;
     keyShareHash?: string;

@@ -308,6 +308,7 @@ export type ChelContractState = {
           SignedDataContext,
           request: string,
           manifest: string,
+          skipInviteAccounting: boolean
         ]
     >;
     props?: Record<string, JSONType>;
