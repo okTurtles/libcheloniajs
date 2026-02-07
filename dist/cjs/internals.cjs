@@ -1165,12 +1165,22 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // happens when OP_KEY_REQUEST_SEEN is observed
                 if (state._vm?.invites?.[signingKeyId] &&
                     !skipInviteAccounting) {
-                    if (state._vm.invites[signingKeyId].quantity != null &&
-                        (--state._vm.invites[signingKeyId].quantity <= 0)) {
-                        state._vm.invites[signingKeyId].status = constants_js_1.INVITE_STATUS.USED;
-                        (0, utils_js_1.logEvtError)(message, '[processMessage] Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
+                    if (state._vm.invites[signingKeyId].status !== constants_js_1.INVITE_STATUS.VALID) {
+                        (0, utils_js_1.logEvtError)(message, '[processMessage] Ignoring OP_KEY_REQUEST because it is not valid: ' +
                             originatingContractID);
                         return;
+                    }
+                    if (state._vm?.invites?.[signingKeyId]?.quantity != null) {
+                        if (state._vm.invites[signingKeyId].quantity > 0) {
+                            if (--state._vm.invites[signingKeyId].quantity <= 0) {
+                                state._vm.invites[signingKeyId].status = constants_js_1.INVITE_STATUS.USED;
+                            }
+                        }
+                        else {
+                            (0, utils_js_1.logEvtError)(message, 'Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
+                                originatingContractID);
+                            return;
+                        }
                     }
                     if (state._vm.invites[signingKeyId].expires != null &&
                         state._vm.invites[signingKeyId].expires < Date.now()) {
