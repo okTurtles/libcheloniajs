@@ -15,7 +15,7 @@ import {
   unwrapMaybeEncryptedData
 } from './encryptedData.js'
 import { createCID, multicodes } from './functions.js'
-import type { SignedData } from './signedData.js'
+import type { RawSignedData, SignedData } from './signedData.js'
 import {
   isRawSignedData,
   isSignedData,
@@ -82,8 +82,7 @@ export type ProtoSPOpKeyShare = {
   keyRequestHeight?: number;
 };
 export type SPOpKeyShare = ProtoSPOpKeyShare | EncryptedData<ProtoSPOpKeyShare>;
-// TODO encrypted SPOpKeyRequest
-export type ProtoSPOpKeyRequest = {
+export type ProtoSPOpKeyRequestV1 = {
   contractID: string;
   height: number;
   replyWith: SignedData<{
@@ -92,13 +91,42 @@ export type ProtoSPOpKeyRequest = {
   }>;
   request: string;
 };
-export type SPOpKeyRequest = ProtoSPOpKeyRequest | EncryptedData<ProtoSPOpKeyRequest>;
-export type ProtoSPOpKeyRequestSeen = {
+export type ProtoSPOpKeyRequestInnerV2 = {
+  contractID: string;
+  height: number;
+  replyWith: SignedData<{
+    encryptionKeyId: string;
+    responseKey: EncryptedData<string>;
+  }>;
+  request: string;
+};
+export type SPOpKeyRequestV1 = ProtoSPOpKeyRequestV1 | EncryptedData<ProtoSPOpKeyRequestV1>;
+export type SPOpKeyRequestV2 = {
+  skipInviteAccounting?: boolean;
+  innerData: ProtoSPOpKeyRequestInnerV2 | EncryptedData<ProtoSPOpKeyRequestInnerV2>
+};
+export type SPOpKeyRequest = SPOpKeyRequestV1 | SPOpKeyRequestV2
+export type ProtoSPOpKeyRequestSeenV1 = {
   keyRequestHash: string;
   keyShareHash?: string;
   success: boolean;
 };
-export type SPOpKeyRequestSeen = ProtoSPOpKeyRequestSeen | EncryptedData<ProtoSPOpKeyRequestSeen>;
+export type SPOpKeyRequestSeenV1 = |
+  ProtoSPOpKeyRequestSeenV1 |
+  EncryptedData<ProtoSPOpKeyRequestSeenV1>;
+export type ProtoSPOpKeyRequestSeenInnerV2 = {
+  keyShareHash?: string;
+  success: boolean;
+};
+export type SPOpKeyRequestSeenInnerV2 = |
+  ProtoSPOpKeyRequestSeenInnerV2 |
+  EncryptedData<ProtoSPOpKeyRequestSeenInnerV2>;
+export type SPOpKeyRequestSeenV2 = {
+  keyRequestHash: string;
+  skipInviteAccounting?: boolean;
+  innerData: SPOpKeyRequestSeenInnerV2
+};
+export type SPOpKeyRequestSeen = SPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2;
 export type SPKeyUpdate = {
   name: string;
   id?: string;
@@ -364,23 +392,44 @@ const decryptedAndVerifiedDeserializedMessage = (
   // If the operation is OP_KEY_REQUEST, the payload might be EncryptedData
   // The ReplyWith attribute is SignedData
   if (op === SPMessage.OP_KEY_REQUEST) {
-    return maybeEncryptedIncomingData<ProtoSPOpKeyRequest>(
+    return maybeEncryptedIncomingData<ProtoSPOpKeyRequestV1 | SPOpKeyRequestV2>(
       contractID,
       state,
-      message as ProtoSPOpKeyRequest,
+      message as ProtoSPOpKeyRequestV1,
       height,
       additionalKeys,
       headJSON,
-      (msg) => {
-        msg.replyWith = signedIncomingData(
-          msg.contractID,
-          undefined,
-          msg.replyWith as unknown as { _signedData: [string, string, string] },
-          msg.height,
-          headJSON
-        )
+      (msg, id) => {
+        if (!id && has(msg, 'innerData')) {
+          (msg as SPOpKeyRequestV2).innerData =
+            maybeEncryptedIncomingData<ProtoSPOpKeyRequestInnerV2>(
+              contractID,
+              state,
+              (msg as SPOpKeyRequestV2).innerData as ProtoSPOpKeyRequestInnerV2,
+              height,
+              additionalKeys,
+              headJSON,
+              (innerMsg) => {
+                innerMsg.replyWith = signedIncomingData(
+                  innerMsg.contractID,
+                  undefined,
+                  innerMsg.replyWith as unknown as RawSignedData,
+                  innerMsg.height,
+                  headJSON
+                )
+              }
+            )
+        } else {
+          (msg as ProtoSPOpKeyRequestV1).replyWith = signedIncomingData(
+            (msg as ProtoSPOpKeyRequestV1).contractID,
+            undefined,
+            (msg as ProtoSPOpKeyRequestV1).replyWith as unknown as RawSignedData,
+            (msg as ProtoSPOpKeyRequestV1).height,
+            headJSON
+          )
+        }
       }
-    )
+    ) as SPOpKeyRequest
   }
 
   // If the operation is OP_ACTION_UNENCRYPTED, it may contain an inner
@@ -416,15 +465,29 @@ const decryptedAndVerifiedDeserializedMessage = (
   }
 
   if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
-    return maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeen>(
+    return maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2>(
       contractID,
       state,
-      parsedMessage as unknown as ProtoSPOpKeyRequestSeen,
+      parsedMessage as unknown as ProtoSPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2,
       height,
       additionalKeys,
       headJSON,
-      undefined
-    )
+      (data) => {
+        if (data === parsedMessage) {
+          const dataV2 = data as SPOpKeyRequestSeenV2
+          if (dataV2.innerData) {
+            dataV2.innerData = maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeenInnerV2>(
+              contractID,
+              state,
+              dataV2.innerData as unknown as ProtoSPOpKeyRequestSeenInnerV2,
+              height,
+              additionalKeys,
+              headJSON
+            )
+          }
+        }
+      }
+    ) as SPOpKeyRequestSeen
   }
 
   // If the operation is OP_ATOMIC, call this function recursively
