@@ -216,7 +216,13 @@ export const validateKeyPermissions = (
     !Array.isArray(signingKey.purpose) ||
     !signingKey.purpose.includes('sig') ||
     (signingKey.permissions !== '*' &&
-      (!Array.isArray(signingKey.permissions) || !signingKey.permissions.includes(opT)))
+      (!Array.isArray(signingKey.permissions) || (
+        !signingKey.permissions.includes(opT) &&
+        (
+          opT === SPMessage.OP_KEY_DEL &&
+          !signingKey.permissions.includes(`${opT}#self`)
+        )
+      )))
   ) {
     logEvtError(msg, `Signing key ${signingKeyId} is missing permissions for operation ${opT}`)
     return false
@@ -281,7 +287,13 @@ export const validateKeyAddPermissions = function (
     if (signingKeyPermissions !== '*') {
       if (
         !Array.isArray(k.permissions) ||
-        !k.permissions.reduce((acc, cv) => acc && signingKeyPermissions.has(cv), true)
+        k.permissions.some((cv) => {
+          if (cv === `${SPMessage.OP_KEY_DEL}#self`) {
+            // Granting `kd#self` requires `kd`
+            cv = SPMessage.OP_KEY_DEL
+          }
+          return !signingKeyPermissions.has(cv)
+        })
       ) {
         throw new Error(
           'Unable to add or update a key with more permissions than the signing key. signingKey permissions: ' +
@@ -324,6 +336,7 @@ export const validateKeyDelPermissions = function (
     )
   }
   const localSigningKey = state._vm.authorizedKeys[signingKey.id]
+  const selfDeleteOnly = localSigningKey.permissions !== '*' && !localSigningKey.permissions.includes(SPMessage.OP_KEY_DEL)
   v.forEach((wid) => {
     const data = this.config.unwrapMaybeEncryptedData<string>(wid)
     if (!data) return
@@ -345,6 +358,14 @@ export const validateKeyDelPermissions = function (
           ' but attempted to remove a key with ringLevel ' +
           k.ringLevel
       )
+    }
+    if (selfDeleteOnly) {
+      if (!k._addedByKeyId || !state._vm.authorizedKeys[k._addedByKeyId]) {
+        throw new Error('Missing or invalid _addedByKeyId')
+      }
+      if (state._vm.authorizedKeys[k._addedByKeyId].name !== localSigningKey.name) {
+        throw new Error('Key was added by a different key')
+      }
     }
   })
 }
