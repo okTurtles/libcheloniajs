@@ -317,6 +317,9 @@ export default sbp('sbp/selectors/register', {
       // Similarly, future events will not be reingested and will throw
       // with ChelErrorDBBadPreviousHEAD
       strictOrdering: false,
+      // Chelonia will store some information (e.g., date it was received) about
+      // messages. This is primarily useful in the server, and not so useful for
+      // clients, especially for lightweight clients that don't store messages.
       saveMessageMetadata: false,
       connectionOptions: {
         maxRetries: Infinity, // See https://github.com/okTurtles/group-income/issues/1183
