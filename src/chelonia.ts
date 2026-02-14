@@ -214,8 +214,11 @@ export type ChelKeyRequestParams = {
   // Arbitrary data the requester can use as reference (e.g., the hash
   // of the user-initiated action that triggered this key request)
   reference?: string;
+  // Contract-defined string describing which keys are being requested
   request?: string;
+  // Use an existing #krrk key instead of creating a new one
   keyRequestResponseId?: string;
+  // Mark request as not consuming invites (this will be enforced by the responder)
   skipInviteAccounting?: boolean;
   hooks?: {
     prepublishContract?: (msg: SPMessage) => void;
