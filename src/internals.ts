@@ -293,7 +293,14 @@ const keyRotationHelper = <T>(
  * @param keyIds - Array of key IDs to delete
  */
 const deleteKeyHelper = (state: ChelContractState, height: number, keyIds: string[]) => {
+  // First collect the names of keys being deleted
+  const namesToCheck = new Set(
+    keyIds
+      .map(id => state._vm.authorizedKeys[id]?.name)
+      .filter((name): name is string => name != null)
+  )
   const allIdsForNames = Object.values(state._vm.authorizedKeys)
+    .filter(({ name }) => namesToCheck.has(name))
     .reduce((acc, { id, name }) => {
       if (!acc[name]) {
         acc[name] = [id]
@@ -303,7 +310,13 @@ const deleteKeyHelper = (state: ChelContractState, height: number, keyIds: strin
       return acc
     }, Object.create(null))
   for (const keyId of keyIds) {
-    const name = state._vm.authorizedKeys[keyId].name
+    // Key IDs passed to this function should already exist
+    const key = state._vm.authorizedKeys[keyId]
+    if (!key) {
+      console.error('[deleteKeyHelper] Key not found in authorizedKeys:', keyId)
+      continue
+    }
+    const name = key.name
     // Clear pending revocations for all keys with the same name
     // to handle key rotation scenarios where multiple keys exist
     for (const id of allIdsForNames[name]) {
@@ -1461,6 +1474,8 @@ export default sbp('sbp/selectors/register', {
         // Handle both V1 and V2
         const v = (() => {
           if (!data) return
+          // V2 has an _unencrypted_ outer layer and an optionally encrypted
+          // `innerData` field
           if (!data.encryptionKeyId && has(data.data, 'innerData')) {
             // It's V2
             skipInviteAccounting = !!(data.data as SPOpKeyRequestV2).skipInviteAccounting
@@ -1482,8 +1497,6 @@ export default sbp('sbp/selectors/register', {
 
         const originatingContractID = v.contractID
 
-        // We can only do these early checks for '*' requests, since accounting
-        // happens when OP_KEY_REQUEST_SEEN is observed
         if (
           state._vm?.invites?.[signingKeyId] &&
           !skipInviteAccounting
@@ -1497,6 +1510,9 @@ export default sbp('sbp/selectors/register', {
             return
           }
 
+          // We consume invites before responding (or checking if we can respond)
+          // because it's the only way to be certain that we won't over-respond
+          // to requests.
           if (state._vm?.invites?.[signingKeyId]?.quantity != null) {
             if (state._vm.invites[signingKeyId].quantity > 0) {
               if (--state._vm.invites[signingKeyId].quantity <= 0) {
@@ -1608,8 +1624,10 @@ export default sbp('sbp/selectors/register', {
           let inner: ProtoSPOpKeyRequestSeenInnerV2 | undefined =
             v as ProtoSPOpKeyRequestSeenInnerV2
           if (data.encryptionKeyId == null && has(v, 'innerData')) {
-            const data = config.unwrapMaybeEncryptedData((v as SPOpKeyRequestSeenV2).innerData)
-            inner = data?.data
+            const innerResult = config.unwrapMaybeEncryptedData(
+              (v as SPOpKeyRequestSeenV2).innerData
+            )
+            inner = innerResult?.data
           }
           const success = inner?.success
 
@@ -2347,7 +2365,7 @@ export default sbp('sbp/selectors/register', {
         }
 
         const [currentRingLevel, currentSigningKeyId, currentKeyArgs] = acc
-        const ringLevel = Math.min(currentRingLevel, key.ringLevel ?? Number.POSITIVE_INFINITY)
+        const ringLevel = Math.min(currentRingLevel, key.ringLevel ?? Number.MAX_SAFE_INTEGER)
         if (ringLevel >= currentRingLevel) {
           affectedKeyIds.add(key.id)
           currentKeyArgs.push({
@@ -2524,6 +2542,7 @@ export default sbp('sbp/selectors/register', {
       requestedSkipInviteAccounting
     ] = entry
 
+    // If the OP_KEY_REQUEST was encrypted, use an encrypted OP_KEY_REQUEST_SEEN
     const krsEncryption = keyShareEncryption
 
     // 1. Sync (originating) identity contract
@@ -2616,7 +2635,7 @@ export default sbp('sbp/selectors/register', {
                 skipInviteAccounting = result.skipInviteAccounting
               }
             } catch (e) {
-              console.info('[respondToKeyRequest] no keys to share (hook errored)', {
+              console.warn('[respondToKeyRequest] Cannot respond: hook errored', {
                 contractID,
                 originatingContractID,
                 inviteId,
@@ -2626,7 +2645,7 @@ export default sbp('sbp/selectors/register', {
               return
             }
           } else {
-            console.info('[respondToKeyRequest] no keys to share (hook not defined)', {
+            console.warn('[respondToKeyRequest] Cannot respond: hook not defined', {
               contractID,
               originatingContractID,
               inviteId,
@@ -2645,6 +2664,8 @@ export default sbp('sbp/selectors/register', {
           })
           return
         } else if (keyIds.length === 0) {
+          // If the responder explicitly decided no keys are to be shared, mark
+          // the request as successful, but without sharing any keys.
           return [null, skipInviteAccounting]
         }
 
@@ -2715,6 +2736,8 @@ export default sbp('sbp/selectors/register', {
         if (instance !== this._instance) return
 
         // 4(i). Remove originating contract and update current contract with information
+        // If no keys were shared (empty array), we still mark success but without a hash
+        // (undefined keyShareHash will be disregarded)
         const innerPayload = { keyShareHash: msg?.hash(), success: true }
         const connectionKeyPayload = {
           contractID: originatingContractID,

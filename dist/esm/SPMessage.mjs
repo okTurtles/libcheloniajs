@@ -98,6 +98,8 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
     // The ReplyWith attribute is SignedData
     if (op === SPMessage.OP_KEY_REQUEST) {
         return maybeEncryptedIncomingData(contractID, state, message, height, additionalKeys, headJSON, (msg, id) => {
+            // V2 format has `innerData`, V1 does not. V2 always has an _unencrypted_
+            // outer layer.
             if (!id && has(msg, 'innerData')) {
                 msg.innerData =
                     maybeEncryptedIncomingData(contractID, state, msg.innerData, height, additionalKeys, headJSON, (innerMsg) => {
@@ -125,8 +127,8 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
         });
     }
     if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
-        return maybeEncryptedIncomingData(contractID, state, parsedMessage, height, additionalKeys, headJSON, (data) => {
-            if (data === parsedMessage) {
+        return maybeEncryptedIncomingData(contractID, state, parsedMessage, height, additionalKeys, headJSON, (data, id) => {
+            if (!id && has(data, 'innerData')) {
                 const dataV2 = data;
                 if (dataV2.innerData) {
                     dataV2.innerData = maybeEncryptedIncomingData(contractID, state, dataV2.innerData, height, additionalKeys, headJSON);

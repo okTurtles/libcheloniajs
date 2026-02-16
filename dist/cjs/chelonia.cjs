@@ -79,6 +79,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // Similarly, future events will not be reingested and will throw
             // with ChelErrorDBBadPreviousHEAD
             strictOrdering: false,
+            // Chelonia will store some information (e.g., date it was received) about
+            // messages. This is primarily useful in the server, and not so useful for
+            // clients, especially for lightweight clients that don't store messages.
             saveMessageMetadata: false,
             connectionOptions: {
                 maxRetries: Infinity, // See https://github.com/okTurtles/group-income/issues/1183
@@ -436,6 +439,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const keyId = (0, utils_js_1.findSuitableSecretKeyId)(contractIDOrState, permissions, purposes, ringLevel, allowedActions);
         return keyId;
     },
+    // setPendingKeyRevocation is meant to be called by contracts (or applications)
+    // to mark a set of keys as pending revocation / rotation (that is, adding the
+    // key to `_volatile.pendingKeyRevocations`).
+    // Keys that are marked as pending revocation can then be collected by key
+    // rotation logic (currently, 'gi.actions/out/rotateKeys') to rotate them or
+    // delete them.
+    // Calling this selector in itself doesn't revoke or rotate the key. It will
+    // just set a flag on that key for later handling. The flag is automatically
+    // cleared when the key is updated or deleted.
     'chelonia/contract/setPendingKeyRevocation': function (contractIDOrState, names, keyIds) {
         let state;
         let contractID;
@@ -461,7 +473,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             }
             else {
                 console.warn('[setPendingKeyRevocation] Unable to find keyId for name', {
-                    contractID,
+                    contractID: contractID ?? '(unknown)',
                     name
                 });
             }
@@ -991,7 +1003,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             return await callback();
         }
         finally {
-            await (0, sbp_1.default)('chelonia/contract/release', contractIDs, { ephemeral: true });
+            await (0, sbp_1.default)('chelonia/contract/release', contractIDs, { ephemeral: true }).catch((e) => {
+                console.error('[withRetained] Error releasing contract:', e);
+            });
         }
     },
     'chelonia/contract/disconnect': async function (contractID, contractIDToDisconnect) {

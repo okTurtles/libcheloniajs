@@ -91,6 +91,8 @@ export type ProtoSPOpKeyRequestV1 = {
   }>;
   request: string;
 };
+// Same data and structure as ProtoSPOpKeyRequestV1. Difference between V1 and
+// V2 is an unencrypted wrapper
 export type ProtoSPOpKeyRequestInnerV2 = {
   contractID: string;
   height: number;
@@ -400,6 +402,8 @@ const decryptedAndVerifiedDeserializedMessage = (
       additionalKeys,
       headJSON,
       (msg, id) => {
+        // V2 format has `innerData`, V1 does not. V2 always has an _unencrypted_
+        // outer layer.
         if (!id && has(msg, 'innerData')) {
           (msg as SPOpKeyRequestV2).innerData =
             maybeEncryptedIncomingData<ProtoSPOpKeyRequestInnerV2>(
@@ -472,8 +476,8 @@ const decryptedAndVerifiedDeserializedMessage = (
       height,
       additionalKeys,
       headJSON,
-      (data) => {
-        if (data === parsedMessage) {
+      (data, id) => {
+        if (!id && has(data, 'innerData')) {
           const dataV2 = data as SPOpKeyRequestSeenV2
           if (dataV2.innerData) {
             dataV2.innerData = maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeenInnerV2>(

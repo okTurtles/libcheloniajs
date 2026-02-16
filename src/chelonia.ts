@@ -733,6 +733,15 @@ export default sbp('sbp/selectors/register', {
     )
     return keyId
   },
+  // setPendingKeyRevocation is meant to be called by contracts (or applications)
+  // to mark a set of keys as pending revocation / rotation (that is, adding the
+  // key to `_volatile.pendingKeyRevocations`).
+  // Keys that are marked as pending revocation can then be collected by key
+  // rotation logic (currently, 'gi.actions/out/rotateKeys') to rotate them or
+  // delete them.
+  // Calling this selector in itself doesn't revoke or rotate the key. It will
+  // just set a flag on that key for later handling. The flag is automatically
+  // cleared when the key is updated or deleted.
   'chelonia/contract/setPendingKeyRevocation': function (
     this: CheloniaContext,
     contractIDOrState: string | ChelContractState,
@@ -761,7 +770,7 @@ export default sbp('sbp/selectors/register', {
         this.config.reactiveSet(state._volatile!.pendingKeyRevocations!, keyId, true)
       } else {
         console.warn('[setPendingKeyRevocation] Unable to find keyId for name', {
-          contractID,
+          contractID: contractID ?? '(unknown)',
           name
         })
       }
@@ -1397,12 +1406,14 @@ export default sbp('sbp/selectors/register', {
       : undefined
   },
   // Higher level function to automatically retain / release a contract
-  'chelonia/contract/withRetained': async function (contractIDs: string | string[], callback: () => unknown) {
+  'chelonia/contract/withRetained': async function (contractIDs: string | string[], callback: () => unknown | Promise<unknown>) {
     await sbp('chelonia/contract/retain', contractIDs, { ephemeral: true })
     try {
       return await callback()
     } finally {
-      await sbp('chelonia/contract/release', contractIDs, { ephemeral: true })
+      await sbp('chelonia/contract/release', contractIDs, { ephemeral: true }).catch((e: unknown) => {
+        console.error('[withRetained] Error releasing contract:', e)
+      })
     }
   },
   'chelonia/contract/disconnect': async function (
