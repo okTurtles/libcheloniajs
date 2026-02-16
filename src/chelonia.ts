@@ -215,6 +215,10 @@ export type ChelKeyRequestParams = {
   // of the user-initiated action that triggered this key request)
   reference?: string;
   // Contract-defined string describing which keys are being requested
+  // The special value '*' (default) means that all 'shareable' keys will be
+  // shared. Otherwise, this value is passed on to a contract-defined handler
+  // for processing. For example, this string could be something like 'missing'
+  // or it could be a comma-separated list of key names to share.
   request?: string;
   // Use an existing #krrk key instead of creating a new one
   keyRequestResponseId?: string;

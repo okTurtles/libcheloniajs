@@ -1005,7 +1005,7 @@ export default sbp('sbp/selectors/register', {
       // And call it
         try {
         // Note: Errors here should not stop processing, since running these
-        // hooks is optionl (for example, they aren't run on the server)
+        // hooks is optional (for example, they aren't run on the server)
           sbp(hook, { contractID, message, state, atomic })
         } catch (e) {
           console.error(
