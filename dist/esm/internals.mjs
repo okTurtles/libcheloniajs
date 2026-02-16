@@ -1935,7 +1935,7 @@ export default sbp('sbp/selectors/register', {
         const contractState = state[contractID];
         const entry = contractState?._vm?.pendingKeyshares?.[hash];
         const instance = this._instance;
-        if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 7)) {
+        if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 7) || has(entry, 'processing')) {
             return;
         }
         const [keyShareEncryption, height, inviteId, [originatingContractID, rv, originatingContractHeight, headJSON], request, manifestHash, requestedSkipInviteAccounting] = entry;
@@ -1960,6 +1960,13 @@ export default sbp('sbp/selectors/register', {
             .then(async () => {
             if (instance !== this._instance)
                 return;
+            // Guard to prevent responding to this request multiple times
+            if (has(entry, 'processing'))
+                return;
+            // Using Object.defineProperty because it's not part of the type definition
+            // and making `processing` part of the type definition seems to break type
+            // inference
+            Object.defineProperty(entry, 'processing', { configurable: true, value: true });
             if (!has(originatingState._vm.authorizedKeys, responseKeyId) ||
                 originatingState._vm.authorizedKeys[responseKeyId]._notAfterHeight != null) {
                 throw new Error(`Unable to respond to key request for ${originatingContractID}. Key ${responseKeyId} is not valid.`);
