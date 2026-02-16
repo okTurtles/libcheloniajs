@@ -122,8 +122,8 @@ const validateKeyPermissions = (msg, config, state, signingKeyId, opT, opV) => {
         !signingKey.purpose.includes('sig') ||
         (signingKey.permissions !== '*' &&
             (!Array.isArray(signingKey.permissions) || (!signingKey.permissions.includes(opT) &&
-                (opT === SPMessage_js_1.SPMessage.OP_KEY_DEL &&
-                    !signingKey.permissions.includes(`${opT}#self`)))))) {
+                !(opT === SPMessage_js_1.SPMessage.OP_KEY_DEL &&
+                    signingKey.permissions.includes(`${opT}#self`)))))) {
         (0, exports.logEvtError)(msg, `Signing key ${signingKeyId} is missing permissions for operation ${opT}`);
         return false;
     }

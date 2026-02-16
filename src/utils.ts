@@ -218,9 +218,9 @@ export const validateKeyPermissions = (
     (signingKey.permissions !== '*' &&
       (!Array.isArray(signingKey.permissions) || (
         !signingKey.permissions.includes(opT) &&
-        (
+        !(
           opT === SPMessage.OP_KEY_DEL &&
-          !signingKey.permissions.includes(`${opT}#self`)
+          signingKey.permissions.includes(`${opT}#self`)
         )
       )))
   ) {
