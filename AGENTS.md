@@ -143,7 +143,7 @@ chelonia/out/actionEncrypted     — Send an encrypted action
 chelonia/out/actionUnencrypted   — Send an unencrypted action
 chelonia/out/keyAdd              — Add a key to a contract
 chelonia/out/keyDel              — Remove a key from a contract
-chelonia/out/keyUpdate           — Update key properties
+chelonia/out/keyUpdate           — Rotate key and/or update key properties
 chelonia/out/keyShare            — Share a key with another contract
 chelonia/out/keyRequest          — Request keys from a contract
 chelonia/out/atomic              — Execute multiple operations atomically
@@ -156,7 +156,7 @@ chelonia/out/atomic              — Execute multiple operations atomically
 
 ### Shelter Protocol Operations
 
-Defined in `SPMessage.ts`:
+Types defined in `SPMessage.ts` (and implemented/processed in `internals.ts`):
 
 | Operation | Type | Purpose |
 |---|---|---|
