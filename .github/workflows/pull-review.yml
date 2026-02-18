@@ -17,7 +17,7 @@ jobs:
     concurrency:
       group: pr-review-${{ github.event.issue.number }}
       cancel-in-progress: true
-    timeout-minutes: 25
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
@@ -85,7 +85,7 @@ jobs:
       - name: Check for linked issue
         id: check-issue
         run: |
-          ISSUE_NUM=$(grep -oiP '(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?|ref(?:erences?)?|see)\s*#(\d+)' /tmp/pr_body.txt | grep -oP '\d+' | head -1 || true)
+          ISSUE_NUM=$(grep -oiP '\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?|ref(?:erences?)?|see)\s*#(\d+)' /tmp/pr_body.txt | grep -oP '\d+' | head -1 || true)
 
           if [ -z "$ISSUE_NUM" ]; then
             echo "has_issue=false" >> "$GITHUB_OUTPUT"
@@ -126,6 +126,7 @@ jobs:
           git merge "origin/$BASE_REF" --no-edit -m "Merge $BASE_REF for review" || {
             echo "::warning::Merge conflict detected, reviewing PR branch as-is"
             git merge --abort
+            git reset --hard HEAD
           }
 
       - name: Generate diff
@@ -141,6 +142,14 @@ jobs:
             ':!go.sum' ':!**/go.sum' \
             ':!*.min.js' ':!*.min.css' \
             ':!**/node_modules/**' ':!**/vendor/**' \
+            ':!*.svg' ':!**/*.svg' \
+            ':!*.png' ':!**/*.png' \
+            ':!*.jpg' ':!**/*.jpg' ':!*.jpeg' ':!**/*.jpeg' \
+            ':!*.gif' ':!**/*.gif' \
+            ':!*.ico' ':!**/*.ico' \
+            ':!*.webp' ':!**/*.webp' \
+            ':!*.woff' ':!**/*.woff' ':!*.woff2' ':!**/*.woff2' \
+            ':!*.ttf' ':!**/*.ttf' ':!*.eot' ':!**/*.eot' \
             > /tmp/pr_diff.txt
 
           MAX_CHARS=100000
@@ -264,7 +273,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --body "**Automated Review Notice**
 
-          This PR exceeds the 65k token limit (~${TOKEN_EST} tokens estimated). The review cannot be performed automatically.
+          This PR exceeds the 260k character limit (~${TOKEN_EST} tokens estimated). The review cannot be performed automatically.
 
           Please break the PR into smaller pieces, or request a manual review."
 
@@ -286,20 +295,20 @@ jobs:
             -d @/tmp/raw_payload.json \
             -o /tmp/raw_response.json)
 
-          RAW_OK=false
+          RAW_REVIEW_OK=false
           if [ "$HTTP_CODE" -ne 200 ]; then
             echo "::warning::Raw review API call failed with HTTP $HTTP_CODE"
             echo "Raw review unavailable (API returned HTTP $HTTP_CODE)." > /tmp/raw_review.txt
           elif jq -e '.choices[0].message.content' /tmp/raw_response.json > /dev/null 2>&1; then
             jq -r '.choices[0].message.content' /tmp/raw_response.json > /tmp/raw_review.txt
-            RAW_OK=true
+            RAW_REVIEW_OK=true
           else
             echo "::warning::Raw review returned unexpected response"
             echo "Raw review unavailable (unexpected API response)." > /tmp/raw_review.txt
           fi
 
           echo "Raw review complete ($(wc -c < /tmp/raw_review.txt) bytes)"
-          echo "RAW_REVIEW_OK=${RAW_OK:-false}" >> "$GITHUB_ENV"
+          echo "RAW_REVIEW_OK=${RAW_REVIEW_OK:-false}" >> "$GITHUB_ENV"
 
       - name: Install opencode
         if: steps.check-issue.outputs.has_issue == 'true' && steps.size-check.outputs.too_large == 'false'
@@ -426,3 +435,15 @@ jobs:
           gh pr comment "${{ steps.pr-info.outputs.number }}" \
             --repo "${{ github.repository }}" \
             --body-file /tmp/review_comment.txt
+
+      - name: Post failure comment
+        if: failure() && steps.pr-info.outputs.number
+        run: |
+          gh pr comment "${{ steps.pr-info.outputs.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "## Advanced AI Review
+
+          - Type: Error
+          - Model: ${REVIEW_MODEL}
+
+          The review workflow failed. Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details. Comment \`/review\` to re-run."
