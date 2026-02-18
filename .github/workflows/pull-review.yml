@@ -141,7 +141,7 @@ jobs:
             ':!yarn.lock' ':!**/yarn.lock' \
             ':!go.sum' ':!**/go.sum' \
             ':!*.min.js' ':!*.min.css' \
-            ':!**/node_modules/**' ':!**/vendor/**' \
+            ':!**/node_modules/**' ':!**/vendor/**' ':!**/dist/**' ':!**/build/**' \
             ':!*.svg' ':!**/*.svg' \
             ':!*.png' ':!**/*.png' \
             ':!*.jpg' ':!**/*.jpg' ':!*.jpeg' ':!**/*.jpeg' \
