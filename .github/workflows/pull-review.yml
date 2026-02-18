@@ -351,10 +351,11 @@ jobs:
 
           1. De-duplicate issues that appear in both reviews (keep the better description)
           2. Sort all issues by priority: 🔴 (high importance & high confidence) first, then 🟡 (medium), then ⚪️ (low)
-          3. Keep the rating and checkbox format for each issue
-          4. Preserve specific code references (file:line) and code suggestions
-          5. Do not place a header like `# Combined Code Review` at the top of the review, just immediately output the issues (if there are any)
-          6. If there are no issues, state that and do nothing else.
+          3. Make sure the issue headings are all numbered sequentially starting from 1. and preserve the priority indicator in the heading
+          4. The Addressed/Dismissed checkboxes in the issues should immediately follow the heading for each issue
+          5. Preserve specific code references (file:line) and code suggestions
+          6. Do not place a header like `# Combined Code Review` at the top of the combined review, just immediately output the issues (if there are any)
+          7. If there are no issues, state that and do nothing else.
 
           Output ONLY the combined review in Markdown. No preamble about the combining process.
 
