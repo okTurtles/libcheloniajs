@@ -351,7 +351,7 @@ jobs:
 
           1. De-duplicate issues that appear in both reviews (keep the better description)
           2. Sort all issues by priority: 🔴 (high importance & high confidence) first, then 🟡 (medium), then ⚪️ (low)
-          3. Make sure the issue headings are all numbered sequentially starting from 1. and preserve the priority indicator in the heading
+          3. Make sure the issue headings are all numbered sequentially, starting from 1, and preserve the priority indicator in the heading
           4. The Addressed/Dismissed checkboxes in the issues should immediately follow the heading for each issue
           5. Preserve specific code references (file:line) and code suggestions
           6. Do not place a header like `# Combined Code Review` at the top of the combined review, just immediately output the issues (if there are any)
