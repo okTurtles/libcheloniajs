@@ -1,4 +1,4 @@
-name: PR Review
+name: AI PR Review
 
 on:
   issue_comment:
