@@ -426,6 +426,36 @@ jobs:
           cat /tmp/agentic_review.txt
           echo "::endgroup::"
 
+      # This step can be removed if crush ever closes this issue: https://github.com/charmbracelet/crush/issues/2265
+      - name: Extract review from agentic output
+        if: steps.size-check.outputs.too_large == 'false'
+        run: |
+          jq -n \
+            --arg model "$REVIEW_MODEL" \
+            --rawfile text /tmp/agentic_review.txt \
+            '{
+              model: $model,
+              messages: [{role: "user", content: ("The following text is the full output of an AI coding assistant that was asked to review a pull request. The output contains the assistant'\''s entire thought process, but the actual review with the found issues (if any) is only at the very end.\n\nExtract ONLY the final review portion and output it verbatim. Do not summarize, rephrase, or add anything. If there is no review in the text (e.g. the assistant failed or produced no review), output exactly: \"No review found in agentic output.\"\n\n---\n\n" + $text)}]
+            }' > /tmp/extract_payload.json
+
+          HTTP_CODE=$(curl -s -w '%{http_code}' \
+            "$PROVIDER_API_URL" \
+            -H "Authorization: Bearer $PROVIDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/extract_payload.json \
+            -o /tmp/extract_response.json)
+
+          if [ "$HTTP_CODE" -eq 200 ] && jq -e '.choices[0].message.content' /tmp/extract_response.json > /dev/null 2>&1; then
+            jq -r '.choices[0].message.content' /tmp/extract_response.json > /tmp/agentic_review.txt
+            echo "Extracted review ($(wc -c < /tmp/agentic_review.txt) bytes)"
+          else
+            echo "::warning::Review extraction failed (HTTP $HTTP_CODE), using full agentic output"
+          fi
+
+          echo "::group::Extracted agentic review"
+          cat /tmp/agentic_review.txt
+          echo "::endgroup::"
+
       - name: Combine reviews
         if: steps.size-check.outputs.too_large == 'false' && env.FAST_MODE != 'true'
         run: |
