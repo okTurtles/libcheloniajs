@@ -9,7 +9,7 @@ jobs:
     name: Automated PR Review
     if: >-
       github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/review') &&
+      startsWith(github.event.comment.body, '/crush') &&
       (github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'COLLABORATOR')
