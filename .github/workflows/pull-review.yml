@@ -232,6 +232,10 @@ jobs:
             printf '<pr_description>\n%s\n</pr_description>\n' "$SUMMARY" > /tmp/helpful_context.txt
           fi
 
+          echo "::group::Helpful context"
+          cat /tmp/helpful_context.txt
+          echo "::endgroup::"
+
       - name: Build review prompts
         run: |
           cat > /tmp/raw_prompt.txt << 'PROMPT_END'
@@ -364,6 +368,10 @@ jobs:
           echo "Raw review complete ($(wc -c < /tmp/raw_review.txt) bytes)"
           echo "RAW_REVIEW_OK=${RAW_REVIEW_OK:-false}" >> "$GITHUB_ENV"
 
+          echo "::group::Raw LLM review"
+          cat /tmp/raw_review.txt
+          echo "::endgroup::"
+
       - name: Install opencode
         if: steps.size-check.outputs.too_large == 'false'
         run: curl -fsSL https://opencode.ai/install | bash
@@ -396,6 +404,10 @@ jobs:
           }
 
           echo "Agentic review complete ($(wc -c < /tmp/agentic_review.txt) bytes)"
+
+          echo "::group::Agentic (opencode) review"
+          cat /tmp/agentic_review.txt
+          echo "::endgroup::"
 
       - name: Combine reviews
         if: steps.size-check.outputs.too_large == 'false'
