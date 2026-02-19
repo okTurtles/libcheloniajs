@@ -497,7 +497,6 @@ jobs:
             echo ""
             echo "- Type: ${REVIEW_TYPE}"
             echo "- Model: ${REVIEW_MODEL}"
-            echo "- [Workflow Run](${RUN_URL})"
             echo ""
             echo "<details>"
             echo "<summary>Click to expand review</summary>"
@@ -507,7 +506,7 @@ jobs:
             echo "</details>"
             echo ""
             echo "---"
-            echo "*Review generated using \`${REVIEW_MODEL}\` via ${PROVIDER_DISPLAY}. Comment \`/review\` to re-run.*"
+            echo "*Review [generated](${RUN_URL}) using \`${REVIEW_MODEL}\` via ${PROVIDER_DISPLAY}. Comment \`/review\` to re-run.*"
           } > /tmp/review_comment.txt
 
           gh pr comment "${{ steps.pr-info.outputs.number }}" \
@@ -521,8 +520,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --body "## Advanced AI Review
 
-          - ⚠️ Type: Error
-          - 🤖 Model: ${REVIEW_MODEL}
-          - 🔧 [Workflow Run](${RUN_URL})
+          - Type: Error
+          - Model: ${REVIEW_MODEL}
 
-          The review workflow failed. Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details. Comment \`/review\` to re-run."
+          The review workflow failed. Check the [workflow run](${RUN_URL}) for details. Comment \`/review\` to re-run."
