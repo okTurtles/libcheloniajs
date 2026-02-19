@@ -24,6 +24,7 @@ jobs:
       issues: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       # ── Provider configuration ─────────────────────────────
       # Set via Settings → Secrets and variables → Actions → Variables:
       #   REVIEW_PROVIDER: openrouter | zai-coding-plan
@@ -124,7 +125,10 @@ jobs:
             ':!yarn.lock' ':!**/yarn.lock' \
             ':!go.sum' ':!**/go.sum' \
             ':!*.min.js' ':!*.min.css' \
-            ':!**/node_modules/**' ':!**/vendor/**' ':!**/dist/**' ':!**/build/**' \
+            ':!node_modules/**' ':!**/node_modules/**' \
+            ':!vendor/**' ':!**/vendor/**' \
+            ':!dist/**' ':!**/dist/**' \
+            ':!build/**' ':!**/build/**' \
             ':!*.svg' ':!**/*.svg' \
             ':!*.png' ':!**/*.png' \
             ':!*.jpg' ':!**/*.jpg' ':!*.jpeg' ':!**/*.jpeg' \
@@ -144,6 +148,10 @@ jobs:
           fi
 
           echo "Diff size: $DIFF_SIZE bytes"
+
+          echo "::group::PR diff"
+          cat /tmp/pr_diff.txt
+          echo "::endgroup::"
 
       - name: Generate helpful context
         env:
@@ -333,7 +341,9 @@ jobs:
 
           This PR exceeds the 260k character limit (~${TOKEN_EST} tokens estimated). The review cannot be performed automatically.
 
-          Please break the PR into smaller pieces, or request a manual review."
+          Please break the PR into smaller pieces, or request a manual review.
+
+          _[🔧 Workflow Run](${RUN_URL})_"
 
       - name: Run raw review
         if: steps.size-check.outputs.too_large == 'false'
@@ -487,6 +497,7 @@ jobs:
             echo ""
             echo "- Type: ${REVIEW_TYPE}"
             echo "- Model: ${REVIEW_MODEL}"
+            echo "- [Workflow Run](${RUN_URL})"
             echo ""
             echo "<details>"
             echo "<summary>Click to expand review</summary>"
@@ -510,7 +521,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --body "## Advanced AI Review
 
-          - Type: Error
-          - Model: ${REVIEW_MODEL}
+          - ⚠️ Type: Error
+          - 🤖 Model: ${REVIEW_MODEL}
+          - 🔧 [Workflow Run](${RUN_URL})
 
           The review workflow failed. Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details. Comment \`/review\` to re-run."
