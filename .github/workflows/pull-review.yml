@@ -48,7 +48,7 @@ jobs:
             -X PATCH \
             -f body="${ORIGINAL_BODY}
 
-          --
+          ---
 
           _AI review [started](${RUN_URL})._"
 
