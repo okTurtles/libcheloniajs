@@ -100,6 +100,8 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
     // If the operation is OP_KEY_REQUEST, the payload might be EncryptedData
     // The ReplyWith attribute is SignedData
     if (op === SPMessage.OP_KEY_REQUEST) {
+        // TODO: THIS CODE SHOULD BE RE-FACTORED IF WE RECREATE GROUPS
+        //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
         return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, message, height, additionalKeys, headJSON, (msg, id) => {
             // V2 format has `innerData`, V1 does not. V2 always has an _unencrypted_
             // outer layer.
@@ -130,6 +132,8 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
         });
     }
     if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
+        // TODO: THIS CODE SHOULD BE RE-FACTORED IF WE RECREATE GROUPS
+        //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
         return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, parsedMessage, height, additionalKeys, headJSON, (data, id) => {
             if (!id && (0, turtledash_1.has)(data, 'innerData')) {
                 const dataV2 = data;

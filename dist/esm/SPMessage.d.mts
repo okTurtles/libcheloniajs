@@ -68,16 +68,8 @@ export type ProtoSPOpKeyRequestV1 = {
     }>;
     request: string;
 };
-export type ProtoSPOpKeyRequestInnerV2 = {
-    contractID: string;
-    height: number;
-    replyWith: SignedData<{
-        encryptionKeyId: string;
-        responseKey: EncryptedData<string>;
-    }>;
-    request: string;
-};
 export type SPOpKeyRequestV1 = ProtoSPOpKeyRequestV1 | EncryptedData<ProtoSPOpKeyRequestV1>;
+export type ProtoSPOpKeyRequestInnerV2 = ProtoSPOpKeyRequestV1;
 export type SPOpKeyRequestV2 = {
     skipInviteAccounting?: boolean;
     innerData: ProtoSPOpKeyRequestInnerV2 | EncryptedData<ProtoSPOpKeyRequestInnerV2>;

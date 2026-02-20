@@ -1479,8 +1479,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             }
             let keyRequestReplyKeyS;
             let keyAddOp;
+            // NOTE: This doesn't currently check for key permissions
             if (keyRequestResponseId) {
-                // Use an exisiting key (i.e., avoid sending OP_KEY_ADD)
+                // Use an existing key (i.e., avoid sending OP_KEY_ADD)
                 // TODO: This option currently breaks `pendingKeyRequests` due to this
                 // being set on `OP_KEY_ADD`.
                 if (!originatingState._vm.authorizedKeys[keyRequestResponseId] ||

@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.handleFetchResult = exports.logEvtError = exports.collectEventStream = exports.checkCanBeGarbageCollected = exports.reactiveClearObject = exports.clearObject = exports.getContractIDfromKeyId = exports.recreateEvent = exports.subscribeToForeignKeyContracts = exports.keyAdditionProcessor = exports.validateKeyUpdatePermissions = exports.validateKeyDelPermissions = exports.validateKeyAddPermissions = exports.validateKeyPermissions = exports.findSuitablePublicKeyIds = exports.findContractIDByForeignKeyId = exports.findSuitableSecretKeyId = exports.findRevokedKeyIdsByName = exports.findForeignKeysByContractID = exports.findKeyIdByName = void 0;
+exports.deleteKeyHelper = exports.handleFetchResult = exports.logEvtError = exports.collectEventStream = exports.checkCanBeGarbageCollected = exports.reactiveClearObject = exports.clearObject = exports.getContractIDfromKeyId = exports.recreateEvent = exports.subscribeToForeignKeyContracts = exports.keyAdditionProcessor = exports.validateKeyUpdatePermissions = exports.validateKeyDelPermissions = exports.validateKeyAddPermissions = exports.validateKeyPermissions = exports.findSuitablePublicKeyIds = exports.findContractIDByForeignKeyId = exports.findSuitableSecretKeyId = exports.findRevokedKeyIdsByName = exports.findForeignKeysByContractID = exports.findKeyIdByName = void 0;
 exports.eventsAfter = eventsAfter;
 exports.buildShelterAuthorizationHeader = buildShelterAuthorizationHeader;
 exports.verifyShelterAuthorizationHeader = verifyShelterAuthorizationHeader;
@@ -941,3 +941,46 @@ const handleFetchResult = (type) => {
     };
 };
 exports.handleFetchResult = handleFetchResult;
+/**
+ * Helper function to delete keys from the state and clear related pending revocations.
+ * Handles key rotation scenarios by clearing pending revocations for all keys with the same name.
+ *
+ * @param state - The contract state to modify
+ * @param height - The height at which the keys should be marked as deleted
+ * @param keyIds - Array of key IDs to delete
+ */
+const deleteKeyHelper = (state, height, keyIds) => {
+    // First collect the names of keys being deleted
+    const namesToCheck = new Set(keyIds
+        .map(id => state._vm.authorizedKeys[id]?.name)
+        .filter((name) => name != null));
+    const allIdsForNames = Object.values(state._vm.authorizedKeys)
+        .filter(({ name }) => namesToCheck.has(name))
+        .reduce((acc, { id, name }) => {
+        if (!acc[name]) {
+            acc[name] = [id];
+        }
+        else {
+            acc[name].push(id);
+        }
+        return acc;
+    }, Object.create(null));
+    for (const keyId of keyIds) {
+        // Key IDs passed to this function should already exist
+        const key = state._vm.authorizedKeys[keyId];
+        if (!key) {
+            console.error('[deleteKeyHelper] Key not found in authorizedKeys:', keyId);
+            continue;
+        }
+        const name = key.name;
+        // Clear pending revocations for all keys with the same name
+        // to handle key rotation scenarios where multiple keys exist
+        for (const id of allIdsForNames[name]) {
+            if ((0, turtledash_1.has)(state._volatile.pendingKeyRevocations, id)) {
+                delete state._volatile.pendingKeyRevocations[id];
+            }
+        }
+        state._vm.authorizedKeys[keyId]._notAfterHeight = height;
+    }
+};
+exports.deleteKeyHelper = deleteKeyHelper;

@@ -82,6 +82,8 @@ export type ProtoSPOpKeyShare = {
   keyRequestHeight?: number;
 };
 export type SPOpKeyShare = ProtoSPOpKeyShare | EncryptedData<ProtoSPOpKeyShare>;
+// TODO: THIS CODE SHOULD BE DELETED IF WE RECREATE GROUPS
+//       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
 export type ProtoSPOpKeyRequestV1 = {
   contractID: string;
   height: number;
@@ -91,18 +93,13 @@ export type ProtoSPOpKeyRequestV1 = {
   }>;
   request: string;
 };
-// Same data and structure as ProtoSPOpKeyRequestV1. Difference between V1 and
-// V2 is an unencrypted wrapper
-export type ProtoSPOpKeyRequestInnerV2 = {
-  contractID: string;
-  height: number;
-  replyWith: SignedData<{
-    encryptionKeyId: string;
-    responseKey: EncryptedData<string>;
-  }>;
-  request: string;
-};
 export type SPOpKeyRequestV1 = ProtoSPOpKeyRequestV1 | EncryptedData<ProtoSPOpKeyRequestV1>;
+// END: TODO THIS CODE SHOULD BE DELETED
+// Same data and structure as ProtoSPOpKeyRequestV1. Difference between V1 and
+// V2 is an unencrypted wrapper.
+// We re-declare the type for clarity and because the V2 structure could change
+// in the future (e.g., we might add new fields to ProtoSPOpKeyRequestInnerV2)
+export type ProtoSPOpKeyRequestInnerV2 = ProtoSPOpKeyRequestV1;
 export type SPOpKeyRequestV2 = {
   skipInviteAccounting?: boolean;
   innerData: ProtoSPOpKeyRequestInnerV2 | EncryptedData<ProtoSPOpKeyRequestInnerV2>
@@ -113,6 +110,8 @@ export type ProtoSPOpKeyRequestSeenV1 = {
   keyShareHash?: string;
   success: boolean;
 };
+// TODO: THIS CODE SHOULD BE DELETED IF WE RECREATE GROUPS
+//       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
 export type SPOpKeyRequestSeenV1 = |
   ProtoSPOpKeyRequestSeenV1 |
   EncryptedData<ProtoSPOpKeyRequestSeenV1>;
@@ -120,6 +119,7 @@ export type ProtoSPOpKeyRequestSeenInnerV2 = {
   keyShareHash?: string;
   success: boolean;
 };
+// END: TODO THIS CODE SHOULD BE DELETED
 export type SPOpKeyRequestSeenInnerV2 = |
   ProtoSPOpKeyRequestSeenInnerV2 |
   EncryptedData<ProtoSPOpKeyRequestSeenInnerV2>;
@@ -394,6 +394,8 @@ const decryptedAndVerifiedDeserializedMessage = (
   // If the operation is OP_KEY_REQUEST, the payload might be EncryptedData
   // The ReplyWith attribute is SignedData
   if (op === SPMessage.OP_KEY_REQUEST) {
+    // TODO: THIS CODE SHOULD BE RE-FACTORED IF WE RECREATE GROUPS
+    //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
     return maybeEncryptedIncomingData<ProtoSPOpKeyRequestV1 | SPOpKeyRequestV2>(
       contractID,
       state,
@@ -469,6 +471,8 @@ const decryptedAndVerifiedDeserializedMessage = (
   }
 
   if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
+    // TODO: THIS CODE SHOULD BE RE-FACTORED IF WE RECREATE GROUPS
+    //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
     return maybeEncryptedIncomingData<ProtoSPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2>(
       contractID,
       state,

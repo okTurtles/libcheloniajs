@@ -1,6 +1,6 @@
 import { deserializeKey, keyId, verifySignature } from '@chelonia/crypto';
 import sbp, { domainFromSelector } from '@sbp/sbp';
-import { cloneDeep, debounce, delay, has, randomIntFromRange } from 'turtledash';
+import { cloneDeep, debounce, delay, has, pick, randomIntFromRange } from 'turtledash';
 import { SPMessage } from './SPMessage.mjs';
 import { Secret } from './Secret.mjs';
 import { INVITE_STATUS } from './constants.mjs';
@@ -10,7 +10,7 @@ import { ChelErrorAlreadyProcessed, ChelErrorDBBadPreviousHEAD, ChelErrorFetchSe
 import { CONTRACTS_MODIFIED, CONTRACT_HAS_RECEIVED_KEYS, CONTRACT_IS_SYNCING, EVENT_HANDLED, EVENT_PUBLISHED, EVENT_PUBLISHING_ERROR } from './events.mjs';
 import { multicodes } from './functions.mjs';
 import { isSignedData, signedIncomingData } from './signedData.mjs';
-import { buildShelterAuthorizationHeader, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
+import { buildShelterAuthorizationHeader, deleteKeyHelper, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
 // Used for temporarily storing the missing decryption key IDs in a given
 // message
 const missingDecryptionKeyIdsMap = new WeakMap();
@@ -141,48 +141,6 @@ const keyRotationHelper = (contractID, state, config, updatedKeysMap, requiredPe
             });
         });
     });
-};
-/**
- * Helper function to delete keys from the state and clear related pending revocations.
- * Handles key rotation scenarios by clearing pending revocations for all keys with the same name.
- *
- * @param state - The contract state to modify
- * @param height - The height at which the keys should be marked as deleted
- * @param keyIds - Array of key IDs to delete
- */
-const deleteKeyHelper = (state, height, keyIds) => {
-    // First collect the names of keys being deleted
-    const namesToCheck = new Set(keyIds
-        .map(id => state._vm.authorizedKeys[id]?.name)
-        .filter((name) => name != null));
-    const allIdsForNames = Object.values(state._vm.authorizedKeys)
-        .filter(({ name }) => namesToCheck.has(name))
-        .reduce((acc, { id, name }) => {
-        if (!acc[name]) {
-            acc[name] = [id];
-        }
-        else {
-            acc[name].push(id);
-        }
-        return acc;
-    }, Object.create(null));
-    for (const keyId of keyIds) {
-        // Key IDs passed to this function should already exist
-        const key = state._vm.authorizedKeys[keyId];
-        if (!key) {
-            console.error('[deleteKeyHelper] Key not found in authorizedKeys:', keyId);
-            continue;
-        }
-        const name = key.name;
-        // Clear pending revocations for all keys with the same name
-        // to handle key rotation scenarios where multiple keys exist
-        for (const id of allIdsForNames[name]) {
-            if (has(state._volatile.pendingKeyRevocations, id)) {
-                delete state._volatile.pendingKeyRevocations[id];
-            }
-        }
-        state._vm.authorizedKeys[keyId]._notAfterHeight = height;
-    }
 };
 // export const FERAL_FUNCTION = Function
 export default sbp('sbp/selectors/register', {
@@ -740,7 +698,7 @@ export default sbp('sbp/selectors/register', {
                 // And call it
                 try {
                     // Note: Errors here should not stop processing, since running these
-                    // hooks is optionl (for example, they aren't run on the server)
+                    // hooks is optional (for example, they aren't run on the server)
                     sbp(hook, { contractID, message, state, atomic });
                 }
                 catch (e) {
@@ -758,6 +716,9 @@ export default sbp('sbp/selectors/register', {
                 callHook(op, true);
             }
         }
+        // Note that for `OP_ATOMIC` the hook will be called multiple times:
+        //   * once per op-type (with the `atomic` option)
+        //   * then, for OP_ATOMIC
         callHook(message.opType());
     },
     'chelonia/private/in/processMessage': async function (message, state, internalSideEffectStack, contractName) {
@@ -1111,6 +1072,8 @@ export default sbp('sbp/selectors/register', {
             },
             [SPMessage.OP_KEY_REQUEST](wv) {
                 const data = config.unwrapMaybeEncryptedData(wv);
+                // TODO: THIS CODE SHOULD BE REFACTORED IF WE RECREATE GROUPS
+                //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
                 // If we're unable to decrypt the OP_KEY_REQUEST, then still
                 // proceed to do accounting of invites
                 let skipInviteAccounting = false;
@@ -1223,6 +1186,8 @@ export default sbp('sbp/selectors/register', {
                     const hash = v.keyRequestHash;
                     const pending = state._vm.pendingKeyshares[hash];
                     delete state._vm.pendingKeyshares[hash];
+                    // TODO: THIS CODE SHOULD BE REFACTORED IF WE RECREATE GROUPS
+                    //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
                     if (pending.length !== 4 && pending.length !== 7)
                         return;
                     // If we were able to respond, clean up responders
@@ -1233,6 +1198,8 @@ export default sbp('sbp/selectors/register', {
                     }
                     if (!has(state._vm, 'keyshares'))
                         state._vm.keyshares = Object.create(null);
+                    // TODO: THIS CODE SHOULD BE DELETED IF WE RECREATE GROUPS
+                    //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
                     // Handle new and old formats
                     let inner = v;
                     if (data.encryptionKeyId == null && has(v, 'innerData')) {
@@ -1375,12 +1342,10 @@ export default sbp('sbp/selectors/register', {
                         state._vm.authorizedKeys[key.id] = cloneDeep(key);
                     }
                     else {
+                        const partialUpdate = pick(key, ['purpose', 'permissions', 'allowedActions', 'meta']);
                         state._vm.authorizedKeys[key.id] = {
                             ...state._vm.authorizedKeys[key.id],
-                            ...(key.purpose ? { purpose: key.purpose } : {}),
-                            ...(key.permissions ? { permissions: key.permissions } : {}),
-                            ...(key.allowedActions ? { allowedActions: key.allowedActions } : {}),
-                            ...(key.meta ? { meta: key.meta } : {})
+                            ...partialUpdate
                         };
                     }
                     // If this is a foreign key, it may be out of sync
@@ -1900,7 +1865,7 @@ export default sbp('sbp/selectors/register', {
                 data: keyIdsToDelete,
                 signingKeyId: keyDelSigningKeyId
             }).catch((e) => {
-                console.error(`[chelonia/private/deleteRevokedKeys] Error sending OP_KEY_DEL for ${contractID}`, e.message);
+                console.error(`[chelonia/private/deleteOrRotateRevokedKeys] Error sending OP_KEY_DEL for ${contractID}`, e.message);
             });
         }
     },
@@ -1938,6 +1903,9 @@ export default sbp('sbp/selectors/register', {
         if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 7) || has(entry, 'processing')) {
             return;
         }
+        // For `entry.length === 4` (kept for compatibility purposes, not used in
+        // new entries), `request` and subsequent values will be undefined. This
+        // is expected and should be handled.
         const [keyShareEncryption, height, inviteId, [originatingContractID, rv, originatingContractHeight, headJSON], request, manifestHash, requestedSkipInviteAccounting] = entry;
         // If the OP_KEY_REQUEST was encrypted, use an encrypted OP_KEY_REQUEST_SEEN
         const krsEncryption = keyShareEncryption;
@@ -1961,6 +1929,8 @@ export default sbp('sbp/selectors/register', {
             if (instance !== this._instance)
                 return;
             // Guard to prevent responding to this request multiple times
+            // Note: there's a small time window where the previous check and this
+            // could pass. This is for brevity (avoiding the same check multiple times)
             if (has(entry, 'processing'))
                 return;
             // Using Object.defineProperty because it's not part of the type definition
@@ -1976,6 +1946,7 @@ export default sbp('sbp/selectors/register', {
             sbp('chelonia/storeSecretKeys', new Secret([{ key: deserializedResponseKey }]));
             let keyIds;
             let skipInviteAccounting;
+            // skipInviteAccounting isn't allowed to be `true` for these requests
             if (request == null || request === '*') {
                 if (contractState._vm?.invites?.[inviteId]?.expires != null) {
                     if (contractState._vm.invites[inviteId].expires < Date.now()) {
@@ -2045,6 +2016,12 @@ export default sbp('sbp/selectors/register', {
             else if (keyIds.length === 0) {
                 // If the responder explicitly decided no keys are to be shared, mark
                 // the request as successful, but without sharing any keys.
+                console.info('[respondToKeyRequest] explicitly empty keyshare response', {
+                    contractID,
+                    originatingContractID,
+                    inviteId,
+                    request
+                });
                 return [null, skipInviteAccounting];
             }
             for (let i = 0; i < keyIds.length; i++) {
