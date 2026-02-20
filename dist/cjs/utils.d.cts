@@ -37,3 +37,12 @@ export declare const checkCanBeGarbageCollected: (this: CheloniaContext, id: str
 export declare const collectEventStream: <T>(s: ReadableStream<T>) => Promise<T[]>;
 export declare const logEvtError: (msg: SPMessage, ...args: unknown[]) => void;
 export declare const handleFetchResult: (type: "text" | "json" | "blob") => ((r: Response) => Promise<string | JSONType | Blob>);
+/**
+ * Helper function to delete keys from the state and clear related pending revocations.
+ * Handles key rotation scenarios by clearing pending revocations for all keys with the same name.
+ *
+ * @param state - The contract state to modify
+ * @param height - The height at which the keys should be marked as deleted
+ * @param keyIds - Array of key IDs to delete
+ */
+export declare const deleteKeyHelper: (state: ChelContractState, height: number, keyIds: string[]) => void;

@@ -79,6 +79,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // Similarly, future events will not be reingested and will throw
             // with ChelErrorDBBadPreviousHEAD
             strictOrdering: false,
+            // Chelonia will store some information (e.g., date it was received) about
+            // messages. This is primarily useful in the server, and not so useful for
+            // clients, especially for lightweight clients that don't store messages.
+            saveMessageMetadata: false,
             connectionOptions: {
                 maxRetries: Infinity, // See https://github.com/okTurtles/group-income/issues/1183
                 reconnectOnTimeout: true // can be enabled since we are not doing auth via web sockets
@@ -171,6 +175,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // process of syncing for the first time. After sync completes for the
         // first time, they are removed from pending and added to subscriptionSet
         this.pending = [];
+        const rootState = (0, sbp_1.default)(this.config.stateSelector);
+        rootState.secretKeys = rootState.secretKeys || Object.create(null);
     },
     'chelonia/config': function () {
         return {
@@ -244,6 +250,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // Remove all contracts, including all contracts from pending
         (0, utils_js_1.reactiveClearObject)(rootState, this.config.reactiveDel);
         this.config.reactiveSet(rootState, 'contracts', Object.create(null));
+        this.config.reactiveSet(rootState, 'secretKeys', Object.create(null));
         (0, utils_js_1.clearObject)(this.ephemeralReferenceCount);
         this.pending.splice(0);
         (0, utils_js_1.clearObject)(this.currentSyncs);
@@ -432,9 +439,26 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const keyId = (0, utils_js_1.findSuitableSecretKeyId)(contractIDOrState, permissions, purposes, ringLevel, allowedActions);
         return keyId;
     },
-    'chelonia/contract/setPendingKeyRevocation': function (contractID, names) {
-        const rootState = (0, sbp_1.default)(this.config.stateSelector);
-        const state = rootState[contractID];
+    // setPendingKeyRevocation is meant to be called by contracts (or applications)
+    // to mark a set of keys as pending revocation / rotation (that is, adding the
+    // key to `_volatile.pendingKeyRevocations`).
+    // Keys that are marked as pending revocation can then be collected by key
+    // rotation logic (currently, 'gi.actions/out/rotateKeys') to rotate them or
+    // delete them.
+    // Calling this selector in itself doesn't revoke or rotate the key. It will
+    // just set a flag on that key for later handling. The flag is automatically
+    // cleared when the key is updated or deleted.
+    'chelonia/contract/setPendingKeyRevocation': function (contractIDOrState, names, keyIds) {
+        let state;
+        let contractID;
+        if (typeof contractIDOrState === 'string') {
+            const rootState = (0, sbp_1.default)(this.config.stateSelector);
+            contractID = contractIDOrState;
+            state = rootState[contractIDOrState];
+        }
+        else {
+            state = contractIDOrState;
+        }
         if (!state._volatile)
             this.config.reactiveSet(state, '_volatile', Object.create(null));
         if (!state._volatile.pendingKeyRevocations) {
@@ -443,11 +467,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         for (const name of names) {
             const keyId = (0, utils_js_1.findKeyIdByName)(state, name);
             if (keyId) {
+                if (keyIds && !keyIds.includes(keyId))
+                    continue;
                 this.config.reactiveSet(state._volatile.pendingKeyRevocations, keyId, true);
             }
             else {
                 console.warn('[setPendingKeyRevocation] Unable to find keyId for name', {
-                    contractID,
+                    contractID: contractID ?? '(unknown)',
                     name
                 });
             }
@@ -970,6 +996,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             })
             : undefined;
     },
+    // Higher level function to automatically retain / release a contract
+    'chelonia/contract/withRetained': async function (contractIDs, callback) {
+        await (0, sbp_1.default)('chelonia/contract/retain', contractIDs, { ephemeral: true });
+        try {
+            return await callback();
+        }
+        finally {
+            await (0, sbp_1.default)('chelonia/contract/release', contractIDs, { ephemeral: true }).catch((e) => {
+                console.error('[withRetained] Error releasing contract:', e);
+            });
+        }
+    },
     'chelonia/contract/disconnect': async function (contractID, contractIDToDisconnect) {
         const state = (0, sbp_1.default)(this.config.stateSelector);
         const contractState = state[contractID];
@@ -1412,7 +1450,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         return msg;
     },
     'chelonia/out/keyRequest': async function (params) {
-        const { originatingContractID, originatingContractName, contractID, contractName, hooks, publishOptions, innerSigningKeyId, encryptionKeyId, innerEncryptionKeyId, encryptKeyRequestMetadata, reference } = params;
+        const { originatingContractID, originatingContractName, contractID, contractName, hooks, publishOptions, innerSigningKeyId, encryptionKeyId, innerEncryptionKeyId, encryptKeyRequestMetadata, reference, request, keyRequestResponseId, skipInviteAccounting } = params;
         // `encryptKeyRequestMetadata` is optional because it could be desirable
         // sometimes to allow anyone to audit OP_KEY_REQUEST and OP_KEY_SHARE
         // operations. If `encryptKeyRequestMetadata` were always true, it would
@@ -1424,67 +1462,87 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (!contract) {
             throw new Error('Contract name not found');
         }
-        const rootState = (0, sbp_1.default)(this.config.stateSelector);
-        try {
-            await (0, sbp_1.default)('chelonia/contract/retain', contractID, { ephemeral: true });
+        return await (0, sbp_1.default)('chelonia/contract/withRetained', contractID, async () => {
+            const rootState = (0, sbp_1.default)(this.config.stateSelector);
             const state = contract.state(contractID);
             const originatingState = originatingContract.state(originatingContractID);
-            const havePendingKeyRequest = Object.values(originatingState._vm.authorizedKeys).findIndex((k) => {
+            const havePendingKeyRequest = Object.values(originatingState._vm.authorizedKeys).some((k) => {
                 return (k._notAfterHeight == null &&
                     k.meta?.keyRequest?.contractID === contractID &&
-                    state?._volatile?.pendingKeyRequests?.some((pkr) => pkr.name === k.name));
-            }) !== -1;
+                    state?._volatile?.pendingKeyRequests?.some((pkr) => pkr.name === k.name && pkr.reference === reference));
+            });
             // If there's a pending key request for this contract, return
+            // TODO: This won't work if re-using a request key using keyRequestResponseId
+            // because `_volatile.pendingKeyRequests` only gets set on `OP_KEY_ADD`.
             if (havePendingKeyRequest) {
                 return;
             }
-            const keyRequestReplyKey = (0, crypto_1.keygen)(crypto_1.EDWARDS25519SHA512BATCH);
-            const keyRequestReplyKeyId = (0, crypto_1.keyId)(keyRequestReplyKey);
-            const keyRequestReplyKeyP = (0, crypto_1.serializeKey)(keyRequestReplyKey, false);
-            const keyRequestReplyKeyS = (0, crypto_1.serializeKey)(keyRequestReplyKey, true);
-            const signingKeyId = (0, utils_js_1.findSuitableSecretKeyId)(originatingState, [SPMessage_js_1.SPMessage.OP_KEY_ADD], ['sig']);
-            if (!signingKeyId) {
-                throw new errors_js_1.ChelErrorUnexpected(`Unable to send key request. Originating contract is missing a key with OP_KEY_ADD permission. contractID=${contractID} originatingContractID=${originatingContractID}`);
+            let keyRequestReplyKeyS;
+            let keyAddOp;
+            // NOTE: This doesn't currently check for key permissions
+            if (keyRequestResponseId) {
+                // Use an existing key (i.e., avoid sending OP_KEY_ADD)
+                // TODO: This option currently breaks `pendingKeyRequests` due to this
+                // being set on `OP_KEY_ADD`.
+                if (!originatingState._vm.authorizedKeys[keyRequestResponseId] ||
+                    originatingState._vm.authorizedKeys[keyRequestResponseId]._notAfterHeight != null) {
+                    throw new Error(`Contract ID ${originatingContractID} is missing key or it has expired: ${keyRequestResponseId}`);
+                }
+                if (!rootState.secretKeys[keyRequestResponseId]) {
+                    throw new Error('Missing secret key ID ' + keyRequestResponseId);
+                }
+                keyRequestReplyKeyS = rootState.secretKeys[keyRequestResponseId];
+                keyAddOp = () => Promise.resolve();
             }
-            const keyAddOp = () => (0, sbp_1.default)('chelonia/out/keyAdd', {
-                contractID: originatingContractID,
-                contractName: originatingContractName,
-                data: [
-                    {
-                        id: keyRequestReplyKeyId,
-                        name: '#krrk-' + keyRequestReplyKeyId,
-                        purpose: ['sig'],
-                        ringLevel: Number.MAX_SAFE_INTEGER,
-                        permissions: params.permissions === '*'
-                            ? '*'
-                            : Array.isArray(params.permissions)
-                                ? [...params.permissions, SPMessage_js_1.SPMessage.OP_KEY_SHARE]
-                                : [SPMessage_js_1.SPMessage.OP_KEY_SHARE],
-                        allowedActions: params.allowedActions,
-                        meta: {
-                            private: {
-                                content: (0, encryptedData_js_1.encryptedOutgoingData)(originatingContractID, encryptionKeyId, keyRequestReplyKeyS),
-                                shareable: false
+            else {
+                const keyRequestReplyKey = (0, crypto_1.keygen)(crypto_1.EDWARDS25519SHA512BATCH);
+                const keyRequestReplyKeyId = (0, crypto_1.keyId)(keyRequestReplyKey);
+                const keyRequestReplyKeyP = (0, crypto_1.serializeKey)(keyRequestReplyKey, false);
+                keyRequestReplyKeyS = (0, crypto_1.serializeKey)(keyRequestReplyKey, true);
+                const signingKeyId = (0, utils_js_1.findSuitableSecretKeyId)(originatingState, [SPMessage_js_1.SPMessage.OP_KEY_ADD], ['sig']);
+                if (!signingKeyId) {
+                    throw new errors_js_1.ChelErrorUnexpected(`Unable to send key request. Originating contract is missing a key with OP_KEY_ADD permission. contractID=${contractID} originatingContractID=${originatingContractID}`);
+                }
+                keyAddOp = () => (0, sbp_1.default)('chelonia/out/keyAdd', {
+                    contractID: originatingContractID,
+                    contractName: originatingContractName,
+                    data: [
+                        {
+                            id: keyRequestReplyKeyId,
+                            name: '#krrk-' + keyRequestReplyKeyId,
+                            purpose: ['sig'],
+                            ringLevel: Number.MAX_SAFE_INTEGER,
+                            permissions: params.permissions === '*'
+                                ? '*'
+                                : Array.isArray(params.permissions)
+                                    ? [...params.permissions, SPMessage_js_1.SPMessage.OP_KEY_SHARE]
+                                    : [SPMessage_js_1.SPMessage.OP_KEY_SHARE],
+                            allowedActions: params.allowedActions,
+                            meta: {
+                                private: {
+                                    content: (0, encryptedData_js_1.encryptedOutgoingData)(originatingContractID, encryptionKeyId, keyRequestReplyKeyS),
+                                    shareable: false
+                                },
+                                keyRequest: {
+                                    ...(reference && {
+                                        reference: encryptKeyRequestMetadata
+                                            ? (0, encryptedData_js_1.encryptedOutgoingData)(originatingContractID, encryptionKeyId, reference)
+                                            : reference
+                                    }),
+                                    contractID: encryptKeyRequestMetadata
+                                        ? (0, encryptedData_js_1.encryptedOutgoingData)(originatingContractID, encryptionKeyId, contractID)
+                                        : contractID
+                                }
                             },
-                            keyRequest: {
-                                ...(reference && {
-                                    reference: encryptKeyRequestMetadata
-                                        ? (0, encryptedData_js_1.encryptedOutgoingData)(originatingContractID, encryptionKeyId, reference)
-                                        : reference
-                                }),
-                                contractID: encryptKeyRequestMetadata
-                                    ? (0, encryptedData_js_1.encryptedOutgoingData)(originatingContractID, encryptionKeyId, contractID)
-                                    : contractID
-                            }
-                        },
-                        data: keyRequestReplyKeyP
-                    }
-                ],
-                signingKeyId
-            }).catch((e) => {
-                console.error(`[chelonia] Error sending OP_KEY_ADD for ${originatingContractID} during key request to ${contractID}`, e);
-                throw e;
-            });
+                            data: keyRequestReplyKeyP
+                        }
+                    ],
+                    signingKeyId
+                }).catch((e) => {
+                    console.error(`[chelonia] Error sending OP_KEY_ADD for ${originatingContractID} during key request to ${contractID}`, e);
+                    throw e;
+                });
+            }
             const payload = {
                 contractID: originatingContractID,
                 height: rootState.contracts[originatingContractID].height,
@@ -1492,15 +1550,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     encryptionKeyId,
                     responseKey: (0, encryptedData_js_1.encryptedOutgoingData)(contractID, innerEncryptionKeyId, keyRequestReplyKeyS)
                 }, this.transientSecretKeys),
-                request: '*'
+                request: request ?? '*'
             };
             let msg = SPMessage_js_1.SPMessage.createV1_0({
                 contractID,
                 op: [
                     SPMessage_js_1.SPMessage.OP_KEY_REQUEST,
-                    (0, signedData_js_1.signedOutgoingData)(contractID, params.signingKeyId, encryptKeyRequestMetadata
-                        ? (0, encryptedData_js_1.encryptedOutgoingData)(contractID, innerEncryptionKeyId, payload)
-                        : payload, this.transientSecretKeys)
+                    (0, signedData_js_1.signedOutgoingData)(contractID, params.signingKeyId, {
+                        ...(skipInviteAccounting && { skipInviteAccounting: true }),
+                        innerData: encryptKeyRequestMetadata
+                            ? (0, encryptedData_js_1.encryptedOutgoingData)(contractID, innerEncryptionKeyId, payload)
+                            : payload
+                    }, this.transientSecretKeys)
                 ],
                 manifest: manifestHash
             });
@@ -1512,10 +1573,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 }
             });
             return msg;
-        }
-        finally {
-            await (0, sbp_1.default)('chelonia/contract/release', contractID, { ephemeral: true });
-        }
+        });
     },
     'chelonia/out/keyRequestResponse': async function (params) {
         const { atomic, contractID, contractName, data, hooks, publishOptions } = params;

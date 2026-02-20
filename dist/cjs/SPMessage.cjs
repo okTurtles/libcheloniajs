@@ -100,8 +100,20 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
     // If the operation is OP_KEY_REQUEST, the payload might be EncryptedData
     // The ReplyWith attribute is SignedData
     if (op === SPMessage.OP_KEY_REQUEST) {
-        return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, message, height, additionalKeys, headJSON, (msg) => {
-            msg.replyWith = (0, signedData_js_1.signedIncomingData)(msg.contractID, undefined, msg.replyWith, msg.height, headJSON);
+        // TODO: THIS CODE SHOULD BE RE-FACTORED IF WE RECREATE GROUPS
+        //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
+        return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, message, height, additionalKeys, headJSON, (msg, id) => {
+            // V2 format has `innerData`, V1 does not. V2 always has an _unencrypted_
+            // outer layer.
+            if (!id && (0, turtledash_1.has)(msg, 'innerData')) {
+                msg.innerData =
+                    (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, msg.innerData, height, additionalKeys, headJSON, (innerMsg) => {
+                        innerMsg.replyWith = (0, signedData_js_1.signedIncomingData)(innerMsg.contractID, undefined, innerMsg.replyWith, innerMsg.height, headJSON);
+                    });
+            }
+            else {
+                msg.replyWith = (0, signedData_js_1.signedIncomingData)(msg.contractID, undefined, msg.replyWith, msg.height, headJSON);
+            }
         });
     }
     // If the operation is OP_ACTION_UNENCRYPTED, it may contain an inner
@@ -120,7 +132,16 @@ const decryptedAndVerifiedDeserializedMessage = (head, headJSON, contractID, par
         });
     }
     if (op === SPMessage.OP_KEY_REQUEST_SEEN) {
-        return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, parsedMessage, height, additionalKeys, headJSON, undefined);
+        // TODO: THIS CODE SHOULD BE RE-FACTORED IF WE RECREATE GROUPS
+        //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
+        return (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, parsedMessage, height, additionalKeys, headJSON, (data, id) => {
+            if (!id && (0, turtledash_1.has)(data, 'innerData')) {
+                const dataV2 = data;
+                if (dataV2.innerData) {
+                    dataV2.innerData = (0, encryptedData_js_1.maybeEncryptedIncomingData)(contractID, state, dataV2.innerData, height, additionalKeys, headJSON);
+                }
+            }
+        });
     }
     // If the operation is OP_ATOMIC, call this function recursively
     if (op === SPMessage.OP_ATOMIC) {

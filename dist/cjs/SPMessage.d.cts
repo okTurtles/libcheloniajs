@@ -59,7 +59,7 @@ export type ProtoSPOpKeyShare = {
     keyRequestHeight?: number;
 };
 export type SPOpKeyShare = ProtoSPOpKeyShare | EncryptedData<ProtoSPOpKeyShare>;
-export type ProtoSPOpKeyRequest = {
+export type ProtoSPOpKeyRequestV1 = {
     contractID: string;
     height: number;
     replyWith: SignedData<{
@@ -68,13 +68,30 @@ export type ProtoSPOpKeyRequest = {
     }>;
     request: string;
 };
-export type SPOpKeyRequest = ProtoSPOpKeyRequest | EncryptedData<ProtoSPOpKeyRequest>;
-export type ProtoSPOpKeyRequestSeen = {
+export type SPOpKeyRequestV1 = ProtoSPOpKeyRequestV1 | EncryptedData<ProtoSPOpKeyRequestV1>;
+export type ProtoSPOpKeyRequestInnerV2 = ProtoSPOpKeyRequestV1;
+export type SPOpKeyRequestV2 = {
+    skipInviteAccounting?: boolean;
+    innerData: ProtoSPOpKeyRequestInnerV2 | EncryptedData<ProtoSPOpKeyRequestInnerV2>;
+};
+export type SPOpKeyRequest = SPOpKeyRequestV1 | SPOpKeyRequestV2;
+export type ProtoSPOpKeyRequestSeenV1 = {
     keyRequestHash: string;
     keyShareHash?: string;
     success: boolean;
 };
-export type SPOpKeyRequestSeen = ProtoSPOpKeyRequestSeen | EncryptedData<ProtoSPOpKeyRequestSeen>;
+export type SPOpKeyRequestSeenV1 = ProtoSPOpKeyRequestSeenV1 | EncryptedData<ProtoSPOpKeyRequestSeenV1>;
+export type ProtoSPOpKeyRequestSeenInnerV2 = {
+    keyShareHash?: string;
+    success: boolean;
+};
+export type SPOpKeyRequestSeenInnerV2 = ProtoSPOpKeyRequestSeenInnerV2 | EncryptedData<ProtoSPOpKeyRequestSeenInnerV2>;
+export type SPOpKeyRequestSeenV2 = {
+    keyRequestHash: string;
+    skipInviteAccounting?: boolean;
+    innerData: SPOpKeyRequestSeenInnerV2;
+};
+export type SPOpKeyRequestSeen = SPOpKeyRequestSeenV1 | SPOpKeyRequestSeenV2;
 export type SPKeyUpdate = {
     name: string;
     id?: string;
