@@ -1968,6 +1968,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // could pass. This is for brevity (avoiding the same check multiple times)
             if ((0, turtledash_1.has)(entry, 'processing'))
                 return;
+            if (!contractState?._vm?.pendingKeyshares?.[hash]) {
+                // While we were getting ready, another client may have shared the keys
+                return;
+            }
             // Using Object.defineProperty because it's not part of the type definition
             // and making `processing` part of the type definition seems to break type
             // inference
@@ -2086,10 +2090,6 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 keyRequestHeight: height
             };
             // 3. Send OP_KEY_SHARE to identity contract
-            if (!contractState?._vm?.pendingKeyshares?.[hash]) {
-                // While we were getting ready, another client may have shared the keys
-                return;
-            }
             return [keySharePayload, skipInviteAccounting];
         })
             .then(async (value) => {
