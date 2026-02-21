@@ -46,3 +46,4 @@ export declare const handleFetchResult: (type: "text" | "json" | "blob") => ((r:
  * @param keyIds - Array of key IDs to delete
  */
 export declare const deleteKeyHelper: (state: ChelContractState, height: number, keyIds: string[]) => void;
+export declare const updateKey: (key: ChelContractKey, updatedKey: ChelContractKey) => ChelContractKey;

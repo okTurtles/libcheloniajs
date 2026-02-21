@@ -1,6 +1,6 @@
 import { deserializeKey, keyId, verifySignature } from '@chelonia/crypto'
 import sbp, { domainFromSelector } from '@sbp/sbp'
-import { cloneDeep, debounce, delay, has, pick, randomIntFromRange } from 'turtledash'
+import { cloneDeep, debounce, delay, has, randomIntFromRange } from 'turtledash'
 import type {
   ProtoSPOpActionUnencrypted,
   ProtoSPOpKeyRequestInnerV2,
@@ -72,6 +72,7 @@ import {
   keyAdditionProcessor,
   logEvtError,
   recreateEvent,
+  updateKey,
   validateKeyAddPermissions,
   validateKeyDelPermissions,
   validateKeyPermissions,
@@ -1772,12 +1773,10 @@ export default sbp('sbp/selectors/register', {
           if (!has(state._vm.authorizedKeys, key.id)) {
             key._notBeforeHeight = height
             state._vm.authorizedKeys[key.id] = cloneDeep(key)
+          } else if (state._vm.authorizedKeys[key.id]._notAfterHeight == null) {
+            state._vm.authorizedKeys[key.id] = updateKey(state._vm.authorizedKeys[key.id], key)
           } else {
-            const partialUpdate = pick(key, ['purpose', 'permissions', 'allowedActions', 'meta'])
-            state._vm.authorizedKeys[key.id] = {
-              ...state._vm.authorizedKeys[key.id],
-              ...partialUpdate
-            }
+            throw new Error('Unable to update a deleted key')
           }
           // If this is a foreign key, it may be out of sync
           if (key.foreignKey != null) {
@@ -1921,7 +1920,7 @@ export default sbp('sbp/selectors/register', {
       // Verify that the signing key is found, has the correct purpose and is
       // allowed to sign this particular operation
       if (!validateKeyPermissions(message, config, stateForValidation, signingKeyId, opT, opV)) {
-        throw new Error('No matching signing key was defined')
+        throw new Error(`No matching signing key was defined: ${signingKeyId} of ${hash} (${contractID})`)
       }
 
       signingKey = stateForValidation._vm.authorizedKeys[signingKeyId]

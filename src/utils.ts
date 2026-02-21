@@ -2,7 +2,7 @@ import type { Key } from '@chelonia/crypto'
 import { deserializeKey, serializeKey, sign, verifySignature } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import { Buffer } from 'buffer'
-import { has, omit } from 'turtledash'
+import { has, omit, union } from 'turtledash'
 import type {
   ProtoSPOpActionUnencrypted,
   SPKey,
@@ -1219,5 +1219,32 @@ export const deleteKeyHelper = (state: ChelContractState, height: number, keyIds
     }
 
     state._vm.authorizedKeys[keyId]._notAfterHeight = height
+  }
+}
+
+const extendKeyField = <T extends '*' | string[]>(a: T | undefined, b: T) => {
+  if (a === '*' || b === '*') return '*'
+  return union(a || [], b)
+}
+
+// Helper for OP_KEY_UPDATE. To allow for out-of-order processing (e.g., old
+// messages in a chatroom), we always augment permissions.
+// TODO: THIS CODE SHOULD BE REMOVED IF WE RECREATE GROUPS, AS THIS SHOULD BE
+// HANDLED BY THE OP_KEY_UPDATE ISSUER.
+export const updateKey = (key: ChelContractKey, updatedKey: ChelContractKey): ChelContractKey => {
+  return {
+    ...key,
+    ...(updatedKey.purpose ? { purpose: union(key.purpose, updatedKey.purpose) } : {}),
+    ...(updatedKey.permissions
+      ? {
+          permissions: extendKeyField(key.permissions, updatedKey.permissions)
+        }
+      : {}),
+    ...(updatedKey.allowedActions
+      ? {
+          allowedActions: extendKeyField(key.allowedActions, updatedKey.allowedActions)
+        }
+      : {}),
+    ...(updatedKey.meta ? { meta: updatedKey.meta } : {})
   }
 }

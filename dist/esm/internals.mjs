@@ -1,6 +1,6 @@
 import { deserializeKey, keyId, verifySignature } from '@chelonia/crypto';
 import sbp, { domainFromSelector } from '@sbp/sbp';
-import { cloneDeep, debounce, delay, has, pick, randomIntFromRange } from 'turtledash';
+import { cloneDeep, debounce, delay, has, randomIntFromRange } from 'turtledash';
 import { SPMessage } from './SPMessage.mjs';
 import { Secret } from './Secret.mjs';
 import { INVITE_STATUS } from './constants.mjs';
@@ -10,7 +10,7 @@ import { ChelErrorAlreadyProcessed, ChelErrorDBBadPreviousHEAD, ChelErrorFetchSe
 import { CONTRACTS_MODIFIED, CONTRACT_HAS_RECEIVED_KEYS, CONTRACT_IS_SYNCING, EVENT_HANDLED, EVENT_PUBLISHED, EVENT_PUBLISHING_ERROR } from './events.mjs';
 import { multicodes } from './functions.mjs';
 import { isSignedData, signedIncomingData } from './signedData.mjs';
-import { buildShelterAuthorizationHeader, deleteKeyHelper, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
+import { buildShelterAuthorizationHeader, deleteKeyHelper, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, updateKey, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
 // Used for temporarily storing the missing decryption key IDs in a given
 // message
 const missingDecryptionKeyIdsMap = new WeakMap();
@@ -1341,12 +1341,11 @@ export default sbp('sbp/selectors/register', {
                         key._notBeforeHeight = height;
                         state._vm.authorizedKeys[key.id] = cloneDeep(key);
                     }
+                    else if (state._vm.authorizedKeys[key.id]._notAfterHeight == null) {
+                        state._vm.authorizedKeys[key.id] = updateKey(state._vm.authorizedKeys[key.id], key);
+                    }
                     else {
-                        const partialUpdate = pick(key, ['purpose', 'permissions', 'allowedActions', 'meta']);
-                        state._vm.authorizedKeys[key.id] = {
-                            ...state._vm.authorizedKeys[key.id],
-                            ...partialUpdate
-                        };
+                        throw new Error('Unable to update a deleted key');
                     }
                     // If this is a foreign key, it may be out of sync
                     if (key.foreignKey != null) {
@@ -1456,7 +1455,7 @@ export default sbp('sbp/selectors/register', {
             // Verify that the signing key is found, has the correct purpose and is
             // allowed to sign this particular operation
             if (!validateKeyPermissions(message, config, stateForValidation, signingKeyId, opT, opV)) {
-                throw new Error('No matching signing key was defined');
+                throw new Error(`No matching signing key was defined: ${signingKeyId} of ${hash} (${contractID})`);
             }
             signingKey = stateForValidation._vm.authorizedKeys[signingKeyId];
         }

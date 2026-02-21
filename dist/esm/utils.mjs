@@ -1,7 +1,7 @@
 import { deserializeKey, serializeKey, sign, verifySignature } from '@chelonia/crypto';
 import sbp from '@sbp/sbp';
 import { Buffer } from 'buffer';
-import { has, omit } from 'turtledash';
+import { has, omit, union } from 'turtledash';
 import { SPMessage } from './SPMessage.mjs';
 import { Secret } from './Secret.mjs';
 import { INVITE_STATUS } from './constants.mjs';
@@ -953,4 +953,30 @@ export const deleteKeyHelper = (state, height, keyIds) => {
         }
         state._vm.authorizedKeys[keyId]._notAfterHeight = height;
     }
+};
+const extendKeyField = (a, b) => {
+    if (a === '*' || b === '*')
+        return '*';
+    return union(a || [], b);
+};
+// Helper for OP_KEY_UPDATE. To allow for out-of-order processing (e.g., old
+// messages in a chatroom), we always augment permissions.
+// TODO: THIS CODE SHOULD BE REMOVED IF WE RECREATE GROUPS, AS THIS SHOULD BE
+// HANDLED BY THE OP_KEY_UPDATE ISSUER.
+export const updateKey = (key, updatedKey) => {
+    return {
+        ...key,
+        ...(updatedKey.purpose ? { purpose: union(key.purpose, updatedKey.purpose) } : {}),
+        ...(updatedKey.permissions
+            ? {
+                permissions: extendKeyField(key.permissions, updatedKey.permissions)
+            }
+            : {}),
+        ...(updatedKey.allowedActions
+            ? {
+                allowedActions: extendKeyField(key.allowedActions, updatedKey.allowedActions)
+            }
+            : {}),
+        ...(updatedKey.meta ? { meta: updatedKey.meta } : {})
+    };
 };
