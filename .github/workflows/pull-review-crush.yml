@@ -60,6 +60,28 @@ jobs:
             echo "FAST_MODE=false" >> "$GITHUB_ENV"
           fi
 
+      - name: Parse provider/model override
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          # Check for {{provider, model, small_model}} override syntax at comment start
+          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/crush(_fast)?[[:space:]]+\{\{[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^}]+)[[:space:]]*\}\} ]]; then
+            PROVIDER=$(echo "${BASH_REMATCH[2]}" | xargs)
+            MODEL=$(echo "${BASH_REMATCH[3]}" | xargs)
+            SMALL_MODEL=$(echo "${BASH_REMATCH[4]}" | xargs)
+            # Validate provider and models contain only safe characters
+            if [[ "$PROVIDER" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "$MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]] && [[ "$SMALL_MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; then
+              echo "Overriding provider to: $PROVIDER"
+              echo "Overriding model to: $MODEL"
+              echo "Overriding small model to: $SMALL_MODEL"
+              echo "REVIEW_PROVIDER=$PROVIDER" >> "$GITHUB_ENV"
+              echo "REVIEW_MODEL=$MODEL" >> "$GITHUB_ENV"
+              echo "REVIEW_SMALL_MODEL=$SMALL_MODEL" >> "$GITHUB_ENV"
+            else
+              echo "::warning::Invalid provider or model format in override, using defaults"
+            fi
+          fi
+
       - name: Resolve provider settings
         run: |
           case "$REVIEW_PROVIDER" in
@@ -85,6 +107,21 @@ jobs:
               echo "::error::Unknown REVIEW_PROVIDER '$REVIEW_PROVIDER' (supported: openrouter, zai-coding-plan)"
               exit 1
               ;;
+          esac
+
+          # Set CRUSH_SMALL_MODEL based on provider (with override support)
+          if [ -n "$REVIEW_SMALL_MODEL" ]; then
+            SMALL_MODEL="$REVIEW_SMALL_MODEL"
+          elif [ "$REVIEW_PROVIDER" = "zai-coding-plan" ]; then
+            SMALL_MODEL="glm-4.7"
+          else
+            SMALL_MODEL="google/gemini-3-flash-preview"
+          fi
+
+          # Prefix small model with provider for crush
+          case "$REVIEW_PROVIDER" in
+            openrouter) echo "CRUSH_SMALL_MODEL=openrouter/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
+            zai-coding-plan) echo "CRUSH_SMALL_MODEL=zai/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
           esac
 
       - name: Get PR number
@@ -422,10 +459,8 @@ jobs:
 
       - name: Run agentic review
         if: steps.size-check.outputs.too_large == 'false'
-        # HACK: currently hard-coding zai/glm-4.7 as the small model which is provider-specific and will break if openrouter is used!
-        # reason for this is to using a non-stupid model and to avoid hitting Z.ai's concurrency limit in case many agents are spun up
         run: |
-          crush run -q -m "$CRUSH_MODEL" --small-model zai/glm-4.7 < /tmp/agentic_prompt.txt > /tmp/agentic_review.txt 2>/tmp/crush_stderr.txt || {
+          crush run -q -m "$CRUSH_MODEL" --small-model "$CRUSH_SMALL_MODEL" < /tmp/agentic_prompt.txt > /tmp/agentic_review.txt 2>/tmp/crush_stderr.txt || {
             echo "::warning::Agentic review via crush failed"
             cat /tmp/crush_stderr.txt >&2
             echo "Agentic review unavailable (crush encountered an error)." > /tmp/agentic_review.txt
