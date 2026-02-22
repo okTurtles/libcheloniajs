@@ -141,6 +141,7 @@ jobs:
             echo "base_ref=$(jq -r '.base.ref' pr_data.json)"
           } >> "$GITHUB_OUTPUT"
           jq -r '.body // ""' pr_data.json > /tmp/pr_body.txt
+          jq -r '.title // ""' pr_data.json > /tmp/pr_title.txt
 
       - name: Check for linked issue
         id: check-issue
@@ -218,7 +219,7 @@ jobs:
           ISSUE_NUMBER: ${{ steps.check-issue.outputs.issue_number }}
         run: |
           # Start with PR title
-          printf '<pr_title>\n%s\n</pr_title>\n' "$(jq -r '.title // ""' pr_data.json)" > /tmp/helpful_context.txt
+          printf '<pr_title>\n%s\n</pr_title>\n' "$(cat /tmp/pr_title.txt)" > /tmp/helpful_context.txt
 
           if [ "$HAS_ISSUE" = "true" ]; then
             # Fetch the issue
