@@ -111,7 +111,7 @@ jobs:
               ;;
           esac
 
-          # Set CRUSH_SMALL_MODEL based on provider (with override support)
+          # Set SMALL_MODEL based on provider (with override support)
           if [ -n "$REVIEW_SMALL_MODEL" ]; then
             SMALL_MODEL="$REVIEW_SMALL_MODEL"
           elif [ "$REVIEW_PROVIDER" = "zai-coding-plan" ]; then
@@ -122,9 +122,9 @@ jobs:
 
           # Prefix small model with provider for crush
           case "$REVIEW_PROVIDER" in
-            openrouter) echo "CRUSH_SMALL_MODEL=openrouter/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
-            zai-coding-plan) echo "CRUSH_SMALL_MODEL=zai/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
-            *) echo "CRUSH_SMALL_MODEL=zai/glm-4.7" >> "$GITHUB_ENV" ;;
+            openrouter) echo "SMALL_MODEL=openrouter/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
+            zai-coding-plan) echo "SMALL_MODEL=zai/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
+            *) echo "SMALL_MODEL=zai/glm-4.7" >> "$GITHUB_ENV" ;;
           esac
 
       - name: Get PR number
@@ -467,7 +467,7 @@ jobs:
       - name: Run agentic review
         if: steps.size-check.outputs.too_large == 'false'
         run: |
-          crush run -q -m "$CRUSH_MODEL" --small-model "$CRUSH_SMALL_MODEL" < /tmp/agentic_prompt.txt > /tmp/agentic_review.txt 2>/tmp/crush_stderr.txt || {
+          crush run -q -m "$CRUSH_MODEL" --small-model "$SMALL_MODEL" < /tmp/agentic_prompt.txt > /tmp/agentic_review.txt 2>/tmp/crush_stderr.txt || {
             echo "::warning::Agentic review via crush failed"
             cat /tmp/crush_stderr.txt >&2
             echo "Agentic review unavailable (crush encountered an error)." > /tmp/agentic_review.txt
