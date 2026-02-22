@@ -65,10 +65,10 @@ jobs:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           # Check for {{provider, model}} or {{provider, model, small_model}} override syntax at comment start
-          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/crush(_fast)?[[:space:]]+\{\{[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^,}]+)[[:space:]]*(?:,[[:space:]]*([^}]+)[[:space:]]*)?\}\} ]]; then
+          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/crush(_fast)?[[:space:]]+\{\{[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^,}]+)[[:space:]]*(,[[:space:]]*([^}]+)[[:space:]]*)?\}\} ]]; then
             PROVIDER=$(echo "${BASH_REMATCH[2]}" | xargs)
             MODEL=$(echo "${BASH_REMATCH[3]}" | xargs)
-            SMALL_MODEL=$(echo "${BASH_REMATCH[4]}" | xargs)
+            SMALL_MODEL=$(echo "${BASH_REMATCH[5]}" | xargs)
             # Validate provider and models contain only safe characters
             if [[ "$PROVIDER" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "$MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]] && { [[ -z "$SMALL_MODEL" ]] || [[ "$SMALL_MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; }; then
               echo "Overriding provider to: $PROVIDER"
