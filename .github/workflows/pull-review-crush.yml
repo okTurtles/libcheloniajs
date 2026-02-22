@@ -64,19 +64,21 @@ jobs:
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          # Check for {{provider, model, small_model}} override syntax at comment start
-          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/crush(_fast)?[[:space:]]+\{\{[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^}]+)[[:space:]]*\}\} ]]; then
+          # Check for {{provider, model}} or {{provider, model, small_model}} override syntax at comment start
+          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/crush(_fast)?[[:space:]]+\{\{[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^,}]+)[[:space:]]*(?:,[[:space:]]*([^}]+)[[:space:]]*)?\}\} ]]; then
             PROVIDER=$(echo "${BASH_REMATCH[2]}" | xargs)
             MODEL=$(echo "${BASH_REMATCH[3]}" | xargs)
             SMALL_MODEL=$(echo "${BASH_REMATCH[4]}" | xargs)
             # Validate provider and models contain only safe characters
-            if [[ "$PROVIDER" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "$MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]] && [[ "$SMALL_MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; then
+            if [[ "$PROVIDER" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "$MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]] && { [[ -z "$SMALL_MODEL" ]] || [[ "$SMALL_MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; }; then
               echo "Overriding provider to: $PROVIDER"
               echo "Overriding model to: $MODEL"
-              echo "Overriding small model to: $SMALL_MODEL"
               echo "REVIEW_PROVIDER=$PROVIDER" >> "$GITHUB_ENV"
               echo "REVIEW_MODEL=$MODEL" >> "$GITHUB_ENV"
-              echo "REVIEW_SMALL_MODEL=$SMALL_MODEL" >> "$GITHUB_ENV"
+              if [[ -n "$SMALL_MODEL" ]]; then
+                echo "Overriding small model to: $SMALL_MODEL"
+                echo "REVIEW_SMALL_MODEL=$SMALL_MODEL" >> "$GITHUB_ENV"
+              fi
             else
               echo "::warning::Invalid provider or model format in override, using defaults"
             fi
