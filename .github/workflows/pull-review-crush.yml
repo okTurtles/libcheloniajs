@@ -64,7 +64,7 @@ jobs:
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          # Check for {{provider, model}} or {{provider, model, small_model}} override syntax at comment start
+          # Check for {{provider, model}} or {{provider, model, small_model}} override syntax after /crush or /crush_fast command
           if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/crush(_fast)?[[:space:]]+\{\{[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^,}]+)[[:space:]]*(,[[:space:]]*([^}]+)[[:space:]]*)?\}\} ]]; then
             PROVIDER=$(echo "${BASH_REMATCH[2]}" | xargs)
             MODEL=$(echo "${BASH_REMATCH[3]}" | xargs)
@@ -124,6 +124,7 @@ jobs:
           case "$REVIEW_PROVIDER" in
             openrouter) echo "CRUSH_SMALL_MODEL=openrouter/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
             zai-coding-plan) echo "CRUSH_SMALL_MODEL=zai/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
+            *) echo "CRUSH_SMALL_MODEL=zai/glm-4.7" >> "$GITHUB_ENV" ;;
           esac
 
       - name: Get PR number
