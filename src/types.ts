@@ -288,7 +288,10 @@ export type ChelContractState = {
       contractID: string;
       height: number;
       // List of contract IDs the key share is addressed to
-      foreignContractIDs?: [string, number][];
+      foreignContractIDs?: (
+        | [contractID: string, firstShareHeight: number]
+        | [contractID: string, firstShareHeight: number, lastShareHeight: number]
+      )[];
       keyRequestHash?: string;
       keyRequestHeight?: number;
     }[];

@@ -884,7 +884,14 @@ export default sbp('sbp/selectors/register', {
                                 sharedKeyId.foreignContractIDs = [[v.foreignContractID, height]];
                             }
                             else {
-                                sharedKeyId.foreignContractIDs.push([v.foreignContractID, height]);
+                                const tuple = sharedKeyId
+                                    .foreignContractIDs.find(([id]) => id === v.foreignContractID);
+                                if (tuple) {
+                                    tuple[2] = height;
+                                }
+                                else {
+                                    sharedKeyId.foreignContractIDs.push([v.foreignContractID, height]);
+                                }
                             }
                         }
                     }
@@ -1838,7 +1845,7 @@ export default sbp('sbp/selectors/register', {
             if (!keyId || affectedKeyIds.has(keyId))
                 return acc;
             const [currentRingLevel, currentSigningKeyId, currentKeyIds] = acc;
-            const ringLevel = Math.min(currentRingLevel, contractState._vm?.authorizedKeys?.[keyId]?.ringLevel ?? Number.POSITIVE_INFINITY);
+            const ringLevel = Math.min(currentRingLevel, contractState._vm?.authorizedKeys?.[keyId]?.ringLevel ?? Number.MAX_SAFE_INTEGER);
             if (ringLevel >= currentRingLevel) {
                 affectedKeyIds.add(keyId);
                 currentKeyIds.push(keyId);

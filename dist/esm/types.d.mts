@@ -270,7 +270,7 @@ export type ChelContractState = {
             id: string;
             contractID: string;
             height: number;
-            foreignContractIDs?: [string, number][];
+            foreignContractIDs?: ([contractID: string, firstShareHeight: number] | [contractID: string, firstShareHeight: number, lastShareHeight: number])[];
             keyRequestHash?: string;
             keyRequestHeight?: number;
         }[];
