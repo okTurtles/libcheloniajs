@@ -3,6 +3,7 @@ import type sbp from '@sbp/sbp';
 import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.mjs';
 import type { EncryptedData } from './encryptedData.mjs';
 import type { PubSubClient } from './pubsub/index.mjs';
+import type { SignedDataContext } from './signedData.mjs';
 export type JSONType = null | string | number | boolean | JSONObject | JSONArray;
 export interface JSONObject {
     [x: string]: JSONType;
@@ -43,6 +44,7 @@ export type CheloniaConfig = {
     skipSideEffects: boolean;
     strictProcessing: boolean;
     strictOrdering: boolean;
+    saveMessageMetadata: boolean;
     connectionOptions: {
         maxRetries: number;
         reconnectOnTimeout: boolean;
@@ -155,6 +157,7 @@ export type CheloniaContext = {
         slim: boolean;
         info: string;
         contract: CheloniaContractCtx;
+        name: string;
     }>;
     whitelistedActions: Record<string, true>;
     currentSyncs: Record<string, {
@@ -249,16 +252,16 @@ export type ChelContractState = {
         authorizedKeys: Record<string, ChelContractKey>;
         invites?: Record<string, {
             status: string;
-            initialQuantity: number;
-            quantity: number;
-            expires: number;
+            initialQuantity?: number;
+            quantity?: number;
+            expires?: number;
             inviteSecret: string;
             responses: string[];
         }>;
         type: string;
         pendingWatch?: Record<string, [fkName: string, fkId: string][]>;
         keyshares?: Record<string, {
-            success: boolean;
+            success?: boolean;
             contractID: string;
             height: number;
             hash?: string;
@@ -267,6 +270,7 @@ export type ChelContractState = {
             id: string;
             contractID: string;
             height: number;
+            foreignContractIDs?: ([contractID: string, firstShareHeight: number] | [contractID: string, firstShareHeight: number, lastShareHeight: number])[];
             keyRequestHash?: string;
             keyRequestHeight?: number;
         }[];
@@ -274,14 +278,15 @@ export type ChelContractState = {
             isPrivate: boolean,
             height: number,
             signingKeyId: string,
-            [
-                string,
-                {
-                    _signedData: [string, string, string];
-                },
-                number,
-                string
-            ]
+            SignedDataContext
+        ] | [
+            isPrivate: boolean,
+            height: number,
+            signingKeyId: string,
+            SignedDataContext,
+            request: string,
+            manifest: string,
+            skipInviteAccounting: boolean
         ]>;
         props?: Record<string, JSONType>;
     };
@@ -308,6 +313,7 @@ export type ChelRootState = {
         previousKeyOp: string;
         missingDecryptionKeyIds?: string[];
     }>;
+    secretKeys: Record<string, string>;
 };
 export type Response = {
     type: ResType;

@@ -1,16 +1,16 @@
+import { deserializeKey, keyId, verifySignature } from '@chelonia/crypto';
 import sbp, { domainFromSelector } from '@sbp/sbp';
-import { multicodes } from './functions.mjs';
-import { cloneDeep, debounce, delay, has, pick, randomIntFromRange } from 'turtledash';
+import { cloneDeep, debounce, delay, has, randomIntFromRange } from 'turtledash';
 import { SPMessage } from './SPMessage.mjs';
 import { Secret } from './Secret.mjs';
 import { INVITE_STATUS } from './constants.mjs';
-import { deserializeKey, keyId, verifySignature } from '@chelonia/crypto';
 import './db.mjs';
 import { encryptedIncomingData, encryptedOutgoingData } from './encryptedData.mjs';
-import { ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnrecoverable, ChelErrorWarning, ChelErrorDBBadPreviousHEAD, ChelErrorAlreadyProcessed, ChelErrorFetchServerTimeFailed, ChelErrorForkedChain } from './errors.mjs';
+import { ChelErrorAlreadyProcessed, ChelErrorDBBadPreviousHEAD, ChelErrorFetchServerTimeFailed, ChelErrorForkedChain, ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnrecoverable, ChelErrorWarning } from './errors.mjs';
 import { CONTRACTS_MODIFIED, CONTRACT_HAS_RECEIVED_KEYS, CONTRACT_IS_SYNCING, EVENT_HANDLED, EVENT_PUBLISHED, EVENT_PUBLISHING_ERROR } from './events.mjs';
-import { buildShelterAuthorizationHeader, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, validateKeyPermissions, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyUpdatePermissions } from './utils.mjs';
+import { multicodes } from './functions.mjs';
 import { isSignedData, signedIncomingData } from './signedData.mjs';
+import { buildShelterAuthorizationHeader, deleteKeyHelper, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, updateKey, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
 // Used for temporarily storing the missing decryption key IDs in a given
 // message
 const missingDecryptionKeyIdsMap = new WeakMap();
@@ -393,7 +393,8 @@ export default sbp('sbp/selectors/register', {
         this.manifestToContract[manifestHash] = {
             slim: contractInfo === body.contractSlim,
             info: contractInfo,
-            contract: this.defContract
+            contract: this.defContract,
+            name: contractName
         };
     },
     // Warning: avoid using this unless you know what you're doing. Prefer using /remove.
@@ -686,24 +687,39 @@ export default sbp('sbp/selectors/register', {
     'chelonia/private/operationHook': function (contractID, message, state) {
         if (this.config.skipActionProcessing)
             return;
-        const rootState = sbp('chelonia/rootState');
-        const contractName = rootState.contracts[contractID]?.type || state._vm?.type;
+        const manifestHash = message.manifest();
+        const contractName = this.manifestToContract[manifestHash]?.name;
         if (!contractName)
             return;
-        const manifestHash = message.manifest();
-        const hook = `${manifestHash}/${contractName}/hook/${message.opType()}`;
-        // Check if a hook is defined
-        if (sbp('sbp/selectors/fn', hook)) {
-            // And call it
-            try {
-                // Note: Errors here should not stop processing, since running these
-                // hooks is optionl (for example, they aren't run on the server)
-                sbp(hook, { contractID, message, state });
+        const callHook = (op, atomic) => {
+            const hook = `${manifestHash}/${contractName}/_postOpHook/${op}`;
+            // Check if a hook is defined
+            if (sbp('sbp/selectors/fn', hook)) {
+                // And call it
+                try {
+                    // Note: Errors here should not stop processing, since running these
+                    // hooks is optional (for example, they aren't run on the server)
+                    sbp(hook, { contractID, message, state, atomic });
+                }
+                catch (e) {
+                    console.error(`[${hook}] hook error for message ${message.hash()} on contract ${contractID}:`, e);
+                }
             }
-            catch (e) {
-                console.error(`[${hook}] hook error for message ${message.hash()} on contract ${contractID}:`, e);
+        };
+        if (message.opType() === SPMessage.OP_ATOMIC) {
+            const opsSet = new Set();
+            for (const [op] of message.opValue()) {
+                // Only call hook once per opcode
+                if (opsSet.has(op))
+                    continue;
+                opsSet.add(op);
+                callHook(op, true);
             }
         }
+        // Note that for `OP_ATOMIC` the hook will be called multiple times:
+        //   * once per op-type (with the `atomic` option)
+        //   * then, for OP_ATOMIC
+        callHook(message.opType());
     },
     'chelonia/private/in/processMessage': async function (message, state, internalSideEffectStack, contractName) {
         const [opT, opV] = message.op();
@@ -849,14 +865,34 @@ export default sbp('sbp/selectors/register', {
                     if (key.id && key.meta?.private?.content) {
                         if (!has(state._vm, 'sharedKeyIds'))
                             state._vm.sharedKeyIds = [];
-                        if (!state._vm.sharedKeyIds.some((sK) => sK.id === key.id)) {
+                        // Set or update sharedKeyIds information
+                        const sharedKeyId = state._vm.sharedKeyIds.find((sK) => sK.id === key.id);
+                        if (!sharedKeyId) {
                             state._vm.sharedKeyIds.push({
                                 id: key.id,
+                                // Contract ID this key is for
                                 contractID: v.contractID,
+                                // Contract ID used for encrypting the key
+                                foreignContractIDs: v.foreignContractID ? [[v.foreignContractID, height]] : [],
                                 height,
                                 keyRequestHash: v.keyRequestHash,
                                 keyRequestHeight: v.keyRequestHeight
                             });
+                        }
+                        else if (v.foreignContractID) {
+                            if (!sharedKeyId.foreignContractIDs) {
+                                sharedKeyId.foreignContractIDs = [[v.foreignContractID, height]];
+                            }
+                            else {
+                                const tuple = sharedKeyId
+                                    .foreignContractIDs.find(([id]) => id === v.foreignContractID);
+                                if (tuple) {
+                                    tuple[2] = height;
+                                }
+                                else {
+                                    sharedKeyId.foreignContractIDs.push([v.foreignContractID, height]);
+                                }
+                            }
                         }
                     }
                 }
@@ -1043,28 +1079,60 @@ export default sbp('sbp/selectors/register', {
             },
             [SPMessage.OP_KEY_REQUEST](wv) {
                 const data = config.unwrapMaybeEncryptedData(wv);
+                // TODO: THIS CODE SHOULD BE REFACTORED IF WE RECREATE GROUPS
+                //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
                 // If we're unable to decrypt the OP_KEY_REQUEST, then still
                 // proceed to do accounting of invites
-                const v = data?.data || {
-                    contractID: '(private)',
-                    replyWith: { context: undefined },
-                    request: '*'
-                };
-                const originatingContractID = v.contractID;
-                if (state._vm?.invites?.[signingKeyId]?.quantity != null) {
-                    if (state._vm.invites[signingKeyId].quantity > 0) {
-                        if (--state._vm.invites[signingKeyId].quantity <= 0) {
-                            state._vm.invites[signingKeyId].status = INVITE_STATUS.USED;
-                        }
+                let skipInviteAccounting = false;
+                let encryptedRequest = false;
+                // Handle both V1 and V2
+                const v = (() => {
+                    if (!data)
+                        return;
+                    // V2 has an _unencrypted_ outer layer and an optionally encrypted
+                    // `innerData` field
+                    if (!data.encryptionKeyId && has(data.data, 'innerData')) {
+                        // It's V2
+                        skipInviteAccounting = !!data.data.skipInviteAccounting;
+                        const innerData = config.unwrapMaybeEncryptedData(data.data.innerData);
+                        encryptedRequest = !!innerData?.encryptionKeyId;
+                        return innerData?.data;
                     }
                     else {
-                        logEvtError(message, 'Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
+                        // It's V1
+                        encryptedRequest = !!data.encryptionKeyId;
+                        return data.data;
+                    }
+                })() || {
+                    contractID: '(private)',
+                    replyWith: { context: undefined },
+                    request: '(private)'
+                };
+                const originatingContractID = v.contractID;
+                if (state._vm?.invites?.[signingKeyId] &&
+                    !skipInviteAccounting) {
+                    if (state._vm.invites[signingKeyId].status !== INVITE_STATUS.VALID) {
+                        logEvtError(message, '[processMessage] Ignoring OP_KEY_REQUEST because it is not valid: ' +
                             originatingContractID);
                         return;
                     }
-                }
-                if (state._vm?.invites?.[signingKeyId]?.expires != null) {
-                    if (state._vm.invites[signingKeyId].expires < Date.now()) {
+                    // We consume invites before responding (or checking if we can respond)
+                    // because it's the only way to be certain that we won't over-respond
+                    // to requests.
+                    if (state._vm?.invites?.[signingKeyId]?.quantity != null) {
+                        if (state._vm.invites[signingKeyId].quantity > 0) {
+                            if (--state._vm.invites[signingKeyId].quantity <= 0) {
+                                state._vm.invites[signingKeyId].status = INVITE_STATUS.USED;
+                            }
+                        }
+                        else {
+                            logEvtError(message, 'Ignoring OP_KEY_REQUEST because it exceeds allowed quantity: ' +
+                                originatingContractID);
+                            return;
+                        }
+                    }
+                    if (state._vm.invites[signingKeyId].expires != null &&
+                        state._vm.invites[signingKeyId].expires < Date.now()) {
                         logEvtError(message, 'Ignoring OP_KEY_REQUEST because it expired at ' +
                             state._vm.invites[signingKeyId].expires +
                             ': ' +
@@ -1072,7 +1140,7 @@ export default sbp('sbp/selectors/register', {
                         return;
                     }
                 }
-                // If skipping porocessing or if the message is outgoing, there isn't
+                // If skipping processing or if the message is outgoing, there isn't
                 // anything else to do
                 if (config.skipActionProcessing || direction === 'outgoing') {
                     return;
@@ -1087,22 +1155,21 @@ export default sbp('sbp/selectors/register', {
                     logEvtError(message, 'Ignoring OP_KEY_REQUEST because it is signed by the wrong contract');
                     return;
                 }
-                if (v.request !== '*') {
-                    logEvtError(message, 'Ignoring OP_KEY_REQUEST because it has an unsupported request attribute', v.request);
-                    return;
-                }
                 if (!state._vm.pendingKeyshares)
                     state._vm.pendingKeyshares = Object.create(null);
                 state._vm.pendingKeyshares[message.hash()] = context
                     ? [
                         // Full-encryption (i.e., KRS encryption) requires that this request
                         // was encrypted and that the invite is marked as private
-                        !!data?.encryptionKeyId,
+                        encryptedRequest,
                         message.height(),
                         signingKeyId,
-                        context
+                        context,
+                        v.request,
+                        message.manifest(),
+                        skipInviteAccounting
                     ]
-                    : [!!data?.encryptionKeyId, message.height(), signingKeyId];
+                    : [encryptedRequest, message.height(), signingKeyId];
                 // Call 'chelonia/private/respondToAllKeyRequests' after sync
                 if (data) {
                     internalSideEffectStack?.push(() => {
@@ -1126,7 +1193,9 @@ export default sbp('sbp/selectors/register', {
                     const hash = v.keyRequestHash;
                     const pending = state._vm.pendingKeyshares[hash];
                     delete state._vm.pendingKeyshares[hash];
-                    if (pending.length !== 4)
+                    // TODO: THIS CODE SHOULD BE REFACTORED IF WE RECREATE GROUPS
+                    //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
+                    if (pending.length !== 4 && pending.length !== 7)
                         return;
                     // If we were able to respond, clean up responders
                     const keyId = pending[2];
@@ -1136,13 +1205,21 @@ export default sbp('sbp/selectors/register', {
                     }
                     if (!has(state._vm, 'keyshares'))
                         state._vm.keyshares = Object.create(null);
-                    const success = v.success;
+                    // TODO: THIS CODE SHOULD BE DELETED IF WE RECREATE GROUPS
+                    //       AS THIS OLD V1 STUFF WON'T BE NECESSARY.
+                    // Handle new and old formats
+                    let inner = v;
+                    if (data.encryptionKeyId == null && has(v, 'innerData')) {
+                        const innerResult = config.unwrapMaybeEncryptedData(v.innerData);
+                        inner = innerResult?.data;
+                    }
+                    const success = inner?.success;
                     state._vm.keyshares[hash] = {
                         contractID: originatingContractID,
                         height,
                         success,
                         ...(success && {
-                            hash: v.keyShareHash
+                            hash: inner?.keyShareHash
                         })
                     };
                 }
@@ -1195,12 +1272,9 @@ export default sbp('sbp/selectors/register', {
                     }
                     return true;
                 });
+                deleteKeyHelper(state, height, keyIds);
                 keyIds.forEach((keyId) => {
                     const key = state._vm.authorizedKeys[keyId];
-                    state._vm.authorizedKeys[keyId]._notAfterHeight = height;
-                    if (has(state._volatile.pendingKeyRevocations, keyId)) {
-                        delete state._volatile.pendingKeyRevocations[keyId];
-                    }
                     // Are we deleting a foreign key? If so, we also need to remove
                     // the operation from (1) _volatile.watch (on the other contract)
                     // and (2) pendingWatch
@@ -1266,19 +1340,61 @@ export default sbp('sbp/selectors/register', {
                 }
                 const [updatedKeys, updatedMap] = validateKeyUpdatePermissions.call(self, contractID, signingKey, state, v);
                 const keysToDelete = Object.values(updatedMap);
-                for (const keyId of keysToDelete) {
-                    if (has(state._volatile.pendingKeyRevocations, keyId)) {
-                        delete state._volatile.pendingKeyRevocations[keyId];
-                    }
-                    state._vm.authorizedKeys[keyId]._notAfterHeight = height;
-                }
+                deleteKeyHelper(state, height, keysToDelete);
+                let canMirrorOperationsUpToRingLevel = NaN;
+                let hasOutOfSyncKeys = false;
                 for (const key of updatedKeys) {
                     if (!has(state._vm.authorizedKeys, key.id)) {
                         key._notBeforeHeight = height;
                         state._vm.authorizedKeys[key.id] = cloneDeep(key);
                     }
+                    else if (state._vm.authorizedKeys[key.id]._notAfterHeight == null) {
+                        state._vm.authorizedKeys[key.id] = updateKey(state._vm.authorizedKeys[key.id], key);
+                    }
+                    else {
+                        throw new Error('Unable to update a deleted key');
+                    }
+                    // If this is a foreign key, it may be out of sync
+                    if (key.foreignKey != null) {
+                        if (!(key.ringLevel >= canMirrorOperationsUpToRingLevel)) {
+                            const signingKey = findSuitableSecretKeyId(state, [SPMessage.OP_KEY_DEL], ['sig'], key.ringLevel);
+                            if (signingKey) {
+                                canMirrorOperationsUpToRingLevel = key.ringLevel;
+                            }
+                        }
+                        const fkUrl = new URL(key.foreignKey);
+                        const foreignContractID = fkUrl.pathname;
+                        const foreignKeyName = fkUrl.searchParams.get('keyName');
+                        if (!foreignKeyName)
+                            throw new Error('Missing foreign key name');
+                        const foreignState = sbp('chelonia/contract/state', foreignContractID);
+                        if (foreignState) {
+                            const fKeyId = findKeyIdByName(foreignState, foreignKeyName);
+                            if (!fKeyId) {
+                                // Key was deleted; mark it for deletion
+                                self.config.reactiveSet(state._volatile.pendingKeyRevocations, key.id, 'del');
+                                hasOutOfSyncKeys = true;
+                            }
+                            else if (fKeyId !== key.id) {
+                                // Key still needs to be rotated
+                                self.config.reactiveSet(state._volatile.pendingKeyRevocations, key.id, true);
+                                hasOutOfSyncKeys = true;
+                            }
+                        }
+                    }
                 }
                 keyAdditionProcessor.call(self, message, hash, updatedKeys, state, contractID, signingKey, internalSideEffectStack);
+                // If we're able to rotate foreign keys and we need to, do so
+                if (Number.isFinite(canMirrorOperationsUpToRingLevel) && hasOutOfSyncKeys) {
+                    internalSideEffectStack?.push(() => {
+                        sbp('chelonia/private/queueEvent', contractID, [
+                            'chelonia/private/deleteOrRotateRevokedKeys',
+                            contractID
+                        ]).catch((e) => {
+                            console.error(`Error at deleteOrRotateRevokedKeys for contractID ${contractID} at OP_KEY_UPDATE with ${hash}`, e);
+                        });
+                    });
+                }
                 // Check state._volatile.watch for contracts that should be
                 // mirroring this operation
                 if (Array.isArray(state._volatile?.watch)) {
@@ -1346,7 +1462,7 @@ export default sbp('sbp/selectors/register', {
             // Verify that the signing key is found, has the correct purpose and is
             // allowed to sign this particular operation
             if (!validateKeyPermissions(message, config, stateForValidation, signingKeyId, opT, opV)) {
-                throw new Error('No matching signing key was defined');
+                throw new Error(`No matching signing key was defined: ${signingKeyId} of ${hash} (${contractID})`);
             }
             signingKey = stateForValidation._vm.authorizedKeys[signingKeyId];
         }
@@ -1509,9 +1625,9 @@ export default sbp('sbp/selectors/register', {
         Object.entries(pendingWatch).forEach(([contractID, keys]) => {
             if (!Array.isArray(keys) ||
                 // Check that the keys exist and haven't been revoked
-                !keys.reduce((acc, [, id]) => {
-                    return acc || has(externalContractState._vm.authorizedKeys, id);
-                }, false)) {
+                !keys.some(([, id]) => {
+                    return has(externalContractState._vm.authorizedKeys, id);
+                })) {
                 console.info('[chelonia/private/watchForeignKeys]: Skipping as none of the keys to watch exist', {
                     externalContractID,
                     contractID
@@ -1536,11 +1652,10 @@ export default sbp('sbp/selectors/register', {
         // unnecessarily subscribing to the contract
         if (!Array.isArray(pendingWatch) ||
             // Check that the keys exist and haven't been revoked
-            !pendingWatch.reduce((acc, [, id]) => {
-                return (acc ||
-                    (has(externalContractState._vm.authorizedKeys, id) &&
-                        findKeyIdByName(externalContractState, externalContractState._vm.authorizedKeys[id].name) != null));
-            }, false)) {
+            !pendingWatch.some(([, id]) => {
+                return (has(externalContractState._vm.authorizedKeys, id) &&
+                    findKeyIdByName(externalContractState, externalContractState._vm.authorizedKeys[id].name) != null);
+            })) {
             console.info('[chelonia/private/syncContractAndWatchKeys]: Skipping as none of the keys to watch exist', {
                 externalContractID,
                 contractID
@@ -1630,14 +1745,26 @@ export default sbp('sbp/selectors/register', {
         const pendingKeyRevocations = contractState?._volatile?.pendingKeyRevocations;
         if (!pendingKeyRevocations || Object.keys(pendingKeyRevocations).length === 0)
             return;
+        // Map of foreign keys to their ID (URI -> key id)
+        const activeForeignKeyIds = Object.fromEntries(Object.values(contractState._vm.authorizedKeys)
+            .filter(({ foreignKey, _notAfterHeight }) => foreignKey != null && _notAfterHeight == null)
+            .map(({ foreignKey, id }) => [foreignKey, id]));
         // First, we handle keys that have been rotated
         const keysToUpdate = Object.entries(pendingKeyRevocations)
             .filter(([, v]) => v === true)
             .map(([id]) => id);
+        // Set to prevent duplicates
+        const affectedKeyIds = new Set();
         // Aggregate the keys that we can update to send them in a single operation
         const [, keyUpdateSigningKeyId, keyUpdateArgs] = keysToUpdate.reduce((acc, keyId) => {
-            const key = contractState._vm?.authorizedKeys?.[keyId];
-            if (!key || !key.foreignKey)
+            const pkrKey = contractState._vm?.authorizedKeys?.[keyId];
+            if (!pkrKey || !pkrKey.foreignKey)
+                return acc;
+            const activeKeyId = activeForeignKeyIds[pkrKey.foreignKey];
+            if (!activeKeyId)
+                return acc;
+            const key = contractState._vm.authorizedKeys[activeKeyId];
+            if (affectedKeyIds.has(key.id))
                 return acc;
             const foreignKey = String(key.foreignKey);
             const fkUrl = new URL(foreignKey);
@@ -1656,12 +1783,18 @@ export default sbp('sbp/selectors/register', {
                 }
                 return acc;
             }
+            else if (fKeyId === key.id) {
+                // Key has already been rotated
+                this.config.reactiveDel(pendingKeyRevocations, keyId);
+                return acc;
+            }
             const [currentRingLevel, currentSigningKeyId, currentKeyArgs] = acc;
-            const ringLevel = Math.min(currentRingLevel, key.ringLevel ?? Number.POSITIVE_INFINITY);
+            const ringLevel = Math.min(currentRingLevel, key.ringLevel ?? Number.MAX_SAFE_INTEGER);
             if (ringLevel >= currentRingLevel) {
+                affectedKeyIds.add(key.id);
                 currentKeyArgs.push({
                     name: key.name,
-                    oldKeyId: keyId,
+                    oldKeyId: key.id,
                     id: fKeyId,
                     data: foreignState._vm.authorizedKeys[fKeyId].data
                 });
@@ -1670,9 +1803,10 @@ export default sbp('sbp/selectors/register', {
             else if (Number.isFinite(ringLevel)) {
                 const signingKeyId = findSuitableSecretKeyId(contractState, [SPMessage.OP_KEY_UPDATE], ['sig'], ringLevel);
                 if (signingKeyId) {
+                    affectedKeyIds.add(key.id);
                     currentKeyArgs.push({
                         name: key.name,
-                        oldKeyId: keyId,
+                        oldKeyId: key.id,
                         id: fKeyId,
                         data: foreignState._vm.authorizedKeys[fKeyId].data
                     });
@@ -1703,16 +1837,24 @@ export default sbp('sbp/selectors/register', {
             .filter(([, v]) => v === 'del')
             .map(([id]) => id);
         // Aggregate the keys that we can delete to send them in a single operation
-        const [, keyDelSigningKeyId, keyIdsToDelete] = keysToDelete.reduce((acc, keyId) => {
+        const [, keyDelSigningKeyId, keyIdsToDelete] = keysToDelete.reduce((acc, pkrKeyId) => {
+            const pkrKey = contractState._vm?.authorizedKeys?.[pkrKeyId];
+            if (!pkrKey || !pkrKey.foreignKey)
+                return acc;
+            const keyId = activeForeignKeyIds[pkrKey.foreignKey];
+            if (!keyId || affectedKeyIds.has(keyId))
+                return acc;
             const [currentRingLevel, currentSigningKeyId, currentKeyIds] = acc;
-            const ringLevel = Math.min(currentRingLevel, contractState._vm?.authorizedKeys?.[keyId]?.ringLevel ?? Number.POSITIVE_INFINITY);
+            const ringLevel = Math.min(currentRingLevel, contractState._vm?.authorizedKeys?.[keyId]?.ringLevel ?? Number.MAX_SAFE_INTEGER);
             if (ringLevel >= currentRingLevel) {
+                affectedKeyIds.add(keyId);
                 currentKeyIds.push(keyId);
                 return [currentRingLevel, currentSigningKeyId, currentKeyIds];
             }
             else if (Number.isFinite(ringLevel)) {
                 const signingKeyId = findSuitableSecretKeyId(contractState, [SPMessage.OP_KEY_DEL], ['sig'], ringLevel);
                 if (signingKeyId) {
+                    affectedKeyIds.add(keyId);
                     currentKeyIds.push(keyId);
                     return [ringLevel, signingKeyId, currentKeyIds];
                 }
@@ -1729,13 +1871,13 @@ export default sbp('sbp/selectors/register', {
                 data: keyIdsToDelete,
                 signingKeyId: keyDelSigningKeyId
             }).catch((e) => {
-                console.error(`[chelonia/private/deleteRevokedKeys] Error sending OP_KEY_DEL for ${contractID}`, e.message);
+                console.error(`[chelonia/private/deleteOrRotateRevokedKeys] Error sending OP_KEY_DEL for ${contractID}`, e.message);
             });
         }
     },
     'chelonia/private/respondToAllKeyRequests': function (contractID) {
         const state = sbp(this.config.stateSelector);
-        const contractState = state[contractID] ?? {};
+        const contractState = (state[contractID] ?? { _vm: {} });
         const pending = contractState?._vm?.pendingKeyshares;
         if (!pending)
             return;
@@ -1745,7 +1887,7 @@ export default sbp('sbp/selectors/register', {
             return;
         }
         Object.entries(pending).map(([hash, entry]) => {
-            if (!Array.isArray(entry) || entry.length !== 4) {
+            if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 7)) {
                 return undefined;
             }
             const [, , , [originatingContractID]] = entry;
@@ -1764,12 +1906,15 @@ export default sbp('sbp/selectors/register', {
         const contractState = state[contractID];
         const entry = contractState?._vm?.pendingKeyshares?.[hash];
         const instance = this._instance;
-        if (!Array.isArray(entry) || entry.length !== 4) {
+        if (!Array.isArray(entry) || (entry.length !== 4 && entry.length !== 7) || has(entry, 'processing')) {
             return;
         }
-        const [keyShareEncryption, height, , [originatingContractID, rv, originatingContractHeight, headJSON]] = entry;
-        entry.pop();
-        const krsEncryption = !!contractState._vm.authorizedKeys?.[signingKeyId]?._private;
+        // For `entry.length === 4` (kept for compatibility purposes, not used in
+        // new entries), `request` and subsequent values will be undefined. This
+        // is expected and should be handled.
+        const [keyShareEncryption, height, inviteId, [originatingContractID, rv, originatingContractHeight, headJSON], request, manifestHash, requestedSkipInviteAccounting] = entry;
+        // If the OP_KEY_REQUEST was encrypted, use an encrypted OP_KEY_REQUEST_SEEN
+        const krsEncryption = keyShareEncryption;
         // 1. Sync (originating) identity contract
         await sbp('chelonia/private/in/syncContract', originatingContractID);
         if (instance !== this._instance)
@@ -1786,9 +1931,22 @@ export default sbp('sbp/selectors/register', {
         // This is safe to do without await because it's sending actions
         // If we had await it could deadlock when retrying to send the event
         Promise.resolve()
-            .then(() => {
+            .then(async () => {
             if (instance !== this._instance)
                 return;
+            // Guard to prevent responding to this request multiple times
+            // Note: there's a small time window where the previous check and this
+            // could pass. This is for brevity (avoiding the same check multiple times)
+            if (has(entry, 'processing'))
+                return;
+            if (!contractState?._vm?.pendingKeyshares?.[hash]) {
+                // While we were getting ready, another client may have shared the keys
+                return;
+            }
+            // Using Object.defineProperty because it's not part of the type definition
+            // and making `processing` part of the type definition seems to break type
+            // inference
+            Object.defineProperty(entry, 'processing', { configurable: true, value: true });
             if (!has(originatingState._vm.authorizedKeys, responseKeyId) ||
                 originatingState._vm.authorizedKeys[responseKeyId]._notAfterHeight != null) {
                 throw new Error(`Unable to respond to key request for ${originatingContractID}. Key ${responseKeyId} is not valid.`);
@@ -1796,23 +1954,105 @@ export default sbp('sbp/selectors/register', {
             // We don't need to worry about persistence (if it was an outgoing
             // message) here as this is done from an internal side-effect.
             sbp('chelonia/storeSecretKeys', new Secret([{ key: deserializedResponseKey }]));
-            const keys = pick(state.secretKeys, Object.entries(contractState._vm.authorizedKeys)
-                .filter(([, key]) => !!key.meta?.private?.shareable)
-                .map(([kId]) => kId));
-            if (!keys || Object.keys(keys).length === 0) {
-                console.info('respondToAllKeyRequests: no keys to share', {
+            let keyIds;
+            let skipInviteAccounting;
+            // skipInviteAccounting isn't allowed to be `true` for these requests
+            if (request == null || request === '*') {
+                if (contractState._vm?.invites?.[inviteId]?.expires != null) {
+                    if (contractState._vm.invites[inviteId].expires < Date.now()) {
+                        console.error('[respondToKeyRequest] Ignoring OP_KEY_REQUEST because it expired at ' +
+                            contractState._vm.invites[inviteId].expires +
+                            ': ' +
+                            originatingContractID);
+                        return;
+                    }
+                }
+                keyIds = Object.entries(contractState._vm.authorizedKeys)
+                    .filter(([, key]) => !!key.meta?.private?.shareable)
+                    .map(([kId]) => kId);
+            }
+            else if (manifestHash) {
+                const contractName = this.manifestToContract[manifestHash]?.name;
+                if (!contractName)
+                    return;
+                const method = `${manifestHash}/${contractName}/_responseOptionsForKeyRequest`;
+                if (sbp('sbp/selectors/fn', method)) {
+                    try {
+                        const result = await sbp(method, {
+                            contractID,
+                            request,
+                            state: contractState,
+                            keyShareEncryption,
+                            height,
+                            inviteId,
+                            originatingContractID,
+                            originatingContractHeight
+                        });
+                        if (result) {
+                            keyIds = result.keyIds;
+                            skipInviteAccounting = result.skipInviteAccounting;
+                        }
+                    }
+                    catch (e) {
+                        console.warn('[respondToKeyRequest] Cannot respond: hook errored', {
+                            contractID,
+                            originatingContractID,
+                            inviteId,
+                            request,
+                            e
+                        });
+                        return;
+                    }
+                }
+                else {
+                    console.warn('[respondToKeyRequest] Cannot respond: hook not defined', {
+                        contractID,
+                        originatingContractID,
+                        inviteId,
+                        request
+                    });
+                    return;
+                }
+            }
+            if (!Array.isArray(keyIds)) {
+                console.info('[respondToKeyRequest] no keys to share', {
                     contractID,
-                    originatingContractID
+                    originatingContractID,
+                    inviteId,
+                    request
                 });
                 return;
             }
+            else if (keyIds.length === 0) {
+                // If the responder explicitly decided no keys are to be shared, mark
+                // the request as successful, but without sharing any keys.
+                console.info('[respondToKeyRequest] explicitly empty keyshare response', {
+                    contractID,
+                    originatingContractID,
+                    inviteId,
+                    request
+                });
+                return [null, skipInviteAccounting];
+            }
+            for (let i = 0; i < keyIds.length; i++) {
+                if (!state.secretKeys[keyIds[i]]) {
+                    console.info('[respondToKeyRequest] missing key id', {
+                        contractID,
+                        originatingContractID,
+                        inviteId,
+                        request,
+                        keyId: keyIds[i]
+                    });
+                    return;
+                }
+            }
             const keySharePayload = {
                 contractID,
-                keys: Object.entries(keys).map(([keyId, key]) => ({
+                keys: keyIds.map((keyId) => ({
                     id: keyId,
                     meta: {
                         private: {
-                            content: encryptedOutgoingData(originatingContractID, encryptionKeyId, key),
+                            content: encryptedOutgoingData(originatingContractID, encryptionKeyId, state.secretKeys[keyId]),
                             shareable: true
                         }
                     }
@@ -1821,75 +2061,81 @@ export default sbp('sbp/selectors/register', {
                 keyRequestHeight: height
             };
             // 3. Send OP_KEY_SHARE to identity contract
-            if (!contractState?._vm?.pendingKeyshares?.[hash]) {
-                // While we were getting ready, another client may have shared the keys
-                return;
-            }
-            return keySharePayload;
+            return [keySharePayload, skipInviteAccounting];
         })
-            .then((keySharePayload) => {
-            if (instance !== this._instance || !keySharePayload)
+            .then(async (value) => {
+            if (instance !== this._instance || !value)
                 return;
-            return sbp('chelonia/out/keyShare', {
+            const [keySharePayload, skipInviteAccounting] = value;
+            if (!!requestedSkipInviteAccounting !== !!skipInviteAccounting) {
+                console.error(`Error at respondToKeyRequest: mismatched result for skipInviteAccounting (${!!requestedSkipInviteAccounting} !== ${!!skipInviteAccounting}) for ${contractID}`);
+                throw new Error('Mismatched skipInviteAccounting');
+            }
+            const msg = keySharePayload && await sbp('chelonia/out/keyShare', {
                 contractID: originatingContractID,
                 contractName: originatingContractName,
                 data: keyShareEncryption
                     ? encryptedOutgoingData(originatingContractID, findSuitablePublicKeyIds(originatingState, [SPMessage.OP_KEY_SHARE], ['enc'])?.[0] || '', keySharePayload)
                     : keySharePayload,
                 signingKeyId: responseKeyId
-            }).then((msg) => {
-                if (instance !== this._instance)
-                    return;
-                // 4(i). Remove originating contract and update current contract with information
-                const payload = { keyRequestHash: hash, keyShareHash: msg.hash(), success: true };
-                const connectionKeyPayload = {
-                    contractID: originatingContractID,
-                    keys: [
-                        {
-                            id: responseKeyId,
-                            meta: {
-                                private: {
-                                    content: encryptedOutgoingData(contractID, findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_REQUEST_SEEN], ['enc'])?.[0] || '', responseKey),
-                                    shareable: true
-                                }
+            });
+            if (instance !== this._instance)
+                return;
+            // 4(i). Remove originating contract and update current contract with information
+            // If no keys were shared (empty array), we still mark success but without a hash
+            // (undefined keyShareHash will be disregarded)
+            const innerPayload = { keyShareHash: msg?.hash(), success: true };
+            const connectionKeyPayload = {
+                contractID: originatingContractID,
+                keys: [
+                    {
+                        id: responseKeyId,
+                        meta: {
+                            private: {
+                                content: encryptedOutgoingData(contractID, findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_REQUEST_SEEN], ['enc'])?.[0] || '', responseKey),
+                                shareable: true
                             }
                         }
-                    ]
-                };
-                // This is safe to do without await because it's sending an action
-                // If we had await it could deadlock when retrying to send the event
-                sbp('chelonia/out/atomic', {
-                    contractID,
-                    contractName,
-                    signingKeyId,
-                    data: [
-                        [
-                            'chelonia/out/keyRequestResponse',
-                            {
-                                data: krsEncryption
-                                    ? encryptedOutgoingData(contractID, findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_REQUEST_SEEN], ['enc'])?.[0] || '', payload)
-                                    : payload
+                    }
+                ]
+            };
+            // This is safe to do without await because it's sending an action
+            // If we had await it could deadlock when retrying to send the event
+            sbp('chelonia/out/atomic', {
+                contractID,
+                contractName,
+                signingKeyId,
+                data: [
+                    [
+                        'chelonia/out/keyRequestResponse',
+                        {
+                            data: {
+                                keyRequestHash: hash,
+                                skipInviteAccounting,
+                                innerData: krsEncryption
+                                    ? encryptedOutgoingData(contractID, findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_REQUEST_SEEN], ['enc'])?.[0] || '', innerPayload)
+                                    : innerPayload
                             }
-                        ],
-                        [
-                            // Upon successful key share, we want to share deserializedResponseKey
-                            // with ourselves
-                            'chelonia/out/keyShare',
-                            {
-                                data: keyShareEncryption
-                                    ? encryptedOutgoingData(contractID, findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_SHARE], ['enc'])?.[0] || '', connectionKeyPayload)
-                                    : connectionKeyPayload
-                            }
-                        ]
+                        }
+                    ],
+                    [
+                        // Upon successful key share, we want to share deserializedResponseKey
+                        // with ourselves
+                        'chelonia/out/keyShare',
+                        {
+                            data: keyShareEncryption
+                                ? encryptedOutgoingData(contractID, findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_SHARE], ['enc'])?.[0] || '', connectionKeyPayload)
+                                : connectionKeyPayload
+                        }
                     ]
-                }).catch((e) => {
-                    console.error('Error at respondToKeyRequest while sending keyRequestResponse', e);
-                });
+                ]
+            }).catch((e) => {
+                console.error('Error at respondToKeyRequest while sending keyRequestResponse', e);
             });
         })
             .catch((e) => {
             console.error('Error at respondToKeyRequest', e);
-            const payload = { keyRequestHash: hash, success: false };
+            const innerPayload = { success: false };
             // 4(ii). Remove originating contract and update current contract with information
             if (!contractState?._vm?.pendingKeyshares?.[hash]) {
                 // While we were getting ready, another client may have shared the keys
@@ -1901,9 +2147,13 @@ export default sbp('sbp/selectors/register', {
                 contractID,
                 contractName,
                 signingKeyId,
-                data: krsEncryption
-                    ? encryptedOutgoingData(contractID, findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_REQUEST_SEEN], ['enc'])?.[0] || '', payload)
-                    : payload
+                data: {
+                    keyRequestHash: hash,
+                    skipInviteAccounting: requestedSkipInviteAccounting,
+                    innerData: krsEncryption
+                        ? encryptedOutgoingData(contractID, findSuitablePublicKeyIds(contractState, [SPMessage.OP_KEY_REQUEST_SEEN], ['enc'])?.[0] || '', innerPayload)
+                        : innerPayload
+                }
             }).catch((e) => {
                 console.error('Error at respondToKeyRequest while sending keyRequestResponse in error handler', e);
             });

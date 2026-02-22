@@ -5,6 +5,7 @@ import type sbp from '@sbp/sbp'
 import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.js'
 import type { EncryptedData } from './encryptedData.js'
 import type { PubSubClient } from './pubsub/index.js'
+import type { SignedDataContext } from './signedData.js'
 
 export type JSONType = null | string | number | boolean | JSONObject | JSONArray;
 export interface JSONObject {
@@ -62,6 +63,8 @@ export type CheloniaConfig = {
   // Similarly, future events will not be reingested and will throw
   // with ChelErrorDBBadPreviousHEAD
   strictOrdering: boolean;
+  // Store information such as the date the message was received (_private_hidx=)
+  saveMessageMetadata: boolean;
   connectionOptions: {
     maxRetries: number;
     reconnectOnTimeout: boolean;
@@ -179,7 +182,7 @@ export type CheloniaContext = {
   };
   manifestToContract: Record<
     string,
-    { slim: boolean; info: string; contract: CheloniaContractCtx }
+    { slim: boolean; info: string; contract: CheloniaContractCtx, name: string }
   >;
   whitelistedActions: Record<string, true>;
   currentSyncs: Record<string, { firstSync: boolean }>;
@@ -267,9 +270,9 @@ export type ChelContractState = {
       string,
       {
         status: string;
-        initialQuantity: number;
-        quantity: number;
-        expires: number;
+        initialQuantity?: number;
+        quantity?: number;
+        expires?: number;
         inviteSecret: string;
         responses: string[];
       }
@@ -278,12 +281,17 @@ export type ChelContractState = {
     pendingWatch?: Record<string, [fkName: string, fkId: string][]>;
     keyshares?: Record<
       string,
-      { success: boolean; contractID: string; height: number; hash?: string }
+      { success?: boolean; contractID: string; height: number; hash?: string }
     >;
     sharedKeyIds?: {
       id: string;
       contractID: string;
       height: number;
+      // List of contract IDs the key share is addressed to
+      foreignContractIDs?: (
+        | [contractID: string, firstShareHeight: number]
+        | [contractID: string, firstShareHeight: number, lastShareHeight: number]
+      )[];
       keyRequestHash?: string;
       keyRequestHeight?: number;
     }[];
@@ -294,7 +302,16 @@ export type ChelContractState = {
           isPrivate: boolean,
           height: number,
           signingKeyId: string,
-          [string, { _signedData: [string, string, string] }, number, string],
+          SignedDataContext,
+        ]
+      | [
+          isPrivate: boolean,
+          height: number,
+          signingKeyId: string,
+          SignedDataContext,
+          request: string,
+          manifest: string,
+          skipInviteAccounting: boolean
         ]
     >;
     props?: Record<string, JSONType>;
@@ -314,8 +331,10 @@ export type ChelContractState = {
 };
 
 export type ChelRootState = {
+  // By default, assume that all subentries are contracts
   [x: string]: ChelContractState;
 } & {
+  // Contract meta-information
   contracts: Record<
     string,
     {
@@ -326,6 +345,8 @@ export type ChelRootState = {
       missingDecryptionKeyIds?: string[];
     }
   >;
+  // Secret keys. Format secretKeys[keyId] = serializedSecretKey
+  secretKeys: Record<string, string>;
 };
 
 export type Response = {

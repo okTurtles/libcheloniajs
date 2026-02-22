@@ -12,6 +12,10 @@ import type { ChelContractState } from './types.js'
 
 const rootStateFn = () => sbp('chelonia/rootState')
 
+export type RawSignedData<T extends object = object> = T &
+  { _signedData: [data: string, keyId: string, signature: string] }
+export type SignedDataContext<T extends object = object> =
+  [contractID: string, rawSignedData: RawSignedData<T>, height: number, additionalData: string]
 export interface SignedData<T, U extends object = object> {
   // The ID of the signing key used
   signingKeyId: string;
@@ -22,10 +26,10 @@ export interface SignedData<T, U extends object = object> {
   // attempted. For incoming data, this is the original data given as input.
   // The `additionalData` parameter is only used for outgoing data, and binds
   // the signed payload to additional information.
-  serialize: (additionalData?: string) => U & { _signedData: [string, string, string] };
+  serialize: (additionalData?: string) => RawSignedData<U>;
   // Data needed to recreate signed data.
   // [contractID, data, height, additionalData]
-  context?: [string, U & { _signedData: [string, string, string] }, number, string];
+  context?: SignedDataContext<U>;
   // A string version of the serialized signed data (i.e., `JSON.stringify()`)
   toString: (additionalData?: string) => string;
   // For outgoing data, recreate SignedData using different data and the same
@@ -33,7 +37,7 @@ export interface SignedData<T, U extends object = object> {
   recreate?: (data: T) => SignedData<T, U>;
   // For incoming data, this is an alias of `serialize`. Undefined for outgoing
   // data.
-  toJSON?: () => U & { _signedData: [string, string, string] };
+  toJSON?: () => RawSignedData<U>;
   // `get` and `set` can set additional (unsigned) fields within `SignedData`
   get: (k: keyof U) => U[typeof k] | undefined;
   set?: (k: keyof U, v: U[typeof k]) => void;
@@ -66,9 +70,7 @@ const signData = function <T, U extends object = object> (
   extraFields: U,
   additionalKeys: Record<string, Key | string>,
   additionalData: string
-): U & {
-  _signedData: [string, string, string];
-} {
+): RawSignedData<U> {
   const state =
     typeof stateOrContractID === 'string'
       ? (rootStateFn()[stateOrContractID] as ChelContractState)
@@ -130,7 +132,7 @@ const signData = function <T, U extends object = object> (
 const verifySignatureData = function <T, U extends object = object> (
   state: ChelContractState,
   height: number,
-  data: U & { _signedData: [string, string, string] },
+  data: RawSignedData<U>,
   additionalData: string
 ): [string, T] {
   if (!state) {
@@ -218,7 +220,7 @@ export const signedOutgoingData = <T, U extends object = object>(
     additionalKeys!
   )
   const serializefn = (additionalData?: string) =>
-    boundStringValueFn(additionalData || '') as U & { _signedData: [string, string, string] }
+    boundStringValueFn(additionalData || '') as RawSignedData<U>
 
   return wrapper({
     get signingKeyId () {
@@ -272,7 +274,7 @@ export const signedOutgoingDataWithRawKey = <T, U extends object = object>(
     [sKeyId]: key
   })
   const serializefn = (additionalData?: string) =>
-    boundStringValueFn(additionalData || '') as U & { _signedData: [string, string, string] }
+    boundStringValueFn(additionalData || '') as RawSignedData<U>
 
   return wrapper({
     get signingKeyId () {
@@ -304,7 +306,7 @@ export const signedOutgoingDataWithRawKey = <T, U extends object = object>(
 export const signedIncomingData = <T, V = T, U extends object = object>(
   contractID: string,
   state: object | null | undefined,
-  data: U & { _signedData: [string, string, string] },
+  data: RawSignedData<U>,
   height: number,
   additionalData: string,
   mapperFn?: (value: V) => T
@@ -333,7 +335,7 @@ export const signedIncomingData = <T, V = T, U extends object = object>(
     get serialize () {
       return stringValueFn
     },
-    get context (): [string, U & { _signedData: [string, string, string] }, number, string] {
+    get context (): [string, RawSignedData<U>, number, string] {
       return [contractID, data, height, additionalData]
     },
     get toString () {
@@ -361,7 +363,7 @@ export const signedDataKeyId = (data: unknown): string => {
 
 export const isRawSignedData = (
   data: unknown
-): data is { _signedData: [string, string, string] } => {
+): data is RawSignedData => {
   if (
     !data ||
     typeof data !== 'object' ||
@@ -380,7 +382,7 @@ export const isRawSignedData = (
 
 // WARNING: The following function (rawSignedIncomingData) will not check signatures
 export const rawSignedIncomingData = <T, U extends object = object>(
-  data: U & { _signedData: [string, string, string] }
+  data: RawSignedData<U>
 ): SignedData<T, U> => {
   if (!isRawSignedData(data)) {
     throw new ChelErrorSignatureError('Invalid message format')

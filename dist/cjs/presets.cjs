@@ -21,5 +21,7 @@ exports.SERVER = {
     // ignored
     strictProcessing: true,
     // The server expects events to be received in order (no past or future events)
-    strictOrdering: true
+    strictOrdering: true,
+    // _private_hidx= entries with per-message metadata
+    saveMessageMetadata: true
 };
