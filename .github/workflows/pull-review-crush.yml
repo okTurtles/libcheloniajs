@@ -215,11 +215,14 @@ jobs:
           HAS_ISSUE: ${{ steps.check-issue.outputs.has_issue }}
           ISSUE_NUMBER: ${{ steps.check-issue.outputs.issue_number }}
         run: |
+          # Start with PR title
+          printf '<pr_title>\n%s\n</pr_title>\n' "$(jq -r '.title // ""' pr_data.json)" > /tmp/helpful_context.txt
+
           if [ "$HAS_ISSUE" = "true" ]; then
             # Fetch the issue
             if ! gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" > issue_data.json 2>/dev/null; then
               echo "::warning::Could not fetch issue #$ISSUE_NUMBER"
-              echo "<issue_summary>Issue context unavailable.</issue_summary>" > /tmp/helpful_context.txt
+              echo "<issue_summary>Issue context unavailable.</issue_summary>" >> /tmp/helpful_context.txt
               exit 0
             fi
 
@@ -269,7 +272,7 @@ jobs:
               SUMMARY=$(cat /tmp/issue_conversation.txt)
             fi
 
-            printf '<issue_summary>\n%s\n</issue_summary>\n' "$SUMMARY" > /tmp/helpful_context.txt
+            printf '<issue_summary>\n%s\n</issue_summary>\n' "$SUMMARY" >> /tmp/helpful_context.txt
           else
             # No referenced issue — summarize the PR description instead
             jq -n \
@@ -294,7 +297,7 @@ jobs:
               SUMMARY=""
             fi
 
-            printf '<pr_description>\n%s\n</pr_description>\n' "$SUMMARY" > /tmp/helpful_context.txt
+            printf '<pr_description>\n%s\n</pr_description>\n' "$SUMMARY" >> /tmp/helpful_context.txt
           fi
 
           echo "::group::Helpful context"
