@@ -133,6 +133,7 @@ const keysToMap = function (
   this: CheloniaContext,
   keys_: (SPKey | EncryptedData<SPKey>)[],
   height: number,
+  signingKeyId: string,
   authorizedKeys?: ChelContractState['_vm']['authorizedKeys']
 ): ChelContractState['_vm']['authorizedKeys'] {
   // Using cloneDeep to ensure that the returned object is serializable
@@ -154,6 +155,7 @@ const keysToMap = function (
   return Object.fromEntries(
     keysCopy.map((key) => {
       key._notBeforeHeight = height
+      key._addedByKeyId = signingKeyId
       if (authorizedKeys?.[key.id]) {
         if (authorizedKeys[key.id]._notAfterHeight == null) {
           throw new ChelErrorKeyAlreadyExists(`Cannot set existing unrevoked key: ${key.id}`)
@@ -1110,7 +1112,7 @@ export default sbp('sbp/selectors/register', {
       },
       [SPMessage.OP_CONTRACT] (v: SPOpContract) {
         state._vm.type = v.type
-        const keys = keysToMap.call(self, v.keys, height)
+        const keys = keysToMap.call(self, v.keys, height, signingKeyId)
         state._vm.authorizedKeys = keys
         // Loop through the keys in the contract and try to decrypt all of the private keys
         // Example: in the identity contract you have the IEK, IPK, CSK, and CEK.
@@ -1619,7 +1621,7 @@ export default sbp('sbp/selectors/register', {
         state._vm.props[v.key] = v.value
       },
       [SPMessage.OP_KEY_ADD] (v: SPOpKeyAdd) {
-        const keys = keysToMap.call(self, v, height, state._vm.authorizedKeys)
+        const keys = keysToMap.call(self, v, height, signingKeyId, state._vm.authorizedKeys)
         const keysArray = Object.values(v) as SPKey[]
         keysArray.forEach((k) => {
           if (
@@ -1918,7 +1920,9 @@ export default sbp('sbp/selectors/register', {
         opT === SPMessage.OP_CONTRACT && !state?._vm?.authorizedKeys
           ? {
               _vm: {
-                authorizedKeys: keysToMap.call(this, (opV as SPOpContract).keys, height)
+                authorizedKeys: keysToMap.call(this,
+                  (opV as SPOpContract).keys, height, signingKeyId
+                )
               }
             }
           : state

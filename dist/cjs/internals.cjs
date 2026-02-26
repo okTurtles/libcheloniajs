@@ -78,7 +78,7 @@ const getMsgMeta = function (message, contractID, state, index) {
     };
     return result;
 };
-const keysToMap = function (keys_, height, authorizedKeys) {
+const keysToMap = function (keys_, height, signingKeyId, authorizedKeys) {
     // Using cloneDeep to ensure that the returned object is serializable
     // Keys in a SPMessage may not be serializable (i.e., supported by the
     // structured clone algorithm) when they contain encryptedIncomingData
@@ -97,6 +97,7 @@ const keysToMap = function (keys_, height, authorizedKeys) {
     const keysCopy = (0, turtledash_1.cloneDeep)(keys);
     return Object.fromEntries(keysCopy.map((key) => {
         key._notBeforeHeight = height;
+        key._addedByKeyId = signingKeyId;
         if (authorizedKeys?.[key.id]) {
             if (authorizedKeys[key.id]._notAfterHeight == null) {
                 throw new errors_js_1.ChelErrorKeyAlreadyExists(`Cannot set existing unrevoked key: ${key.id}`);
@@ -842,7 +843,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             },
             [SPMessage_js_1.SPMessage.OP_CONTRACT](v) {
                 state._vm.type = v.type;
-                const keys = keysToMap.call(self, v.keys, height);
+                const keys = keysToMap.call(self, v.keys, height, signingKeyId);
                 state._vm.authorizedKeys = keys;
                 // Loop through the keys in the contract and try to decrypt all of the private keys
                 // Example: in the identity contract you have the IEK, IPK, CSK, and CEK.
@@ -1266,7 +1267,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 state._vm.props[v.key] = v.value;
             },
             [SPMessage_js_1.SPMessage.OP_KEY_ADD](v) {
-                const keys = keysToMap.call(self, v, height, state._vm.authorizedKeys);
+                const keys = keysToMap.call(self, v, height, signingKeyId, state._vm.authorizedKeys);
                 const keysArray = Object.values(v);
                 keysArray.forEach((k) => {
                     if ((0, turtledash_1.has)(state._vm.authorizedKeys, k.id) &&
@@ -1490,7 +1491,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             const stateForValidation = opT === SPMessage_js_1.SPMessage.OP_CONTRACT && !state?._vm?.authorizedKeys
                 ? {
                     _vm: {
-                        authorizedKeys: keysToMap.call(this, opV.keys, height)
+                        authorizedKeys: keysToMap.call(this, opV.keys, height, signingKeyId)
                     }
                 }
                 : state;
