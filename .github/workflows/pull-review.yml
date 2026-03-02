@@ -53,7 +53,7 @@ jobs:
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          REVIEW_COMMAND=$(echo "$COMMENT_BODY" | grep -oP '^\s*/\S+(\s+\{\{[^}]*\}\})?' | xargs)
+          REVIEW_COMMAND=$(echo "$COMMENT_BODY" | grep -m1 -oP '^\s*\K/\S+(\s+\{\{[^}]*\}\})?')
           echo "REVIEW_COMMAND=$REVIEW_COMMAND" >> "$GITHUB_ENV"
           if echo "$COMMENT_BODY" | grep -qP '^\s*/review_fast'; then
             echo "FAST_MODE=true" >> "$GITHUB_ENV"
