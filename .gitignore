@@ -2,3 +2,6 @@
 /.parcel-cache/
 *.DS_Store
 dist/**/*.test.*
+/.agent/
+/.tldr*
+/.agents

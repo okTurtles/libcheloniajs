@@ -251,24 +251,6 @@ console.log(secret)  // Does NOT reveal the value
 
 All event constants are in `events.ts`:
 
-| Event | Purpose |
-|---|---|
-| `CHELONIA_RESET` | Chelonia state was reset |
-| `CONTRACT_IS_SYNCING` | Contract sync started/ended |
-| `CONTRACTS_MODIFIED` | Contract list changed |
-| `CONTRACTS_MODIFIED_READY` | Contract list change fully processed |
-| `EVENT_HANDLED` | An event was processed |
-| `EVENT_PUBLISHED` | An event was published |
-| `EVENT_PUBLISHING_ERROR` | Event publishing failed |
-| `EVENT_HANDLED_READY` | Event handling fully complete |
-| `CONTRACT_REGISTERED` | New contract type registered |
-| `CONTRACT_UNREGISTERED` | Contract type unregistered |
-| `CONTRACT_IS_PENDING_KEY_REQUESTS` | Contract awaiting key responses |
-| `CONTRACT_HAS_RECEIVED_KEYS` | Contract received requested keys |
-| `PERSISTENT_ACTION_FAILURE` | A persistent action attempt failed |
-| `PERSISTENT_ACTION_SUCCESS` | A persistent action succeeded |
-| `PERSISTENT_ACTION_TOTAL_FAILURE` | A persistent action exhausted all retries |
-
 Events are emitted and listened to via `sbp('okTurtles.events/emit', ...)` and `sbp('okTurtles.events/on', ...)`.
 
 ### Key Management
