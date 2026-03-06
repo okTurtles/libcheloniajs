@@ -38,6 +38,7 @@ export type SPKey = {
   ringLevel: number;
   permissions: '*' | string[];
   allowedActions?: '*' | string[];
+  permissionsContext?: '*' | string[];
   meta?: {
     quantity?: number;
     expires?: number;
@@ -137,6 +138,7 @@ export type SPKeyUpdate = {
   purpose?: string[];
   permissions?: string[];
   allowedActions?: '*' | string[];
+  permissionsContext?: '*' | string[];
   meta?: {
     quantity?: number;
     expires?: number;
