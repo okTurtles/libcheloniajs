@@ -11,7 +11,7 @@ import {
   randomHexString,
   randomIntFromRange
 } from 'turtledash'
-import { createCID, multicodes, parseCID } from './functions.js'
+import { blake32Hash, createCID, multicodes, parseCID } from './functions.js'
 import { Buffer } from 'buffer'
 import { NOTIFICATION_TYPE, createClient } from './pubsub/index.js'
 import type {
@@ -69,11 +69,13 @@ import {
   checkCanBeGarbageCollected,
   clearObject,
   collectEventStream,
+  deletionTokenFromHint,
   eventsAfter,
   findForeignKeysByContractID,
   findKeyIdByName,
   findRevokedKeyIdsByName,
   findSuitableSecretKeyId,
+  freshDeletionToken,
   getContractIDfromKeyId,
   handleFetchResult,
   reactiveClearObject
@@ -2331,7 +2333,8 @@ export default sbp('sbp/selectors/register', {
       encryptionKeyId,
       signingKeyId,
       maxAttempts,
-      onconflict
+      onconflict,
+      uploader
     }: {
       ifMatch?: string;
       innerSigningKeyId?: string | null | undefined;
@@ -2339,6 +2342,7 @@ export default sbp('sbp/selectors/register', {
       signingKeyId: string;
       maxAttempts?: number | null | undefined;
       onconflict?: ChelKvOnConflictCallback | null | undefined;
+      uploader?: { contractID: string, keyName: string, hint?: string };
     }
   ) {
     maxAttempts = maxAttempts ?? 3
@@ -2403,6 +2407,22 @@ export default sbp('sbp/selectors/register', {
       return true
     }
 
+    let deletionToken: string | undefined
+    let deletionTokenHint: string | undefined
+    let deletionTokenHash: string | undefined
+
+    if (uploader) {
+      const state = sbp('chelonia/contract/state', uploader.contractID)
+      if (uploader.hint == null) {
+        const token = freshDeletionToken(state, uploader.keyName, contractID, key)
+        deletionToken = token!.token
+        deletionTokenHint = token!.hint
+        deletionTokenHash = blake32Hash(deletionToken)
+      } else {
+        deletionToken = deletionTokenFromHint(state, uploader.keyName, contractID, key)
+      }
+    }
+
     for (;;) {
       if (data !== undefined) {
         const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
@@ -2415,8 +2435,19 @@ export default sbp('sbp/selectors/register', {
         })
         response = await this.config.fetch(url, {
           headers: new Headers([
-            ['authorization', buildShelterAuthorizationHeader.call(this, contractID)],
-            ['if-match', ifMatch || '""']
+            ['authorization', deletionToken && !deletionTokenHash
+              ? `bearer ${deletionToken}`
+              : buildShelterAuthorizationHeader.call(this, contractID)
+            ],
+            ['if-match', ifMatch || '""'],
+            ...((deletionTokenHash
+              ? [['shelter-deletion-token-digest', deletionTokenHash]]
+              : []) as [string, string][]
+            ),
+            ...((deletionTokenHint
+              ? [['shelter-deletion-token-hint', deletionTokenHint]]
+              : []) as [string, string][]
+            )
           ]),
           method: 'POST',
           body: JSON.stringify(serializedData),

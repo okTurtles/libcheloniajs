@@ -43,6 +43,20 @@ const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10)
 
 const copiedExistingData = Symbol('copiedExistingData')
 
+export const findAllKeyIdsByName = (
+  state: ChelContractState,
+  name: string
+): string[] | null | undefined =>
+  state._vm?.authorizedKeys &&
+  Object.values(state._vm.authorizedKeys)
+    .filter((k) => k.name === name)
+    .sort((a, b) => {
+      if (a._notAfterHeight == null) return 1
+      if (b._notAfterHeight == null) return 1
+      return a._notAfterHeight - b._notAfterHeight
+    })
+    .map(k => k.id)
+
 export const findKeyIdByName = (
   state: ChelContractState,
   name: string
@@ -1247,4 +1261,35 @@ export const updateKey = (key: ChelContractKey, updatedKey: ChelContractKey): Ch
       : {}),
     ...(updatedKey.meta ? { meta: updatedKey.meta } : {})
   }
+}
+export const freshDeletionToken = (
+  state: ChelContractState, signingKeyName: string, objectCid: string, kvKey?: string
+): { token: string, hint: string } | undefined => {
+  const signingKeyId = findKeyIdByName(state, signingKeyName)
+  if (!signingKeyId) return
+
+  const tokenData = `deletionToken/${objectCid}${kvKey ? `/${kvKey}` : ''}`
+
+  const key = (sbp('chelonia/rootState') as ChelRootState).secretKeys[signingKeyId]
+  const token = sign(key, tokenData).slice(0, 24)
+  const hint = findAllKeyIdsByName(state, signingKeyName)?.findIndex((id) => id === signingKeyId)
+
+  return {
+    token,
+    hint: String(hint)
+  }
+}
+
+export const deletionTokenFromHint = (
+  state: ChelContractState, signingKeyName: string, hint: string, objectCid: string, kvKey?: string
+): string | undefined => {
+  const signingKeyId = findAllKeyIdsByName(state, signingKeyName)?.[Number(hint)]
+  if (!signingKeyId) return
+
+  const tokenData = `deletionToken/${objectCid}${kvKey ? `/${kvKey}` : ''}`
+
+  const key = (sbp('chelonia/rootState') as ChelRootState).secretKeys[signingKeyId]
+  const token = sign(key, tokenData).slice(0, 24)
+
+  return token
 }
