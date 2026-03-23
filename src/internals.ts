@@ -1526,12 +1526,14 @@ export default sbp('sbp/selectors/register', {
           return
         }
 
+        // Used as a proxy to tell whether a request could be decrypted
         const context = v.replyWith.context
 
-        if (data && (!Array.isArray(context) || context[0] !== originatingContractID)) {
+        if (Array.isArray(context) && context[0] !== originatingContractID) {
           logEvtError(
             message,
-            'Ignoring OP_KEY_REQUEST because it is signed by the wrong contract'
+            'Ignoring OP_KEY_REQUEST because it is signed by the wrong contract',
+            originatingContractID + ' !== ' + context[0]
           )
           return
         }
@@ -1553,7 +1555,7 @@ export default sbp('sbp/selectors/register', {
           : [encryptedRequest, message.height(), signingKeyId]
 
         // Call 'chelonia/private/respondToAllKeyRequests' after sync
-        if (data) {
+        if (context) {
           internalSideEffectStack?.push(() => {
             self.setPostSyncOp(contractID, 'respondToAllKeyRequests-' + message.contractID(), [
               'chelonia/private/respondToAllKeyRequests',
