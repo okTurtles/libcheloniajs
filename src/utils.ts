@@ -1153,10 +1153,11 @@ export const collectEventStream = async <T>(s: ReadableStream<T>): Promise<T[]> 
 // Used inside processing functions for displaying errors at the 'warn' level
 // for outgoing messages to increase the signal-to-noise error. See issue #2773.
 export const logEvtError = (msg: SPMessage, ...args: unknown[]) => {
+  const extra = `(contractID ${msg.contractID()}, hash ${msg.hash()})`
   if (msg._direction === 'outgoing') {
-    console.warn(...args)
+    console.warn(...args, extra)
   } else {
-    console.error(...args)
+    console.error(...args, extra)
   }
 }
 

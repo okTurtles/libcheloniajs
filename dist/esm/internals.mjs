@@ -1150,9 +1150,13 @@ export default sbp('sbp/selectors/register', {
                     logEvtError(message, 'Ignoring OP_KEY_REQUEST because it is missing the context attribute');
                     return;
                 }
+                // Used as a proxy to tell whether a request could be decrypted
+                // For V1: outer layer decryption failure results in undefined context
+                // For V2: inner layer decryption failure results in undefined context
+                // Note: V1 support is planned for removal, but this logic is version-independent
                 const context = v.replyWith.context;
-                if (data && (!Array.isArray(context) || context[0] !== originatingContractID)) {
-                    logEvtError(message, 'Ignoring OP_KEY_REQUEST because it is signed by the wrong contract');
+                if (Array.isArray(context) && context[0] !== originatingContractID) {
+                    logEvtError(message, 'Ignoring OP_KEY_REQUEST because it is signed by the wrong contract', originatingContractID + ' !== ' + context[0]);
                     return;
                 }
                 if (!state._vm.pendingKeyshares)
@@ -1171,7 +1175,7 @@ export default sbp('sbp/selectors/register', {
                     ]
                     : [encryptedRequest, message.height(), signingKeyId];
                 // Call 'chelonia/private/respondToAllKeyRequests' after sync
-                if (data) {
+                if (context) {
                     internalSideEffectStack?.push(() => {
                         self.setPostSyncOp(contractID, 'respondToAllKeyRequests-' + message.contractID(), [
                             'chelonia/private/respondToAllKeyRequests',
