@@ -1151,6 +1151,9 @@ export default sbp('sbp/selectors/register', {
                     return;
                 }
                 // Used as a proxy to tell whether a request could be decrypted
+                // For V1: outer layer decryption failure results in undefined context
+                // For V2: inner layer decryption failure results in undefined context
+                // Note: V1 support is planned for removal, but this logic is version-independent
                 const context = v.replyWith.context;
                 if (Array.isArray(context) && context[0] !== originatingContractID) {
                     logEvtError(message, 'Ignoring OP_KEY_REQUEST because it is signed by the wrong contract', originatingContractID + ' !== ' + context[0]);
