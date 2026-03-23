@@ -13,6 +13,8 @@ Guide for AI agents working in the `@chelonia/lib` codebase.
 - Zero-knowledge password proofs (ZKPP)
 - Persistent action queue with retry logic
 
+Every contract is represented as an append-only log of operations (op codes). Some of the opcodes are for managing keys, others are for updating contract state. Clients that are interested in the contracts will subscribe to them, load the chain of events, decrypt them locally on-device, and process them to update their local contract state. Each contract is referenced by its `contractID`, the hash of the first message in the contract. Contracts can be multi-writer and multi-reader, but a message can only be added on top of the previous one, with the server acting as the source of truth for message ordering. The structure of a message is defined by an object called `SPMessage` and contains the hash of the previous message in a field called `previousHEAD`.
+
 ## Essential Commands
 
 ```bash
