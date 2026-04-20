@@ -837,7 +837,7 @@ export default sbp('sbp/selectors/register', {
             ...(billableContractID && {
               Authorization: buildShelterAuthorizationHeader.call(this, billableContractID)
             }),
-            'Content-Type': 'text/plain'
+            'Content-Type': 'application/json'
           },
           signal: this.abortController.signal
         })
