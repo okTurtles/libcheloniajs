@@ -629,7 +629,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         ...(billableContractID && {
                             Authorization: utils_js_1.buildShelterAuthorizationHeader.call(this, billableContractID)
                         }),
-                        'Content-Type': 'text/plain'
+                        'Content-Type': 'application/json'
                     },
                     signal: this.abortController.signal
                 });
