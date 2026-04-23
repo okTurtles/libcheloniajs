@@ -249,7 +249,7 @@
   "dependencies": {
     "@apeleghq/multipart-parser": "1.0.18",
     "@apeleghq/rfc8188": "1.0.8",
-    "@chelonia/crypto": "1.0.1",
+    "@chelonia/crypto": "file:../crypto/chelonia-crypto-1.0.2.tgz",
     "@chelonia/serdes": "1.0.1",
     "@sbp/okturtles.data": "0.1.7",
     "@sbp/okturtles.eventqueue": "1.2.1",

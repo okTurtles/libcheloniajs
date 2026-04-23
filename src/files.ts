@@ -10,7 +10,7 @@ import { has } from 'turtledash'
 import type { Secret } from './Secret.js'
 import { blake32Hash, createCID, createCIDfromStream, multicodes } from './functions.js'
 import { ChelFileManifest, CheloniaContext } from './types.js'
-import { buildShelterAuthorizationHeader } from './utils.js'
+import { buildShelterAuthorizationHeader, freshDeletionToken } from './utils.js'
 
 // Snippet from <https://github.com/WebKit/standards-positions/issues/24#issuecomment-1181821440>
 // Node.js supports request streams, but also this check isn't meant for Node.js
@@ -291,7 +291,13 @@ export default sbp('sbp/selectors/register', {
     this: CheloniaContext,
     chunks: Blob | Blob[],
     manifestOptions: ChelFileManifest,
-    { billableContractID }: { billableContractID?: string } = {}
+    {
+      billableContractID,
+      uploader
+    }: {
+      billableContractID?: string,
+      uploader?: { contractID: string, keyName: string }
+    } = {}
   ) {
     if (!Array.isArray(chunks)) chunks = [chunks]
     const chunkDescriptors: Promise<[number, string]>[] = []
@@ -357,7 +363,19 @@ export default sbp('sbp/selectors/register', {
           .join('')
     const stream = encodeMultipartMessage(boundary, transferParts)
 
-    const deletionToken = 'deletionToken' + generateSalt()
+    let deletionToken: string
+    let deletionTokenHint: string | undefined
+
+    if (!uploader) {
+      deletionToken = 'deletionToken' + generateSalt()
+    } else {
+      // TODO: state, CID
+      const state = sbp('chelonia/contract/state', uploader.contractID)
+      const token = freshDeletionToken(state, uploader.keyName, 'placeholder-cid')
+      deletionToken = token!.token
+      deletionTokenHint = token!.hint
+    }
+
     const deletionTokenHash = blake32Hash(deletionToken)
 
     const uploadResponse = await this.config.fetch(`${this.config.connectionURL}/file`, {
@@ -369,7 +387,10 @@ export default sbp('sbp/selectors/register', {
           ? [['authorization', buildShelterAuthorizationHeader.call(this, billableContractID)]]
           : []) as [string, string][]),
         ['content-type', `multipart/form-data; boundary=${boundary}`],
-        ['shelter-deletion-token-digest', deletionTokenHash]
+        ['shelter-deletion-token-digest', deletionTokenHash],
+        ...((deletionTokenHint
+          ? [['shelter-deletion-token-hint', deletionTokenHint]]
+          : []) as [string, string][])
       ]),
       duplex: 'half'
     } as unknown as Request)
@@ -380,7 +401,8 @@ export default sbp('sbp/selectors/register', {
         manifestCid: await uploadResponse.text(),
         downloadParams: cipherHandler.downloadParams
       },
-      delete: deletionToken
+      delete: deletionToken,
+      hint: deletionTokenHint
     }
   },
   'chelonia/fileDownload': async function (
