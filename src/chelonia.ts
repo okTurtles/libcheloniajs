@@ -1445,10 +1445,54 @@ export default sbp('sbp/selectors/register', {
       signingKeyId: findSuitableSecretKeyId(contractState, [SPMessage.OP_KEY_DEL], ['sig'])
     })
   },
+  // Helper function to deserialize an `SPMessage` from a raw string. This
+  // function invokes `SPMessage.deserialize` with the correct internal
+  // state, serving as a useful primitive for applications that require low-level
+  // access to an `SPMessage`, whether for debugging or other purposes.
+  // This selector differs from `chelonia/in/processMessage` in that this one
+  // returns the SPMessage (or message head, depending on options), while
+  // `chelonia/in/processMessage` takes in a state parameter and applies the
+  // message to the state.
+  // If one starts with a raw string with a message, `spm`, the following are
+  // roughly equivalent:
+  //    const state1 = sbp('chelonia/in/processMessage', spm, state)
+  //    const state2 = sbp('chelonia/in/processMessage',
+  //      sbp('chelonia/in/deserializeMessage', spm, { state }),
+  //      state
+  //    )
+  // The main difference is that calling `processMessage` directly will use a
+  // cloned copy of the state in the deserialization step, while manually
+  // deserializing a message will not peform any cloning. However, since
+  // calling `SPMessage.deserialize` should not mutate the state argument,
+  // the observable behaviour should be the same.
+  'chelonia/in/deserializeMessage': function (
+    this: CheloniaContext,
+    rawMessage: string,
+    options: { headOnly?: boolean, state?: ChelContractState }
+  ) {
+    if (options.headOnly) {
+      return SPMessage.deserializeHEAD(rawMessage)
+    } else {
+      let state: ChelContractState
+      if (!options.state) {
+        const { contractID } = SPMessage.deserializeHEAD(rawMessage)
+        state = sbp(this.config.stateSelector)?.[contractID] || {}
+      } else {
+        state = options.state
+      }
+
+      return SPMessage.deserialize(
+        rawMessage,
+        this.transientSecretKeys,
+        state,
+        this.config.unwrapMaybeEncryptedData
+      )
+    }
+  },
   'chelonia/in/processMessage': function (
     this: CheloniaContext,
     messageOrRawMessage: SPMessage | string,
-    state: ChelContractState
+    state?: ChelContractState
   ) {
     const stateCopy = cloneDeep(state)
     const message =
