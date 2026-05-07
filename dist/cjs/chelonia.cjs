@@ -1042,23 +1042,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     //    )
     // The main difference is that calling `processMessage` directly will use a
     // cloned copy of the state in the deserialization step, while manually
-    // deserializing a message will not peform any cloning. However, since
+    // deserializing a message will not perform any cloning. However, since
     // calling `SPMessage.deserialize` should not mutate the state argument,
     // the observable behaviour should be the same.
-    'chelonia/in/deserializeMessage': function (rawMessage, options) {
+    'chelonia/in/deserializeMessage': function (rawMessage, options = {}) {
         if (options.headOnly) {
             return SPMessage_js_1.SPMessage.deserializeHEAD(rawMessage);
         }
         else {
-            let state;
-            if (!options.state) {
-                const { contractID } = SPMessage_js_1.SPMessage.deserializeHEAD(rawMessage);
-                state = (0, sbp_1.default)(this.config.stateSelector)?.[contractID] || {};
-            }
-            else {
-                state = options.state;
-            }
-            return SPMessage_js_1.SPMessage.deserialize(rawMessage, this.transientSecretKeys, state, this.config.unwrapMaybeEncryptedData);
+            return SPMessage_js_1.SPMessage.deserialize(rawMessage, this.transientSecretKeys, options.state, this.config.unwrapMaybeEncryptedData);
         }
     },
     'chelonia/in/processMessage': function (messageOrRawMessage, state) {
