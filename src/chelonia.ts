@@ -45,6 +45,7 @@ import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './event
 import { SPMessage } from './SPMessage.js'
 import type { Secret } from './Secret.js'
 import './chelonia-utils.js'
+import { DEFAULT_SNAPSHOT_INTERVAL } from './journal.js'
 import type { EncryptedData } from './encryptedData.js'
 import {
   encryptedOutgoingData,
@@ -338,6 +339,21 @@ export default sbp('sbp/selectors/register', {
         syncContractError: null, // (e: Error, contractID: string) => {}
         pubsubError: null // (e:Error, socket: Socket)
       },
+      // Per-contract journal of state changes. See `src/journal.ts`.
+      // Opt-in by default: enabling it imposes per-event CPU (deep clones
+      // + diff) and persisted-state cost (up to ~2X entries plus full
+      // snapshots) on every active contract. Consumers turn it on via
+      // `chelonia/configure`. Function fields (`redactions[*].redact`,
+      // `diff`, `applyPatch`) are intentionally left unset here so they
+      // survive `merge()` (which deep-clones via JSON and would otherwise
+      // strip them); `chelonia/configure` reattaches them in a dedicated
+      // pass.
+      journal: {
+        enabled: false,
+        snapshotInterval: DEFAULT_SNAPSHOT_INTERVAL,
+        contractIDs: [],
+        redactions: []
+      },
       unwrapMaybeEncryptedData
     }
     // Used in publishEvent to cancel sending events after reset (logout)
@@ -420,18 +436,52 @@ export default sbp('sbp/selectors/register', {
     rootState.secretKeys = rootState.secretKeys || Object.create(null)
   },
   'chelonia/config': function (this: CheloniaContext) {
-    return {
+    const out = {
       ...cloneDeep(this.config),
       fetch: this.config.fetch,
       reactiveSet: this.config.reactiveSet,
       reactiveDel: this.config.reactiveDel
+    } as ReturnType<typeof cloneDeep> & { journal?: CheloniaConfig['journal'] }
+    // `cloneDeep` strips function values (same pitfall handled below by
+    // `chelonia/configure`). Re-attach the journal's function fields so
+    // the returned snapshot is a faithful copy of the live config and
+    // round-trips correctly through `chelonia/configure`.
+    if (this.config.journal) {
+      out.journal = {
+        ...out.journal,
+        redactions: this.config.journal.redactions?.slice(),
+        diff: this.config.journal.diff,
+        applyPatch: this.config.journal.applyPatch
+      }
     }
+    return out
   },
   'chelonia/configure': async function (this: CheloniaContext, config: CheloniaConfig) {
     merge(this.config, config)
     // merge will strip the hooks off of config.hooks when merging from the root of the object
     // because they are functions and cloneDeep doesn't clone functions
     Object.assign(this.config.hooks, config.hooks || {})
+    // Same reasoning for journal: `merge` deep-clones via JSON.stringify, so
+    // function fields on the user's `journal` config (the `redact` callbacks
+    // inside `redactions`, plus optional `diff` / `applyPatch` overrides)
+    // would silently disappear. It also deep-merges arrays, which would
+    // prevent callers from clearing `contractIDs` / `redactions` by passing
+    // an empty array. Replace each provided field by reference instead.
+    if (config.journal) {
+      const target = this.config.journal!
+      if (config.journal.enabled !== undefined) target.enabled = config.journal.enabled
+      if (config.journal.snapshotInterval !== undefined) {
+        target.snapshotInterval = config.journal.snapshotInterval
+      }
+      if (config.journal.contractIDs !== undefined) {
+        target.contractIDs = config.journal.contractIDs?.slice()
+      }
+      if (config.journal.redactions !== undefined) {
+        target.redactions = config.journal.redactions?.slice()
+      }
+      if (config.journal.diff !== undefined) target.diff = config.journal.diff
+      if (config.journal.applyPatch !== undefined) target.applyPatch = config.journal.applyPatch
+    }
     // using Object.assign here instead of merge to avoid stripping away imported modules
     if (config.contracts) {
       Object.assign(this.config.contracts.defaults, config.contracts.defaults || {})

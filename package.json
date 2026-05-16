@@ -107,6 +107,16 @@
         "default": "./dist/cjs/functions.cjs"
       }
     },
+    "./journal": {
+      "import": {
+        "types": "./dist/esm/journal.d.mts",
+        "default": "./dist/esm/journal.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/journal.d.cts",
+        "default": "./dist/cjs/journal.cjs"
+      }
+    },
     "./local-selectors": {
       "import": {
         "types": "./dist/esm/local-selectors/index.d.mts",

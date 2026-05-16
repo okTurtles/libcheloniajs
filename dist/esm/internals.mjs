@@ -2482,6 +2482,13 @@ const handleEvent = {
         const contractID = message.contractID();
         const hash = message.hash();
         const height = message.height();
+        // Capture the per-contract state as it was before this event was
+        // applied. `state[contractID]` is the live root-state reference; the
+        // event-loop path (`handleEvent` above) cloned it into
+        // `contractStateCopy` before mutating, so this reference remains the
+        // pre-event object even after the `reactiveSet` below swaps in the
+        // post-event state. May be undefined for the first message.
+        const beforeContractState = state[contractID];
         await sbp('chelonia/db/addEntry', message);
         if (!processingErrored) {
             // Once side-effects are called, we apply changes to the state.
@@ -2554,6 +2561,13 @@ const handleEvent = {
             sbp('okTurtles.events/emit', hash, contractID, message);
             sbp('okTurtles.events/emit', EVENT_HANDLED, contractID, message);
         }
+        // Journal recording. Runs after `state.contracts[contractID]` has been
+        // populated (HEAD/height/etc.) so the journal selector can attach
+        // `_journal` to a real bookkeeping object. The selector enforces a
+        // "MUST NOT throw" contract internally, so we deliberately do not wrap
+        // this call: a journal failure must never break event processing, and
+        // we don't want a duplicate log line on the way out.
+        sbp('chelonia/private/journal/recordEvent', contractID, message, beforeContractState, processingErrored ? beforeContractState : contractState, processingErrored);
     }
 };
 const notImplemented = (v) => {
