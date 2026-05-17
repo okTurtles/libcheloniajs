@@ -205,6 +205,78 @@ describe('journal: defaultApplyPatch', () => {
     )
   })
 
+  it('does not pollute Object.prototype via __proto__ / constructor segments', () => {
+    // Final-segment `__proto__`: writing via defineProperty must define an
+    // OWN data property literally named "__proto__" that shadows the
+    // accessor inherited from Object.prototype, NOT re-parent the object
+    // and NOT mutate Object.prototype.
+    const target1 = defaultApplyPatch(
+      {},
+      [{ op: 'add', path: '/__proto__', value: { polluted: 'yes' } }]
+    ) as Record<string, unknown>
+    // Object.prototype must be untouched.
+    assert.strictEqual(
+      (Object.prototype as Record<string, unknown>).polluted,
+      undefined,
+      'Object.prototype was polluted via final-segment __proto__'
+    )
+    assert.strictEqual(
+      ({} as Record<string, unknown>).polluted,
+      undefined,
+      'fresh {} sees a polluted property'
+    )
+    // The target should still descend from Object.prototype (i.e. the
+    // assignment-form __proto__ setter did not fire).
+    assert.strictEqual(Object.getPrototypeOf(target1), Object.prototype)
+    // And it should have an own "__proto__" data property carrying the value.
+    assert.ok(Object.prototype.hasOwnProperty.call(target1, '__proto__'))
+    const protoKey = '__proto__'
+    assert.deepStrictEqual(
+      (target1 as { [k: string]: unknown })[protoKey],
+      { polluted: 'yes' }
+    )
+  })
+  it('does not allow traversing through __proto__ to write on Object.prototype', () => {
+    // Intermediate `__proto__`: own-property checks in the walk mean we
+    // never index through Object.prototype, so this must throw. Either
+    // way, Object.prototype must remain clean.
+    assert.throws(() =>
+      defaultApplyPatch(
+        {},
+        [{ op: 'add', path: '/__proto__/polluted', value: 1 }]
+      )
+    )
+    assert.strictEqual(
+      (Object.prototype as Record<string, unknown>).polluted,
+      undefined,
+      'Object.prototype was polluted via intermediate __proto__'
+    )
+  })
+  it('does not allow traversing through constructor to write on Object.prototype', () => {
+    assert.throws(() =>
+      defaultApplyPatch(
+        {},
+        [{ op: 'add', path: '/constructor/prototype/polluted', value: 1 }]
+      )
+    )
+    assert.strictEqual(
+      (Object.prototype as Record<string, unknown>).polluted,
+      undefined,
+      'Object.prototype was polluted via constructor/prototype'
+    )
+  })
+
+  it('uses own-property semantics when walking (inherited keys do not count)', () => {
+    // `toString` is inherited from Object.prototype but not own, so both
+    // `replace` (requires existence) and walking through it must throw.
+    assert.throws(() =>
+      defaultApplyPatch({}, [{ op: 'replace', path: '/toString', value: 1 }])
+    )
+    assert.throws(() =>
+      defaultApplyPatch({}, [{ op: 'add', path: '/toString/x', value: 1 }])
+    )
+  })
+
   it("accepts the RFC 6901 '-' token for 'add' on arrays", () => {
     assert.deepStrictEqual(
       defaultApplyPatch([1, 2], [{ op: 'add', path: '/-', value: 3 }]),
