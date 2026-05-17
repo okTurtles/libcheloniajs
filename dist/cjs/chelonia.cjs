@@ -255,13 +255,39 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             if (journalOverride.enabled !== undefined)
                 target.enabled = journalOverride.enabled;
             if (journalOverride.snapshotInterval !== undefined) {
-                target.snapshotInterval = journalOverride.snapshotInterval;
+                // `snapshotInterval` directly bounds journal retention. Reject
+                // non-finite / non-positive / non-integer values that would break
+                // the trim invariant (Infinity / NaN never trim, <=0 makes the
+                // retention nonsensical, fractions break the boundary arithmetic)
+                // and fall back to the default in that case.
+                const si = journalOverride.snapshotInterval;
+                target.snapshotInterval = (Number.isInteger(si) && si > 0)
+                    ? si
+                    : journal_js_1.DEFAULT_SNAPSHOT_INTERVAL;
+                if (target.snapshotInterval !== si) {
+                    console.warn(`[chelonia][journal] invalid snapshotInterval ${String(si)}; ` +
+                        `falling back to ${journal_js_1.DEFAULT_SNAPSHOT_INTERVAL}`);
+                }
             }
             if (journalOverride.contractIDs !== undefined) {
                 target.contractIDs = journalOverride.contractIDs?.slice();
             }
             if (journalOverride.redactions !== undefined) {
-                target.redactions = journalOverride.redactions?.slice();
+                // Deep-copy each redaction entry: `slice()` alone shares the
+                // `{ path, redact }` objects with the caller, who could then
+                // re-point `path` and silently change the live journal config.
+                // The `redact` function is intentionally shared by reference.
+                target.redactions = journalOverride.redactions?.map(r => ({
+                    path: r.path,
+                    redact: r.redact
+                }));
+                // Redactions are applied at record time, not retroactively. Any
+                // pre-existing journal entries were produced under the old
+                // redaction set and would now be inconsistent with subsequent
+                // patches (and with `reconstruct`'s output until the next
+                // snapshot). Clear all journals so the next event re-seeds with
+                // a fresh snapshot under the new redactions.
+                (0, sbp_1.default)('chelonia/journal/clear');
             }
             if (journalOverride.diff !== undefined)
                 target.diff = journalOverride.diff;

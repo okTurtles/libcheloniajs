@@ -86,7 +86,12 @@ export function cloneValue<T> (v: T): T {
   if (v === null || typeof v !== 'object') return v
   if (Array.isArray(v)) return (v.map(cloneValue) as unknown) as T
   if (isPlainObject(v)) {
-    const out: Record<string, unknown> = {}
+    // Preserve the source prototype so `Object.create(null)` containers
+    // (which Chelonia uses throughout contract state — `_vm`, `_volatile`,
+    // etc.) round-trip as null-prototype objects rather than silently
+    // gaining `Object.prototype`. `deepStrictEqual` against the live
+    // state would otherwise diverge on prototype.
+    const out: Record<string, unknown> = Object.create(Object.getPrototypeOf(v))
     for (const k of Object.keys(v)) {
       // Use `defineProperty` instead of `out[k] = ...` so a state with an
       // own enumerable `__proto__` key cannot pollute `Object.prototype`
@@ -478,9 +483,10 @@ function walkAndRedact (
   }
 }
 
-// A convenience redactor that maps a value to the first 8 chars of a
-// blake2b-256 hash of its JSON serialization. Distinct inputs produce
-// distinct outputs with high probability while never revealing the value.
+// A convenience redactor that maps a value to the first 8 characters of
+// a blake2b-256 hash of its JSON serialization (base58btc-encoded, as
+// produced by `blake32Hash` — not hex). Distinct inputs produce distinct
+// outputs with high probability while never revealing the value.
 //
 // Caveat: this is NOT suitable for adversarial inputs. Low-entropy values
 // (booleans, small integers, short enum strings) are trivially reversible

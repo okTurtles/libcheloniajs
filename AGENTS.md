@@ -239,12 +239,27 @@ again — provided fields replace the previous value; omitted fields are
 left alone. Arrays (`contractIDs`, `redactions`) are copied so later
 mutations on the caller's reference don't leak in.
 
-Reconfigure semantics: a provided `null` is treated as the literal
-value `null`, *not* as "reset to default". To revert `diff` /
-`applyPatch` back to the built-ins, pass `defaultDiff` /
-`defaultApplyPatch` (imported from `@chelonia/lib` or
-`@chelonia/lib/journal`) explicitly. To clear `contractIDs` /
-`redactions`, pass an empty array.
+Reconfigure semantics: omitted fields are left alone. For individual
+journal fields (`enabled`, `snapshotInterval`, `contractIDs`,
+`redactions`, `diff`, `applyPatch`), `null` is rejected — only the
+documented value types are accepted; pass `undefined` (or omit the
+field) to leave it alone. To revert `diff` / `applyPatch` back to the
+built-ins, pass `defaultDiff` / `defaultApplyPatch` (imported from
+`@chelonia/lib` or `@chelonia/lib/journal`) explicitly. To clear
+`contractIDs` / `redactions`, pass an empty array. The top-level
+`config.journal` block itself can be omitted; passing `null` for the
+whole block is also treated as "leave alone".
+
+Changing `redactions` at runtime is destructive to existing journal
+state: the previously recorded snapshots and patches were produced
+under the old redaction set, so applying a new redaction would leave
+those entries projected through the old set while subsequent entries
+use the new one, breaking `reconstruct`. `chelonia/configure` therefore
+clears *all* journals (equivalent to `chelonia/journal/clear` with no
+argument) whenever `redactions` is provided — the next event on each
+contract re-seeds with a fresh snapshot under the new redactions. If
+you need pre-change history preserved, snapshot the journal via
+`chelonia/journal/get` *before* calling `chelonia/configure`.
 
 Redaction scope: `redactions` covers `state` only. The
 `JournalEntry.description` field (a copy of `SPMessage.description()`)
@@ -270,11 +285,12 @@ Keep contract state plain JSON for the journal to behave correctly,
 or swap in a `structuredClone`-based `diff` / `applyPatch` override.
 
 Redaction caveat: the bundled `shortHashRedactor` hashes
-`JSON.stringify(value)` and returns the first 8 hex chars. This is
-fine for high-entropy values, but **trivially reversible** for
-booleans, small integers, or short enum strings — anyone with the
-journal and the contract schema can precompute the mapping. Use a
-constant sentinel (e.g. `'[REDACTED]'`) for low-entropy fields.
+`JSON.stringify(value)` and returns the first 8 characters of the
+base58btc-encoded blake2b-256 hash. This is fine for high-entropy
+values, but **trivially reversible** for booleans, small integers, or
+short enum strings — anyone with the journal and the contract schema
+can precompute the mapping. Use a constant sentinel (e.g.
+`'[REDACTED]'`) for low-entropy fields.
 
 Import path: the journal module is re-exported from the package root
 (`import { defaultDiff } from '@chelonia/lib'`) and is also available
