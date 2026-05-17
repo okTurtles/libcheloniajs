@@ -205,6 +205,27 @@ describe('journal: defaultApplyPatch', () => {
     )
   })
 
+  it("rejects 'remove' on a missing object key (RFC 6902 §4.2)", () => {
+    // RFC 6902 §4.2 requires the target location to exist for the patch
+    // to be applied successfully. JavaScript's `delete` on a missing key
+    // is a no-op, so without an explicit existence check the bug would
+    // silently accept malformed external patches.
+    assert.throws(() =>
+      defaultApplyPatch({ a: 1 }, [{ op: 'remove', path: '/missing' }])
+    )
+    // Inherited keys (e.g. `toString`) are not own properties and must
+    // also be rejected — otherwise an attacker-crafted patch could
+    // claim to remove `Object.prototype` members.
+    assert.throws(() =>
+      defaultApplyPatch({}, [{ op: 'remove', path: '/toString' }])
+    )
+    // Sanity: a present own key still removes successfully.
+    assert.deepStrictEqual(
+      defaultApplyPatch({ a: 1, b: 2 }, [{ op: 'remove', path: '/a' }]),
+      { b: 2 }
+    )
+  })
+
   it('does not pollute Object.prototype via __proto__ / constructor segments', () => {
     // Final-segment `__proto__`: writing via defineProperty must define an
     // OWN data property literally named "__proto__" that shadows the
@@ -286,6 +307,27 @@ describe('journal: defaultApplyPatch', () => {
     assert.deepStrictEqual(
       defaultApplyPatch({ a: [1] }, [{ op: 'add', path: '/a/-', value: 9 }]),
       { a: [1, 9] }
+    )
+  })
+
+  it("rejects out-of-bounds 'add' on arrays (RFC 6902 §4.1)", () => {
+    // `splice(idx, 0, v)` silently clamps `idx` to `length`, so without an
+    // explicit upper-bound check a patch like `{ op:'add', path:'/999' }`
+    // would be accepted as an append — diverging from any conformant
+    // RFC 6902 consumer. Index === length is still a valid append.
+    assert.throws(() =>
+      defaultApplyPatch([1, 2], [{ op: 'add', path: '/999', value: 9 }])
+    )
+    assert.throws(() =>
+      defaultApplyPatch([1, 2], [{ op: 'add', path: '/3', value: 9 }])
+    )
+    assert.deepStrictEqual(
+      defaultApplyPatch([1, 2], [{ op: 'add', path: '/2', value: 9 }]),
+      [1, 2, 9]
+    )
+    assert.deepStrictEqual(
+      defaultApplyPatch([1, 2], [{ op: 'add', path: '/0', value: 9 }]),
+      [9, 1, 2]
     )
   })
 

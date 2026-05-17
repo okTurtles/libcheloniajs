@@ -16,5 +16,5 @@ export * from './types.mjs';
 export * from './utils.mjs';
 export * from './zkpp.mjs';
 export * from './zkppConstants.mjs';
-declare const _default: any[];
+declare const _default: string[];
 export default _default;

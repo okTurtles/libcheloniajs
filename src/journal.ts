@@ -328,6 +328,15 @@ function applyOne (root: unknown, patch: JournalPatch): unknown {
       throw new Error(`Invalid array index '${last}' in patch '${patch.path}'`)
     }
     if (patch.op === 'add') {
+      // RFC 6902 §4.1: for arrays the index must reference a position
+      // within the array, OR equal its length (append). `splice` would
+      // otherwise silently clamp out-of-bounds indices to `length`,
+      // turning malformed patches like `/999` into a valid append.
+      if (!isDash && idx > parent.length) {
+        throw new Error(
+          `Cannot 'add' at '${patch.path}': array index out of bounds`
+        )
+      }
       parent.splice(idx, 0, cloneValue((patch as { value: unknown }).value))
     } else if (patch.op === 'replace') {
       if (isDash) {
@@ -790,4 +799,4 @@ export default sbp('sbp/selectors/register', {
     }
     return count
   }
-})
+}) as string[]

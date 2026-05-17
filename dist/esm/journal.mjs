@@ -21,6 +21,7 @@
 // library and vice versa.
 import { blake32Hash } from './functions.mjs';
 import sbp from '@sbp/sbp';
+import { has } from 'turtledash';
 // ---------------------------------------------------------------------------
 // JSON-Pointer helpers
 // ---------------------------------------------------------------------------
@@ -74,7 +75,15 @@ export function cloneValue(v) {
     if (isPlainObject(v)) {
         const out = {};
         for (const k of Object.keys(v)) {
-            out[k] = cloneValue(v[k]);
+            // Use `defineProperty` instead of `out[k] = ...` so a state with an
+            // own enumerable `__proto__` key cannot pollute `Object.prototype`
+            // via this clone path.
+            Object.defineProperty(out, k, {
+                value: cloneValue(v[k]),
+                writable: true,
+                enumerable: true,
+                configurable: true
+            });
         }
         return out;
     }
@@ -191,6 +200,24 @@ function shallowEqualPrimitives(a, b) {
 // ---------------------------------------------------------------------------
 // Apply
 // ---------------------------------------------------------------------------
+// Write `value` at key `last` on `obj` without invoking inherited setters.
+//
+// Why this matters: `obj[last] = value` on a plain object will trigger any
+// setter inherited from the prototype chain. The most important case is
+// `last === '__proto__'`: the assignment form invokes the inherited
+// `Object.prototype.__proto__` setter and re-parents `obj`. Using
+// `Object.defineProperty` instead defines an *own* data property literally
+// named `"__proto__"` that shadows the accessor — `Object.prototype` is
+// never touched and `Object.getPrototypeOf(obj)` is unchanged. The same
+// reasoning covers any user-defined accessor on the prototype chain.
+function safeDefine(obj, last, value) {
+    Object.defineProperty(obj, last, {
+        value,
+        writable: true,
+        enumerable: true,
+        configurable: true
+    });
+}
 // Apply a sequence of patches to a value, returning a new value. Does not
 // mutate the input. Rejects unknown op kinds.
 export function defaultApplyPatch(state, patches) {
@@ -221,15 +248,35 @@ function applyOne(root, patch) {
         throw new Error(`Cannot apply patch '${patch.op}' at '${patch.path}' to non-container root`);
     }
     // Walk to parent. The root was already cloned by `defaultApplyPatch`,
-    // so it is safe to mutate the container chain in place.
+    // so it is safe to mutate the container chain in place. Every object
+    // step uses `has` (own-property only), so attacker-controlled segments
+    // like `__proto__` / `constructor` cannot traverse into
+    // `Object.prototype` — those names are inherited, not own, on plain
+    // objects and the walk throws before reaching them.
     let parent = root;
     for (let i = 0; i < segments.length - 1; i++) {
         const seg = segments[i];
-        const next = parent[seg];
-        if (next === undefined || next === null || typeof next !== 'object') {
-            throw new Error(`Cannot apply patch '${patch.op}' at '${patch.path}': intermediate '${seg}' is not a container`);
+        if (Array.isArray(parent)) {
+            const idx = Number(seg);
+            if (!Number.isInteger(idx) || idx < 0 || idx >= parent.length) {
+                throw new Error(`Cannot apply patch '${patch.op}' at '${patch.path}': intermediate '${seg}' is not a container`);
+            }
+            const next = parent[idx];
+            if (next === undefined || next === null || typeof next !== 'object') {
+                throw new Error(`Cannot apply patch '${patch.op}' at '${patch.path}': intermediate '${seg}' is not a container`);
+            }
+            parent = next;
         }
-        parent = next;
+        else {
+            if (!has(parent, seg)) {
+                throw new Error(`Cannot apply patch '${patch.op}' at '${patch.path}': intermediate '${seg}' is not a container`);
+            }
+            const next = parent[seg];
+            if (next === undefined || next === null || typeof next !== 'object') {
+                throw new Error(`Cannot apply patch '${patch.op}' at '${patch.path}': intermediate '${seg}' is not a container`);
+            }
+            parent = next;
+        }
     }
     const last = segments[segments.length - 1];
     if (Array.isArray(parent)) {
@@ -242,6 +289,13 @@ function applyOne(root, patch) {
             throw new Error(`Invalid array index '${last}' in patch '${patch.path}'`);
         }
         if (patch.op === 'add') {
+            // RFC 6902 §4.1: for arrays the index must reference a position
+            // within the array, OR equal its length (append). `splice` would
+            // otherwise silently clamp out-of-bounds indices to `length`,
+            // turning malformed patches like `/999` into a valid append.
+            if (!isDash && idx > parent.length) {
+                throw new Error(`Cannot 'add' at '${patch.path}': array index out of bounds`);
+            }
             parent.splice(idx, 0, cloneValue(patch.value));
         }
         else if (patch.op === 'replace') {
@@ -269,17 +323,21 @@ function applyOne(root, patch) {
     else {
         const obj = parent;
         if (patch.op === 'add') {
-            obj[last] = cloneValue(patch.value);
+            safeDefine(obj, last, cloneValue(patch.value));
         }
         else if (patch.op === 'replace') {
             // RFC 6902 §4.3: replace requires the target location to already
-            // exist. Differentiates us from `add` for conformant consumers.
-            if (!Object.prototype.hasOwnProperty.call(obj, last)) {
+            // exist. Use `has` so inherited properties (e.g. via
+            // Object.prototype) do NOT count as "existing".
+            if (!has(obj, last)) {
                 throw new Error(`Cannot 'replace' at '${patch.path}': target key does not exist`);
             }
-            obj[last] = cloneValue(patch.value);
+            safeDefine(obj, last, cloneValue(patch.value));
         }
         else if (patch.op === 'remove') {
+            if (!has(obj, last)) {
+                throw new Error(`Cannot 'remove' at '${patch.path}': target key does not exist`);
+            }
             delete obj[last];
         }
         else {
@@ -313,11 +371,13 @@ function walkAndRedact(parent, segments, i, redact, resolved) {
         return;
     const seg = segments[i];
     const isLast = i === segments.length - 1;
+    // Only consider own properties when matching a literal segment, and only
+    // own enumerable keys for the `*` glob — never traverse the prototype.
     const keys = seg === '*'
         ? (Array.isArray(parent)
             ? parent.map((_, idx) => String(idx))
             : Object.keys(parent))
-        : (seg in parent ? [seg] : []);
+        : (has(parent, seg) ? [seg] : []);
     for (const k of keys) {
         const fullPath = [...resolved, k];
         if (isLast) {
@@ -331,7 +391,20 @@ function walkAndRedact(parent, segments, i, redact, resolved) {
                 console.warn(`[chelonia][journal] redactor threw for path '${fullPath.join('.')}':`, e);
                 replacement = REDACTION_ERROR_SENTINEL;
             }
-            container[k] = replacement;
+            // Write via defineProperty: even though `cloneValue` produced this
+            // container, defending against prototype-polluting keys at the write
+            // site costs nothing and keeps the invariant local.
+            if (Array.isArray(container)) {
+                container[k] = replacement;
+            }
+            else {
+                Object.defineProperty(container, k, {
+                    value: replacement,
+                    writable: true,
+                    enumerable: true,
+                    configurable: true
+                });
+            }
         }
         else {
             walkAndRedact(parent[k], segments, i + 1, redact, fullPath);
@@ -411,14 +484,14 @@ postSnapshotState) {
         const lastSnapIdx = indexOfLastSnapshot(entries);
         const patchesSinceSnap = entries.length - 1 - lastSnapIdx;
         if (patchesSinceSnap >= snapshotInterval) {
-            entries.push({
-                kind: 'snapshot',
-                hash: entry.hash,
-                height: entry.height,
-                opType: entry.opType,
-                description: entry.description,
-                state: postSnapshotState.state
-            });
+            const snap = Object.create(null);
+            snap.kind = 'snapshot';
+            snap.hash = entry.hash;
+            snap.height = entry.height;
+            snap.opType = entry.opType;
+            snap.description = entry.description;
+            snap.state = postSnapshotState.state;
+            entries.push(snap);
         }
     }
     // Trim: if total length exceeded 2X, drop everything before the most
@@ -518,14 +591,14 @@ export default sbp('sbp/selectors/register', {
             let nextEntries;
             if (isFirstOrResync) {
                 // First event for this contract OR a resync: emit a snapshot only.
-                nextEntries = [{
-                        kind: 'snapshot',
-                        hash,
-                        height,
-                        opType,
-                        description,
-                        state: redactedAfter
-                    }];
+                const snap = Object.create(null);
+                snap.kind = 'snapshot';
+                snap.hash = hash;
+                snap.height = height;
+                snap.opType = opType;
+                snap.description = description;
+                snap.state = redactedAfter;
+                nextEntries = [snap];
             }
             else {
                 let patch;
@@ -543,17 +616,18 @@ export default sbp('sbp/selectors/register', {
                         patch = [];
                     }
                 }
-                const entry = {
-                    kind: 'patch',
-                    hash,
-                    height,
-                    opType,
-                    description,
-                    patch
-                };
+                const entry = Object.create(null);
+                entry.kind = 'patch';
+                entry.hash = hash;
+                entry.height = height;
+                entry.opType = opType;
+                entry.description = description;
+                entry.patch = patch;
                 nextEntries = appendAndTrim(existing, entry, cfg.snapshotInterval, { state: redactedAfter });
             }
-            this.config.reactiveSet(contractMeta, '_journal', { entries: nextEntries });
+            const wrapper = Object.create(null);
+            wrapper.entries = nextEntries;
+            this.config.reactiveSet(contractMeta, '_journal', wrapper);
         }
         catch (e) {
             // The recorder is contractually "MUST NOT throw": any failure here

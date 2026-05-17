@@ -16,5 +16,5 @@ export * from './types.cjs';
 export * from './utils.cjs';
 export * from './zkpp.cjs';
 export * from './zkppConstants.cjs';
-declare const _default: any[];
+declare const _default: string[];
 export default _default;

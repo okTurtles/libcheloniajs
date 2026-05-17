@@ -11,5 +11,5 @@ export declare const REDACTION_ERROR_SENTINEL = "[REDACTION_ERROR]";
 export declare function applyRedactions<T>(state: T, redactions: JournalRedaction[] | undefined): T;
 export declare function shortHashRedactor(value: unknown): string;
 export declare const DEFAULT_SNAPSHOT_INTERVAL = 50;
-declare const _default: any;
+declare const _default: string[];
 export default _default;
