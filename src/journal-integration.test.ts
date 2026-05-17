@@ -184,6 +184,52 @@ describe('journal: integration via SBP selectors', () => {
     assert.deepStrictEqual(recon, prev)
   })
 
+  // Guards the "between X and 2X" window invariant across the
+  // auto-snapshot + trim boundary, where the trim could in principle
+  // splice everything before a freshly-pushed snapshot and collapse the
+  // window to a single entry. Drives the journal through many events
+  // and asserts on every step:
+  //   1. entries.length never exceeds 2 * snapshotInterval (upper bound)
+  //   2. entries.length stays >= snapshotInterval once steady state is
+  //      reached (the trim never collapses the window)
+  //   3. entries[0] is always a snapshot so `reconstruct` has a base
+  it('never collapses the window below `snapshotInterval` even at the auto-snapshot + trim boundary', () => {
+    const cid = 'cid-trim-collapse-regression'
+    ensureContractMeta(cid)
+    let prev = mkState(0)
+    record(cid, 'h0', 0, undefined, prev)
+    const X = 3
+    for (let i = 1; i <= 50; i++) {
+      const next = mkState(i)
+      record(cid, `h${i}`, i, prev, next)
+      prev = next
+      const entries = getEntries(cid)!
+      // Upper bound: trim must keep us at or below 2X.
+      assert.ok(
+        entries.length <= 2 * X,
+        `step ${i}: entries.length=${entries.length} exceeded 2*X=${2 * X}`
+      )
+      // Lower bound: after the first event the window is just one
+      // snapshot, which is fine; from step 2 onward we have at least
+      // two entries, and once we reach steady state we should never
+      // see the window collapse below X.
+      if (i >= X) {
+        assert.ok(
+          entries.length >= X,
+          `step ${i}: window collapsed to ${entries.length} entries (< X=${X})`
+        )
+      }
+      // The head must always be a snapshot so `reconstruct` works.
+      assert.strictEqual(
+        entries[0].kind,
+        'snapshot',
+        `step ${i}: entries[0] is not a snapshot`
+      )
+    }
+    // Reconstruct still matches the latest after-state.
+    assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), prev)
+  })
+
   it('skips journaling entirely when `enabled: false`', async () => {
     await sbp('chelonia/configure', {
       journal: { enabled: false, snapshotInterval: 3, contractIDs: [], redactions: [] }
