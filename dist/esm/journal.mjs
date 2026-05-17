@@ -234,6 +234,14 @@ export function defaultApplyPatch(state, patches) {
 }
 function applyOne(root, patch) {
     const segments = pointerToSegments(patch.path);
+    // Reject unknown ops up front. The strict-subset producer only emits
+    // add/remove/replace, but external patches fed into the public
+    // `defaultApplyPatch` could contain anything; without this guard the
+    // root-path branch below would silently treat e.g. `{ op: 'frob', ... }`
+    // as a whole-root replace.
+    if (patch.op !== 'add' && patch.op !== 'replace' && patch.op !== 'remove') {
+        throw new Error(`Unsupported patch op '${patch.op}' at '${patch.path}'`);
+    }
     if (patch.op === 'add' || patch.op === 'replace') {
         // The strict-subset type guarantees `value`, but a malformed patch from
         // an external producer might omit it. Validate at runtime so we reject
@@ -574,34 +582,35 @@ export default sbp('sbp/selectors/register', {
             // When the contract errored we will emit an empty-patch entry that
             // doesn't need either redacted projection — skip the work.
             const willEmitEmptyPatch = !isFirstOrResync && processingErrored;
-            // Compute redacted before/after defensively. We can skip both when
-            // we know the result will be an empty-patch entry (processingErrored
-            // on a chain that already has entries) — the patch is `[]` regardless
-            // and the redactions would only burn CPU on equal inputs. We can also
-            // skip the `before` projection when we're going to emit a snapshot.
+            // Compute redacted before/after defensively. We can skip the
+            // `before` projection when we know the diff will be empty
+            // (processingErrored on a chain that already has entries) or when
+            // we're going to emit a snapshot. We must always compute
+            // `after` for non-first/non-resync events so `appendAndTrim` has a
+            // value to materialize a boundary snapshot from — without it, a
+            // long run of errored events would keep pushing empty patches and
+            // never be trimmed, growing the journal without bound.
             let redactedBefore;
             let redactedAfter;
-            if (!willEmitEmptyPatch) {
-                if (!isFirstOrResync) {
-                    try {
-                        redactedBefore = beforeState === undefined
-                            ? undefined
-                            : applyRedactions(beforeState, cfg.redactions);
-                    }
-                    catch (e) {
-                        logJournalError('redaction (before) failed', e);
-                        redactedBefore = undefined;
-                    }
-                }
+            if (!willEmitEmptyPatch && !isFirstOrResync) {
                 try {
-                    redactedAfter = afterState === undefined
-                        ? null
-                        : applyRedactions(afterState, cfg.redactions);
+                    redactedBefore = beforeState === undefined
+                        ? undefined
+                        : applyRedactions(beforeState, cfg.redactions);
                 }
                 catch (e) {
-                    logJournalError('redaction (after) failed', e);
-                    redactedAfter = null;
+                    logJournalError('redaction (before) failed', e);
+                    redactedBefore = undefined;
                 }
+            }
+            try {
+                redactedAfter = afterState === undefined
+                    ? null
+                    : applyRedactions(afterState, cfg.redactions);
+            }
+            catch (e) {
+                logJournalError('redaction (after) failed', e);
+                redactedAfter = null;
             }
             let nextEntries;
             if (isFirstOrResync) {

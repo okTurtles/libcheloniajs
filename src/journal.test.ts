@@ -178,6 +178,19 @@ describe('journal: defaultApplyPatch', () => {
     )
   })
 
+  it('rejects unknown ops even at the document root (no silent root replace)', () => {
+    // Regression: previously the root-path branch only special-cased
+    // `remove`, so an unknown op like `frob` at `path: ''` would silently
+    // be treated as a whole-root replace using `patch.value`.
+    assert.throws(
+      () =>
+        defaultApplyPatch({ a: 1 }, [
+          { op: 'frob', path: '', value: { hijacked: true } } as unknown as JournalPatch
+        ]),
+      /Unsupported patch op/
+    )
+  })
+
   it('throws on patches whose intermediate path is missing', () => {
     assert.throws(() =>
       defaultApplyPatch({}, [{ op: 'replace', path: '/a/b', value: 1 }])

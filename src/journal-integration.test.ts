@@ -358,6 +358,28 @@ describe('journal: integration via SBP selectors', () => {
     }
   })
 
+  it('bounds the journal at 2*snapshotInterval even under sustained processing errors', () => {
+    // Regression: errored events emit empty-patch entries with no
+    // post-state to snapshot from, so the snapshot-boundary path is
+    // skipped. If an errored run begins after the last snapshot and
+    // never returns, `appendAndTrim` has no newer snapshot to trim to
+    // and the journal would grow unboundedly. Drive a long run of
+    // errored events and assert the 2X upper bound holds throughout.
+    const cid = 'cid-errored-bound'
+    ensureContractMeta(cid)
+    const initial = mkState(0)
+    record(cid, 'h0', 0, undefined, initial)
+    // snapshotInterval = 3 in this suite, so 2X = 6.
+    for (let i = 1; i <= 50; i++) {
+      record(cid, `h${i}`, i, initial, initial, true)
+      const entries = getEntries(cid)!
+      assert.ok(
+        entries.length <= 6,
+        `journal grew past 2*snapshotInterval (${entries.length}) at step ${i}`
+      )
+    }
+  })
+
   it('records an empty-patch entry when processingErrored is true', () => {
     const cid = 'cid-errored'
     ensureContractMeta(cid)
