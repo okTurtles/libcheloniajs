@@ -407,11 +407,17 @@ function walkAndRedact(parent, segments, i, redact, resolved) {
                 console.warn(`[chelonia][journal] redactor threw for path '${fullPath.join('.')}':`, e);
                 replacement = exports.REDACTION_ERROR_SENTINEL;
             }
-            // Write via defineProperty: even though `cloneValue` produced this
-            // container, defending against prototype-polluting keys at the write
-            // site costs nothing and keeps the invariant local.
+            // Write via defineProperty on objects: even though `cloneValue`
+            // produced this container, defending against prototype-polluting
+            // keys at the write site costs nothing and keeps the invariant
+            // local. On arrays we validate the index and use bracket
+            // assignment — arrays don't have string keys in JSON Patch, so a
+            // non-integer key here is a bug, not a write to mishandle.
             if (Array.isArray(container)) {
-                container[k] = replacement;
+                const idx = Number(k);
+                if (Number.isInteger(idx) && idx >= 0 && idx < container.length) {
+                    container[idx] = replacement;
+                }
             }
             else {
                 Object.defineProperty(container, k, {
@@ -454,17 +460,20 @@ function shortHashRedactor(value) {
 // Default snapshot interval (X). The journal holds between X and 2X entries.
 exports.DEFAULT_SNAPSHOT_INTERVAL = 50;
 function resolveJournalConfig(cfg) {
-    // Invariant: `chelonia/_init` always populates `this.config.journal`
-    // with `enabled`, `snapshotInterval`, `contractIDs`, and `redactions`,
-    // so the defaults policy lives in exactly one place. We trust the
-    // invariant here and only handle the optional function-overrides
-    // (`diff` / `applyPatch`) by falling back to the built-ins.
-    const enabled = cfg.enabled === true;
-    const snapshotInterval = cfg.snapshotInterval;
-    const contractIDs = cfg.contractIDs && cfg.contractIDs.length > 0
+    // `chelonia/_init` populates `this.config.journal` with all of the
+    // documented defaults so the policy lives in exactly one place. We still
+    // tolerate a missing / partial config here because the public selectors
+    // (`chelonia/journal/reconstruct`, `chelonia/journal/get`) can be invoked
+    // via SBP from anywhere — including before `_init` has run in tests or
+    // in unusual reset orderings — and a missing field must not crash.
+    const enabled = cfg?.enabled === true;
+    const snapshotInterval = typeof cfg?.snapshotInterval === 'number'
+        ? cfg.snapshotInterval
+        : exports.DEFAULT_SNAPSHOT_INTERVAL;
+    const contractIDs = cfg?.contractIDs && cfg.contractIDs.length > 0
         ? new Set(cfg.contractIDs)
         : null;
-    const redactions = cfg.redactions ?? [];
+    const redactions = cfg?.redactions ?? [];
     const diff = cfg?.diff ?? defaultDiff;
     const applyPatch = cfg?.applyPatch ?? defaultApplyPatch;
     return { enabled, snapshotInterval, contractIDs, redactions, diff, applyPatch };

@@ -202,7 +202,15 @@ export default sbp('sbp/selectors/register', {
         if (this.config.journal) {
             out.journal = {
                 ...out.journal,
-                redactions: this.config.journal.redactions?.slice(),
+                // Deep-copy each redaction entry: `.slice()` alone shares the
+                // `{ path, redact }` objects with the live config, so a caller
+                // could mutate the live redaction path via the returned snapshot.
+                // The `redact` function is intentionally shared by reference
+                // (functions can't be cloned).
+                redactions: this.config.journal.redactions?.map(r => ({
+                    path: r.path,
+                    redact: r.redact
+                })),
                 diff: this.config.journal.diff,
                 applyPatch: this.config.journal.applyPatch
             };
@@ -210,33 +218,49 @@ export default sbp('sbp/selectors/register', {
         return out;
     },
     'chelonia/configure': async function (config) {
-        merge(this.config, config);
+        // Pull the journal override aside before `merge`: `merge` deep-clones
+        // via JSON.stringify (so function fields like `redact` callbacks and
+        // optional `diff`/`applyPatch` overrides disappear) and deep-merges
+        // arrays (so callers cannot clear `contractIDs` / `redactions` by
+        // passing an empty array). Handling the journal field-by-field below
+        // keeps `merge`'s behaviour for every other key while giving the
+        // journal config the by-reference semantics it needs.
+        const journalOverride = config.journal;
+        const configForMerge = journalOverride !== undefined
+            ? { ...config, journal: undefined }
+            : config;
+        merge(this.config, configForMerge);
         // merge will strip the hooks off of config.hooks when merging from the root of the object
         // because they are functions and cloneDeep doesn't clone functions
         Object.assign(this.config.hooks, config.hooks || {});
-        // Same reasoning for journal: `merge` deep-clones via JSON.stringify, so
-        // function fields on the user's `journal` config (the `redact` callbacks
-        // inside `redactions`, plus optional `diff` / `applyPatch` overrides)
-        // would silently disappear. It also deep-merges arrays, which would
-        // prevent callers from clearing `contractIDs` / `redactions` by passing
-        // an empty array. Replace each provided field by reference instead.
-        if (config.journal) {
+        if (journalOverride) {
+            if (!this.config.journal) {
+                // No prior journal block (e.g. configure called before _init in
+                // tests). Seed with the documented defaults so subsequent
+                // field-by-field overrides have somewhere to land.
+                this.config.journal = {
+                    enabled: false,
+                    snapshotInterval: DEFAULT_SNAPSHOT_INTERVAL,
+                    contractIDs: [],
+                    redactions: []
+                };
+            }
             const target = this.config.journal;
-            if (config.journal.enabled !== undefined)
-                target.enabled = config.journal.enabled;
-            if (config.journal.snapshotInterval !== undefined) {
-                target.snapshotInterval = config.journal.snapshotInterval;
+            if (journalOverride.enabled !== undefined)
+                target.enabled = journalOverride.enabled;
+            if (journalOverride.snapshotInterval !== undefined) {
+                target.snapshotInterval = journalOverride.snapshotInterval;
             }
-            if (config.journal.contractIDs !== undefined) {
-                target.contractIDs = config.journal.contractIDs?.slice();
+            if (journalOverride.contractIDs !== undefined) {
+                target.contractIDs = journalOverride.contractIDs?.slice();
             }
-            if (config.journal.redactions !== undefined) {
-                target.redactions = config.journal.redactions?.slice();
+            if (journalOverride.redactions !== undefined) {
+                target.redactions = journalOverride.redactions?.slice();
             }
-            if (config.journal.diff !== undefined)
-                target.diff = config.journal.diff;
-            if (config.journal.applyPatch !== undefined)
-                target.applyPatch = config.journal.applyPatch;
+            if (journalOverride.diff !== undefined)
+                target.diff = journalOverride.diff;
+            if (journalOverride.applyPatch !== undefined)
+                target.applyPatch = journalOverride.applyPatch;
         }
         // using Object.assign here instead of merge to avoid stripping away imported modules
         if (config.contracts) {
