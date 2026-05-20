@@ -52,3 +52,4 @@ export const ChelErrorResourceGone = ChelErrorGenerator(
   'ChelErrorResourceGone',
   ChelErrorUnexpectedHttpResponseCode
 )
+export const ChelErrorJournalCorrupt = ChelErrorGenerator('ChelErrorJournalCorrupt')

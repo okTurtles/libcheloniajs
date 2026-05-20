@@ -14,6 +14,7 @@ import { describe, it, before, beforeEach } from 'node:test'
 
 import './chelonia.js'
 import './db.js'
+import { ChelErrorJournalCorrupt } from './errors.js'
 import { defaultApplyPatch, defaultDiff } from './journal.js'
 import type { ChelContractState, ChelRootState, JournalEntry, JournalPatch } from './types.js'
 
@@ -306,6 +307,40 @@ describe('journal: integration via SBP selectors', () => {
     }
   })
 
+  it('does NOT clear the journal when reconfiguring with redactions (caller is responsible for clearing on actual changes)', async () => {
+    // Rationale: `chelonia/configure` is typically re-invoked on every
+    // app start with the same redactions, but function identity isn't
+    // stable across process restarts — so we cannot detect "redactions
+    // actually changed" reliably. Auto-clearing would therefore wipe
+    // persisted journal history on every relaunch. The contract is:
+    // configure leaves journals alone; callers who genuinely change
+    // their redaction set must call `chelonia/journal/clear` themselves.
+    await sbp('chelonia/configure', {
+      journal: {
+        enabled: true,
+        snapshotInterval: 3,
+        contractIDs: [],
+        redactions: [{ path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED]' }]
+      }
+    })
+    const cid = 'cid-redact-noclear'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    record(cid, 'h1', 1, mkState(1), mkState(2))
+    const before = getEntries(cid)!
+    assert.ok(before.length >= 2)
+    // Reconfigure with a *different* redact function: configure must
+    // still not auto-clear. This mimics an app relaunch where the
+    // freshly constructed redactor function is structurally identical
+    // but a different object reference.
+    await sbp('chelonia/configure', {
+      journal: {
+        redactions: [{ path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED-2]' }]
+      }
+    })
+    assert.deepStrictEqual(getEntries(cid), before)
+  })
+
   it('continues recording when a redactor throws (sentinel value)', async () => {
     const origWarn = console.warn
     console.warn = () => {}
@@ -466,6 +501,42 @@ describe('journal: integration via SBP selectors', () => {
     assert.strictEqual(sbp('chelonia/journal/reconstruct', 'never-seen'), undefined)
   })
 
+  it('reconstruct throws ChelErrorJournalCorrupt when applyPatch fails', async () => {
+    // Swap in a deliberately broken applier and watch reconstruct fail
+    // loudly rather than silently returning undefined (which a caller
+    // could not distinguish from "no journal exists").
+    const origWarn = console.warn
+    console.warn = () => {}
+    try {
+      await sbp('chelonia/configure', {
+        journal: {
+          applyPatch: () => { throw new Error('boom') }
+        }
+      })
+      const cid = 'cid-recon-broken'
+      ensureContractMeta(cid)
+      record(cid, 'h0', 0, undefined, mkState(1))
+      record(cid, 'h1', 1, mkState(1), mkState(2))
+      assert.throws(
+        () => sbp('chelonia/journal/reconstruct', cid),
+        (err: unknown) => {
+          assert.ok(err instanceof ChelErrorJournalCorrupt,
+            `expected ChelErrorJournalCorrupt, got ${(err as Error)?.name}`)
+          const e = err as Error & { entryIndex?: number; contractID?: string; cause?: unknown }
+          assert.strictEqual(e.entryIndex, 1)
+          assert.strictEqual(e.contractID, cid)
+          assert.ok(e.cause instanceof Error)
+          assert.strictEqual((e.cause as Error).message, 'boom')
+          return true
+        }
+      )
+    } finally {
+      // Restore the default applier so subsequent tests are unaffected.
+      await sbp('chelonia/configure', { journal: { applyPatch: defaultApplyPatch } })
+      console.warn = origWarn
+    }
+  })
+
   it('reconstruct matches the latest redacted after-state across many events', () => {
     const cid = 'cid-recon-long'
     ensureContractMeta(cid)
@@ -567,5 +638,68 @@ describe('journal: integration via SBP selectors', () => {
     // Property must still exist with value `undefined` (not dropped).
     assert.ok('dropMe' in cloned, '`undefined` value was dropped by clone')
     assert.strictEqual(cloned.dropMe, undefined)
+  })
+
+  it('rejects field-level null in chelonia/configure with a TypeError', async () => {
+    // Documented contract: only typed values are accepted; pass
+    // `undefined`/omit to leave a field alone. `null` is a programmer
+    // error and must fail loudly rather than slip through to the read
+    // path with surprising effects.
+    for (const field of [
+      'enabled', 'snapshotInterval', 'contractIDs', 'redactions', 'diff', 'applyPatch'
+    ]) {
+      await assert.rejects(
+        sbp('chelonia/configure', { journal: { [field]: null } }),
+        (err: unknown) => err instanceof TypeError && /cannot be null/.test((err as Error).message),
+        `expected configure to reject null for ${field}`
+      )
+    }
+  })
+
+  it('treats top-level journal: null as "stop journaling"', async () => {
+    // Seed: record an entry on a contract while journaling is enabled.
+    const cid = 'cid-journal-null'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    assert.ok(getEntries(cid), 'precondition: journal exists')
+
+    // Reset via journal: null. This should disable journaling and clear
+    // all persisted journals.
+    await sbp('chelonia/configure', { journal: null })
+
+    assert.strictEqual(getEntries(cid), undefined,
+      'persisted journal should be cleared by journal: null')
+
+    // And subsequent recordEvent must be a no-op while disabled.
+    record(cid, 'h1', 1, undefined, mkState(2))
+    assert.strictEqual(getEntries(cid), undefined,
+      'recordEvent must not journal while disabled')
+
+    // Restore enabled state for subsequent tests (beforeEach also does
+    // this, but be explicit).
+    await sbp('chelonia/configure', {
+      journal: { enabled: true, snapshotInterval: 3 }
+    })
+  })
+
+  it('treats omitted journal field as "leave alone"', async () => {
+    // Reconfiguring without a `journal` key must not touch journal
+    // config or persisted entries.
+    const cid = 'cid-journal-leave-alone'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    const before = getEntries(cid)
+    assert.ok(before)
+
+    await sbp('chelonia/configure', { /* no journal key */ })
+
+    assert.deepStrictEqual(getEntries(cid), before,
+      'omitted journal must not clear persisted entries')
+
+    // And recording must still work (i.e. journaling is still enabled).
+    record(cid, 'h1', 1, mkState(1), mkState(2))
+    const after = getEntries(cid)!
+    assert.ok(after.length > before!.length,
+      'omitted journal must leave `enabled: true` alone')
   })
 })

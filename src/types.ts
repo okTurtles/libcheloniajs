@@ -89,7 +89,7 @@ export type CheloniaConfig = {
         data: T;
       }
     | undefined;
-  journal?: JournalConfig;
+  journal?: JournalConfig | null;
 };
 
 // JSON-Patch (RFC 6902) strict subset emitted/consumed by the journal.

@@ -229,7 +229,11 @@ Public selectors:
 
 ```
 chelonia/journal/get          — Returns a deep clone of { entries } or undefined
-chelonia/journal/reconstruct  — Rebuilds the redacted state at HEAD
+chelonia/journal/reconstruct  — Rebuilds the redacted state at HEAD;
+                                returns undefined if no journal exists,
+                                throws `ChelErrorJournalCorrupt` (with
+                                `entryIndex`, `contractID`, and `cause`)
+                                if a recorded patch fails to apply
 chelonia/journal/clear        — Clears one contract's journal (or all if no arg)
 ```
 
@@ -241,25 +245,36 @@ mutations on the caller's reference don't leak in.
 
 Reconfigure semantics: omitted fields are left alone. For individual
 journal fields (`enabled`, `snapshotInterval`, `contractIDs`,
-`redactions`, `diff`, `applyPatch`), `null` is rejected — only the
-documented value types are accepted; pass `undefined` (or omit the
-field) to leave it alone. To revert `diff` / `applyPatch` back to the
-built-ins, pass `defaultDiff` / `defaultApplyPatch` (imported from
-`@chelonia/lib` or `@chelonia/lib/journal`) explicitly. To clear
-`contractIDs` / `redactions`, pass an empty array. The top-level
-`config.journal` block itself can be omitted; passing `null` for the
-whole block is also treated as "leave alone".
+`redactions`, `diff`, `applyPatch`), `null` is rejected with a
+`TypeError` — only the documented value types are accepted; pass
+`undefined` (or omit the field) to leave it alone. To revert `diff` /
+`applyPatch` back to the built-ins, pass `defaultDiff` /
+`defaultApplyPatch` (imported from `@chelonia/lib` or
+`@chelonia/lib/journal`) explicitly. To clear `contractIDs` /
+`redactions`, pass an empty array. The top-level `config.journal`
+block itself can be omitted to leave the journal config alone;
+passing `journal: null` explicitly means "stop journaling" and resets
+the whole block back to disabled defaults (`enabled: false`,
+`snapshotInterval: 50`, no `contractIDs`, no `redactions`, default
+`diff`/`applyPatch`) and clears every persisted journal so no stale
+entries linger after the reset.
 
 Changing `redactions` at runtime is destructive to existing journal
 state: the previously recorded snapshots and patches were produced
 under the old redaction set, so applying a new redaction would leave
 those entries projected through the old set while subsequent entries
-use the new one, breaking `reconstruct`. `chelonia/configure` therefore
-clears *all* journals (equivalent to `chelonia/journal/clear` with no
-argument) whenever `redactions` is provided — the next event on each
-contract re-seeds with a fresh snapshot under the new redactions. If
-you need pre-change history preserved, snapshot the journal via
-`chelonia/journal/get` *before* calling `chelonia/configure`.
+use the new one, breaking `reconstruct`. Chelonia does **not**
+auto-clear on `redactions` change — function identity isn't stable
+across process restarts (so an in-memory equality check would either
+clear on every relaunch or fail to detect real changes), and
+`chelonia/configure` is normally called with the same redaction set
+on every app start. If a caller is genuinely *changing* the redaction
+set vs. what produced the persisted journal, they MUST call
+`chelonia/journal/clear` themselves; otherwise the next event on each
+contract simply continues under the new redactions and `reconstruct`
+output will be inconsistent until the next snapshot. If you need
+pre-change history preserved, snapshot the journal via
+`chelonia/journal/get` *before* clearing.
 
 Redaction scope: `redactions` covers `state` only. The
 `JournalEntry.description` field (a copy of `SPMessage.description()`)

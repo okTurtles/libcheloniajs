@@ -23,6 +23,7 @@
 import { blake32Hash } from './functions.js'
 import sbp from '@sbp/sbp'
 import { has } from 'turtledash'
+import { ChelErrorJournalCorrupt } from './errors.js'
 import type { SPMessage } from './SPMessage.js'
 import type {
   CheloniaContext,
@@ -522,7 +523,7 @@ export function shortHashRedactor (value: unknown): string {
 // Default snapshot interval (X). The journal holds between X and 2X entries.
 export const DEFAULT_SNAPSHOT_INTERVAL = 50
 
-function resolveJournalConfig (cfg: JournalConfig | undefined): {
+function resolveJournalConfig (cfg: JournalConfig | null | undefined): {
   enabled: boolean;
   snapshotInterval: number;
   contractIDs: Set<string> | null;
@@ -565,11 +566,16 @@ function appendAndTrim (
   // first entry, which is itself a snapshot).
   postSnapshotState: { state: unknown } | null
 ): JournalEntry[] {
-  // We mutate `entries` in place. `recordEvent` always replaces the
-  // wrapper object via `reactiveSet(contractMeta, '_journal', { entries })`
-  // so subscribers go through the wrapper and the array's identity is an
-  // implementation detail. Re-using the existing array avoids a fresh
-  // O(window) allocation on every event.
+  // Allocate a fresh array on every call so the array's identity changes
+  // in lock-step with the `_journal` wrapper swap performed by
+  // `recordEvent` via `reactiveSet`. This means consumers that destructure
+  // (`const { entries } = _journal`) and reactive frameworks observing
+  // `_journal.entries` directly see a single atomic transition per event
+  // rather than a mid-tick `push` followed by a `splice` trim — they will
+  // never observe the array at length `2X+1` between the push and the
+  // trim. The O(window) copy is bounded by `2 * snapshotInterval` and
+  // happens at most once per processed event.
+  entries = entries.slice()
   entries.push(entry)
   // If this push reached snapshotInterval patches since the most recent
   // snapshot, append a snapshot entry as well. We derive the identifying
@@ -597,7 +603,9 @@ function appendAndTrim (
     }
   }
   // Trim: if total length exceeded 2X, drop everything before the most
-  // recent snapshot via splice (in-place) to avoid a fresh allocation.
+  // recent snapshot. The splice operates on the fresh copy allocated
+  // above, so external observers of the previous `entries` array are
+  // unaffected.
   if (entries.length > 2 * snapshotInterval) {
     const lastSnapIdx = indexOfLastSnapshot(entries)
     if (lastSnapIdx > 0) {
@@ -770,7 +778,13 @@ export default sbp('sbp/selectors/register', {
 
   // Public: rebuild the redacted contract state at the journal's HEAD by
   // walking from the most recent snapshot and applying subsequent patches.
-  // Returns `undefined` if no journal exists. Useful as a self-check.
+  // Returns `undefined` if no journal exists (or the journal exists but is
+  // empty / has no snapshot to seed from). Throws `ChelErrorJournalCorrupt`
+  // if a recorded patch fails to apply: this is a debugging tool and a
+  // self-check, so a loud failure is preferable to silently returning
+  // `undefined` (which would be indistinguishable from "no journal"). The
+  // thrown error's `cause` is the underlying applier error and its
+  // `entryIndex` property points at the offending entry for inspection.
   'chelonia/journal/reconstruct': function (
     this: CheloniaContext,
     contractID: string
@@ -793,7 +807,14 @@ export default sbp('sbp/selectors/register', {
         state = cfg.applyPatch(state, e.patch)
       } catch (err) {
         logJournalError(`reconstruct failed at entry ${i}`, err)
-        return undefined
+        const corruptErr = new ChelErrorJournalCorrupt(
+          `journal reconstruct failed for contract ${contractID} at entry ${i}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+          { cause: err }
+        ) as Error & { entryIndex?: number; contractID?: string }
+        corruptErr.entryIndex = i
+        corruptErr.contractID = contractID
+        throw corruptErr
       }
     }
     return state
