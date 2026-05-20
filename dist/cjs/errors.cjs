@@ -2,7 +2,7 @@
 // ugly boilerplate because JavaScript is stupid
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ChelErrorResourceGone = exports.ChelErrorUnexpectedHttpResponseCode = exports.ChelErrorFetchServerTimeFailed = exports.ChelErrorSignatureKeyNotFound = exports.ChelErrorSignatureKeyUnauthorized = exports.ChelErrorSignatureError = exports.ChelErrorDecryptionKeyNotFound = exports.ChelErrorDecryptionError = exports.ChelErrorForkedChain = exports.ChelErrorUnrecoverable = exports.ChelErrorKeyAlreadyExists = exports.ChelErrorUnexpected = exports.ChelErrorDBConnection = exports.ChelErrorDBBadPreviousHEAD = exports.ChelErrorAlreadyProcessed = exports.ChelErrorWarning = exports.ChelErrorGenerator = void 0;
+exports.ChelErrorJournalCorrupt = exports.ChelErrorResourceGone = exports.ChelErrorUnexpectedHttpResponseCode = exports.ChelErrorFetchServerTimeFailed = exports.ChelErrorSignatureKeyNotFound = exports.ChelErrorSignatureKeyUnauthorized = exports.ChelErrorSignatureError = exports.ChelErrorDecryptionKeyNotFound = exports.ChelErrorDecryptionError = exports.ChelErrorForkedChain = exports.ChelErrorUnrecoverable = exports.ChelErrorKeyAlreadyExists = exports.ChelErrorUnexpected = exports.ChelErrorDBConnection = exports.ChelErrorDBBadPreviousHEAD = exports.ChelErrorAlreadyProcessed = exports.ChelErrorWarning = exports.ChelErrorGenerator = void 0;
 const ChelErrorGenerator = (name, base = Error) => class extends base {
     constructor(...params) {
         super(...params);
@@ -37,3 +37,4 @@ exports.ChelErrorSignatureKeyNotFound = (0, exports.ChelErrorGenerator)('ChelErr
 exports.ChelErrorFetchServerTimeFailed = (0, exports.ChelErrorGenerator)('ChelErrorFetchServerTimeFailed');
 exports.ChelErrorUnexpectedHttpResponseCode = (0, exports.ChelErrorGenerator)('ChelErrorUnexpectedHttpResponseCode');
 exports.ChelErrorResourceGone = (0, exports.ChelErrorGenerator)('ChelErrorResourceGone', exports.ChelErrorUnexpectedHttpResponseCode);
+exports.ChelErrorJournalCorrupt = (0, exports.ChelErrorGenerator)('ChelErrorJournalCorrupt');

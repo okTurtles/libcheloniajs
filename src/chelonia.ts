@@ -523,7 +523,12 @@ export default sbp('sbp/selectors/register', {
       // instead. Use `in` so the message is precise about which field
       // the caller actually supplied.
       const rejectNull = (name: keyof JournalConfig) => {
-        if (name in journalOverride && journalOverride[name] === null) {
+        // Use `has` (own-property check) rather than `in`: the latter
+        // walks the prototype chain, so e.g. `'toString' in {}` is
+        // `true`. The `keyof JournalConfig` type bound makes that
+        // unreachable in practice, but own-property checks are the
+        // codebase convention and avoid the foot-gun outright.
+        if (has(journalOverride, name) && journalOverride[name] === null) {
           throw new TypeError(
             `[chelonia][journal] config.journal.${name} cannot be null; ` +
             'omit the field to leave it alone, or pass `journal: null` ' +
@@ -549,7 +554,18 @@ export default sbp('sbp/selectors/register', {
         }
       }
       const target = this.config.journal
-      if (journalOverride.enabled !== undefined) target.enabled = journalOverride.enabled
+      if (journalOverride.enabled !== undefined) {
+        // `resolveJournalConfig` checks `cfg?.enabled === true` (strict
+        // equality), so any non-boolean truthy value (`"true"`, `1`,
+        // etc.) would silently leave journaling disabled. Fail loudly
+        // instead — same rationale as `rejectNull`.
+        if (typeof journalOverride.enabled !== 'boolean') {
+          throw new TypeError(
+            `[chelonia][journal] config.journal.enabled must be a boolean; got ${typeof journalOverride.enabled}`
+          )
+        }
+        target.enabled = journalOverride.enabled
+      }
       if (journalOverride.snapshotInterval !== undefined) {
         // `snapshotInterval` directly bounds journal retention. Reject
         // non-finite / non-positive / non-integer values that would break
@@ -568,9 +584,19 @@ export default sbp('sbp/selectors/register', {
         }
       }
       if (journalOverride.contractIDs !== undefined) {
+        if (!Array.isArray(journalOverride.contractIDs)) {
+          throw new TypeError(
+            `[chelonia][journal] config.journal.contractIDs must be an array; got ${typeof journalOverride.contractIDs}`
+          )
+        }
         target.contractIDs = journalOverride.contractIDs.slice()
       }
       if (journalOverride.redactions !== undefined) {
+        if (!Array.isArray(journalOverride.redactions)) {
+          throw new TypeError(
+            `[chelonia][journal] config.journal.redactions must be an array; got ${typeof journalOverride.redactions}`
+          )
+        }
         // Deep-copy each redaction entry: `slice()` alone shares the
         // `{ path, redact }` objects with the caller, who could then
         // re-point `path` and silently change the live journal config.
@@ -595,8 +621,22 @@ export default sbp('sbp/selectors/register', {
         // redactions. Mixing entries across redaction sets will leave
         // `reconstruct` output inconsistent until the next snapshot.
       }
-      if (journalOverride.diff !== undefined) target.diff = journalOverride.diff
-      if (journalOverride.applyPatch !== undefined) target.applyPatch = journalOverride.applyPatch
+      if (journalOverride.diff !== undefined) {
+        if (typeof journalOverride.diff !== 'function') {
+          throw new TypeError(
+            `[chelonia][journal] config.journal.diff must be a function; got ${typeof journalOverride.diff}`
+          )
+        }
+        target.diff = journalOverride.diff
+      }
+      if (journalOverride.applyPatch !== undefined) {
+        if (typeof journalOverride.applyPatch !== 'function') {
+          throw new TypeError(
+            `[chelonia][journal] config.journal.applyPatch must be a function; got ${typeof journalOverride.applyPatch}`
+          )
+        }
+        target.applyPatch = journalOverride.applyPatch
+      }
     }
     // using Object.assign here instead of merge to avoid stripping away imported modules
     if (config.contracts) {

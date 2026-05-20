@@ -84,6 +84,15 @@ export function cloneValue<T> (v: T): T {
   // Minimal structural clone for plain JSON-ish values. Functions, Dates,
   // Maps, Sets, etc. fall through and are returned as-is — Chelonia state
   // is plain JSON in practice, so this is enough.
+  //
+  // Round-trip caveat: `cloneValue` faithfully preserves own keys whose
+  // value is `undefined` (`{ a: undefined }` clones to `{ a: undefined }`),
+  // but `defaultDiff` treats `undefined` on either side as "key absent"
+  // and emits an `add`/`remove`. Reconstructing through diff+apply
+  // therefore drops such keys. This is consistent with JSON semantics
+  // (`JSON.stringify({ a: undefined })` is `"{}"`) and matches the
+  // documented "plain JSON state" contract; states that rely on
+  // explicit-undefined keys must supply a custom `diff` / `applyPatch`.
   if (v === null || typeof v !== 'object') return v
   if (Array.isArray(v)) return (v.map(cloneValue) as unknown) as T
   if (isPlainObject(v)) {

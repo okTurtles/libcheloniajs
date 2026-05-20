@@ -79,7 +79,7 @@ export type CheloniaConfig = {
         encryptionKeyId: string | null;
         data: T;
     } | undefined;
-    journal?: JournalConfig;
+    journal?: JournalConfig | null;
 };
 export type JournalPatch = {
     op: 'add' | 'replace';

@@ -231,15 +231,74 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // passing an empty array). Handling the journal field-by-field below
         // keeps `merge`'s behaviour for every other key while giving the
         // journal config the by-reference semantics it needs.
-        const journalOverride = config.journal;
-        const configForMerge = journalOverride !== undefined
-            ? { ...config, journal: undefined }
-            : config;
+        // Strip the journal field rather than letting `merge` see it:
+        // turtledash's `merge` enumerates own keys (including own keys whose
+        // value is `undefined`!) and would either overwrite the live
+        // `this.config.journal` with the literal value (e.g. `null` or
+        // `undefined`) or deep-merge arrays in ways that can't clear
+        // `contractIDs` / `redactions`. We handle the journal ourselves
+        // below so `merge`'s behaviour is preserved for every other key
+        // while the journal config gets the reset/by-reference semantics it
+        // needs. We also key off `'journal' in config` rather than
+        // `journal !== undefined` so that an explicit `{ journal: undefined }`
+        // (commonly produced by spreads / conditional builders) is treated
+        // the same as omission — "leave alone" — rather than silently
+        // wiping the live block by letting `merge` plant `undefined` over
+        // it.
+        const hasJournalKey = config !== null &&
+            typeof config === 'object' &&
+            Object.prototype.hasOwnProperty.call(config, 'journal');
+        const journalOverride = hasJournalKey ? config.journal : undefined;
+        let configForMerge = config;
+        if (hasJournalKey) {
+            configForMerge = { ...config };
+            delete configForMerge.journal;
+        }
         (0, turtledash_1.merge)(this.config, configForMerge);
         // merge will strip the hooks off of config.hooks when merging from the root of the object
         // because they are functions and cloneDeep doesn't clone functions
         Object.assign(this.config.hooks, config.hooks || {});
-        if (journalOverride) {
+        if (journalOverride === null) {
+            // Explicit `journal: null` means "stop journaling": reset the
+            // whole block to disabled defaults and wipe any persisted
+            // journals. This is the documented "don't journal" escape hatch
+            // and is symmetric with the way other config blocks accept a
+            // null/empty value to mean "off".
+            this.config.journal = {
+                enabled: false,
+                snapshotInterval: journal_js_1.DEFAULT_SNAPSHOT_INTERVAL,
+                contractIDs: [],
+                redactions: []
+            };
+            (0, sbp_1.default)('chelonia/journal/clear');
+        }
+        else if (journalOverride !== undefined) {
+            // Reject `null` per individual field: AGENTS.md documents that
+            // only the typed values are accepted and that callers should
+            // omit a field (or pass `undefined`) to leave it alone. Silently
+            // accepting `null` here would let it slip through to the read
+            // path with surprising effects (e.g. `enabled: null` disables,
+            // `contractIDs: null` re-broadens to "all"), so fail loudly
+            // instead. Use `in` so the message is precise about which field
+            // the caller actually supplied.
+            const rejectNull = (name) => {
+                // Use `has` (own-property check) rather than `in`: the latter
+                // walks the prototype chain, so e.g. `'toString' in {}` is
+                // `true`. The `keyof JournalConfig` type bound makes that
+                // unreachable in practice, but own-property checks are the
+                // codebase convention and avoid the foot-gun outright.
+                if ((0, turtledash_1.has)(journalOverride, name) && journalOverride[name] === null) {
+                    throw new TypeError(`[chelonia][journal] config.journal.${name} cannot be null; ` +
+                        'omit the field to leave it alone, or pass `journal: null` ' +
+                        'to reset the whole block to disabled defaults');
+                }
+            };
+            rejectNull('enabled');
+            rejectNull('snapshotInterval');
+            rejectNull('contractIDs');
+            rejectNull('redactions');
+            rejectNull('diff');
+            rejectNull('applyPatch');
             if (!this.config.journal) {
                 // No prior journal block (e.g. configure called before _init in
                 // tests). Seed with the documented defaults so subsequent
@@ -252,8 +311,16 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 };
             }
             const target = this.config.journal;
-            if (journalOverride.enabled !== undefined)
+            if (journalOverride.enabled !== undefined) {
+                // `resolveJournalConfig` checks `cfg?.enabled === true` (strict
+                // equality), so any non-boolean truthy value (`"true"`, `1`,
+                // etc.) would silently leave journaling disabled. Fail loudly
+                // instead — same rationale as `rejectNull`.
+                if (typeof journalOverride.enabled !== 'boolean') {
+                    throw new TypeError(`[chelonia][journal] config.journal.enabled must be a boolean; got ${typeof journalOverride.enabled}`);
+                }
                 target.enabled = journalOverride.enabled;
+            }
             if (journalOverride.snapshotInterval !== undefined) {
                 // `snapshotInterval` directly bounds journal retention. Reject
                 // non-finite / non-positive / non-integer values that would break
@@ -270,29 +337,51 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 }
             }
             if (journalOverride.contractIDs !== undefined) {
-                target.contractIDs = journalOverride.contractIDs?.slice();
+                if (!Array.isArray(journalOverride.contractIDs)) {
+                    throw new TypeError(`[chelonia][journal] config.journal.contractIDs must be an array; got ${typeof journalOverride.contractIDs}`);
+                }
+                target.contractIDs = journalOverride.contractIDs.slice();
             }
             if (journalOverride.redactions !== undefined) {
+                if (!Array.isArray(journalOverride.redactions)) {
+                    throw new TypeError(`[chelonia][journal] config.journal.redactions must be an array; got ${typeof journalOverride.redactions}`);
+                }
                 // Deep-copy each redaction entry: `slice()` alone shares the
                 // `{ path, redact }` objects with the caller, who could then
                 // re-point `path` and silently change the live journal config.
                 // The `redact` function is intentionally shared by reference.
-                target.redactions = journalOverride.redactions?.map(r => ({
+                target.redactions = journalOverride.redactions.map(r => ({
                     path: r.path,
                     redact: r.redact
                 }));
-                // Redactions are applied at record time, not retroactively. Any
-                // pre-existing journal entries were produced under the old
-                // redaction set and would now be inconsistent with subsequent
-                // patches (and with `reconstruct`'s output until the next
-                // snapshot). Clear all journals so the next event re-seeds with
-                // a fresh snapshot under the new redactions.
-                (0, sbp_1.default)('chelonia/journal/clear');
+                // We deliberately do NOT auto-clear journals here. Two reasons:
+                //   1. `redactions` contains user functions that cannot be
+                //      stably compared across process restarts (function
+                //      identity is per-process), so we cannot reliably tell
+                //      "same redactor as last time" from "different redactor".
+                //   2. `chelonia/configure` is typically called on every app
+                //      start with the same redaction set; auto-clearing here
+                //      would wipe persisted journal history every relaunch.
+                // If the caller is genuinely *changing* the redaction set
+                // (paths, redactor behaviour) versus what produced the
+                // persisted entries, they MUST call `chelonia/journal/clear`
+                // themselves before/after `chelonia/configure` so subsequent
+                // events re-seed with a fresh snapshot under the new
+                // redactions. Mixing entries across redaction sets will leave
+                // `reconstruct` output inconsistent until the next snapshot.
             }
-            if (journalOverride.diff !== undefined)
+            if (journalOverride.diff !== undefined) {
+                if (typeof journalOverride.diff !== 'function') {
+                    throw new TypeError(`[chelonia][journal] config.journal.diff must be a function; got ${typeof journalOverride.diff}`);
+                }
                 target.diff = journalOverride.diff;
-            if (journalOverride.applyPatch !== undefined)
+            }
+            if (journalOverride.applyPatch !== undefined) {
+                if (typeof journalOverride.applyPatch !== 'function') {
+                    throw new TypeError(`[chelonia][journal] config.journal.applyPatch must be a function; got ${typeof journalOverride.applyPatch}`);
+                }
                 target.applyPatch = journalOverride.applyPatch;
+            }
         }
         // using Object.assign here instead of merge to avoid stripping away imported modules
         if (config.contracts) {

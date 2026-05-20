@@ -656,6 +656,27 @@ describe('journal: integration via SBP selectors', () => {
     }
   })
 
+  it('rejects field-level type mismatches in chelonia/configure with a TypeError', async () => {
+    // Same loud-failure rationale as the null check: a wrong type would
+    // otherwise slip through (e.g. `enabled: "true"` is truthy but
+    // fails the strict-equality check in `resolveJournalConfig`, leaving
+    // journaling silently disabled).
+    const cases: Array<[string, unknown, RegExp]> = [
+      ['enabled', 'true', /must be a boolean/],
+      ['contractIDs', 'cid-x', /must be an array/],
+      ['redactions', {}, /must be an array/],
+      ['diff', 'not-a-fn', /must be a function/],
+      ['applyPatch', 42, /must be a function/]
+    ]
+    for (const [field, value, pattern] of cases) {
+      await assert.rejects(
+        sbp('chelonia/configure', { journal: { [field]: value } }),
+        (err: unknown) => err instanceof TypeError && pattern.test((err as Error).message),
+        `expected configure to reject ${field}=${String(value)}`
+      )
+    }
+  })
+
   it('treats top-level journal: null as "stop journaling"', async () => {
     // Seed: record an entry on a contract while journaling is enabled.
     const cid = 'cid-journal-null'

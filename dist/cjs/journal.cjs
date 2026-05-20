@@ -38,6 +38,7 @@ exports.shortHashRedactor = shortHashRedactor;
 const functions_js_1 = require("./functions.cjs");
 const sbp_1 = __importDefault(require("@sbp/sbp"));
 const turtledash_1 = require("turtledash");
+const errors_js_1 = require("./errors.cjs");
 // ---------------------------------------------------------------------------
 // JSON-Pointer helpers
 // ---------------------------------------------------------------------------
@@ -84,6 +85,15 @@ function cloneValue(v) {
     // Minimal structural clone for plain JSON-ish values. Functions, Dates,
     // Maps, Sets, etc. fall through and are returned as-is — Chelonia state
     // is plain JSON in practice, so this is enough.
+    //
+    // Round-trip caveat: `cloneValue` faithfully preserves own keys whose
+    // value is `undefined` (`{ a: undefined }` clones to `{ a: undefined }`),
+    // but `defaultDiff` treats `undefined` on either side as "key absent"
+    // and emits an `add`/`remove`. Reconstructing through diff+apply
+    // therefore drops such keys. This is consistent with JSON semantics
+    // (`JSON.stringify({ a: undefined })` is `"{}"`) and matches the
+    // documented "plain JSON state" contract; states that rely on
+    // explicit-undefined keys must supply a custom `diff` / `applyPatch`.
     if (v === null || typeof v !== 'object')
         return v;
     if (Array.isArray(v))
@@ -504,11 +514,16 @@ function appendAndTrim(entries, entry, snapshotInterval,
 // X-boundary. Passing null skips snapshot insertion (used for the very
 // first entry, which is itself a snapshot).
 postSnapshotState) {
-    // We mutate `entries` in place. `recordEvent` always replaces the
-    // wrapper object via `reactiveSet(contractMeta, '_journal', { entries })`
-    // so subscribers go through the wrapper and the array's identity is an
-    // implementation detail. Re-using the existing array avoids a fresh
-    // O(window) allocation on every event.
+    // Allocate a fresh array on every call so the array's identity changes
+    // in lock-step with the `_journal` wrapper swap performed by
+    // `recordEvent` via `reactiveSet`. This means consumers that destructure
+    // (`const { entries } = _journal`) and reactive frameworks observing
+    // `_journal.entries` directly see a single atomic transition per event
+    // rather than a mid-tick `push` followed by a `splice` trim — they will
+    // never observe the array at length `2X+1` between the push and the
+    // trim. The O(window) copy is bounded by `2 * snapshotInterval` and
+    // happens at most once per processed event.
+    entries = entries.slice();
     entries.push(entry);
     // If this push reached snapshotInterval patches since the most recent
     // snapshot, append a snapshot entry as well. We derive the identifying
@@ -534,7 +549,9 @@ postSnapshotState) {
         }
     }
     // Trim: if total length exceeded 2X, drop everything before the most
-    // recent snapshot via splice (in-place) to avoid a fresh allocation.
+    // recent snapshot. The splice operates on the fresh copy allocated
+    // above, so external observers of the previous `entries` array are
+    // unaffected.
     if (entries.length > 2 * snapshotInterval) {
         const lastSnapIdx = indexOfLastSnapshot(entries);
         if (lastSnapIdx > 0) {
@@ -593,7 +610,20 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 height === lastEntry.height) {
                 return;
             }
-            const isResync = lastEntry !== undefined && height < lastEntry.height;
+            // A strictly backwards height is the unambiguous resync signal
+            // (the contract has been re-processed from scratch). We additionally
+            // treat a strictly forward height *gap* as a resync: under normal
+            // operation Chelonia journals every event at the current height,
+            // so seeing the chain skip from height M to M+2+ means we missed
+            // entries (e.g. journaling was disabled and re-enabled, or the
+            // `contractIDs` filter changed to re-include this contract). The
+            // before-state for this incoming event no longer matches the state
+            // captured by `lastEntry`, so producing a patch on top of it would
+            // silently corrupt `reconstruct`. Drop the stale window and re-seed
+            // with a fresh snapshot in that case.
+            const isBackwards = lastEntry !== undefined && height < lastEntry.height;
+            const isForwardGap = lastEntry !== undefined && height > lastEntry.height + 1;
+            const isResync = isBackwards || isForwardGap;
             const isFirstOrResync = !existing || existing.length === 0 || isResync;
             // When the contract errored we will emit an empty-patch entry that
             // doesn't need either redacted projection — skip the work.
@@ -691,7 +721,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     },
     // Public: rebuild the redacted contract state at the journal's HEAD by
     // walking from the most recent snapshot and applying subsequent patches.
-    // Returns `undefined` if no journal exists. Useful as a self-check.
+    // Returns `undefined` if no journal exists (or the journal exists but is
+    // empty / has no snapshot to seed from). Throws `ChelErrorJournalCorrupt`
+    // if a recorded patch fails to apply: this is a debugging tool and a
+    // self-check, so a loud failure is preferable to silently returning
+    // `undefined` (which would be indistinguishable from "no journal"). The
+    // thrown error's `cause` is the underlying applier error and its
+    // `entryIndex` property points at the offending entry for inspection.
     'chelonia/journal/reconstruct': function (contractID) {
         const cfg = resolveJournalConfig(this.config.journal);
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
@@ -715,7 +751,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             }
             catch (err) {
                 logJournalError(`reconstruct failed at entry ${i}`, err);
-                return undefined;
+                const corruptErr = new errors_js_1.ChelErrorJournalCorrupt(`journal reconstruct failed for contract ${contractID} at entry ${i}: ` +
+                    `${err instanceof Error ? err.message : String(err)}`, { cause: err });
+                corruptErr.entryIndex = i;
+                corruptErr.contractID = contractID;
+                throw corruptErr;
             }
         }
         return state;
