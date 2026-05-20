@@ -252,12 +252,27 @@ journal fields (`enabled`, `snapshotInterval`, `contractIDs`,
 `defaultApplyPatch` (imported from `@chelonia/lib` or
 `@chelonia/lib/journal`) explicitly. To clear `contractIDs` /
 `redactions`, pass an empty array. The top-level `config.journal`
-block itself can be omitted to leave the journal config alone;
-passing `journal: null` explicitly means "stop journaling" and resets
-the whole block back to disabled defaults (`enabled: false`,
-`snapshotInterval: 50`, no `contractIDs`, no `redactions`, default
-`diff`/`applyPatch`) and clears every persisted journal so no stale
-entries linger after the reset.
+block itself can be omitted (or set to `undefined`) to leave the
+journal config alone; passing `journal: null` explicitly means "stop
+journaling" and resets the whole block back to disabled defaults
+(`enabled: false`, `snapshotInterval: 50`, no `contractIDs`, no
+`redactions`, default `diff`/`applyPatch`) and clears every persisted
+journal so no stale entries linger after the reset.
+
+Resync detection: the recorder watches the incoming event's `height`
+relative to the last journalled entry to decide between three cases.
+A strictly backwards height (`height < lastEntry.height`) is an
+unambiguous resync — the contract was re-processed from scratch — and
+the journal is collapsed to a fresh snapshot. A strictly forward gap
+(`height > lastEntry.height + 1`) is also treated as a resync: under
+normal operation Chelonia journals every event at the current height,
+so a gap means entries are missing (e.g. journaling was toggled
+`enabled: false → true`, or `contractIDs` was widened to re-include
+this contract) and the cached `before`-state no longer matches the
+incoming event. Producing a patch on top of it would silently corrupt
+`reconstruct`, so the recorder re-seeds with a snapshot instead. The
+duplicate-arrival case (same `hash` at the same `height`) is ignored
+without rewriting the journal.
 
 Changing `redactions` at runtime is destructive to existing journal
 state: the previously recorded snapshots and patches were produced
@@ -290,6 +305,18 @@ persistence layers. When `enabled: true`, expect up to two redacted
 full-state snapshots plus up to ~`snapshotInterval` patch entries per
 active contract sitting in persisted state. Tune `snapshotInterval`
 down (or set `enabled: false`) if state size is a concern.
+
+Consumer-visible leakage: because `_journal` is an own property of
+`state.contracts[contractID]`, it travels with anything that exposes
+that subtree. Notably `chelonia/contract/fullState` returns
+`cheloniaState: rootState.contracts[contractID]` verbatim, and any
+listener on `EVENT_HANDLED` that snapshots `state.contracts` (e.g.
+the Vuex mirror set up by `chelonia/externalStateSetup`) will receive
+the journal as well. Treat the journal block as in-band with the rest
+of the bookkeeping subtree: redact accordingly, and if you need a
+journal-free view of `cheloniaState`, project it client-side via
+`{ ...cheloniaState, _journal: undefined }` (the journal API itself
+remains accessible through `chelonia/journal/get`).
 
 Supported state shape: the journal's deep-clone is JSON-shape-only.
 `Date` / `Map` / `Set` / `Buffer` / class instances inside contract

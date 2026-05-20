@@ -473,17 +473,26 @@ export default sbp('sbp/selectors/register', {
     // passing an empty array). Handling the journal field-by-field below
     // keeps `merge`'s behaviour for every other key while giving the
     // journal config the by-reference semantics it needs.
-    const journalOverride = config.journal
+    // Strip the journal field rather than letting `merge` see it:
+    // turtledash's `merge` enumerates own keys (including own keys whose
+    // value is `undefined`!) and would either overwrite the live
+    // `this.config.journal` with the literal value (e.g. `null` or
+    // `undefined`) or deep-merge arrays in ways that can't clear
+    // `contractIDs` / `redactions`. We handle the journal ourselves
+    // below so `merge`'s behaviour is preserved for every other key
+    // while the journal config gets the reset/by-reference semantics it
+    // needs. We also key off `'journal' in config` rather than
+    // `journal !== undefined` so that an explicit `{ journal: undefined }`
+    // (commonly produced by spreads / conditional builders) is treated
+    // the same as omission — "leave alone" — rather than silently
+    // wiping the live block by letting `merge` plant `undefined` over
+    // it.
+    const hasJournalKey = config !== null &&
+      typeof config === 'object' &&
+      Object.prototype.hasOwnProperty.call(config, 'journal')
+    const journalOverride = hasJournalKey ? config.journal : undefined
     let configForMerge = config
-    if (journalOverride !== undefined) {
-      // Strip the journal field rather than letting `merge` see it:
-      // turtledash's `merge` enumerates own keys and would either
-      // overwrite the live `this.config.journal` with the literal value
-      // (e.g. `null` or `undefined`) or deep-merge arrays in ways that
-      // can't clear `contractIDs` / `redactions`. We handle the journal
-      // ourselves below so `merge`'s behaviour is preserved for every
-      // other key while the journal config gets the reset/by-reference
-      // semantics it needs.
+    if (hasJournalKey) {
       configForMerge = { ...config }
       delete (configForMerge as { journal?: unknown }).journal
     }

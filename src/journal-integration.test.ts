@@ -702,4 +702,99 @@ describe('journal: integration via SBP selectors', () => {
     assert.ok(after.length > before!.length,
       'omitted journal must leave `enabled: true` alone')
   })
+
+  it('treats explicit journal: undefined as "leave alone" (not a wipe)', async () => {
+    // Spreads / conditional config builders commonly produce
+    // `{ journal: undefined }`. Per AGENTS.md, omission means "leave
+    // alone"; an explicit `undefined` MUST behave the same. Otherwise
+    // turtledash's `merge` would silently overwrite the live journal
+    // block with `undefined`, killing journaling with no diagnostic.
+    const cid = 'cid-journal-undefined'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    const before = getEntries(cid)
+    assert.ok(before, 'precondition: journal exists')
+
+    await sbp('chelonia/configure', { journal: undefined })
+
+    assert.deepStrictEqual(getEntries(cid), before,
+      'explicit journal: undefined must not clear persisted entries')
+
+    // And recording must still work — i.e. journaling is still enabled
+    // and the live `journal.enabled` flag wasn't quietly clobbered.
+    record(cid, 'h1', 1, mkState(1), mkState(2))
+    const after = getEntries(cid)!
+    assert.ok(after.length > before!.length,
+      'explicit journal: undefined must leave `enabled: true` alone')
+  })
+
+  it('re-seeds when the incoming height jumps forward past lastEntry.height + 1', async () => {
+    // Forward-gap detection. Under normal operation Chelonia journals
+    // every event, so a height jump from M to M+2+ means we missed
+    // entries — typically because journaling was toggled off and back
+    // on, or `contractIDs` was widened to re-include this contract.
+    // The cached before-state inside the next event no longer matches
+    // `lastEntry`, so producing a patch on top of it would silently
+    // corrupt `reconstruct`. Instead the recorder must re-seed with a
+    // fresh snapshot.
+    const cid = 'cid-forward-gap'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(0))
+    record(cid, 'h1', 1, mkState(0), mkState(1))
+    const before = getEntries(cid)!
+    assert.strictEqual(before.length, 2)
+
+    // Simulate the gap: jump from height 1 directly to height 5.
+    record(cid, 'h5', 5, mkState(4), mkState(5))
+    const after = getEntries(cid)!
+    assert.strictEqual(after.length, 1, 'forward gap must collapse the journal to a snapshot')
+    assert.strictEqual(after[0].kind, 'snapshot')
+    assert.strictEqual(after[0].hash, 'h5')
+
+    // And reconstruct round-trips cleanly against the fresh seed.
+    assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), mkState(5))
+  })
+
+  it('does NOT treat the normal +1 height step as a forward gap', async () => {
+    // Guard against regression: a contiguous chain must continue to
+    // emit patches.
+    const cid = 'cid-no-false-gap'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(0))
+    record(cid, 'h1', 1, mkState(0), mkState(1))
+    record(cid, 'h2', 2, mkState(1), mkState(2))
+    const entries = getEntries(cid)!
+    assert.strictEqual(entries.length, 3)
+    assert.strictEqual(entries[0].kind, 'snapshot')
+    assert.strictEqual(entries[1].kind, 'patch')
+    assert.strictEqual(entries[2].kind, 'patch')
+  })
+
+  it('survives an enabled: false → true cycle without corrupting reconstruct', async () => {
+    // End-to-end scenario for the gap-detection guard: journal a chain,
+    // disable journaling, drive the contract forward off-journal, then
+    // re-enable. The next recorded event arrives with a forward gap
+    // and the recorder must re-seed rather than diff from the stale
+    // before-state.
+    const cid = 'cid-toggle-cycle'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(0))
+    record(cid, 'h1', 1, mkState(0), mkState(1))
+
+    // Disable: subsequent events are no-ops in the recorder.
+    await sbp('chelonia/configure', { journal: { enabled: false } })
+    record(cid, 'h2', 2, mkState(1), mkState(2))
+    record(cid, 'h3', 3, mkState(2), mkState(3))
+
+    // Re-enable. The next event has height 4 while the last entry is
+    // still at height 1 — a forward gap. Re-seed with a snapshot.
+    await sbp('chelonia/configure', { journal: { enabled: true } })
+    record(cid, 'h4', 4, mkState(3), mkState(4))
+
+    const entries = getEntries(cid)!
+    assert.strictEqual(entries.length, 1)
+    assert.strictEqual(entries[0].kind, 'snapshot')
+    assert.strictEqual(entries[0].hash, 'h4')
+    assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), mkState(4))
+  })
 })

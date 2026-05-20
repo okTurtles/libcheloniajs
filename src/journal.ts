@@ -674,7 +674,20 @@ export default sbp('sbp/selectors/register', {
           height === lastEntry.height) {
         return
       }
-      const isResync = lastEntry !== undefined && height < lastEntry.height
+      // A strictly backwards height is the unambiguous resync signal
+      // (the contract has been re-processed from scratch). We additionally
+      // treat a strictly forward height *gap* as a resync: under normal
+      // operation Chelonia journals every event at the current height,
+      // so seeing the chain skip from height M to M+2+ means we missed
+      // entries (e.g. journaling was disabled and re-enabled, or the
+      // `contractIDs` filter changed to re-include this contract). The
+      // before-state for this incoming event no longer matches the state
+      // captured by `lastEntry`, so producing a patch on top of it would
+      // silently corrupt `reconstruct`. Drop the stale window and re-seed
+      // with a fresh snapshot in that case.
+      const isBackwards = lastEntry !== undefined && height < lastEntry.height
+      const isForwardGap = lastEntry !== undefined && height > lastEntry.height + 1
+      const isResync = isBackwards || isForwardGap
       const isFirstOrResync = !existing || existing.length === 0 || isResync
       // When the contract errored we will emit an empty-patch entry that
       // doesn't need either redacted projection — skip the work.
