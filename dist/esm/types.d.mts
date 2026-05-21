@@ -103,6 +103,10 @@ export type JournalEntry = {
     opType: string;
     description?: string;
     patch: JournalPatch[];
+    error?: {
+        name: string;
+        message: string;
+    };
 };
 export type JournalRedaction = {
     path: string;

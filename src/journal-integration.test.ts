@@ -62,7 +62,8 @@ const record = (
   height: number,
   before: ChelContractState | undefined,
   after: ChelContractState | undefined,
-  processingErrored = false
+  processingErrored = false,
+  processingError: unknown = null
 ) => {
   sbp(
     'chelonia/private/journal/recordEvent',
@@ -70,7 +71,8 @@ const record = (
     fakeMessage(hash, height),
     before,
     after,
-    processingErrored
+    processingErrored,
+    processingError
   )
 }
 
@@ -424,6 +426,115 @@ describe('journal: integration via SBP selectors', () => {
     assert.strictEqual(entries[1].kind, 'patch')
     const patch = (entries[1] as Extract<JournalEntry, { kind: 'patch' }>).patch as JournalPatch[]
     assert.deepStrictEqual(patch, [])
+  })
+
+  it('attaches { name, message } from a captured error to the empty-patch entry', () => {
+    // The recorder receives the live `Error` from internals.ts and is
+    // expected to persist its `name` / `message` so the journal can
+    // explain why the patch is empty after the fact.
+    const cid = 'cid-errored-detail'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    const err = new Error('bad signature')
+    err.name = 'ChelErrorSignatureError'
+    record(cid, 'h1', 1, mkState(1), mkState(1), true, err)
+    const entries = getEntries(cid)!
+    const e = entries[1] as Extract<JournalEntry, { kind: 'patch' }>
+    assert.deepStrictEqual(e.patch, [])
+    assert.deepStrictEqual(e.error, {
+      name: 'ChelErrorSignatureError',
+      message: 'bad signature'
+    })
+  })
+
+  it('omits `error` when processingErrored is false even if an error reference is passed', () => {
+    // Defensive: only record an error when the mutation was actually
+    // discarded. A successful event must never carry an `error` field.
+    const cid = 'cid-no-error-on-success'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    record(cid, 'h1', 1, mkState(1), mkState(2), false, new Error('ignored'))
+    const entries = getEntries(cid)!
+    const e = entries[1] as Extract<JournalEntry, { kind: 'patch' }>
+    assert.strictEqual(e.error, undefined)
+  })
+
+  it('omits `error` when processingErrored is true but no error reference is passed', () => {
+    // The error parameter is optional; legacy/test callers that only
+    // pass the boolean must continue to produce a clean empty-patch.
+    const cid = 'cid-errored-no-detail'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    record(cid, 'h1', 1, mkState(1), mkState(1), true)
+    const entries = getEntries(cid)!
+    const e = entries[1] as Extract<JournalEntry, { kind: 'patch' }>
+    assert.strictEqual(e.error, undefined)
+  })
+
+  it('normalizes non-Error throwables (string, number, plain object, null) into { name, message }', () => {
+    // JavaScript permits `throw <anything>`. The recorder must not
+    // assume an `Error` instance — these cases must still produce a
+    // sensible `{ name: string, message: string }` pair instead of
+    // crashing or persisting `undefined` getters.
+    //
+    // Helper: locate the patch entry for a specific hash. We can't
+    // just take `entries[entries.length - 1]` because the boundary
+    // snapshot can land on top of a patch when `snapshotInterval`
+    // ticks over.
+    const findPatch = (cid: string, hash: string) => {
+      const entries = getEntries(cid)!
+      const e = entries.find((x) => x.kind === 'patch' && x.hash === hash)
+      assert.ok(e, `expected to find patch entry for ${hash}`)
+      return e as Extract<JournalEntry, { kind: 'patch' }>
+    }
+
+    const cid = 'cid-errored-non-error'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+
+    // String throwable.
+    record(cid, 'h1', 1, mkState(1), mkState(1), true, 'oops')
+    assert.deepStrictEqual(findPatch(cid, 'h1').error,
+      { name: 'string', message: 'oops' })
+
+    // Number throwable.
+    record(cid, 'h2', 2, mkState(1), mkState(1), true, 42)
+    assert.deepStrictEqual(findPatch(cid, 'h2').error,
+      { name: 'number', message: '42' })
+
+    // Plain object with name/message.
+    record(cid, 'h3', 3, mkState(1), mkState(1), true,
+      { name: 'CustomThrow', message: 'plain' })
+    assert.deepStrictEqual(findPatch(cid, 'h3').error,
+      { name: 'CustomThrow', message: 'plain' })
+
+    // Plain object without name/message — defaults applied.
+    record(cid, 'h4', 4, mkState(1), mkState(1), true, {})
+    assert.deepStrictEqual(findPatch(cid, 'h4').error,
+      { name: 'Object', message: '' })
+
+    // null is treated as "no error detail" (same as omitted).
+    record(cid, 'h5', 5, mkState(1), mkState(1), true, null)
+    assert.strictEqual(findPatch(cid, 'h5').error, undefined)
+  })
+
+  it('coerces non-string name/message on Error-like objects without throwing', () => {
+    // A custom error class could expose non-string `name` / `message`
+    // (e.g. a number, an object, even a getter that throws). The
+    // recorder must coerce defensively — a journal entry with a
+    // non-JSON-safe value would break downstream consumers.
+    const cid = 'cid-errored-weird-fields'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    const weird = { name: 123, message: { toString: () => 'stringified' } }
+    record(cid, 'h1', 1, mkState(1), mkState(1), true, weird)
+    const entries = getEntries(cid)!
+    const patch = entries.find((x) => x.kind === 'patch' && x.hash === 'h1') as
+      Extract<JournalEntry, { kind: 'patch' }>
+    assert.strictEqual(typeof patch.error?.name, 'string')
+    assert.strictEqual(typeof patch.error?.message, 'string')
+    assert.strictEqual(patch.error?.name, '123')
+    assert.strictEqual(patch.error?.message, 'stringified')
   })
 
   it('does not insert a snapshot with `state: undefined` when the snapshot boundary lands on an errored event', () => {

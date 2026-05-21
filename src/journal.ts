@@ -628,6 +628,48 @@ function logJournalError (label: string, e: unknown): void {
   console.warn(`[chelonia][journal] ${label}:`, e)
 }
 
+// Normalize an arbitrary throwable into `{ name, message }`. Mirrors
+// the leniency of the JS `throw` statement: any value can be raised,
+// so the journal must not assume an `Error` instance. We intentionally
+// avoid `JSON.stringify` (cycles, BigInt, Symbol → throws) and use
+// `String(...)` for value coercion. `Symbol` is a special case: its
+// `String()` form is the readable `Symbol(...)` representation, which
+// is exactly what we want for a debug breadcrumb.
+function normalizeProcessingError (e: unknown): { name: string; message: string } {
+  // Object-shaped throwables (Error instances or plain objects).
+  if (e !== null && typeof e === 'object') {
+    const obj = e as { name?: unknown; message?: unknown }
+    const rawName = obj.name
+    const rawMessage = obj.message
+    let name: string
+    if (typeof rawName === 'string') {
+      name = rawName
+    } else if (rawName === undefined) {
+      // Default to the JS-conventional "Error" only when no name was
+      // supplied at all. For non-Error values we'd already be in the
+      // `else` branch below.
+      name = e instanceof Error ? 'Error' : (e.constructor?.name ?? 'Object')
+    } else {
+      try { name = String(rawName) } catch { name = 'Error' }
+    }
+    let message: string
+    if (typeof rawMessage === 'string') {
+      message = rawMessage
+    } else if (rawMessage === undefined) {
+      message = ''
+    } else {
+      try { message = String(rawMessage) } catch { message = '' }
+    }
+    return { name, message }
+  }
+  // Primitive throwables (string, number, boolean, bigint, symbol).
+  // Surface the type as `name` so consumers can tell at a glance that
+  // a non-`Error` was raised, and stuff the value into `message`.
+  let message: string
+  try { message = String(e) } catch { message = '' }
+  return { name: typeof e, message }
+}
+
 export default sbp('sbp/selectors/register', {
   // Internal: record a single event in the contract's journal. Called from
   // `handleEvent.applyProcessResult`. MUST NOT throw — failures here are
@@ -638,7 +680,14 @@ export default sbp('sbp/selectors/register', {
     message: SPMessage,
     beforeState: ChelContractState | undefined,
     afterState: ChelContractState | undefined,
-    processingErrored: boolean
+    processingErrored: boolean,
+    // Captured throwable from `processMutation`; only meaningful when
+    // `processingErrored` is true. Typed as `unknown` because JS lets
+    // anything be thrown — strings, numbers, plain objects, `null`,
+    // `undefined`, even `Symbol`s — and `processMutation`'s catch sees
+    // whatever the contract author / lower-level code raised. The
+    // recorder normalizes that into `{ name, message }` before storing.
+    processingError?: unknown
   ): void {
     try {
       const cfg = resolveJournalConfig(this.config.journal)
@@ -763,6 +812,22 @@ export default sbp('sbp/selectors/register', {
         entry.opType = opType
         entry.description = description
         entry.patch = patch
+        // Attach error detail when we have one. JS allows *anything*
+        // to be thrown (strings, numbers, plain objects, `null`, even
+        // `undefined`), so we normalize the raw throwable into a
+        // JSON-safe `{ name, message }` pair. Rules:
+        //   - `Error`-like objects: pull `name` / `message` if they are
+        //     strings, else stringify them.
+        //   - Plain objects with `name` / `message` string fields:
+        //     same.
+        //   - Everything else: derive `name` from `typeof`, stuff the
+        //     stringified value into `message`.
+        // `null` / `undefined` are treated as "no error detail" — the
+        // catch site only forwards a value when it actually caught
+        // something, but a paranoid extra check costs nothing.
+        if (processingErrored && processingError != null) {
+          entry.error = normalizeProcessingError(processingError)
+        }
         nextEntries = appendAndTrim(
           existing,
           entry,

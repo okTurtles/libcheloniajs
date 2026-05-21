@@ -126,6 +126,15 @@ export type JournalEntry =
       // See the note on the snapshot variant: `description` is NOT redacted.
       description?: string;
       patch: JournalPatch[];
+      // Populated when the event's `processMutation` threw and Chelonia
+      // discarded the mutation (the resulting patch is therefore empty).
+      // Captured as plain fields rather than the live `Error` so the
+      // journal stays JSON-serializable. `name` mirrors `Error.name`
+      // (e.g. `'ChelErrorDecryptionKeyNotFound'`); `message` is the raw
+      // error message and is NOT passed through `redactions` — for
+      // unencrypted ops it can echo action data, treat it at the same
+      // trust level as `description`.
+      error?: { name: string; message: string };
     };
 
 // A single redaction directive. `path` uses dotted segments and supports a

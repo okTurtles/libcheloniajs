@@ -2849,6 +2849,13 @@ export default sbp('sbp/selectors/register', {
     const state = sbp(this.config.stateSelector)
     const { preHandleEvent, postHandleEvent, handleEventError } = this.config.hooks
     let processingErrored = false
+    // Captures the throwable from `processMutation` when the mutation
+    // is discarded (`processingErrored = true`). Forwarded to the
+    // journal recorder so the empty-patch entry can carry the error
+    // type and message for post-mortem debugging. Typed as `unknown`
+    // because anything can be thrown in JS — the recorder normalizes
+    // it into `{ name, message }`.
+    let processingError: unknown = null
     let message: SPMessage | undefined
     // Errors in mutations result in ignored messages
     // Errors in side effects result in dropped messages to be reprocessed
@@ -2981,6 +2988,10 @@ export default sbp('sbp/selectors/register', {
           throw e
         }
         processingErrored = e?.name !== 'ChelErrorWarning'
+        // Forward the *raw* throwable (`e_`), not the `as Error` cast,
+        // so the journal recorder sees whatever was actually thrown
+        // (could be a non-Error: string, plain object, etc.).
+        if (processingErrored) processingError = e_
         this.config.hooks.processError?.(
           e,
           message,
@@ -3049,6 +3060,7 @@ export default sbp('sbp/selectors/register', {
           state,
           contractState: contractStateCopy,
           processingErrored,
+          processingError,
           postHandleEvent
         })
       } catch (e_) {
@@ -3263,12 +3275,14 @@ const handleEvent = {
       state,
       contractState,
       processingErrored,
+      processingError,
       postHandleEvent
     }: {
       message: SPMessage;
       state: ChelRootState;
       contractState: ChelContractState;
       processingErrored: boolean;
+      processingError?: unknown;
       postHandleEvent?: { (x: SPMessage): void } | null | undefined;
     }
   ) {
@@ -3377,7 +3391,8 @@ const handleEvent = {
       message,
       beforeContractState,
       processingErrored ? beforeContractState : contractState,
-      processingErrored
+      processingErrored,
+      processingError ?? null
     )
 
     if (!processingErrored) {
