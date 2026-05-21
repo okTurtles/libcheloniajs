@@ -27,7 +27,13 @@ npm install -S @chelonia/lib
 
 ## Usage
 
-Coming soon.
+More guides are coming. In the meantime, see the [`docs/`](./docs) directory:
+
+- [`docs/configure.md`](./docs/configure.md) — full reference for the
+  `chelonia/configure` selector (every option, validation rules, reconfigure
+  semantics) with a complete working app example.
+- [`docs/journal.md`](./docs/journal.md) — the optional per-contract event
+  journal: enabling it, redactions, snapshot tuning, reconstruct, and clear.
 
 [Join our Slack](https://join.slack.com/t/okturtles/shared_invite/zt-10jmpfgxj-tXQ1MKW7t8qqdyY6fB7uyQ) or use [Github Discussions](https://github.com/okTurtles/libcheloniajs/discussions) if you have questions.
 

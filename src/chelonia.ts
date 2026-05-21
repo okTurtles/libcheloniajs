@@ -126,7 +126,7 @@ export type ChelActionParams = {
   contractID: string;
   data: object;
   signingKeyId: string;
-  innerSigningKeyId: string;
+  innerSigningKeyId: string | null;
   encryptionKeyId?: string | null | undefined;
   encryptionKey?: Key | null | undefined;
   hooks?: {
@@ -135,7 +135,7 @@ export type ChelActionParams = {
     postpublish?: (msg: SPMessage) => Promise<void> | void;
   };
   publishOptions?: PublishOptions;
-  atomic: boolean;
+  atomic?: boolean;
 };
 
 export type ChelKeyAddParams = {

@@ -237,7 +237,7 @@ export type CheloniaContractCtx = {
       ) => void | Promise<void>;
     }
   >;
-  methods: Record<string, string>;
+  methods: Record<string, (...args: unknown[]) => unknown>;
 };
 export type CheloniaContext = {
   config: CheloniaConfig;
