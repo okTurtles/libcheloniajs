@@ -110,7 +110,7 @@ export type JournalEntry = {
 };
 export type JournalRedaction = {
     path: string;
-    redact: (value: unknown, fullPath: string[]) => unknown;
+    redact: (value: unknown, fullPath: string[], contractName: string) => unknown;
 };
 export type JournalConfig = {
     enabled?: boolean;

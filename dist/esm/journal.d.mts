@@ -8,7 +8,7 @@ export declare function cloneValue<T>(v: T): T;
 export declare function defaultDiff(before: unknown, after: unknown): JournalPatch[];
 export declare function defaultApplyPatch(state: unknown, patches: JournalPatch[]): unknown;
 export declare const REDACTION_ERROR_SENTINEL = "[REDACTION_ERROR]";
-export declare function applyRedactions<T>(state: T, redactions: JournalRedaction[] | undefined): T;
+export declare function applyRedactions<T>(state: T, redactions: JournalRedaction[] | undefined, contractName: string): T;
 export declare function shortHashRedactor(value: unknown): string;
 export declare const DEFAULT_SNAPSHOT_INTERVAL = 50;
 declare const _default: string[];

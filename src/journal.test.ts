@@ -371,7 +371,8 @@ describe('journal: applyRedactions', () => {
   it('redacts a literal path leaf', () => {
     const out = applyRedactions(
       { a: { b: 'secret', c: 'ok' } },
-      [{ path: 'a.b', redact: () => 'REDACTED' }]
+      [{ path: 'a.b', redact: () => 'REDACTED' }],
+      'test/contract'
     )
     assert.deepStrictEqual(out, { a: { b: 'REDACTED', c: 'ok' } })
   })
@@ -379,7 +380,8 @@ describe('journal: applyRedactions', () => {
   it('redacts via `*` glob across object keys', () => {
     const out = applyRedactions(
       { keys: { k1: { data: 'sec1' }, k2: { data: 'sec2' } } },
-      [{ path: 'keys.*.data', redact: (v) => `R(${v})` }]
+      [{ path: 'keys.*.data', redact: (v) => `R(${v})` }],
+      'test/contract'
     )
     assert.deepStrictEqual(out, {
       keys: { k1: { data: 'R(sec1)' }, k2: { data: 'R(sec2)' } }
@@ -389,7 +391,8 @@ describe('journal: applyRedactions', () => {
   it('redacts via `*` glob across array indices', () => {
     const out = applyRedactions(
       { arr: [{ s: 'a' }, { s: 'b' }] },
-      [{ path: 'arr.*.s', redact: () => 'x' }]
+      [{ path: 'arr.*.s', redact: () => 'x' }],
+      'test/contract'
     )
     assert.deepStrictEqual(out, { arr: [{ s: 'x' }, { s: 'x' }] })
   })
@@ -398,7 +401,7 @@ describe('journal: applyRedactions', () => {
     const before = { a: 1 }
     const out = applyRedactions(before, [
       { path: 'does.not.exist', redact: () => 'x' }
-    ])
+    ], 'test/contract')
     assert.deepStrictEqual(out, { a: 1 })
   })
 
@@ -409,7 +412,8 @@ describe('journal: applyRedactions', () => {
     try {
       const out = applyRedactions(
         { a: 'v' },
-        [{ path: 'a', redact: () => { throw new Error('boom') } }]
+        [{ path: 'a', redact: () => { throw new Error('boom') } }],
+        'test/contract'
       )
       assert.deepStrictEqual(out, { a: REDACTION_ERROR_SENTINEL })
       assert.strictEqual(warned, 1)
@@ -421,13 +425,13 @@ describe('journal: applyRedactions', () => {
   it('does not mutate the input', () => {
     const before = { a: { b: 'secret' } }
     const snapshot = JSON.parse(JSON.stringify(before))
-    applyRedactions(before, [{ path: 'a.b', redact: () => 'x' }])
+    applyRedactions(before, [{ path: 'a.b', redact: () => 'x' }], 'test/contract')
     assert.deepStrictEqual(before, snapshot)
   })
 
   it('returns a clone even with no redactions', () => {
     const before = { a: 1 }
-    const out = applyRedactions(before, [])
+    const out = applyRedactions(before, [], 'test/contract')
     assert.deepStrictEqual(out, before)
     assert.notStrictEqual(out, before)
   })

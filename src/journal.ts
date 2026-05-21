@@ -426,14 +426,15 @@ export const REDACTION_ERROR_SENTINEL = '[REDACTION_ERROR]'
 
 export function applyRedactions<T> (
   state: T,
-  redactions: JournalRedaction[] | undefined
+  redactions: JournalRedaction[] | undefined,
+  contractName: string
 ): T {
   const cloned = cloneValue(state)
   if (!redactions || redactions.length === 0) return cloned
   for (const r of redactions) {
     const segments = parseDottedPath(r.path)
     if (segments.length === 0) continue
-    walkAndRedact(cloned, segments, 0, r.redact, [])
+    walkAndRedact(cloned, segments, 0, r.redact, [], contractName)
   }
   return cloned
 }
@@ -443,7 +444,8 @@ function walkAndRedact (
   segments: string[],
   i: number,
   redact: JournalRedaction['redact'],
-  resolved: string[]
+  resolved: string[],
+  contractName: string
 ): void {
   if (parent === null || typeof parent !== 'object') return
   const seg = segments[i]
@@ -464,7 +466,7 @@ function walkAndRedact (
       const original = container[k]
       let replacement: unknown
       try {
-        replacement = redact(original, fullPath)
+        replacement = redact(original, fullPath, contractName)
       } catch (e) {
         console.warn(
           `[chelonia][journal] redactor threw for path '${fullPath.join('.')}':`,
@@ -497,7 +499,8 @@ function walkAndRedact (
         segments,
         i + 1,
         redact,
-        fullPath
+        fullPath,
+        contractName
       )
     }
   }
@@ -711,6 +714,11 @@ export default sbp('sbp/selectors/register', {
       try { description = message.description() } catch { /* optional */ }
 
       const contractMeta = rootState.contracts[contractID]
+      // Contract name (a.k.a. contract type, e.g. `gi.contracts/group`)
+      // passed to user-supplied redactors so a single redaction directive
+      // can branch on which contract the value comes from. Falls back to
+      // an empty string if the bookkeeping entry has no `type` yet.
+      const contractName = contractMeta.type ?? ''
       const existing = contractMeta._journal?.entries
       const lastEntry = existing && existing.length > 0
         ? existing[existing.length - 1]
@@ -765,7 +773,7 @@ export default sbp('sbp/selectors/register', {
         try {
           redactedBefore = beforeState === undefined
             ? undefined
-            : applyRedactions(beforeState, cfg.redactions)
+            : applyRedactions(beforeState, cfg.redactions, contractName)
         } catch (e) {
           logJournalError('redaction (before) failed', e)
           redactedBefore = undefined
@@ -774,7 +782,7 @@ export default sbp('sbp/selectors/register', {
       try {
         redactedAfter = afterState === undefined
           ? null
-          : applyRedactions(afterState, cfg.redactions)
+          : applyRedactions(afterState, cfg.redactions, contractName)
       } catch (e) {
         logJournalError('redaction (after) failed', e)
         redactedAfter = null

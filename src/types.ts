@@ -139,12 +139,13 @@ export type JournalEntry =
 
 // A single redaction directive. `path` uses dotted segments and supports a
 // literal `*` segment to match any single key (object key or array index).
-// `redact` is invoked with the value found at the path and the resolved
-// segments; it MUST return a redacted replacement value and MUST NOT mutate
-// the input.
+// `redact` is invoked with the value found at the path, the resolved
+// segments, and the contract's name/type (e.g. `gi.contracts/group`) so a
+// shared redactor can branch on which contract the value belongs to. It
+// MUST return a redacted replacement value and MUST NOT mutate the input.
 export type JournalRedaction = {
   path: string;
-  redact: (value: unknown, fullPath: string[]) => unknown;
+  redact: (value: unknown, fullPath: string[], contractName: string) => unknown;
 };
 
 export type JournalConfig = {

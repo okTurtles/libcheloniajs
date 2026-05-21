@@ -377,7 +377,7 @@ function applyOne(root, patch) {
 // A throwing redactor logs once and substitutes the sentinel string so a
 // single bad redactor cannot blank out unrelated parts of the state.
 export const REDACTION_ERROR_SENTINEL = '[REDACTION_ERROR]';
-export function applyRedactions(state, redactions) {
+export function applyRedactions(state, redactions, contractName) {
     const cloned = cloneValue(state);
     if (!redactions || redactions.length === 0)
         return cloned;
@@ -385,11 +385,11 @@ export function applyRedactions(state, redactions) {
         const segments = parseDottedPath(r.path);
         if (segments.length === 0)
             continue;
-        walkAndRedact(cloned, segments, 0, r.redact, []);
+        walkAndRedact(cloned, segments, 0, r.redact, [], contractName);
     }
     return cloned;
 }
-function walkAndRedact(parent, segments, i, redact, resolved) {
+function walkAndRedact(parent, segments, i, redact, resolved, contractName) {
     if (parent === null || typeof parent !== 'object')
         return;
     const seg = segments[i];
@@ -408,7 +408,7 @@ function walkAndRedact(parent, segments, i, redact, resolved) {
             const original = container[k];
             let replacement;
             try {
-                replacement = redact(original, fullPath);
+                replacement = redact(original, fullPath, contractName);
             }
             catch (e) {
                 console.warn(`[chelonia][journal] redactor threw for path '${fullPath.join('.')}':`, e);
@@ -436,7 +436,7 @@ function walkAndRedact(parent, segments, i, redact, resolved) {
             }
         }
         else {
-            walkAndRedact(parent[k], segments, i + 1, redact, fullPath);
+            walkAndRedact(parent[k], segments, i + 1, redact, fullPath, contractName);
         }
     }
 }
@@ -641,6 +641,11 @@ export default sbp('sbp/selectors/register', {
             }
             catch { /* optional */ }
             const contractMeta = rootState.contracts[contractID];
+            // Contract name (a.k.a. contract type, e.g. `gi.contracts/group`)
+            // passed to user-supplied redactors so a single redaction directive
+            // can branch on which contract the value comes from. Falls back to
+            // an empty string if the bookkeeping entry has no `type` yet.
+            const contractName = contractMeta.type ?? '';
             const existing = contractMeta._journal?.entries;
             const lastEntry = existing && existing.length > 0
                 ? existing[existing.length - 1]
@@ -693,7 +698,7 @@ export default sbp('sbp/selectors/register', {
                 try {
                     redactedBefore = beforeState === undefined
                         ? undefined
-                        : applyRedactions(beforeState, cfg.redactions);
+                        : applyRedactions(beforeState, cfg.redactions, contractName);
                 }
                 catch (e) {
                     logJournalError('redaction (before) failed', e);
@@ -703,7 +708,7 @@ export default sbp('sbp/selectors/register', {
             try {
                 redactedAfter = afterState === undefined
                     ? null
-                    : applyRedactions(afterState, cfg.redactions);
+                    : applyRedactions(afterState, cfg.redactions, contractName);
             }
             catch (e) {
                 logJournalError('redaction (after) failed', e);

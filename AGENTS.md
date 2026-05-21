@@ -231,7 +231,7 @@ Config keys (all optional, under `CheloniaConfig.journal`):
 | `enabled` | `false` | Master switch. Opt-in; turn on via `chelonia/configure`. |
 | `snapshotInterval` | `50` | Journal keeps between X and 2X entries, snapshotting every X patches and trimming to the most recent snapshot at 2X. |
 | `contractIDs` | `[]` (all) | If non-empty, only these contracts are journaled. |
-| `redactions` | `[]` | `{ path, redact }` directives applied to both before- and after-states before diffing. `path` uses dotted segments and supports `*`. |
+| `redactions` | `[]` | `{ path, redact }` directives applied to both before- and after-states before diffing. `path` uses dotted segments and supports `*`. `redact` is called as `(value, fullPath, contractName)` so a shared redactor can branch on the contract type. |
 | `diff` | built-in | Override the diff implementation. |
 | `applyPatch` | built-in | Override the patch applier used by `reconstruct`. |
 
