@@ -270,8 +270,10 @@ export type ChelContractKey = {
     ringLevel: number;
     permissions: '*' | string[];
     allowedActions?: '*' | string[];
+    permissionsContext?: '*' | string[];
     _notBeforeHeight: number;
     _notAfterHeight?: number | undefined;
+    _addedByKeyId: string;
     _private?: string;
     foreignKey?: string;
     meta?: {
