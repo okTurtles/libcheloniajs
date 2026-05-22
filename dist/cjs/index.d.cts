@@ -7,6 +7,7 @@ export * from './encryptedData.cjs';
 export * from './errors.cjs';
 export * from './events.cjs';
 export * from './files.cjs';
+export * from './journal.cjs';
 export * from './persistent-actions.cjs';
 export * from './presets.cjs';
 export * from './pubsub/index.cjs';

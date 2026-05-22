@@ -89,6 +89,81 @@ export type CheloniaConfig = {
         data: T;
       }
     | undefined;
+  journal?: JournalConfig | null;
+};
+
+// JSON-Patch (RFC 6902) strict subset emitted/consumed by the journal.
+// Only add/remove/replace are produced. `path` is a JSON-Pointer (RFC 6901).
+// `value` is required on add/replace and absent on remove, mirroring RFC
+// 6902 so the output is consumable by any standards-conformant JSON Patch
+// implementation (and vice versa).
+export type JournalPatch =
+  | { op: 'add' | 'replace'; path: string; value: unknown }
+  | { op: 'remove'; path: string };
+
+export type JournalEntry =
+  | {
+      kind: 'snapshot';
+      hash: string;
+      height: number;
+      opType: string;
+      // The event's `SPMessage.description()` output (raw, never passed
+      // through `redactions`). For unencrypted ops this can include the
+      // action name and action-data fragments; treat it as journal-visible.
+      // Callers worried about leakage should either strip `description`
+      // before persisting `entries` or rely exclusively on encrypted ops.
+      description?: string;
+      // Redacted deep clone of the per-contract state AFTER this event was
+      // processed. May be `null` if the contract state was undefined (e.g.,
+      // failed first-message processing).
+      state: unknown;
+      // Populated when the event's `processMutation` threw and Chelonia
+      // discarded the mutation. Snapshots are emitted on the first entry
+      // for a contract and on resync / forward-gap re-seeds, so a failure
+      // on any of those paths would otherwise lose the captured error
+      // detail that patch entries preserve. Same shape, same trust level,
+      // and same NOT-redacted caveat as the patch variant's `error`.
+      error?: { name: string; message: string };
+    }
+  | {
+      kind: 'patch';
+      hash: string;
+      height: number;
+      opType: string;
+      // See the note on the snapshot variant: `description` is NOT redacted.
+      description?: string;
+      patch: JournalPatch[];
+      // Populated when the event's `processMutation` threw and Chelonia
+      // discarded the mutation (the resulting patch is therefore empty).
+      // Captured as plain fields rather than the live `Error` so the
+      // journal stays JSON-serializable. `name` mirrors `Error.name`
+      // (e.g. `'ChelErrorDecryptionKeyNotFound'`); `message` is the raw
+      // error message and is NOT passed through `redactions` — for
+      // unencrypted ops it can echo action data, treat it at the same
+      // trust level as `description`.
+      error?: { name: string; message: string };
+    };
+
+// A single redaction directive. `path` uses dotted segments and supports a
+// literal `*` segment to match any single key (object key or array index).
+// `redact` is invoked with the value found at the path, the resolved
+// segments, and the contract's name/type (e.g. `gi.contracts/group`) so a
+// shared redactor can branch on which contract the value belongs to. It
+// MUST return a redacted replacement value and MUST NOT mutate the input.
+export type JournalRedaction = {
+  path: string;
+  redact: (value: unknown, fullPath: string[], contractName: string) => unknown;
+};
+
+export type JournalConfig = {
+  enabled?: boolean;
+  snapshotInterval?: number;
+  // When omitted or empty, applies to all contracts (provided `enabled` is
+  // true). Otherwise only listed contractIDs are journaled.
+  contractIDs?: string[];
+  redactions?: JournalRedaction[];
+  diff?: (before: unknown, after: unknown) => JournalPatch[];
+  applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };
 
 export type SendMessageHooks = Partial<{
@@ -169,7 +244,7 @@ export type CheloniaContractCtx = {
       ) => void | Promise<void>;
     }
   >;
-  methods: Record<string, string>;
+  methods: Record<string, (...args: unknown[]) => unknown>;
 };
 export type CheloniaContext = {
   config: CheloniaConfig;
@@ -343,6 +418,7 @@ export type ChelRootState = {
       height: number;
       previousKeyOp: string;
       missingDecryptionKeyIds?: string[];
+      _journal?: { entries: JournalEntry[] };
     }
   >;
   // Secret keys. Format secretKeys[keyId] = serializedSecretKey

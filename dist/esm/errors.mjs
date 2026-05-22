@@ -33,3 +33,4 @@ export const ChelErrorSignatureKeyNotFound = ChelErrorGenerator('ChelErrorSignat
 export const ChelErrorFetchServerTimeFailed = ChelErrorGenerator('ChelErrorFetchServerTimeFailed');
 export const ChelErrorUnexpectedHttpResponseCode = ChelErrorGenerator('ChelErrorUnexpectedHttpResponseCode');
 export const ChelErrorResourceGone = ChelErrorGenerator('ChelErrorResourceGone', ChelErrorUnexpectedHttpResponseCode);
+export const ChelErrorJournalCorrupt = ChelErrorGenerator('ChelErrorJournalCorrupt');

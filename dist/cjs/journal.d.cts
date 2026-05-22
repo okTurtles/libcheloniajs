@@ -1,0 +1,15 @@
+import type { JournalPatch, JournalRedaction } from './types.cjs';
+export declare function escapePointerSegment(segment: string): string;
+export declare function unescapePointerSegment(segment: string): string;
+export declare function segmentsToPointer(segments: string[]): string;
+export declare function pointerToSegments(pointer: string): string[];
+export declare function parseDottedPath(path: string): string[];
+export declare function cloneValue<T>(v: T): T;
+export declare function defaultDiff(before: unknown, after: unknown): JournalPatch[];
+export declare function defaultApplyPatch(state: unknown, patches: JournalPatch[]): unknown;
+export declare const REDACTION_ERROR_SENTINEL = "[REDACTION_ERROR]";
+export declare function applyRedactions<T>(state: T, redactions: JournalRedaction[] | undefined, contractName: string): T;
+export declare function shortHashRedactor(value: unknown): string;
+export declare const DEFAULT_SNAPSHOT_INTERVAL = 50;
+declare const _default: string[];
+export default _default;

@@ -79,6 +79,50 @@ export type CheloniaConfig = {
         encryptionKeyId: string | null;
         data: T;
     } | undefined;
+    journal?: JournalConfig | null;
+};
+export type JournalPatch = {
+    op: 'add' | 'replace';
+    path: string;
+    value: unknown;
+} | {
+    op: 'remove';
+    path: string;
+};
+export type JournalEntry = {
+    kind: 'snapshot';
+    hash: string;
+    height: number;
+    opType: string;
+    description?: string;
+    state: unknown;
+    error?: {
+        name: string;
+        message: string;
+    };
+} | {
+    kind: 'patch';
+    hash: string;
+    height: number;
+    opType: string;
+    description?: string;
+    patch: JournalPatch[];
+    error?: {
+        name: string;
+        message: string;
+    };
+};
+export type JournalRedaction = {
+    path: string;
+    redact: (value: unknown, fullPath: string[], contractName: string) => unknown;
+};
+export type JournalConfig = {
+    enabled?: boolean;
+    snapshotInterval?: number;
+    contractIDs?: string[];
+    redactions?: JournalRedaction[];
+    diff?: (before: unknown, after: unknown) => JournalPatch[];
+    applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };
 export type SendMessageHooks = Partial<{
     prepublish: (entry: SPMessage) => void | Promise<void>;
@@ -139,7 +183,7 @@ export type CheloniaContractCtx = {
             state: ChelContractState;
         }) => void | Promise<void>;
     }>;
-    methods: Record<string, string>;
+    methods: Record<string, (...args: unknown[]) => unknown>;
 };
 export type CheloniaContext = {
     config: CheloniaConfig;
@@ -312,6 +356,9 @@ export type ChelRootState = {
         height: number;
         previousKeyOp: string;
         missingDecryptionKeyIds?: string[];
+        _journal?: {
+            entries: JournalEntry[];
+        };
     }>;
     secretKeys: Record<string, string>;
 };

@@ -7,6 +7,7 @@ export * from './encryptedData.mjs';
 export * from './errors.mjs';
 export * from './events.mjs';
 export * from './files.mjs';
+export * from './journal.mjs';
 export * from './persistent-actions.mjs';
 export * from './presets.mjs';
 export * from './pubsub/index.mjs';

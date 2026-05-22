@@ -2202,6 +2202,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const state = (0, sbp_1.default)(this.config.stateSelector);
         const { preHandleEvent, postHandleEvent, handleEventError } = this.config.hooks;
         let processingErrored = false;
+        // Captures the throwable from `processMutation` when the mutation
+        // is discarded (`processingErrored = true`). Forwarded to the
+        // journal recorder so the empty-patch entry can carry the error
+        // type and message for post-mortem debugging. Typed as `unknown`
+        // because anything can be thrown in JS — the recorder normalizes
+        // it into `{ name, message }`.
+        let processingError = null;
         let message;
         // Errors in mutations result in ignored messages
         // Errors in side effects result in dropped messages to be reprocessed
@@ -2305,6 +2312,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     throw e;
                 }
                 processingErrored = e?.name !== 'ChelErrorWarning';
+                // Forward the *raw* throwable (`e_`), not the `as Error` cast,
+                // so the journal recorder sees whatever was actually thrown
+                // (could be a non-Error: string, plain object, etc.).
+                if (processingErrored)
+                    processingError = e_;
                 this.config.hooks.processError?.(e, message, getMsgMeta.call(this, message, contractID, contractStateCopy));
                 // special error that prevents the head from being updated, effectively killing the contract
                 if (e.name === 'ChelErrorUnrecoverable' ||
@@ -2350,6 +2362,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     state,
                     contractState: contractStateCopy,
                     processingErrored,
+                    processingError,
                     postHandleEvent
                 });
             }
@@ -2513,10 +2526,17 @@ const handleEvent = {
             }
         });
     },
-    async applyProcessResult({ message, state, contractState, processingErrored, postHandleEvent }) {
+    async applyProcessResult({ message, state, contractState, processingErrored, processingError, postHandleEvent }) {
         const contractID = message.contractID();
         const hash = message.hash();
         const height = message.height();
+        // Capture the per-contract state as it was before this event was
+        // applied. `state[contractID]` is the live root-state reference; the
+        // event-loop path (`handleEvent` above) cloned it into
+        // `contractStateCopy` before mutating, so this reference remains the
+        // pre-event object even after the `reactiveSet` below swaps in the
+        // post-event state. May be undefined for the first message.
+        const beforeContractState = state[contractID];
         await (0, sbp_1.default)('chelonia/db/addEntry', message);
         if (!processingErrored) {
             // Once side-effects are called, we apply changes to the state.
@@ -2585,6 +2605,18 @@ const handleEvent = {
                 removed: []
             });
         }
+        // Journal recording. Runs after `state.contracts[contractID]` has been
+        // populated (HEAD/height/etc.) so the journal selector can attach
+        // `_journal` to a real bookkeeping object, but BEFORE we emit
+        // EVENT_HANDLED so any listeners that snapshot contract state on that
+        // event (e.g. `chelonia/externalStateSetup` mirroring
+        // `chelonia/contract/fullState` into an outer store) observe the
+        // fully-committed `_journal` rather than the previous event's value.
+        // The selector enforces a "MUST NOT throw" contract internally, so we
+        // deliberately do not wrap this call: a journal failure must never
+        // break event processing, and we don't want a duplicate log line on
+        // the way out.
+        (0, sbp_1.default)('chelonia/private/journal/recordEvent', contractID, message, beforeContractState, processingErrored ? beforeContractState : contractState, processingErrored, processingError ?? null);
         if (!processingErrored) {
             (0, sbp_1.default)('okTurtles.events/emit', hash, contractID, message);
             (0, sbp_1.default)('okTurtles.events/emit', events_js_1.EVENT_HANDLED, contractID, message);

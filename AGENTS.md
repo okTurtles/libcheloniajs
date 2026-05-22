@@ -81,6 +81,7 @@ src/
 ├── events.ts             # Event name constants
 ├── constants.ts          # INVITE_STATUS enum
 ├── persistent-actions.ts # PersistentAction queue with retry
+├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time synchronization via monotonic offsets
 ├── chelonia-utils.ts     # Optional utility selectors (e.g., chelonia/kv/queuedSet)
@@ -126,6 +127,8 @@ Often the source file's default export is an array of the selector names it regi
 | `chelonia.db/*` | `db.ts` | Database primitives — get, set, delete, iterKeys, keyCount |
 | `chelonia/db/*` | `db.ts` | Higher-level DB — latestHEADinfo, getEntry, addEntry |
 | `chelonia.persistentActions/*` | `persistent-actions.ts` | Retry queue — configure, enqueue, cancel, status |
+| `chelonia/journal/*` | `journal.ts` | Public journal API — get, reconstruct, clear |
+| `chelonia/private/journal/*` | `journal.ts` | Internal journal recorder — recordEvent |
 | `chelonia/kv/*` | `chelonia-utils.ts` | Key-value store — queuedSet |
 | `chelonia/externalStateSetup` | `local-selectors/` | External state synchronization |
 
@@ -182,6 +185,175 @@ Custom errors are generated using `ChelErrorGenerator` in `src/errors.ts`:
 export const ChelErrorUnexpected = ChelErrorGenerator('ChelErrorUnexpected')
 export const ChelErrorDecryptionError = ChelErrorGenerator('ChelErrorDecryptionError')
 ```
+
+### Journal of Contract State Changes
+
+Chelonia keeps an optional per-contract journal of every event applied to
+a contract's state. For each processed event the journal records the
+event's identity (`hash`, `height`, `opType`, `description`) plus a
+strict-subset RFC 6902 JSON Patch diff between the per-contract state
+before and after processing. Periodic full snapshots keep the journal
+bounded and reconstructible. Recording happens inside
+`handleEvent.applyProcessResult` (`src/internals.ts`); the recorder
+itself enforces a "MUST NOT throw" contract via its own try/catch so a
+journal bug can never break event handling.
+
+The journal is **opt-in**: `enabled` defaults to `false` so existing
+consumers don't pay the per-event diff + persisted-state cost unless
+they explicitly turn it on via `chelonia/configure`.
+
+The diff produced is a strict subset of RFC 6902 (only `add`, `remove`,
+`replace`), with JSON-Pointer (RFC 6901) paths including the `-`
+end-of-array token on `add`. Whole-root removal is represented as
+`{ op: 'replace', path: '', value: null }` rather than `remove` (RFC
+6902 does not define root-remove). The output is consumable by any
+standards-conformant JSON Patch implementation, and the applier rejects
+malformed input (`replace` on a missing key, `add`/`replace` without
+`value`).
+
+When `processMutation` throws and Chelonia discards the mutation, the
+recorder still emits a journal entry — with an empty `patch: []` (on
+patch entries) and an additional `error: { name, message }` field
+copied from the captured `Error` (e.g. `{ name:
+'ChelErrorSignatureError', message: '...' }`). The same `error` field
+is also attached to **snapshot** entries when the failure lands on a
+snapshot path — the first event for a contract, or a resync /
+forward-gap re-seed — so error detail is preserved on every path the
+recorder emits, not just patch entries. This makes a failed event
+distinguishable from a no-op event in the journal. The error fields
+are NOT passed through `redactions`; treat them at the same trust
+level as `description` and strip `entries[i].error` after reading via
+`chelonia/journal/get` if leakage is a concern.
+
+The journal is stored at `state.contracts[contractID]._journal` (next to
+`HEAD`/`height`/etc., not on the contract state itself).
+
+Config keys (all optional, under `CheloniaConfig.journal`):
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `false` | Master switch. Opt-in; turn on via `chelonia/configure`. |
+| `snapshotInterval` | `50` | Journal keeps between X and 2X entries, snapshotting every X patches and trimming to the most recent snapshot at 2X. |
+| `contractIDs` | `[]` (all) | If non-empty, only these contracts are journaled. |
+| `redactions` | `[]` | `{ path, redact }` directives applied to both before- and after-states before diffing. `path` uses dotted segments and supports `*`. `redact` is called as `(value, fullPath, contractName)` so a shared redactor can branch on the contract type. |
+| `diff` | built-in | Override the diff implementation. |
+| `applyPatch` | built-in | Override the patch applier used by `reconstruct`. |
+
+Public selectors:
+
+```
+chelonia/journal/get          — Returns a deep clone of { entries } or undefined
+chelonia/journal/reconstruct  — Rebuilds the redacted state at HEAD;
+                                returns undefined if no journal exists,
+                                throws `ChelErrorJournalCorrupt` (with
+                                `entryIndex`, `contractID`, and `cause`)
+                                if a recorded patch fails to apply
+chelonia/journal/clear        — Clears one contract's journal (or all if no arg)
+```
+
+All config keys above (including `enabled`, `redactions`, `diff`,
+`applyPatch`) can be toggled at runtime by calling `chelonia/configure`
+again — provided fields replace the previous value; omitted fields are
+left alone. Arrays (`contractIDs`, `redactions`) are copied so later
+mutations on the caller's reference don't leak in.
+
+Reconfigure semantics: omitted fields are left alone. For individual
+journal fields (`enabled`, `snapshotInterval`, `contractIDs`,
+`redactions`, `diff`, `applyPatch`), `null` is rejected with a
+`TypeError` — only the documented value types are accepted; pass
+`undefined` (or omit the field) to leave it alone. To revert `diff` /
+`applyPatch` back to the built-ins, pass `defaultDiff` /
+`defaultApplyPatch` (imported from `@chelonia/lib` or
+`@chelonia/lib/journal`) explicitly. To clear `contractIDs` /
+`redactions`, pass an empty array. The top-level `config.journal`
+block itself can be omitted (or set to `undefined`) to leave the
+journal config alone; passing `journal: null` explicitly means "stop
+journaling" and resets the whole block back to disabled defaults
+(`enabled: false`, `snapshotInterval: 50`, no `contractIDs`, no
+`redactions`, default `diff`/`applyPatch`) and clears every persisted
+journal so no stale entries linger after the reset.
+
+Resync detection: the recorder watches the incoming event's `height`
+relative to the last journalled entry to decide between three cases.
+A strictly backwards height (`height < lastEntry.height`) is an
+unambiguous resync — the contract was re-processed from scratch — and
+the journal is collapsed to a fresh snapshot. A strictly forward gap
+(`height > lastEntry.height + 1`) is also treated as a resync: under
+normal operation Chelonia journals every event at the current height,
+so a gap means entries are missing (e.g. journaling was toggled
+`enabled: false → true`, or `contractIDs` was widened to re-include
+this contract) and the cached `before`-state no longer matches the
+incoming event. Producing a patch on top of it would silently corrupt
+`reconstruct`, so the recorder re-seeds with a snapshot instead. The
+duplicate-arrival case (same `hash` at the same `height`) is ignored
+without rewriting the journal.
+
+Changing `redactions` at runtime is destructive to existing journal
+state: the previously recorded snapshots and patches were produced
+under the old redaction set, so applying a new redaction would leave
+those entries projected through the old set while subsequent entries
+use the new one, breaking `reconstruct`. Chelonia does **not**
+auto-clear on `redactions` change — function identity isn't stable
+across process restarts (so an in-memory equality check would either
+clear on every relaunch or fail to detect real changes), and
+`chelonia/configure` is normally called with the same redaction set
+on every app start. If a caller is genuinely *changing* the redaction
+set vs. what produced the persisted journal, they MUST call
+`chelonia/journal/clear` themselves; otherwise the next event on each
+contract simply continues under the new redactions and `reconstruct`
+output will be inconsistent until the next snapshot. If you need
+pre-change history preserved, snapshot the journal via
+`chelonia/journal/get` *before* clearing.
+
+Redaction scope: `redactions` covers `state` only. The
+`JournalEntry.description` field (a copy of `SPMessage.description()`)
+is persisted verbatim. For unencrypted ops `description()` can echo
+action data, so treat the journal as visible at the same trust level
+as the description output. Callers that need to scrub the description
+should strip it from `entries` after reading via `chelonia/journal/get`,
+or rely on encrypted ops whose `description()` is intentionally opaque.
+
+Persistence note: `_journal` lives under `state.contracts[contractID]`
+and is serialized alongside the rest of that subtree by typical
+persistence layers. When `enabled: true`, expect up to two redacted
+full-state snapshots plus up to ~`snapshotInterval` patch entries per
+active contract sitting in persisted state. Tune `snapshotInterval`
+down (or set `enabled: false`) if state size is a concern.
+
+Consumer-visible leakage: because `_journal` is an own property of
+`state.contracts[contractID]`, it travels with anything that exposes
+that subtree. Notably `chelonia/contract/fullState` returns
+`cheloniaState: rootState.contracts[contractID]` verbatim, and any
+listener on `EVENT_HANDLED` that snapshots `state.contracts` (e.g.
+the Vuex mirror set up by `chelonia/externalStateSetup`) will receive
+the journal as well. Treat the journal block as in-band with the rest
+of the bookkeeping subtree: redact accordingly, and if you need a
+journal-free view of `cheloniaState`, project it client-side via
+`{ ...cheloniaState, _journal: undefined }` (the journal API itself
+remains accessible through `chelonia/journal/get`).
+
+Supported state shape: the journal's deep-clone is JSON-shape-only.
+`Date` / `Map` / `Set` / `Buffer` / class instances inside contract
+state are passed through by reference rather than copied. In-place
+mutation of such values would retroactively mutate prior journal
+entries and confuse the `before === after` short-circuit in the diff.
+Keep contract state plain JSON for the journal to behave correctly,
+or swap in a `structuredClone`-based `diff` / `applyPatch` override.
+
+Redaction caveat: the bundled `shortHashRedactor` hashes
+`JSON.stringify(value)` and returns the first 8 characters of the
+base58btc-encoded blake2b-256 hash. This is fine for high-entropy
+values, but **trivially reversible** for booleans, small integers, or
+short enum strings — anyone with the journal and the contract schema
+can precompute the mapping. Use a constant sentinel (e.g.
+`'[REDACTED]'`) for low-entropy fields.
+
+Import path: the journal module is re-exported from the package root
+(`import { defaultDiff } from '@chelonia/lib'`) and is also available
+under the `./journal` subpath (`import { defaultDiff } from
+'@chelonia/lib/journal'`). The package-root import is the preferred
+form; the subpath is provided as a convenience for consumers that want
+to tree-shake just the journal helpers.
 
 ### Contract State Structure
 
