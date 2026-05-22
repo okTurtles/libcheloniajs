@@ -212,14 +212,18 @@ malformed input (`replace` on a missing key, `add`/`replace` without
 `value`).
 
 When `processMutation` throws and Chelonia discards the mutation, the
-recorder still emits a patch entry — with an empty `patch: []` and an
-additional `error: { name, message }` field copied from the captured
-`Error` (e.g. `{ name: 'ChelErrorSignatureError', message: '...' }`).
-This makes a failed event distinguishable from a no-op event in the
-journal. The error fields are NOT passed through `redactions`; treat
-them at the same trust level as `description` and strip
-`entries[i].error` after reading via `chelonia/journal/get` if leakage
-is a concern.
+recorder still emits a journal entry — with an empty `patch: []` (on
+patch entries) and an additional `error: { name, message }` field
+copied from the captured `Error` (e.g. `{ name:
+'ChelErrorSignatureError', message: '...' }`). The same `error` field
+is also attached to **snapshot** entries when the failure lands on a
+snapshot path — the first event for a contract, or a resync /
+forward-gap re-seed — so error detail is preserved on every path the
+recorder emits, not just patch entries. This makes a failed event
+distinguishable from a no-op event in the journal. The error fields
+are NOT passed through `redactions`; treat them at the same trust
+level as `description` and strip `entries[i].error` after reading via
+`chelonia/journal/get` if leakage is a concern.
 
 The journal is stored at `state.contracts[contractID]._journal` (next to
 `HEAD`/`height`/etc., not on the contract state itself).

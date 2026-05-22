@@ -529,6 +529,16 @@ postSnapshotState) {
             snap.opType = entry.opType;
             snap.description = entry.description;
             snap.state = postSnapshotState.state;
+            // If the patch entry that triggered this auto-snapshot was itself
+            // an errored event, carry the error detail forward onto the
+            // snapshot too. Otherwise, once `appendAndTrim` collapses the
+            // window past the most recent snapshot, the `error` information
+            // (which currently lives only on the trimmed-away patch entry)
+            // would be lost. Keeping the snapshot and the patch in sync
+            // guarantees error detail survives trimming on every code path.
+            if (entry.kind === 'patch' && entry.error !== undefined) {
+                snap.error = entry.error;
+            }
             entries.push(snap);
         }
     }
@@ -717,6 +727,11 @@ export default sbp('sbp/selectors/register', {
             let nextEntries;
             if (isFirstOrResync) {
                 // First event for this contract OR a resync: emit a snapshot only.
+                // If processing errored on this event we still attach the
+                // normalized `{ name, message }` so the failure detail isn't lost
+                // on the first-event / resync paths (patch entries preserve it
+                // via `entry.error`; snapshots need the same affordance to keep
+                // the journal a faithful record of every event).
                 const snap = Object.create(null);
                 snap.kind = 'snapshot';
                 snap.hash = hash;
@@ -724,6 +739,9 @@ export default sbp('sbp/selectors/register', {
                 snap.opType = opType;
                 snap.description = description;
                 snap.state = redactedAfter;
+                if (processingErrored && processingError != null) {
+                    snap.error = normalizeProcessingError(processingError);
+                }
                 nextEntries = [snap];
             }
             else {

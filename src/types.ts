@@ -117,6 +117,13 @@ export type JournalEntry =
       // processed. May be `null` if the contract state was undefined (e.g.,
       // failed first-message processing).
       state: unknown;
+      // Populated when the event's `processMutation` threw and Chelonia
+      // discarded the mutation. Snapshots are emitted on the first entry
+      // for a contract and on resync / forward-gap re-seeds, so a failure
+      // on any of those paths would otherwise lose the captured error
+      // detail that patch entries preserve. Same shape, same trust level,
+      // and same NOT-redacted caveat as the patch variant's `error`.
+      error?: { name: string; message: string };
     }
   | {
       kind: 'patch';

@@ -96,6 +96,10 @@ export type JournalEntry = {
     opType: string;
     description?: string;
     state: unknown;
+    error?: {
+        name: string;
+        message: string;
+    };
 } | {
     kind: 'patch';
     hash: string;

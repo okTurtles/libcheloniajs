@@ -126,6 +126,9 @@ type JournalEntry =
       state: unknown // redacted clone of post-event state; null if
                      // the contract state was undefined (e.g., failed
                      // first-message processing)
+      error?: { name: string; message: string } // set if processMutation threw
+                                                // on a first-event / resync /
+                                                // forward-gap snapshot
     }
   | {
       kind: 'patch'
@@ -251,9 +254,8 @@ three cases:
 ### Failed events
 
 If `processMutation` throws and Chelonia discards the mutation, the
-recorder still emits a patch entry with an empty `patch: []` and an
-additional `error: { name, message }` field copied from the captured
-`Error`:
+recorder still emits an entry — empty `patch: []` plus an additional
+`error: { name, message }` field copied from the captured `Error`:
 
 ```js
 {
@@ -264,7 +266,24 @@ additional `error: { name, message }` field copied from the captured
 }
 ```
 
-This makes failed events distinguishable from no-op events.
+The same `error: { name, message }` field is attached to **snapshot**
+entries when the failure lands on a snapshot path — i.e. the first
+event for a contract, or a resync / forward-gap re-seed (see
+[Resync, gaps, and failed events](#resync-gaps-and-failed-events)). Without this, the error detail
+would be silently lost on those three paths because they emit only a
+snapshot and no accompanying patch entry.
+
+```js
+{
+  kind: 'snapshot',
+  hash: 'h0', height: 0, opType: 'c',
+  state: null, // post-state was undefined because the mutation threw
+  error: { name: 'ChelErrorSignatureError', message: '...' }
+}
+```
+
+This makes failed events distinguishable from no-op events on every
+path the recorder emits.
 
 ### Recording is non-throwing
 

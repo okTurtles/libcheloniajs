@@ -417,6 +417,96 @@ describe('journal: integration via SBP selectors', () => {
     }
   })
 
+  it('attaches { name, message } to the auto-snapshot at the X-th-patch boundary when the boundary event errored', () => {
+    // The X-th patch since the last snapshot triggers an auto-snapshot
+    // built from `entry.hash/height/opType/description` plus the
+    // post-state. If that boundary event was itself an errored event,
+    // the snapshot must carry the error detail forward too — otherwise,
+    // once the journal grows past 2X and trims everything before the
+    // snapshot, the error info (which lived on the trimmed-away patch
+    // entry) would be silently lost. snapshotInterval=3, so the 3rd
+    // patch is the boundary; we make that 3rd patch error AND mutate
+    // state so the snapshot path actually runs (it skips on undefined
+    // post-state).
+    const cid = 'cid-errored-auto-snapshot'
+    ensureContractMeta(cid)
+    let prev = mkState(0)
+    record(cid, 'h0', 0, undefined, prev)
+    // Two successful patches (patchesSinceSnap = 2).
+    for (let i = 1; i <= 2; i++) {
+      const next = mkState(i)
+      record(cid, `h${i}`, i, prev, next)
+      prev = next
+    }
+    // 3rd patch is the boundary AND errored — but post-state is defined,
+    // so the auto-snapshot path runs.
+    const err = new Error('boundary boom')
+    err.name = 'ChelErrorBoundary'
+    const next = mkState(3)
+    record(cid, 'h3', 3, prev, next, true, err)
+    const entries = getEntries(cid)!
+    // Expect: [snap@h0, patch@h1, patch@h2, patch@h3, snap@h3].
+    assert.strictEqual(entries.length, 5)
+    const autoSnap = entries[4] as Extract<JournalEntry, { kind: 'snapshot' }>
+    assert.strictEqual(autoSnap.kind, 'snapshot')
+    assert.strictEqual(autoSnap.hash, 'h3')
+    assert.deepStrictEqual(autoSnap.error, {
+      name: 'ChelErrorBoundary',
+      message: 'boundary boom'
+    })
+    // And the matching patch entry also has it.
+    const boundaryPatch = entries[3] as Extract<JournalEntry, { kind: 'patch' }>
+    assert.deepStrictEqual(boundaryPatch.error, {
+      name: 'ChelErrorBoundary',
+      message: 'boundary boom'
+    })
+  })
+
+  it('preserves boundary-event error detail on the auto-snapshot after trim discards the original patch entry', () => {
+    // Follow-up to the boundary test: once the journal grows past 2X
+    // entries, the trim splices away everything before the most recent
+    // snapshot — including the errored boundary patch itself. If the
+    // auto-snapshot didn't copy `error` forward, that information would
+    // be permanently lost. Drive enough events past the boundary to
+    // trigger a trim and assert the surviving snapshot still carries
+    // the error.
+    const cid = 'cid-errored-auto-snapshot-trim'
+    ensureContractMeta(cid)
+    let prev = mkState(0)
+    record(cid, 'h0', 0, undefined, prev)
+    for (let i = 1; i <= 2; i++) {
+      const next = mkState(i)
+      record(cid, `h${i}`, i, prev, next)
+      prev = next
+    }
+    const err = new Error('boundary boom')
+    err.name = 'ChelErrorBoundary'
+    const boundaryState = mkState(3)
+    record(cid, 'h3', 3, prev, boundaryState, true, err)
+    prev = boundaryState
+    // Now push more patches past the boundary until the trim fires
+    // (snapshotInterval=3 → 2X=6, so step h6 pushes length to 7 → trim).
+    for (let i = 4; i <= 6; i++) {
+      const next = mkState(i)
+      record(cid, `h${i}`, i, prev, next)
+      prev = next
+    }
+    const entries = getEntries(cid)!
+    // Trim drops everything before the most recent snapshot, so the
+    // h0 snapshot AND the h1/h2/h3 patches are gone; only the h3 snapshot
+    // plus subsequent patches survive.
+    assert.strictEqual(entries[0].kind, 'snapshot')
+    assert.strictEqual(entries[0].hash, 'h3')
+    assert.deepStrictEqual(
+      (entries[0] as Extract<JournalEntry, { kind: 'snapshot' }>).error,
+      { name: 'ChelErrorBoundary', message: 'boundary boom' }
+    )
+    // The errored boundary patch was trimmed away — the snapshot is now
+    // the only place this error detail lives.
+    const boundaryPatch = entries.find((e) => e.kind === 'patch' && e.hash === 'h3')
+    assert.strictEqual(boundaryPatch, undefined)
+  })
+
   it('records an empty-patch entry when processingErrored is true', () => {
     const cid = 'cid-errored'
     ensureContractMeta(cid)
@@ -469,6 +559,91 @@ describe('journal: integration via SBP selectors', () => {
     const entries = getEntries(cid)!
     const e = entries[1] as Extract<JournalEntry, { kind: 'patch' }>
     assert.strictEqual(e.error, undefined)
+  })
+
+  it('attaches { name, message } to the first-event snapshot when the first event errored', () => {
+    // The first event on a contract is recorded as a snapshot (not a
+    // patch), so the error-detail affordance must also exist on the
+    // snapshot variant or the failure detail would be lost on this
+    // path. Same expectation for resync / forward-gap re-seeds below.
+    const cid = 'cid-errored-first'
+    ensureContractMeta(cid)
+    const err = new Error('first-event boom')
+    err.name = 'ChelErrorFirstEvent'
+    record(cid, 'h0', 0, undefined, mkState(1), true, err)
+    const entries = getEntries(cid)!
+    assert.strictEqual(entries.length, 1)
+    const snap = entries[0] as Extract<JournalEntry, { kind: 'snapshot' }>
+    assert.strictEqual(snap.kind, 'snapshot')
+    assert.deepStrictEqual(snap.error, {
+      name: 'ChelErrorFirstEvent',
+      message: 'first-event boom'
+    })
+  })
+
+  it('attaches { name, message } to a resync snapshot when the resync event errored', () => {
+    // A strictly-backwards height re-seeds the journal with a fresh
+    // snapshot. If processMutation throws on that re-seed event we
+    // still want the error detail preserved.
+    const cid = 'cid-errored-resync'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    record(cid, 'h1', 1, mkState(1), mkState(2))
+    // Resync: height moves backwards to 0.
+    const err = new Error('resync boom')
+    err.name = 'ChelErrorResync'
+    record(cid, 'h-resync', 0, undefined, mkState(9), true, err)
+    const entries = getEntries(cid)!
+    assert.strictEqual(entries.length, 1, 'resync must collapse to a single snapshot')
+    const snap = entries[0] as Extract<JournalEntry, { kind: 'snapshot' }>
+    assert.strictEqual(snap.kind, 'snapshot')
+    assert.deepStrictEqual(snap.error, {
+      name: 'ChelErrorResync',
+      message: 'resync boom'
+    })
+  })
+
+  it('attaches { name, message } to a forward-gap snapshot when the gap event errored', () => {
+    // A strictly-forward height gap (last height N, incoming height >
+    // N + 1) is also treated as a resync and emits a fresh snapshot.
+    const cid = 'cid-errored-gap'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    record(cid, 'h1', 1, mkState(1), mkState(2))
+    // Gap: jump from height 1 to height 5 — height > lastEntry.height + 1.
+    const err = new Error('gap boom')
+    err.name = 'ChelErrorGap'
+    record(cid, 'h-gap', 5, mkState(2), mkState(3), true, err)
+    const entries = getEntries(cid)!
+    assert.strictEqual(entries.length, 1, 'forward-gap must collapse to a single snapshot')
+    const snap = entries[0] as Extract<JournalEntry, { kind: 'snapshot' }>
+    assert.strictEqual(snap.kind, 'snapshot')
+    assert.deepStrictEqual(snap.error, {
+      name: 'ChelErrorGap',
+      message: 'gap boom'
+    })
+  })
+
+  it('omits `error` on a snapshot when processingErrored is false even if an error reference is passed', () => {
+    // Mirror of the patch-side defensive check: an `error` argument
+    // must be ignored when the mutation succeeded.
+    const cid = 'cid-snapshot-no-error-on-success'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1), false, new Error('ignored'))
+    const entries = getEntries(cid)!
+    const snap = entries[0] as Extract<JournalEntry, { kind: 'snapshot' }>
+    assert.strictEqual(snap.kind, 'snapshot')
+    assert.strictEqual(snap.error, undefined)
+  })
+
+  it('omits `error` on a snapshot when processingErrored is true but no error reference is passed', () => {
+    const cid = 'cid-snapshot-errored-no-detail'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1), true)
+    const entries = getEntries(cid)!
+    const snap = entries[0] as Extract<JournalEntry, { kind: 'snapshot' }>
+    assert.strictEqual(snap.kind, 'snapshot')
+    assert.strictEqual(snap.error, undefined)
   })
 
   it('normalizes non-Error throwables (string, number, plain object, null) into { name, message }', () => {
