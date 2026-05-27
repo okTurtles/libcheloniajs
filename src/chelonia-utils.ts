@@ -25,6 +25,8 @@ export default sbp('sbp/selectors/register', {
     data,
     onconflict,
     ifMatch,
+    maxAttempts,
+    signal,
     encryptionKeyName = 'cek',
     signingKeyName = 'csk'
   }: {
@@ -33,15 +35,19 @@ export default sbp('sbp/selectors/register', {
     data: JSONType;
     onconflict?: ChelKvOnConflictCallback;
     ifMatch?: string;
+    maxAttempts?: number;
+    signal?: AbortSignal;
     encryptionKeyName: string;
     signingKeyName: string;
-  }) => {
+  }): Promise<{ etag: string | null }> => {
     return sbp('chelonia/queueInvocation', contractID, () => {
       return sbp('chelonia/kv/set', contractID, key, data, {
         ifMatch,
         encryptionKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, encryptionKeyName),
         signingKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, signingKeyName),
-        onconflict
+        onconflict,
+        maxAttempts,
+        signal
       })
     })
   }

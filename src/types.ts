@@ -166,6 +166,72 @@ export type JournalConfig = {
   applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };
 
+// ---------------------------------------------------------------------------
+// KV slot API (see KV-REVAMPED.md and src/kv.ts).
+// ---------------------------------------------------------------------------
+
+// Reducer signature for `chelonia/kv/update`. The reducer receives the latest
+// known value (mirror on first attempt; server `currentData` on conflict
+// retry) and returns the next value, or the `KV_NOOP` sentinel to abort the
+// write. See KV-REVAMPED.md §3.3.
+export type KvUpdater<T> = (prev: T) => T | symbol;
+
+// Status of a KV slot's mirror entry. See KV-REVAMPED.md §5.
+export type KvLoadStatus = 'non-init' | 'loading' | 'loaded' | 'error';
+
+// Context passed to `onUpdate` and embedded in the `CHELONIA_KV_UPDATED`
+// event payload. See KV-REVAMPED.md §4.1.
+export type KvUpdateCtx = {
+  contractID: string;
+  // Resolved from `rootState.contracts[contractID]._vm.type`.
+  contractType: string;
+  key: string;
+  reason: 'load' | 'remote' | 'local' | 'reconnect';
+  etag: string | null;
+  // Mirror value before this update; `undefined` on first load.
+  previousValue: JSONType | undefined;
+};
+
+// Public subset of the internal `SlotDefinition`. Accepted by
+// `chelonia/kv/defineSlot`. See KV-REVAMPED.md §4.1.
+export type KvSlotDefinition = {
+  contractType: string | string[];
+  key: string;
+  defaultValue?: JSONType | (() => JSONType);
+  schema?: { parse: (value: unknown) => JSONType };
+  match?: (contractID: string, contractState: object, rootState: object) => boolean;
+  encryptionKeyName?: string;
+  signingKeyName?: string;
+  // Optional default reducer factory; enables the `value`-form of
+  // `chelonia/kv/update`. See KV-REVAMPED.md §4.1 / §4.2.
+  defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
+  autoSubscribe?: boolean;
+  autoLoad?: 'on-sync' | 'on-demand' | 'never';
+  refreshOnReconnect?: boolean;
+  onUpdate?: (value: JSONType, ctx: KvUpdateCtx) => void | Promise<void>;
+};
+
+// Internal, resolved form of a slot definition. Built from a
+// `KvSlotDefinition` at `chelonia/kv/defineSlot` time: defaults applied,
+// `resolvedDefault` computed, `contractType` narrowed to a single string
+// (the public form accepts an array; each entry is stored as its own
+// `SlotDefinition`). NOT re-exported from `index.ts` — internal only.
+export type SlotDefinition = {
+  contractType: string;
+  key: string;
+  defaultValue: JSONType | (() => JSONType);
+  resolvedDefault: JSONType;
+  schema?: { parse: (value: unknown) => JSONType };
+  match?: (contractID: string, contractState: object, rootState: object) => boolean;
+  encryptionKeyName: string;
+  signingKeyName: string;
+  defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
+  autoSubscribe: boolean;
+  autoLoad: 'on-sync' | 'on-demand' | 'never';
+  refreshOnReconnect: boolean;
+  onUpdate?: (value: JSONType, ctx: KvUpdateCtx) => void | Promise<void>;
+};
+
 export type SendMessageHooks = Partial<{
   prepublish: (entry: SPMessage) => void | Promise<void>;
   onprocessed: (entry: SPMessage) => void;
@@ -245,6 +311,11 @@ export type CheloniaContractCtx = {
     }
   >;
   methods: Record<string, (...args: unknown[]) => unknown>;
+  // Optional declarative KV slot block — sugar over
+  // `chelonia/kv/defineSlot`. See KV-REVAMPED.md §4.8. Each entry is
+  // registered as if the consumer had called `defineSlot` with
+  // `contractType: manifest` and `key` set from the entry name.
+  kv?: Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>;
 };
 export type CheloniaContext = {
   config: CheloniaConfig;
@@ -278,6 +349,21 @@ export type CheloniaContext = {
   defContractManifest: string;
   defContractSBP: typeof sbp;
   defContract: CheloniaContractCtx;
+  // KV slot registry — see KV-REVAMPED.md §11.2.
+  // Primary registry keyed by `${contractType}::${key}`.
+  kvSlots: Map<string, SlotDefinition>;
+  // Secondary index for O(1) pubsub dispatch: contractID → (key → slot).
+  kvSlotsByContractID: Map<string, Map<string, SlotDefinition>>;
+  // Effective filter cache per contract — used to coalesce setFilter.
+  kvActiveFilters: Map<string, Set<string>>;
+  // Microtask flush set for setFilter coalescing (see §11.5).
+  kvFilterDirty: Set<string>;
+  // Bounded FIFO of locally-generated write nonces for self-echo
+  // suppression. Keyed by `${contractID}::${key}`, max 8 entries each.
+  kvLocalEchoNonces: Map<string, string[]>;
+  // Previous `kv` block per manifest, used by `defineContract`
+  // replacement to diff against the new block.
+  defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
 };
 
 export type ChelContractManifestBody = {
@@ -423,6 +509,21 @@ export type ChelRootState = {
   >;
   // Secret keys. Format secretKeys[keyId] = serializedSecretKey
   secretKeys: Record<string, string>;
+  // KV slot mirror — see KV-REVAMPED.md §5. Indexed by contractID then
+  // slot key. `null` is reserved as the wire-level clear sentinel and
+  // MUST NOT appear as a stored value.
+  _kv?: Record<
+    string,
+    Record<
+      string,
+      {
+        value: JSONType | undefined;
+        etag: string | null;
+        status: KvLoadStatus;
+        lastError?: { name: string; message: string };
+      }
+    >
+  >;
 };
 
 export type Response = {

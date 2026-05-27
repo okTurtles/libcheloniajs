@@ -187,12 +187,29 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // when there is a third contract (for example, a group chatroom) using
         // those rotated keys as foreign keys.
         this.subscriptionSet = new Set();
+        // KV slot registry — see KV-REVAMPED.md §11.2.
+        // `kvSlots` and `defContractKvByManifest` survive `chelonia/reset`
+        // because slot definitions are application code. The other four
+        // are per-subscription runtime state and are reset alongside
+        // `subscriptionSet` / `rootState._kv`.
+        this.kvSlots = new Map();
+        this.kvSlotsByContractID = new Map();
+        this.kvActiveFilters = new Map();
+        this.kvFilterDirty = new Set();
+        this.kvLocalEchoNonces = new Map();
+        this.defContractKvByManifest = new Map();
         // pending includes contracts that are scheduled for syncing or in the
         // process of syncing for the first time. After sync completes for the
         // first time, they are removed from pending and added to subscriptionSet
         this.pending = [];
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         rootState.secretKeys = rootState.secretKeys || Object.create(null);
+        // Initialise the KV mirror lazily — see KV-REVAMPED.md §5. Created
+        // as a plain object so reactive frameworks (Vue) can observe
+        // additions via `config.reactiveSet`.
+        if (!rootState._kv) {
+            this.config.reactiveSet(rootState, '_kv', Object.create(null));
+        }
     },
     'chelonia/config': function () {
         const out = {
@@ -443,6 +460,16 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         (0, utils_js_1.reactiveClearObject)(rootState, this.config.reactiveDel);
         this.config.reactiveSet(rootState, 'contracts', Object.create(null));
         this.config.reactiveSet(rootState, 'secretKeys', Object.create(null));
+        // Re-seed the KV mirror — `reactiveClearObject` above stripped it
+        // along with everything else. Slot definitions (`kvSlots`) and the
+        // per-manifest cache (`defContractKvByManifest`) survive reset
+        // because they are code-level state; the four per-subscription maps
+        // are cleared in lock-step with `subscriptionSet` below.
+        this.config.reactiveSet(rootState, '_kv', Object.create(null));
+        this.kvSlotsByContractID.clear();
+        this.kvActiveFilters.clear();
+        this.kvFilterDirty.clear();
+        this.kvLocalEchoNonces.clear();
         (0, utils_js_1.clearObject)(this.ephemeralReferenceCount);
         this.pending.splice(0);
         (0, utils_js_1.clearObject)(this.currentSyncs);
@@ -763,14 +790,23 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                         return;
                                     }
                                     (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, () => {
-                                        v.call(this.pubsub, [
-                                            msg.key,
-                                            parseEncryptedOrUnencryptedMessage(this, {
-                                                contractID: msg.channelID,
-                                                meta: msg.key,
-                                                serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
-                                            })
-                                        ]);
+                                        const parsed = parseEncryptedOrUnencryptedMessage(this, {
+                                            contractID: msg.channelID,
+                                            meta: msg.key,
+                                            serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
+                                        });
+                                        v.call(this.pubsub, [msg.key, parsed]);
+                                        // Additionally feed the slot machinery (KV-REVAMPED §11.4
+                                        // bullet 1). Must run in the same queueInvocation lane so
+                                        // it serialises with `chelonia/kv/update` writes against
+                                        // this contract. `_handleRemote` is a no-op when no slot
+                                        // is registered for `(channelID, key)`.
+                                        try {
+                                            (0, sbp_1.default)('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed);
+                                        }
+                                        catch (e) {
+                                            console.error(`[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`, e);
+                                        }
                                     }).catch((e) => {
                                         console.error(`[chelonia] Error processing kv event for ${msg.channelID} and key ${msg.key}`, msg, e);
                                     });
@@ -820,6 +856,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         contract.state = (contractID) => (0, sbp_1.default)(this.config.stateSelector)[contractID];
         contract.manifest = this.defContractManifest;
         contract.sbp = this.defContractSBP;
+        // KV co-location bookkeeping (KV-REVAMPED §4.8 / §11.3 steps 7–8).
+        // Capture the previous `kv` block for this manifest *before*
+        // rebuilding selectors so the cleanup pass can diff old vs new
+        // key sets. `contract.kv` may legitimately be absent on a
+        // replacement; an absent `kv` with a non-empty `prevKv` is the
+        // signal to unregister every previously-declared key.
+        const prevKv = this.defContractKvByManifest.get(contract.manifest);
         this.defContractSelectors = [];
         this.defContract = contract;
         this.defContractSelectors.push(...(0, sbp_1.default)('sbp/selectors/register', {
@@ -913,6 +956,23 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             }));
         }
         (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CONTRACT_REGISTERED, contract);
+        // Diff KV blocks and (re)register manifest-scoped slots.
+        // - Cleanup runs first so removed keys are unregistered before
+        //   the new ones are registered (keys present in both are handled
+        //   by `defineSlot`'s replacement path, which preserves persisted
+        //   mirror values and re-validates them against the new schema).
+        // - Bookkeeping update keeps the next `defineContract` call able
+        //   to diff against the current key set.
+        if (prevKv || contract.kv) {
+            (0, sbp_1.default)('chelonia/kv/_cleanupContractSlots', contract.manifest, prevKv, contract.kv ?? {});
+        }
+        if (contract.kv) {
+            (0, sbp_1.default)('chelonia/kv/_registerContractSlots', contract.manifest, contract.kv);
+            this.defContractKvByManifest.set(contract.manifest, contract.kv);
+        }
+        else if (prevKv) {
+            this.defContractKvByManifest.delete(contract.manifest);
+        }
     },
     'chelonia/queueInvocation': (contractID, sbpInvocation) => {
         // We maintain two queues, contractID, used for internal events (i.e.,
@@ -1881,11 +1941,19 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // this case, see if `chelonia/kv/queuedSet` covers your needs.
     // `data` is allowed to be falsy, in which case a fetch will occur first and
     // the `onconflict` handler will be called.
-    'chelonia/kv/set': async function (contractID, key, data, { ifMatch, innerSigningKeyId, encryptionKeyId, signingKeyId, maxAttempts, onconflict }) {
+    'chelonia/kv/set': async function (contractID, key, data, { ifMatch, innerSigningKeyId, encryptionKeyId, signingKeyId, maxAttempts, onconflict, signal: callerSignal }) {
         maxAttempts = maxAttempts ?? 3;
         const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`;
         const hasOnconflict = typeof onconflict === 'function';
+        // Compose the caller-provided signal with Chelonia's global abort
+        // controller (KV-REVAMPED.md §4.2). When `callerSignal` is omitted,
+        // we fall back to the global signal unchanged for full backwards
+        // compatibility with existing call sites.
+        const fetchSignal = callerSignal
+            ? AbortSignal.any([this.abortController.signal, callerSignal])
+            : this.abortController.signal;
         let response;
+        let lastEtag = null;
         // The `resolveData` function is tasked with computing merged data, as in
         // merging the existing stored values (after a conflict or initial fetch)
         // and new data. The return value indicates whether there should be a new
@@ -1920,6 +1988,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             else if (response.status !== 404 && response.status !== 410) {
                 throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode('[kv/set] Invalid response code: ' + response.status);
             }
+            const headerEtag = response.headers.get('x-cid') || response.headers.get('etag');
+            if (headerEtag)
+                lastEtag = headerEtag;
             const result = await onconflict({
                 contractID,
                 key,
@@ -1929,7 +2000,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // returned as undefined, which will then use the `''` fallback value
                 // when writing. This allows 404 / 410 responses to work even if no
                 // etag is explicitly given
-                etag: response.headers.get('x-cid') || response.headers.get('etag'),
+                etag: headerEtag,
                 get currentData() {
                     return currentValue?.data;
                 },
@@ -1958,7 +2029,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     ]),
                     method: 'POST',
                     body: JSON.stringify(serializedData),
-                    signal: this.abortController.signal
+                    signal: fetchSignal
                 });
             }
             else {
@@ -1972,7 +2043,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     headers: new Headers([
                         ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)]
                     ]),
-                    signal: this.abortController.signal
+                    signal: fetchSignal
                 });
                 // This is only for the initial case; the logic is replicated below
                 // for subsequent iterations that require conflic resolution.
@@ -1988,6 +2059,14 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 if (response.status === 409 || response.status === 412) {
                     if (--maxAttempts <= 0) {
                         throw new Error('kv/set conflict setting KV value');
+                    }
+                    // Honour caller-side abort at every retry boundary so a
+                    // cancellation that lands between requests is respected
+                    // without waiting for the next fetch.
+                    if (callerSignal?.aborted) {
+                        throw callerSignal.reason instanceof Error
+                            ? callerSignal.reason
+                            : new DOMException('Aborted', 'AbortError');
                     }
                     // Only retry if an onconflict handler exists to potentially resolve it
                     await (0, turtledash_1.delay)((0, turtledash_1.randomIntFromRange)(0, 1500));
@@ -2006,8 +2085,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 }
                 throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode('kv/set invalid response status: ' + response.status);
             }
+            // Successful write: capture the server-issued etag (x-cid /
+            // etag header) so the resolved value reflects the freshest
+            // version. See KV-REVAMPED.md §4.2 step 6.
+            const successEtag = response.headers.get('x-cid') || response.headers.get('etag');
+            if (successEtag)
+                lastEtag = successEtag;
             break;
         }
+        return { etag: lastEtag };
     },
     'chelonia/kv/get': async function (contractID, key) {
         const response = await this.config.fetch(`${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`, {
