@@ -530,7 +530,7 @@ export default sbp('sbp/selectors/register', {
       // pass in globals that we want access to by default in the sandbox
       // note: you can undefine these by setting them to undefined in exposedGlobals
       crypto: {
-        getRandomValues: <T extends ArrayBufferView>(v: T) =>
+        getRandomValues: <T extends ArrayBufferView<ArrayBuffer>>(v: T) =>
           globalThis.crypto.getRandomValues<T>(v)
       },
       ...(typeof window === 'object' &&
@@ -3139,7 +3139,7 @@ const reprocessDebounced = (contractID: string): void => {
       sbp('chelonia/private/out/sync', contractID, { force: true }).catch((e: unknown) => {
         console.error(`[chelonia] Error at reprocessDebounced for ${contractID}`, e)
       })
-    }, 1000) as DebouncedFn
+    }, 1000)
     reprocessDebounceMap.set(contractID, d)
   }
   d()
