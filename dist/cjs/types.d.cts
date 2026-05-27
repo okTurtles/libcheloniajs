@@ -266,6 +266,7 @@ export type CheloniaContext = {
         added: string[];
         removed: string[];
     }) => void;
+    kvReconnectListener: (client: import('./pubsub/index.cjs').PubSubClient) => void;
     defContractSelectors: string[];
     defContractManifest: string;
     defContractSBP: typeof sbp;

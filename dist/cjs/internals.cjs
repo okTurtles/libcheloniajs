@@ -483,6 +483,21 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             }
             this.config.reactiveDel(state, contractID);
         }
+        // Drop per-contract KV runtime state (only on real removal, not resync).
+        // The empty-filter frame must reach the server before the state is cleared
+        // so that stale notifications stop flowing.
+        if (!params?.resync) {
+            try {
+                (0, sbp_1.default)('chelonia/kv/setFilter', contractID, []);
+            }
+            catch { /* best-effort; pubsub may already be gone */ }
+            if (state._kv?.[contractID] !== undefined) {
+                this.config.reactiveDel(state._kv, contractID);
+            }
+            this.kvSlotsByContractID.delete(contractID);
+            this.kvActiveFilters.delete(contractID);
+            this.kvFilterDirty.delete(contractID);
+        }
         this.subscriptionSet.delete(contractID);
         // calling this will make pubsub unsubscribe for events on `contractID`
         (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {

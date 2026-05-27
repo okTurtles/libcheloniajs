@@ -4,7 +4,7 @@ import sbp from '@sbp/sbp';
 import { cloneDeep, delay, difference, has, intersection, merge, randomHexString, randomIntFromRange } from 'turtledash';
 import { createCID, multicodes, parseCID } from './functions.mjs';
 import { Buffer } from 'buffer';
-import { NOTIFICATION_TYPE, createClient } from './pubsub/index.mjs';
+import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, createClient } from './pubsub/index.mjs';
 import { EDWARDS25519SHA512BATCH, deserializeKey, keyId, keygen, serializeKey } from '@chelonia/crypto';
 import { ChelErrorResourceGone, ChelErrorUnexpected, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable } from './errors.mjs';
 import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './events.mjs';
@@ -829,6 +829,36 @@ export default sbp('sbp/selectors/register', {
             // Keep pubsub in sync (logged into the right "rooms") with 'state.contracts'
             this.contractsModifiedListener = () => sbp('chelonia/pubsub/update');
             sbp('okTurtles.events/on', CONTRACTS_MODIFIED, this.contractsModifiedListener);
+        }
+        if (!this.kvReconnectListener) {
+            // KV-REVAMPED §11.4 bullet 3: on websocket reconnect, clear echo
+            // nonces and re-fetch every slot with `refreshOnReconnect: true`.
+            // `client.isNew` is `true` on the initial connection and `false`
+            // on reconnects, so we skip the initial connection to avoid
+            // duplicating the load that `_reconcileForSlot` already scheduled.
+            this.kvReconnectListener = (client) => {
+                if (client.isNew)
+                    return;
+                this.kvLocalEchoNonces.clear();
+                for (const [contractID, perKey] of this.kvSlotsByContractID) {
+                    for (const [key, slot] of perKey) {
+                        if (!slot.refreshOnReconnect)
+                            continue;
+                        sbp('chelonia/queueInvocation', contractID, () => {
+                            if (!this.subscriptionSet.has(contractID))
+                                return;
+                            return sbp('chelonia/kv/_loadSlot', {
+                                contractID,
+                                slot,
+                                reason: 'reconnect'
+                            });
+                        }).catch((e) => {
+                            console.error(`[chelonia/kv] reconnect _loadSlot failed for ${contractID}::${key}`, e);
+                        });
+                    }
+                }
+            };
+            sbp('okTurtles.events/on', PUBSUB_RECONNECTION_SUCCEEDED, this.kvReconnectListener);
         }
         return this.pubsub;
     },

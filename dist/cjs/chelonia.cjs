@@ -836,6 +836,36 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             this.contractsModifiedListener = () => (0, sbp_1.default)('chelonia/pubsub/update');
             (0, sbp_1.default)('okTurtles.events/on', events_js_1.CONTRACTS_MODIFIED, this.contractsModifiedListener);
         }
+        if (!this.kvReconnectListener) {
+            // KV-REVAMPED §11.4 bullet 3: on websocket reconnect, clear echo
+            // nonces and re-fetch every slot with `refreshOnReconnect: true`.
+            // `client.isNew` is `true` on the initial connection and `false`
+            // on reconnects, so we skip the initial connection to avoid
+            // duplicating the load that `_reconcileForSlot` already scheduled.
+            this.kvReconnectListener = (client) => {
+                if (client.isNew)
+                    return;
+                this.kvLocalEchoNonces.clear();
+                for (const [contractID, perKey] of this.kvSlotsByContractID) {
+                    for (const [key, slot] of perKey) {
+                        if (!slot.refreshOnReconnect)
+                            continue;
+                        (0, sbp_1.default)('chelonia/queueInvocation', contractID, () => {
+                            if (!this.subscriptionSet.has(contractID))
+                                return;
+                            return (0, sbp_1.default)('chelonia/kv/_loadSlot', {
+                                contractID,
+                                slot,
+                                reason: 'reconnect'
+                            });
+                        }).catch((e) => {
+                            console.error(`[chelonia/kv] reconnect _loadSlot failed for ${contractID}::${key}`, e);
+                        });
+                    }
+                }
+            };
+            (0, sbp_1.default)('okTurtles.events/on', index_js_1.PUBSUB_RECONNECTION_SUCCEEDED, this.kvReconnectListener);
+        }
         return this.pubsub;
     },
     // This selector is defined primarily for ingesting web push notifications,
