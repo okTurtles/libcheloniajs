@@ -56,7 +56,6 @@ import {
   unwrapMaybeEncryptedData
 } from './encryptedData.js'
 import './files.js'
-import './internals.js'
 import { clearReprocessDebounceAll, type PublishOptions } from './internals.js'
 import {
   isSignedData,

@@ -11,6 +11,7 @@ const turtledash_1 = require("turtledash");
 const functions_js_1 = require("./functions.cjs");
 const buffer_1 = require("buffer");
 const index_js_1 = require("./pubsub/index.cjs");
+const reingestTracker_js_1 = require("./reingestTracker.cjs");
 const crypto_1 = require("@chelonia/crypto");
 const errors_js_1 = require("./errors.cjs");
 const events_js_1 = require("./events.cjs");
@@ -20,7 +21,7 @@ require("./chelonia-utils.cjs");
 const journal_js_1 = require("./journal.cjs");
 const encryptedData_js_1 = require("./encryptedData.cjs");
 require("./files.cjs");
-require("./internals.cjs");
+const internals_js_1 = require("./internals.cjs");
 const signedData_js_1 = require("./signedData.cjs");
 require("./time-sync.cjs");
 const utils_js_1 = require("./utils.cjs");
@@ -450,6 +451,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         (0, utils_js_1.clearObject)(this.sideEffectStacks);
         const removedContractIDs = Array.from(this.subscriptionSet);
         this.subscriptionSet.clear();
+        // Drop every pending re-ingest entry. The tracker is module-level
+        // state that would otherwise survive `chelonia/reset` and poison
+        // the next session with "Already attempted to reingest" on hashes
+        // that belong to a contract timeline we've now torn down.
+        (0, reingestTracker_js_1.clearReingestTrackerAll)();
+        // Cancel any pending forced-resync timers. Otherwise a timer
+        // scheduled before the reset would fire `chelonia/private/out/sync`
+        // against a contract whose state has been torn down.
+        (0, internals_js_1.clearReprocessDebounceAll)();
         (0, sbp_1.default)('chelonia/clearTransientSecretKeys');
         (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_RESET);
         (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {

@@ -12,6 +12,7 @@
     "skipLibCheck": false,
     "forceConsistentCasingInFileNames": true,
     "lib": ["ES2022", "dom"],
+    "types": ["node"],
     "isolatedModules": true,
     "allowJs": true,
     "checkJs": true

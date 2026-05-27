@@ -9,6 +9,7 @@ import { encryptedIncomingData, encryptedOutgoingData } from './encryptedData.mj
 import { ChelErrorAlreadyProcessed, ChelErrorDBBadPreviousHEAD, ChelErrorFetchServerTimeFailed, ChelErrorForkedChain, ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnrecoverable, ChelErrorWarning } from './errors.mjs';
 import { CONTRACTS_MODIFIED, CONTRACT_HAS_RECEIVED_KEYS, CONTRACT_IS_SYNCING, EVENT_HANDLED, EVENT_PUBLISHED, EVENT_PUBLISHING_ERROR } from './events.mjs';
 import { multicodes } from './functions.mjs';
+import { clearReingestTrackerForContract, noteFutureEvent, noteReingestSuccess } from './reingestTracker.mjs';
 import { isSignedData, signedIncomingData } from './signedData.mjs';
 import { buildShelterAuthorizationHeader, deleteKeyHelper, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, updateKey, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
 // Used for temporarily storing the missing decryption key IDs in a given
@@ -400,6 +401,14 @@ export default sbp('sbp/selectors/register', {
     // Warning: avoid using this unless you know what you're doing. Prefer using /remove.
     'chelonia/private/removeImmediately': function (contractID, params) {
         const state = sbp(this.config.stateSelector);
+        // Drop any pending re-ingest entries and any scheduled forced
+        // re-sync for this contract up-front, unconditionally. We do this
+        // before the contract-name early-return below because if the
+        // contract row is missing the entries can never be re-delivered
+        // here, and a pending debounce timer would fire a force-sync
+        // against a contract we've already given up on.
+        clearReingestTrackerForContract(contractID);
+        clearReprocessDebounceForContract(contractID);
         const contractName = state.contracts[contractID]?.type;
         if (!contractName) {
             console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
@@ -449,6 +458,9 @@ export default sbp('sbp/selectors/register', {
             this.config.reactiveDel(state, contractID);
         }
         this.subscriptionSet.delete(contractID);
+        // (Tracker + debounce cancellation moved to the top of this selector
+        // so the early-return path on a missing contract row also clears.
+        // See the comment block at the top of this function.)
         // calling this will make pubsub unsubscribe for events on `contractID`
         sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {
             added: [],
@@ -2354,10 +2366,47 @@ export default sbp('sbp/selectors/register', {
         }
     }
 });
-const eventsToReingest = [];
-const reprocessDebounced = debounce((contractID) => sbp('chelonia/private/out/sync', contractID, { force: true }).catch((e) => {
-    console.error(`[chelonia] Error at reprocessDebounced for ${contractID}`, e);
-}), 1000);
+const reprocessDebounceMap = new Map();
+const reprocessDebounced = (contractID) => {
+    let d = reprocessDebounceMap.get(contractID);
+    if (!d) {
+        // The closure below captures `contractID` from this arrow's parameter.
+        // That's safe because each contract gets its own debounce instance
+        // keyed by `contractID` in `reprocessDebounceMap`, so the closure
+        // only ever sees the value it was created with. If this invariant
+        // ever changes (e.g. a single debounce shared across contracts),
+        // the capture must be made explicit (e.g. via `.bind`) to avoid
+        // firing a force-sync against the wrong contract.
+        d = debounce(() => {
+            // Drop our slot before firing so a follow-up call after the timer
+            // has fired but before `chelonia/private/out/sync` resolves gets a
+            // fresh debounce rather than reusing a stale one (whose internal
+            // `timeout` is already `undefined` so it'd fire instantly).
+            reprocessDebounceMap.delete(contractID);
+            sbp('chelonia/private/out/sync', contractID, { force: true }).catch((e) => {
+                console.error(`[chelonia] Error at reprocessDebounced for ${contractID}`, e);
+            });
+        }, 1000);
+        reprocessDebounceMap.set(contractID, d);
+    }
+    d();
+};
+// Cancel a pending forced-resync for a contract. Called when the
+// contract's tracker entries are dropped (removeImmediately, reset) so
+// a stale timer can't fire a force-sync against a freshly torn-down or
+// re-seeded contract.
+export const clearReprocessDebounceForContract = (contractID) => {
+    const d = reprocessDebounceMap.get(contractID);
+    if (d) {
+        d.clear();
+        reprocessDebounceMap.delete(contractID);
+    }
+};
+export const clearReprocessDebounceAll = () => {
+    for (const d of reprocessDebounceMap.values())
+        d.clear();
+    reprocessDebounceMap.clear();
+};
 const handleEvent = {
     checkMessageOrdering(message) {
         const contractID = message.contractID();
@@ -2388,19 +2437,21 @@ const handleEvent = {
             }
             throw new ChelErrorAlreadyProcessed(`Message ${hash} with height ${height} in contract ${contractID} has already been processed. Current height: ${latestProcessedHeight}.`);
         }
-        // If the message is from the future, add it to eventsToReingest
+        // If the message is from the future, hand it to the per-contract
+        // re-ingest tracker
         if (latestProcessedHeight + 1 < height) {
             if (this.config.strictOrdering) {
                 throw new ChelErrorDBBadPreviousHEAD(`Unexpected message ${hash} with height ${height} in contract ${contractID}: height is too high. Current height: ${latestProcessedHeight}.`);
             }
             // sometimes we simply miss messages, it's not clear why, but it happens
-            // in rare cases. So we attempt to re-sync this contract once
-            if (eventsToReingest.length > 100) {
-                throw new ChelErrorUnrecoverable('more than 100 different bad previousHEAD errors');
-            }
-            if (!eventsToReingest.includes(hash)) {
+            // in rare cases. So we attempt to re-sync this contract once.
+            // The tracker is per-contract, so a chatty contract can't starve
+            // others, and its cap (REINGEST_PER_CONTRACT_CAP) is enforced by
+            // `noteFutureEvent` which throws `ChelErrorUnrecoverable` on
+            // overflow — only when *this* contract is genuinely wedged.
+            const note = noteFutureEvent(contractID, hash);
+            if (note === 'added') {
                 console.warn(`[chelonia] WARN bad previousHEAD for ${message.description()}, will attempt to re-sync contract to reingest message`);
-                eventsToReingest.push(hash);
                 reprocessDebounced(contractID);
                 return false; // ignore the error for now
             }
@@ -2409,10 +2460,8 @@ const handleEvent = {
                 throw new ChelErrorDBBadPreviousHEAD(`Already attempted to reingest ${hash}`);
             }
         }
-        const reprocessIdx = eventsToReingest.indexOf(hash);
-        if (reprocessIdx !== -1) {
+        if (noteReingestSuccess(contractID, hash)) {
             console.warn(`[chelonia] WARN: successfully reingested ${message.description()}`);
-            eventsToReingest.splice(reprocessIdx, 1);
         }
     },
     async processMutation(message, state, internalSideEffectStack) {

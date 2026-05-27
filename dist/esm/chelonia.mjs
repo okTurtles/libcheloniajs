@@ -5,6 +5,7 @@ import { cloneDeep, delay, difference, has, intersection, merge, randomHexString
 import { createCID, multicodes, parseCID } from './functions.mjs';
 import { Buffer } from 'buffer';
 import { NOTIFICATION_TYPE, createClient } from './pubsub/index.mjs';
+import { clearReingestTrackerAll } from './reingestTracker.mjs';
 import { EDWARDS25519SHA512BATCH, deserializeKey, keyId, keygen, serializeKey } from '@chelonia/crypto';
 import { ChelErrorResourceGone, ChelErrorUnexpected, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable } from './errors.mjs';
 import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './events.mjs';
@@ -13,7 +14,7 @@ import './chelonia-utils.mjs';
 import { DEFAULT_SNAPSHOT_INTERVAL } from './journal.mjs';
 import { encryptedOutgoingData, encryptedOutgoingDataWithRawKey, isEncryptedData, maybeEncryptedIncomingData, unwrapMaybeEncryptedData } from './encryptedData.mjs';
 import './files.mjs';
-import './internals.mjs';
+import { clearReprocessDebounceAll } from './internals.mjs';
 import { isSignedData, signedIncomingData, signedOutgoingData, signedOutgoingDataWithRawKey } from './signedData.mjs';
 import './time-sync.mjs';
 import { buildShelterAuthorizationHeader, checkCanBeGarbageCollected, clearObject, collectEventStream, eventsAfter, findForeignKeysByContractID, findKeyIdByName, findRevokedKeyIdsByName, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, reactiveClearObject } from './utils.mjs';
@@ -444,6 +445,15 @@ export default sbp('sbp/selectors/register', {
         clearObject(this.sideEffectStacks);
         const removedContractIDs = Array.from(this.subscriptionSet);
         this.subscriptionSet.clear();
+        // Drop every pending re-ingest entry. The tracker is module-level
+        // state that would otherwise survive `chelonia/reset` and poison
+        // the next session with "Already attempted to reingest" on hashes
+        // that belong to a contract timeline we've now torn down.
+        clearReingestTrackerAll();
+        // Cancel any pending forced-resync timers. Otherwise a timer
+        // scheduled before the reset would fire `chelonia/private/out/sync`
+        // against a contract whose state has been torn down.
+        clearReprocessDebounceAll();
         sbp('chelonia/clearTransientSecretKeys');
         sbp('okTurtles.events/emit', CHELONIA_RESET);
         sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {

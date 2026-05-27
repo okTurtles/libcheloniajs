@@ -3,4 +3,6 @@ import './journal.test.mjs';
 import './journal-integration.test.mjs';
 import './persistent-actions.test.mjs';
 import './pubsub/index.test.mjs';
+import './reingestTracker.test.mjs';
+import './reingestTracker-integration.test.mjs';
 import './utils.test.mjs';
