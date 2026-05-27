@@ -82,6 +82,7 @@ src/
 ├── constants.ts          # INVITE_STATUS enum
 ├── persistent-actions.ts # PersistentAction queue with retry
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
+├── kv.ts                 # KV slots — declarative typed key/value store API
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time synchronization via monotonic offsets
 ├── chelonia-utils.ts     # Optional utility selectors (e.g., chelonia/kv/queuedSet)
@@ -130,6 +131,7 @@ Often the source file's default export is an array of the selector names it regi
 | `chelonia/journal/*` | `journal.ts` | Public journal API — get, reconstruct, clear |
 | `chelonia/private/journal/*` | `journal.ts` | Internal journal recorder — recordEvent |
 | `chelonia/kv/*` | `chelonia-utils.ts` | Key-value store — queuedSet |
+| `chelonia/kv/*` | `kv.ts` | KV slots — defineSlot, update, read, sync, clear, status, refreshFilters |
 | `chelonia/externalStateSetup` | `local-selectors/` | External state synchronization |
 
 #### Key Public Selectors
@@ -326,11 +328,14 @@ that subtree. Notably `chelonia/contract/fullState` returns
 `cheloniaState: rootState.contracts[contractID]` verbatim, and any
 listener on `EVENT_HANDLED` that snapshots `state.contracts` (e.g.
 the Vuex mirror set up by `chelonia/externalStateSetup`) will receive
-the journal as well. Treat the journal block as in-band with the rest
-of the bookkeeping subtree: redact accordingly, and if you need a
-journal-free view of `cheloniaState`, project it client-side via
-`{ ...cheloniaState, _journal: undefined }` (the journal API itself
-remains accessible through `chelonia/journal/get`).
+the journal as well. Similarly, `rootState._kv` (the KV mirror
+subtree) is projected into external stores by
+`chelonia/externalStateSetup`. Treat both `_journal` and `_kv` as
+in-band with the rest of the bookkeeping subtree: redact accordingly,
+and if you need a journal-free view of `cheloniaState`, project it
+client-side via `{ ...cheloniaState, _journal: undefined }` (the
+journal API itself remains accessible through `chelonia/journal/get`).
+For a `_kv`-free view, use `{ ...rootState, _kv: undefined }`.
 
 Supported state shape: the journal's deep-clone is JSON-shape-only.
 `Date` / `Map` / `Set` / `Buffer` / class instances inside contract
@@ -354,6 +359,72 @@ under the `./journal` subpath (`import { defaultDiff } from
 '@chelonia/lib/journal'`). The package-root import is the preferred
 form; the subpath is provided as a convenience for consumers that want
 to tree-shake just the journal helpers.
+
+### KV slots
+
+Chelonia provides a declarative key/value API (`chelonia/kv/*`) layered
+on the existing server-side KV store. Consumers register typed "slots"
+via `chelonia/kv/defineSlot`; the library manages a local mirror
+(`rootState._kv[contractID][key]`), pubsub filter coalescing, conflict
+retries, and schema validation automatically.
+
+Mirror state lives at `rootState._kv[contractID][key]` and contains
+`{ value, etag, status, lastError? }`. It is populated by
+`chelonia/kv/defineSlot` / `_loadSlot` / `_handleRemote` and cleaned up
+on contract release.
+
+Slot definitions (`KvSlotDefinition`) declare a `contractType`, `key`,
+`defaultValue`, optional `schema` (sync `.parse`), `match` predicate,
+`onUpdate` callback, and a handful of boolean flags (`autoSubscribe`,
+`autoLoad`, `refreshOnReconnect`). Slots can also be declared inline on
+a `chelonia/defineContract` call via the `kv` key. `defaultUpdater`
+enables a shorthand `value`-form on `chelonia/kv/update`.
+
+The `KV_NOOP` symbol (`Symbol.for('@chelonia/lib/KV_NOOP')`) can be
+returned from an updater to abort the write without touching the server.
+
+Config keys (all on `KvSlotDefinition`):
+
+| Key | Default | Purpose |
+|---|---|---|
+| `contractType` | (required) | Contract manifest string or array of strings. |
+| `key` | (required) | KV key name. |
+| `defaultValue` | `undefined` | Value returned by `read` before the slot is loaded. |
+| `schema` | none | Object with a synchronous `.parse(value)` method (e.g. Zod schema). |
+| `match` | `() => true` | Predicate `(cID, contractState, rootState) => boolean`. |
+| `autoSubscribe` | `true` | Whether to subscribe to pubsub for this slot automatically. |
+| `autoLoad` | `'on-sync'` | `'on-sync'` fetches on contract sync; `'on-demand'` waits for `read`/`sync`; `'never'` skips. |
+| `refreshOnReconnect` | `false` | Re-fetch the slot on pubsub reconnect. |
+| `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the `value` form of `update`. |
+| `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw. |
+
+Public selectors:
+
+```
+chelonia/kv/defineSlot        — Register or replace a slot definition
+chelonia/kv/update            — Write via updater or value; retries on conflict
+chelonia/kv/read              — Synchronous mirror read (returns default if unloaded)
+chelonia/kv/sync              — Force-fetch slot(s) from the server
+chelonia/kv/clear             — Reset slot to defaultValue (writes null to server)
+chelonia/kv/status            — KvLoadStatus of a slot or aggregate for a contract
+chelonia/kv/refreshFilters    — Re-evaluate match predicates after state transitions
+```
+
+Events emitted:
+
+```
+CHELONIA_KV_UPDATED          — Mirror value changed (load / remote / local / reconnect)
+CHELONIA_KV_STATUS_CHANGED   — Slot status transitioned
+CHELONIA_KV_VALIDATION_ERROR — Mirror value failed schema.parse
+```
+
+Consumer-visible leakage: `rootState._kv` is a separate subtree from
+`rootState.contracts`, but it is projected into external stores by
+`chelonia/externalStateSetup` (alongside `rootState.contracts`).
+Listeners on `CHELONIA_KV_UPDATED` / `CHELONIA_KV_STATUS_CHANGED` and
+the Vuex-style mirror receive the full `_kv` subtree. Treat it as
+in-band with the rest of the bookkeeping data: redact accordingly in
+consumer code if needed.
 
 ### Contract State Structure
 
