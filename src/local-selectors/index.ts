@@ -141,18 +141,18 @@ export default sbp('sbp/selectors/register', {
 
     // Mirror `rootState._kv[contractID]` into the external store on every
     // KV value change. KV updates don't fire EVENT_HANDLED (on-chain only).
+    // `fullState` now returns a `kvState` field sourced from `rootState._kv[contractID]`.
     handles.push(sbp('okTurtles.events/on', CHELONIA_KV_UPDATED, ({
       contractID
     }: { contractID: string }) => {
       sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
-        const { cheloniaState } = await sbp('chelonia/contract/fullState', contractID)
+        const { kvState } = await sbp('chelonia/contract/fullState', contractID)
         const externalState = sbp(stateSelector)
-        const kvSlice = cheloniaState?._kv?.[contractID]
-        if (kvSlice) {
+        if (kvState) {
           if (!externalState._kv) {
             reactiveSet(externalState, '_kv', Object.create(null))
           }
-          reactiveSet(externalState._kv, contractID, cloneDeep(kvSlice))
+          reactiveSet(externalState._kv, contractID, cloneDeep(kvState))
         } else if (externalState._kv) {
           reactiveDel(externalState._kv, contractID)
         }
@@ -161,18 +161,18 @@ export default sbp('sbp/selectors/register', {
 
     // Re-project on status changes (e.g. 'loaded' → 'error') where the value
     // is unchanged but status / lastError need to be visible in the store.
+    // Uses the same `kvState` field from `fullState`.
     handles.push(sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, ({
       contractID
     }: { contractID: string }) => {
       sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
-        const { cheloniaState } = await sbp('chelonia/contract/fullState', contractID)
+        const { kvState } = await sbp('chelonia/contract/fullState', contractID)
         const externalState = sbp(stateSelector)
-        const kvSlice = cheloniaState?._kv?.[contractID]
-        if (kvSlice) {
+        if (kvState) {
           if (!externalState._kv) {
             reactiveSet(externalState, '_kv', Object.create(null))
           }
-          reactiveSet(externalState._kv, contractID, cloneDeep(kvSlice))
+          reactiveSet(externalState._kv, contractID, cloneDeep(kvState))
         } else if (externalState._kv) {
           reactiveDel(externalState._kv, contractID)
         }

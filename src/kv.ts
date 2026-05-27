@@ -5,6 +5,7 @@
 // `chelonia/kv/get`, `chelonia/kv/setFilter`, `chelonia/kv/queuedSet`).
 // Behaviour lands incrementally — see the kv-revamped task plan.
 
+import { Buffer } from 'buffer'
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
 import { cloneDeep } from 'turtledash'
@@ -22,6 +23,7 @@ import {
   CONTRACTS_MODIFIED
 } from './events.js'
 import type {
+  ChelKvOnConflictCallback,
   CheloniaContext,
   ChelRootState,
   JSONType,
@@ -59,14 +61,13 @@ const registryKey = (contractType: string, key: string): string =>
 // and the result is what every subsequent reader sees.
 function resolveSlotDefinition (
   def: KvSlotDefinition,
-  contractType: string
+  contractType: string,
+  resolvedDefault: JSONType
 ): SlotDefinition {
-  const dv = def.defaultValue
-  const resolvedDefault: JSONType = (typeof dv === 'function' ? dv() : dv) ?? null
   return {
     contractType,
     key: def.key,
-    defaultValue: dv as JSONType | (() => JSONType),
+    defaultValue: def.defaultValue as JSONType | (() => JSONType),
     resolvedDefault,
     schema: def.schema,
     match: def.match,
@@ -197,7 +198,6 @@ function setSlotStatus (
   if (lastError) {
     ctx.config.reactiveSet(entry, 'lastError', lastError)
   } else if (entry.lastError) {
-    ctx.config.reactiveSet(entry, 'lastError', undefined as unknown as { name: string; message: string })
     // Use reactiveDel where available so the field truly disappears.
     ctx.config.reactiveDel(entry as unknown as Record<string, unknown>, 'lastError')
   }
@@ -429,11 +429,22 @@ export default (sbp('sbp/selectors/register', {
     if (types.length === 0) {
       throw new ChelErrorKvSlotInvalid('[chelonia/kv] defineSlot: contractType required')
     }
+    // Resolve the default value once before the loop — factories must run
+    // exactly once regardless of how many contract types are listed
+    // (KV-REVAMPED §4.1).
+    const dv = def.defaultValue
+    const resolvedDefault: JSONType | undefined = typeof dv === 'function' ? dv() : dv
+    if (resolvedDefault === undefined) {
+      throw new ChelErrorKvSlotInvalid(
+        `[chelonia/kv] defineSlot: slot '${def.key}' requires a defaultValue ` +
+        '(factories must return a non-undefined value)'
+      )
+    }
     for (const contractType of types) {
       if (typeof contractType !== 'string' || contractType.length === 0) {
         throw new ChelErrorKvSlotInvalid('[chelonia/kv] defineSlot: invalid contractType')
       }
-      const slot = resolveSlotDefinition(def, contractType)
+      const slot = resolveSlotDefinition(def, contractType, resolvedDefault)
       assertSchemaGuards(slot)
       const rKey = registryKey(contractType, def.key)
       const previous = this.kvSlots.get(rKey)
@@ -592,11 +603,42 @@ export default (sbp('sbp/selectors/register', {
         return
       }
       if (parsed === null) {
-        // 404 — key not yet written. Stay at the declared default
-        // (`value: undefined`) and surface `'non-init'` rather than
-        // `'loaded'`. No `CHELONIA_KV_UPDATED` is fired (there is no
-        // value transition to broadcast); the read path will
-        // substitute the deep-cloned default at read time (§4.3).
+        // 404 — key not yet written (or deleted server-side). Reset
+        // the mirror to the declared default state (`value: undefined`,
+        // `etag: null`) and surface `'non-init'` rather than `'loaded'`
+        // (§4.3). If the slot previously held a value, emit
+        // `CHELONIA_KV_UPDATED` so consumers observe the transition.
+        const existingEntry = perContract[slot.key]
+        if (existingEntry) {
+          const previousValue = existingEntry.value
+          this.config.reactiveSet(existingEntry, 'value', undefined)
+          this.config.reactiveSet(existingEntry, 'etag', null)
+          if (previousValue !== undefined) {
+            sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
+              contractID,
+              contractType: slot.contractType,
+              key: slot.key,
+              value: undefined,
+              previousValue,
+              reason,
+              etag: null
+            })
+            // Mirror the successful-load path: fire onUpdate so
+            // consumers observing the slot via the callback (not just
+            // the event bus) see the reversion to default. Pass the
+            // cloned default — the effective value a `read()` call
+            // would return (§4.3).
+            const defaultedValue = cloneDeep(slot.resolvedDefault)
+            await safeOnUpdate(slot, defaultedValue, {
+              contractID,
+              contractType: slot.contractType,
+              key: slot.key,
+              reason,
+              etag: null,
+              previousValue
+            })
+          }
+        }
         setSlotStatus(
           this, rootState, contractID, slot.contractType, slot.key, 'non-init'
         )
@@ -606,26 +648,14 @@ export default (sbp('sbp/selectors/register', {
       // `chelonia/kv/update` / `chelonia/kv/clear`. For backwards
       // compatibility with raw-API writers that don't wrap, fall
       // back to `parsed.data` itself.
-      const data = parsed.data
-      let unwrapped: JSONType
-      if (
-        data !== null &&
-        typeof data === 'object' &&
-        !Array.isArray(data) &&
-        '__chelKvNonce' in (data as object) &&
-        'value' in (data as object)
-      ) {
-        unwrapped = (data as { value: JSONType }).value
-      } else {
-        unwrapped = data
-      }
+      const unwrapped = unwrapData(parsed.data)
       const entry = perContract[slot.key]
       const previousValue = entry?.value
       // Wire `null` is the clear sentinel — skip schema.parse and
       // restore the deep-cloned default.
       let nextValue: JSONType
       if (unwrapped === null) {
-        nextValue = cloneDeep(slot.resolvedDefault) as JSONType
+        nextValue = cloneDeep(slot.resolvedDefault)
       } else if (slot.schema) {
         try {
           nextValue = slot.schema.parse(unwrapped)
@@ -727,10 +757,10 @@ export default (sbp('sbp/selectors/register', {
     contractID: string,
     key: string,
     parsed: ParsedEncryptedOrUnencryptedMessage<JSONType>
-  ): void {
+  ): Promise<void> {
     const perKey = this.kvSlotsByContractID.get(contractID)
     const slot = perKey?.get(key)
-    if (!slot) return
+    if (!slot) return Promise.resolve()
     // Unwrap `{ __chelKvNonce, value }` envelope, with raw-API
     // tolerance (mirrors the `_loadSlot` unwrap shape).
     const data = parsed?.data as JSONType
@@ -761,7 +791,7 @@ export default (sbp('sbp/selectors/register', {
         if (idx >= 0) {
           fifo.splice(idx, 1)
           if (fifo.length === 0) this.kvLocalEchoNonces.delete(echoKey)
-          return
+          return Promise.resolve()
         }
       }
     }
@@ -770,7 +800,7 @@ export default (sbp('sbp/selectors/register', {
     const entry = perContract[key]
     if (!entry) {
       // Reconcile dropped the mirror entry — nothing to write into.
-      return
+      return Promise.resolve()
     }
     const previousValue = entry.value
     // Wire `null` is the clear sentinel — skip schema.parse and
@@ -794,12 +824,15 @@ export default (sbp('sbp/selectors/register', {
           this, rootState, contractID, slot.contractType, key,
           'error', lastError
         )
-        return
+        return Promise.resolve()
       }
     } else {
       nextValue = unwrapped
     }
     this.config.reactiveSet(entry, 'value', nextValue)
+    // Pubsub frames carry no etag — null it out so the next local
+    // write doesn't send a stale `if-match` (§4.9).
+    this.config.reactiveSet(entry, 'etag', null)
     sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
       contractID,
       contractType: slot.contractType,
@@ -807,7 +840,7 @@ export default (sbp('sbp/selectors/register', {
       value: nextValue,
       previousValue,
       reason: 'remote',
-      etag: entry.etag
+      etag: null
     })
     // If the slot was in `'error'` (e.g. from a prior validation
     // failure) and the new value validated cleanly, transition back
@@ -819,17 +852,13 @@ export default (sbp('sbp/selectors/register', {
         this, rootState, contractID, slot.contractType, key, 'loaded'
       )
     }
-    // Fire-and-forget — safeOnUpdate swallows throws / rejections.
-    safeOnUpdate(slot, nextValue, {
+    return safeOnUpdate(slot, nextValue, {
       contractID,
       contractType: slot.contractType,
       key,
       reason: 'remote',
-      etag: entry.etag,
+      etag: null,
       previousValue
-    }).catch((e: unknown) => {
-      // safeOnUpdate already catches; this is belt-and-braces.
-      console.error(`[chelonia/kv] onUpdate dispatch threw for ${contractID}::${key}`, e)
     })
   },
 
@@ -973,13 +1002,13 @@ export default (sbp('sbp/selectors/register', {
     let lastCurrentData: JSONType | undefined
     let lastEtag: string | null | undefined
     let abortedViaNoop = false
-    const onconflict: NonNullable<Parameters<typeof sbp>[1]> = async ({
+    const onconflict = async ({
       currentData,
       etag
     }: {
       currentData: JSONType | undefined;
       etag: string | null | undefined;
-    }) => {
+    }): Promise<[JSONType, string] | false> => {
       lastCurrentData = currentData
       lastEtag = etag
       if (signal?.aborted) {
@@ -989,7 +1018,7 @@ export default (sbp('sbp/selectors/register', {
       }
       let basis: JSONType
       if (currentData === undefined) {
-        basis = cloneDeep(slot.resolvedDefault) as JSONType
+        basis = cloneDeep(slot.resolvedDefault)
       } else {
         const unwrapped = unwrapData(currentData)
         if (unwrapped === null) {
@@ -1047,7 +1076,7 @@ export default (sbp('sbp/selectors/register', {
         contractID,
         key,
         data: { __chelKvNonce: firstNonce, value: nextValue },
-        onconflict,
+        onconflict: onconflict as ChelKvOnConflictCallback,
         ifMatch,
         maxAttempts,
         signal,
@@ -1144,7 +1173,7 @@ export default (sbp('sbp/selectors/register', {
     }
     const entry = rootState._kv?.[contractID]?.[key]
     if (!entry || entry.value === undefined) {
-      return cloneDeep(slot.resolvedDefault) as JSONType
+      return cloneDeep(slot.resolvedDefault)
     }
     return entry.value as JSONType
   },
@@ -1191,10 +1220,9 @@ export default (sbp('sbp/selectors/register', {
       // slot's `status` to 'error' but does NOT throw. For the
       // single-slot form we need rejection semantics, so inspect the
       // slot's lastError after the load resolves.
-      const beforeStatus = rootState._kv?.[contractID]?.[key]?.status
       await sbp('chelonia/kv/_loadSlot', { contractID, slot, reason: 'load' })
       const entry = rootState._kv?.[contractID]?.[key]
-      if (entry?.status === 'error' && beforeStatus !== 'error' && entry.lastError) {
+      if (entry?.status === 'error' && entry.lastError) {
         // Re-create an Error so the caller sees something throwable
         // rather than a `{name, message}` POJO.
         const err = new Error(entry.lastError.message)
@@ -1273,7 +1301,7 @@ export default (sbp('sbp/selectors/register', {
       return
     }
     const previousValue = entry.value
-    const defaultClone = cloneDeep(slot.resolvedDefault) as JSONType
+    const defaultClone = cloneDeep(slot.resolvedDefault)
     this.config.reactiveSet(entry, 'value', defaultClone)
     this.config.reactiveSet(entry, 'etag', setResult.etag)
     sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {

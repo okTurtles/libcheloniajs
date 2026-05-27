@@ -105,16 +105,16 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }));
         // Mirror `rootState._kv[contractID]` into the external store on every
         // KV value change. KV updates don't fire EVENT_HANDLED (on-chain only).
+        // `fullState` now returns a `kvState` field sourced from `rootState._kv[contractID]`.
         handles.push((0, sbp_1.default)('okTurtles.events/on', events_js_1.CHELONIA_KV_UPDATED, ({ contractID }) => {
             (0, sbp_1.default)('okTurtles.eventQueue/queueEvent', events_js_1.EVENT_HANDLED, async () => {
-                const { cheloniaState } = await (0, sbp_1.default)('chelonia/contract/fullState', contractID);
+                const { kvState } = await (0, sbp_1.default)('chelonia/contract/fullState', contractID);
                 const externalState = (0, sbp_1.default)(stateSelector);
-                const kvSlice = cheloniaState?._kv?.[contractID];
-                if (kvSlice) {
+                if (kvState) {
                     if (!externalState._kv) {
                         reactiveSet(externalState, '_kv', Object.create(null));
                     }
-                    reactiveSet(externalState._kv, contractID, (0, turtledash_1.cloneDeep)(kvSlice));
+                    reactiveSet(externalState._kv, contractID, (0, turtledash_1.cloneDeep)(kvState));
                 }
                 else if (externalState._kv) {
                     reactiveDel(externalState._kv, contractID);
@@ -123,16 +123,16 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }));
         // Re-project on status changes (e.g. 'loaded' → 'error') where the value
         // is unchanged but status / lastError need to be visible in the store.
+        // Uses the same `kvState` field from `fullState`.
         handles.push((0, sbp_1.default)('okTurtles.events/on', events_js_1.CHELONIA_KV_STATUS_CHANGED, ({ contractID }) => {
             (0, sbp_1.default)('okTurtles.eventQueue/queueEvent', events_js_1.EVENT_HANDLED, async () => {
-                const { cheloniaState } = await (0, sbp_1.default)('chelonia/contract/fullState', contractID);
+                const { kvState } = await (0, sbp_1.default)('chelonia/contract/fullState', contractID);
                 const externalState = (0, sbp_1.default)(stateSelector);
-                const kvSlice = cheloniaState?._kv?.[contractID];
-                if (kvSlice) {
+                if (kvState) {
                     if (!externalState._kv) {
                         reactiveSet(externalState, '_kv', Object.create(null));
                     }
-                    reactiveSet(externalState._kv, contractID, (0, turtledash_1.cloneDeep)(kvSlice));
+                    reactiveSet(externalState._kv, contractID, (0, turtledash_1.cloneDeep)(kvState));
                 }
                 else if (externalState._kv) {
                     reactiveDel(externalState._kv, contractID);

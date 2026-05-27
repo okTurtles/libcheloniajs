@@ -394,7 +394,7 @@ Config keys (all on `KvSlotDefinition`):
 | `match` | `() => true` | Predicate `(cID, contractState, rootState) => boolean`. |
 | `autoSubscribe` | `true` | Whether to subscribe to pubsub for this slot automatically. |
 | `autoLoad` | `'on-sync'` | `'on-sync'` fetches on contract sync; `'on-demand'` waits for `read`/`sync`; `'never'` skips. |
-| `refreshOnReconnect` | `false` | Re-fetch the slot on pubsub reconnect. |
+| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect. |
 | `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the `value` form of `update`. |
 | `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw. |
 

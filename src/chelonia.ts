@@ -1127,7 +1127,7 @@ export default sbp('sbp/selectors/register', {
                       )
                       return
                     }
-                    sbp('chelonia/queueInvocation', msg.channelID, () => {
+                    sbp('chelonia/queueInvocation', msg.channelID, async () => {
                       const parsed = parseEncryptedOrUnencryptedMessage<object>(this, {
                         contractID: msg.channelID,
                         meta: msg.key,
@@ -1145,7 +1145,7 @@ export default sbp('sbp/selectors/register', {
                       // this contract. `_handleRemote` is a no-op when no slot
                       // is registered for `(channelID, key)`.
                       try {
-                        sbp('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed)
+                        await sbp('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed)
                       } catch (e) {
                         console.error(
                           `[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`,
@@ -2004,7 +2004,8 @@ export default sbp('sbp/selectors/register', {
             contractID,
             {
               contractState: rootState[contractID],
-              cheloniaState: rootState.contracts[contractID]
+              cheloniaState: rootState.contracts[contractID],
+              kvState: rootState._kv?.[contractID]
             }
           ]
         })
@@ -2012,7 +2013,8 @@ export default sbp('sbp/selectors/register', {
     }
     return {
       contractState: rootState[contractID],
-      cheloniaState: rootState.contracts[contractID]
+      cheloniaState: rootState.contracts[contractID],
+      kvState: rootState._kv?.[contractID]
     }
   },
   // 'chelonia/out' - selectors that send data out to the server

@@ -203,6 +203,14 @@ sbp('sbp/selectors/register', {
   // Test helper: add contract to subscriptionSet.
   'chelonia/test/addSubscription': function (this: CheloniaContext, contractID: string) {
     this.subscriptionSet.add(contractID)
+  },
+
+  // Test helper: simulate removeImmediately's KV cleanup for a contract.
+  'chelonia/test/removeSubscription': function (this: CheloniaContext, contractID: string) {
+    this.subscriptionSet.delete(contractID)
+    this.kvSlotsByContractID.delete(contractID)
+    this.kvActiveFilters.delete(contractID)
+    this.kvFilterDirty.delete(contractID)
   }
 })
 
@@ -661,6 +669,19 @@ describe('KV slot API', () => {
 
     const entry = rootState()._kv![c]!.rl as { status: string }
     assert.strictEqual(entry.status, 'non-init')
+
+    // Simulate removeImmediately's KV cleanup path
+    const s = rootState()
+    reactiveDel(s._kv!, c)
+    sbp('chelonia/test/removeSubscription', c)
+    sbp('chelonia/kv/_onContractsModified', { added: [], removed: [c] })
+
+    assert.strictEqual(s._kv?.[c], undefined)
+    assert.strictEqual(
+      sbp('chelonia/kv/status', c),
+      'non-init',
+      'status should be non-init after removal'
+    )
   })
 
   // -----------------------------------------------------------------------

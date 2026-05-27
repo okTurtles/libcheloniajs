@@ -789,7 +789,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                         console.info(`[chelonia] Discarding kv event for ${msg.channelID} because it's not in the current subscriptionSet`);
                                         return;
                                     }
-                                    (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, () => {
+                                    (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, async () => {
                                         const parsed = parseEncryptedOrUnencryptedMessage(this, {
                                             contractID: msg.channelID,
                                             meta: msg.key,
@@ -802,7 +802,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                         // this contract. `_handleRemote` is a no-op when no slot
                                         // is registered for `(channelID, key)`.
                                         try {
-                                            (0, sbp_1.default)('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed);
+                                            await (0, sbp_1.default)('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed);
                                         }
                                         catch (e) {
                                             console.error(`[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`, e);
@@ -1505,14 +1505,16 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     contractID,
                     {
                         contractState: rootState[contractID],
-                        cheloniaState: rootState.contracts[contractID]
+                        cheloniaState: rootState.contracts[contractID],
+                        kvState: rootState._kv?.[contractID]
                     }
                 ];
             }));
         }
         return {
             contractState: rootState[contractID],
-            cheloniaState: rootState.contracts[contractID]
+            cheloniaState: rootState.contracts[contractID],
+            kvState: rootState._kv?.[contractID]
         };
     },
     // 'chelonia/out' - selectors that send data out to the server

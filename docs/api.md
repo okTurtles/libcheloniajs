@@ -272,7 +272,7 @@ in `src/events.ts`; the most commonly observed:
 | `PERSISTENT_ACTION_SUCCESS` | `src/events.ts` | A persistent action resolved. |
 | `PERSISTENT_ACTION_TOTAL_FAILURE` | `src/events.ts` | A persistent action gave up after `maxAttempts`. |
 | `CHELONIA_KV_UPDATED` | `src/events.ts` | After a slot's mirror value changes (load, remote push, local write, reconnect). Payload: `{ contractID, contractType, key, value, previousValue, reason, etag }`. |
-| `CHELONIA_KV_STATUS_CHANGED` | `src/events.ts` | A slot's `KvLoadStatus` transitioned. Payload: `(contractID, key, newStatus)`. |
+| `CHELONIA_KV_STATUS_CHANGED` | `src/events.ts` | A slot's `KvLoadStatus` transitioned. Payload: `{ contractID, contractType, key, status, previousStatus, lastError? }`. |
 | `CHELONIA_KV_VALIDATION_ERROR` | `src/events.ts` | A slot's mirror value failed `schema.parse`. Payload: `{ contractID, contractType, key, error }`. |
 
 Subscribe with:
