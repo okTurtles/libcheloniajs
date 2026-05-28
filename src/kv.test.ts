@@ -1021,4 +1021,126 @@ describe('KV slot API', () => {
     assert.strictEqual(result, undefined)
     assert.strictEqual(networkCalled, false)
   })
+
+  // -----------------------------------------------------------------------
+  // 28: issue 1 – reconnect does not double-queue _loadSlot
+  // -----------------------------------------------------------------------
+  it('28: reconnect _loadSlot not double-queued', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'rq',
+      contractType: CTYPE,
+      defaultValue: { x: 0 },
+      schema: objectSchema,
+      refreshOnReconnect: true
+    })
+    const c = 'cid-28'
+    await setupContract(c)
+
+    let queueDepth = 0
+    let maxDepth = 0
+    stubQueueInvocation = (_cID, fn) => {
+      queueDepth++
+      if (queueDepth > maxDepth) maxDepth = queueDepth
+      const result = Promise.resolve(fn())
+      queueDepth--
+      return result
+    }
+
+    let getCount = 0
+    stubGet = async () => { getCount++; return fakeParsed({ x: 42 }) }
+
+    await sbp('chelonia/kv/sync', c, 'rq')
+    assert.strictEqual(getCount, 1)
+    assert.strictEqual(maxDepth, 1, '_loadSlot should only queue once (no deadlock)')
+  })
+
+  // -----------------------------------------------------------------------
+  // 29: issue 2 – update uses mirror etag when ifMatch omitted
+  // -----------------------------------------------------------------------
+  it('29: update sends mirror etag by default', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'et',
+      contractType: CTYPE,
+      defaultValue: { x: 0 },
+      schema: objectSchema
+    })
+    const c = 'cid-29'
+    await setupContract(c)
+
+    const entry = rootState()._kv![c]!.et as {
+      value: unknown; etag: string | null; status: string
+    }
+    entry.value = { x: 10 }
+    entry.etag = 'mirror-etag-123'
+    entry.status = 'loaded'
+
+    let capturedIfMatch: string | undefined
+    stubQueuedSet = async (args) => {
+      capturedIfMatch = args.ifMatch
+      return { etag: 'new-etag' }
+    }
+
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'et', updater: () => ({ x: 20 })
+    })
+    assert.strictEqual(capturedIfMatch, 'mirror-etag-123')
+
+    // Explicit ifMatch overrides mirror etag
+    capturedIfMatch = undefined
+    await sbp('chelonia/kv/update', {
+      contractID: c,
+      key: 'et',
+      updater: () => ({ x: 30 }),
+      ifMatch: 'explicit-etag'
+    })
+    assert.strictEqual(capturedIfMatch, 'explicit-etag')
+  })
+
+  // -----------------------------------------------------------------------
+  // 30: issue 3 – autoSubscribe:false passes index invariant
+  // -----------------------------------------------------------------------
+  it('30: autoSubscribe:false passes index invariant', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'ns',
+      contractType: CTYPE,
+      defaultValue: { x: 0 },
+      autoSubscribe: false
+    })
+    const c = 'cid-30'
+    await setupContract(c)
+
+    const s = rootState()
+    assert.ok(s._kv?.[c]?.ns, 'mirror entry exists')
+
+    const filterCalls = stubSetFilterCalls.filter((f) => f.contractID === c)
+    assert.ok(
+      !filterCalls.some((f) => f.keys.includes('ns')),
+      'autoSubscribe:false key should not be in setFilter'
+    )
+
+    // Must not throw
+    sbp('chelonia/kv/_assertIndexConsistent')
+  })
+
+  // -----------------------------------------------------------------------
+  // 31: issue 5 – stable coercion/drop caught at registration
+  // -----------------------------------------------------------------------
+  it('31: stable coercion caught at registration', () => {
+    const schema = {
+      parse (value: unknown): { x: number } {
+        if (value === null || value === undefined) throw new Error('reserved')
+        return { x: Number((value as { x: unknown }).x) }
+      }
+    }
+
+    assert.throws(
+      () => sbp('chelonia/kv/defineSlot', {
+        key: 'sc',
+        contractType: CTYPE,
+        defaultValue: { x: '1', extra: true },
+        schema
+      }),
+      (e: unknown) => e instanceof ChelErrorKvSlotInvalid
+    )
+  })
 })

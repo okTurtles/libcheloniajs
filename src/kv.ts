@@ -149,6 +149,12 @@ function assertSchemaGuards (slot: SlotDefinition): void {
       'silently coerces or drops fields of the resolved defaultValue'
     )
   }
+  if (JSON.stringify(slot.resolvedDefault) !== JSON.stringify(first)) {
+    throw new ChelErrorKvSlotInvalid(
+      `[chelonia/kv] slot ${slot.contractType}::${slot.key} schema ` +
+      'silently coerces or drops fields of the resolved defaultValue'
+    )
+  }
 }
 
 // Ensure `rootState._kv[contractID]` exists as a reactive object. Returns
@@ -379,10 +385,16 @@ export default (sbp('sbp/selectors/register', {
             `not match kvSlots[${rKey}] (stale definition)`
           )
         }
-        if (!activeFilter.has(key)) {
+        if (slot.autoSubscribe && !activeFilter.has(key)) {
           throw new Error(
             `[chelonia/kv] index invariant: ${cID}::${key} indexed but not in ` +
             'kvActiveFilters'
+          )
+        }
+        if (!slot.autoSubscribe && activeFilter.has(key)) {
+          throw new Error(
+            `[chelonia/kv] index invariant: ${cID}::${key} is autoSubscribe:false ` +
+            'but is in kvActiveFilters'
           )
         }
       }
@@ -1069,6 +1081,7 @@ export default (sbp('sbp/selectors/register', {
       recordEchoNonce(this, contractID, key, nonce)
       return [{ __chelKvNonce: nonce, value: validated }, etag ?? ''] as [JSONType, string]
     }
+    const mirrorEtag = mirrorEntry?.etag ?? undefined
     let setResult: { etag: string | null }
     try {
       setResult = await sbp('chelonia/kv/queuedSet', {
@@ -1076,7 +1089,7 @@ export default (sbp('sbp/selectors/register', {
         key,
         data: { __chelKvNonce: firstNonce, value: nextValue },
         onconflict,
-        ifMatch,
+        ifMatch: ifMatch ?? mirrorEtag,
         maxAttempts,
         signal,
         encryptionKeyName: slot.encryptionKeyName,
