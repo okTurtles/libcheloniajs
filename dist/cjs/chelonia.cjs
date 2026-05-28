@@ -850,14 +850,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     for (const [key, slot] of perKey) {
                         if (!slot.refreshOnReconnect)
                             continue;
-                        (0, sbp_1.default)('chelonia/queueInvocation', contractID, () => {
-                            if (!this.subscriptionSet.has(contractID))
-                                return;
-                            return (0, sbp_1.default)('chelonia/kv/_loadSlot', {
-                                contractID,
-                                slot,
-                                reason: 'reconnect'
-                            });
+                        (0, sbp_1.default)('chelonia/kv/_loadSlot', {
+                            contractID,
+                            slot,
+                            reason: 'reconnect'
                         }).catch((e) => {
                             console.error(`[chelonia/kv] reconnect _loadSlot failed for ${contractID}::${key}`, e);
                         });

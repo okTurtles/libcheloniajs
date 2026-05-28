@@ -61,7 +61,7 @@ const registryKey = (contractType: string, key: string): string =>
 function resolveSlotDefinition (
   def: KvSlotDefinition,
   contractType: string,
-  resolvedDefault: JSONType
+  resolvedDefault: JSONType | undefined
 ): SlotDefinition {
   return {
     contractType,
@@ -117,43 +117,46 @@ function assertSchemaGuards (slot: SlotDefinition): void {
     )
   }
   // Guard 3: round-trip of resolvedDefault.
-  let first: unknown
-  try {
-    first = schema.parse(slot.resolvedDefault)
-  } catch (e) {
-    throw new ChelErrorKvSlotInvalid(
-      `[chelonia/kv] slot ${slot.contractType}::${slot.key} resolved ` +
-      'defaultValue failed schema.parse at registration',
-      { cause: e }
-    )
-  }
-  if (first && typeof (first as { then?: unknown }).then === 'function') {
-    throw new ChelErrorKvSlotInvalid(
-      `[chelonia/kv] slot ${slot.contractType}::${slot.key} uses an ` +
-      'async/thenable schema parser; v1 supports synchronous parsers only'
-    )
-  }
-  let second: unknown
-  try {
-    second = schema.parse(first)
-  } catch (e) {
-    throw new ChelErrorKvSlotInvalid(
-      `[chelonia/kv] slot ${slot.contractType}::${slot.key} schema is ` +
-      'not idempotent on its own parsed output (defaultValue round-trip failed)',
-      { cause: e }
-    )
-  }
-  if (JSON.stringify(first) !== JSON.stringify(second)) {
-    throw new ChelErrorKvSlotInvalid(
-      `[chelonia/kv] slot ${slot.contractType}::${slot.key} schema ` +
-      'silently coerces or drops fields of the resolved defaultValue'
-    )
-  }
-  if (JSON.stringify(slot.resolvedDefault) !== JSON.stringify(first)) {
-    throw new ChelErrorKvSlotInvalid(
-      `[chelonia/kv] slot ${slot.contractType}::${slot.key} schema ` +
-      'silently coerces or drops fields of the resolved defaultValue'
-    )
+  // Skipped when there is no resolvedDefault — nothing to round-trip.
+  if (slot.resolvedDefault !== undefined) {
+    let first: unknown
+    try {
+      first = schema.parse(slot.resolvedDefault)
+    } catch (e) {
+      throw new ChelErrorKvSlotInvalid(
+        `[chelonia/kv] slot ${slot.contractType}::${slot.key} resolved ` +
+        'defaultValue failed schema.parse at registration',
+        { cause: e }
+      )
+    }
+    if (first && typeof (first as { then?: unknown }).then === 'function') {
+      throw new ChelErrorKvSlotInvalid(
+        `[chelonia/kv] slot ${slot.contractType}::${slot.key} uses an ` +
+        'async/thenable schema parser; v1 supports synchronous parsers only'
+      )
+    }
+    let second: unknown
+    try {
+      second = schema.parse(first)
+    } catch (e) {
+      throw new ChelErrorKvSlotInvalid(
+        `[chelonia/kv] slot ${slot.contractType}::${slot.key} schema is ` +
+        'not idempotent on its own parsed output (defaultValue round-trip failed)',
+        { cause: e }
+      )
+    }
+    if (JSON.stringify(first) !== JSON.stringify(second)) {
+      throw new ChelErrorKvSlotInvalid(
+        `[chelonia/kv] slot ${slot.contractType}::${slot.key} schema ` +
+        'silently coerces or drops fields of the resolved defaultValue'
+      )
+    }
+    if (JSON.stringify(slot.resolvedDefault) !== JSON.stringify(first)) {
+      throw new ChelErrorKvSlotInvalid(
+        `[chelonia/kv] slot ${slot.contractType}::${slot.key} schema ` +
+        'silently coerces or drops fields of the resolved defaultValue'
+      )
+    }
   }
 }
 
@@ -445,12 +448,6 @@ export default (sbp('sbp/selectors/register', {
     // (KV-REVAMPED §4.1).
     const dv = def.defaultValue
     const resolvedDefault: JSONType | undefined = typeof dv === 'function' ? dv() : dv
-    if (resolvedDefault === undefined) {
-      throw new ChelErrorKvSlotInvalid(
-        `[chelonia/kv] defineSlot: slot '${def.key}' requires a defaultValue ` +
-        '(factories must return a non-undefined value)'
-      )
-    }
     for (const contractType of types) {
       if (typeof contractType !== 'string' || contractType.length === 0) {
         throw new ChelErrorKvSlotInvalid('[chelonia/kv] defineSlot: invalid contractType')
@@ -639,7 +636,9 @@ export default (sbp('sbp/selectors/register', {
             // the event bus) see the reversion to default. Pass the
             // cloned default — the effective value a `read()` call
             // would return (§4.3).
-            const defaultedValue = cloneDeep(slot.resolvedDefault)
+            const defaultedValue = slot.resolvedDefault !== undefined
+              ? cloneDeep(slot.resolvedDefault)
+              : undefined
             await safeOnUpdate(slot, defaultedValue, {
               contractID,
               contractType: slot.contractType,
@@ -666,7 +665,9 @@ export default (sbp('sbp/selectors/register', {
       // restore the deep-cloned default.
       let nextValue: JSONType
       if (unwrapped === null) {
-        nextValue = cloneDeep(slot.resolvedDefault)
+        nextValue = slot.resolvedDefault !== undefined
+          ? cloneDeep(slot.resolvedDefault)
+          : undefined
       } else if (slot.schema) {
         try {
           nextValue = slot.schema.parse(unwrapped)
@@ -818,7 +819,9 @@ export default (sbp('sbp/selectors/register', {
     // restore the deep-cloned default.
     let nextValue: JSONType
     if (unwrapped === null) {
-      nextValue = cloneDeep(slot.resolvedDefault) as JSONType
+      nextValue = slot.resolvedDefault !== undefined
+        ? cloneDeep(slot.resolvedDefault)
+        : undefined
     } else if (slot.schema) {
       try {
         nextValue = slot.schema.parse(unwrapped)
@@ -981,7 +984,9 @@ export default (sbp('sbp/selectors/register', {
     const mirrorEntry = perContract[key]
     const seedValue: JSONType = mirrorEntry?.value !== undefined
       ? (mirrorEntry.value as JSONType)
-      : cloneDeep(slot.resolvedDefault) as JSONType
+      : slot.resolvedDefault !== undefined
+        ? cloneDeep(slot.resolvedDefault)
+        : undefined
     // ----- Step 3: run reducer and validate. -----
     const reducerOut = reducer(seedValue)
     if (reducerOut === KV_NOOP) {
@@ -1029,11 +1034,15 @@ export default (sbp('sbp/selectors/register', {
       }
       let basis: JSONType
       if (currentData === undefined) {
-        basis = cloneDeep(slot.resolvedDefault)
+        basis = slot.resolvedDefault !== undefined
+          ? cloneDeep(slot.resolvedDefault)
+          : undefined
       } else {
         const unwrapped = unwrapData(currentData)
         if (unwrapped === null) {
-          basis = cloneDeep(slot.resolvedDefault) as JSONType
+          basis = slot.resolvedDefault !== undefined
+            ? cloneDeep(slot.resolvedDefault)
+            : undefined
         } else if (slot.schema) {
           try {
             basis = slot.schema.parse(unwrapped)
@@ -1158,12 +1167,13 @@ export default (sbp('sbp/selectors/register', {
   // Substitutes a deep-cloned `resolvedDefault` when the mirror entry
   // is absent or `value === undefined` (the "non-init" representation
   // — see the note in §4.3). Returned value is the cloned default,
-  // never `undefined`.
+  // or `undefined` if the slot has no `defaultValue` and the mirror
+  // is empty.
   'chelonia/kv/read': function (
     this: CheloniaContext,
     contractID: string,
     key: string
-  ): JSONType {
+  ): JSONType | undefined {
     const rootState = sbp(this.config.stateSelector) as ChelRootState
     const contractMeta = rootState.contracts?.[contractID]
     if (!contractMeta || !this.subscriptionSet.has(contractID)) {
@@ -1185,7 +1195,9 @@ export default (sbp('sbp/selectors/register', {
     }
     const entry = rootState._kv?.[contractID]?.[key]
     if (!entry || entry.value === undefined) {
-      return cloneDeep(slot.resolvedDefault)
+      return slot.resolvedDefault !== undefined
+        ? cloneDeep(slot.resolvedDefault)
+        : undefined
     }
     return entry.value as JSONType
   },
@@ -1313,7 +1325,9 @@ export default (sbp('sbp/selectors/register', {
       return
     }
     const previousValue = entry.value
-    const defaultClone = cloneDeep(slot.resolvedDefault)
+    const defaultClone = slot.resolvedDefault !== undefined
+      ? cloneDeep(slot.resolvedDefault)
+      : undefined
     this.config.reactiveSet(entry, 'value', defaultClone)
     this.config.reactiveSet(entry, 'etag', setResult.etag)
     sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {

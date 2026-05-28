@@ -219,8 +219,8 @@ export type KvSlotDefinition = {
 export type SlotDefinition = {
   contractType: string;
   key: string;
-  defaultValue: JSONType | (() => JSONType);
-  resolvedDefault: JSONType;
+  defaultValue?: JSONType | (() => JSONType);
+  resolvedDefault: JSONType | undefined;
   schema?: { parse: (value: unknown) => JSONType };
   match?: (contractID: string, contractState: object, rootState: object) => boolean;
   encryptionKeyName: string;

@@ -844,14 +844,10 @@ export default sbp('sbp/selectors/register', {
                     for (const [key, slot] of perKey) {
                         if (!slot.refreshOnReconnect)
                             continue;
-                        sbp('chelonia/queueInvocation', contractID, () => {
-                            if (!this.subscriptionSet.has(contractID))
-                                return;
-                            return sbp('chelonia/kv/_loadSlot', {
-                                contractID,
-                                slot,
-                                reason: 'reconnect'
-                            });
+                        sbp('chelonia/kv/_loadSlot', {
+                            contractID,
+                            slot,
+                            reason: 'reconnect'
                         }).catch((e) => {
                             console.error(`[chelonia/kv] reconnect _loadSlot failed for ${contractID}::${key}`, e);
                         });
