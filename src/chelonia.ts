@@ -440,6 +440,7 @@ export default sbp('sbp/selectors/register', {
     this.kvFilterDirty = new Set()
     this.kvLocalEchoNonces = new Map()
     this.defContractKvByManifest = new Map()
+    this.kvReconnectListener = () => {}
     // pending includes contracts that are scheduled for syncing or in the
     // process of syncing for the first time. After sync completes for the
     // first time, they are removed from pending and added to subscriptionSet

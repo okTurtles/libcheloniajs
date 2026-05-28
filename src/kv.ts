@@ -989,8 +989,12 @@ export default (sbp('sbp/selectors/register', {
         : undefined
     // ----- Step 3: run reducer and validate. -----
     const reducerOut = reducer(seedValue)
-    if (reducerOut === KV_NOOP) {
-      return undefined
+    if (typeof reducerOut === 'symbol') {
+      if (reducerOut === KV_NOOP) return undefined
+      throw new ChelErrorKvUpdateInvalid(
+        `[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
+        'an unexpected symbol; use KV_NOOP to abort'
+      )
     }
     if (reducerOut === null || reducerOut === undefined) {
       // Reducer may not produce the reserved wire sentinels; clear
