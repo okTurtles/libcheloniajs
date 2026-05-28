@@ -133,7 +133,7 @@ describe('reingestTracker', () => {
 
   it('cumulative gap events across many contracts must not trip a shared cap (okTurtles/libcheloniajs#77)', () => {
     // Regression for the original bug: during the consumer's manual
-    // "Re-sync and rebuild data", `chelonia/private/out/sync` fans
+    // "Re-sync and rebuild data", `chelonia/private/in/sync` fans
     // out a forced re-sync over every contract in parallel. Each
     // contract racing through `removeImmediately({resync:true})` +
     // event-stream replay can contribute a few gap events to the

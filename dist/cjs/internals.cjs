@@ -507,7 +507,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     },
     // used by, e.g. 'chelonia/contract/wait'
     'chelonia/private/noop': function () { },
-    'chelonia/private/out/sync': function (contractIDs, params) {
+    'chelonia/private/in/sync': function (contractIDs, params) {
         const listOfIds = typeof contractIDs === 'string' ? [contractIDs] : contractIDs;
         const forcedSync = !!params?.force;
         return Promise.all(listOfIds.map((contractID) => {
@@ -665,7 +665,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         // a call to sync and the subscription time. This is a temporary measure
                         // to handle this until [pubsub] is updated.
                         if (!entry.isFirstMessage() && entry.height() === lastAttemptedHeight) {
-                            await (0, sbp_1.default)('chelonia/private/out/sync', contractID, { force: true });
+                            await (0, sbp_1.default)('chelonia/private/in/sync', contractID, { force: true });
                         }
                     }
                     else {
@@ -1074,7 +1074,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                 .then(() => {
                                 // Now, if we're subscribed to any of the contracts that were
                                 // marked as dirty, re-sync them
-                                (0, sbp_1.default)('chelonia/private/out/sync', contractIdsToUpdate.filter((contractID) => {
+                                (0, sbp_1.default)('chelonia/private/in/sync', contractIdsToUpdate.filter((contractID) => {
                                     return self.subscriptionSet.has(contractID);
                                 }), { force: true, resync: true }).catch((e) => {
                                     // Using console.error instead of logEvtError because this
@@ -1530,7 +1530,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     },
     'chelonia/private/in/enqueueHandleEvent': function (contractID, event) {
         // make sure handleEvent is called AFTER any currently-running invocations
-        // to 'chelonia/private/out/sync', to prevent gi.db from throwing
+        // to 'chelonia/private/in/sync', to prevent gi.db from throwing
         // "bad previousHEAD" errors
         return (0, sbp_1.default)('chelonia/private/queueEvent', contractID, async () => {
             await (0, sbp_1.default)('chelonia/private/in/handleEvent', contractID, event);
@@ -2415,11 +2415,11 @@ const reprocessDebounced = (contractID) => {
         // firing a force-sync against the wrong contract.
         d = (0, turtledash_1.debounce)(() => {
             // Drop our slot before firing so a follow-up call after the timer
-            // has fired but before `chelonia/private/out/sync` resolves gets a
+            // has fired but before `chelonia/private/in/sync` resolves gets a
             // fresh debounce rather than reusing a stale one (whose internal
             // `timeout` is already `undefined` so it'd fire instantly).
             reprocessDebounceMap.delete(contractID);
-            (0, sbp_1.default)('chelonia/private/out/sync', contractID, { force: true }).catch((e) => {
+            (0, sbp_1.default)('chelonia/private/in/sync', contractID, { force: true }).catch((e) => {
                 console.error(`[chelonia] Error at reprocessDebounced for ${contractID}`, e);
             });
         }, 1000);

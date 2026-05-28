@@ -713,7 +713,7 @@ export default sbp('sbp/selectors/register', {
     // that belong to a contract timeline we've now torn down.
     clearReingestTrackerAll()
     // Cancel any pending forced-resync timers. Otherwise a timer
-    // scheduled before the reset would fire `chelonia/private/out/sync`
+    // scheduled before the reset would fire `chelonia/private/in/sync`
     // against a contract whose state has been torn down.
     clearReprocessDebounceAll()
     sbp('chelonia/clearTransientSecretKeys')
@@ -1042,7 +1042,7 @@ export default sbp('sbp/selectors/register', {
             // between the time the subscription was requested and it was
             // actually set up. In these cases, force sync contracts to get them
             // updated.
-            sbp('chelonia/private/out/sync', channelID, { force: true }).catch((err: Error) => {
+            sbp('chelonia/private/in/sync', channelID, { force: true }).catch((err: Error) => {
               console.warn(`[chelonia] Syncing contract ${channelID} failed: ${err.message}`)
             })
           }
@@ -1148,7 +1148,7 @@ export default sbp('sbp/selectors/register', {
         ),
         [NOTIFICATION_TYPE.ENTRY] (msg) {
           // We MUST use 'chelonia/private/in/enqueueHandleEvent' to ensure handleEvent()
-          // is called AFTER any currently-running calls to 'chelonia/private/out/sync'
+          // is called AFTER any currently-running calls to 'chelonia/private/in/sync'
           // to prevent gi.db from throwing "bad previousHEAD" errors.
           // Calling via SBP also makes it simple to implement 'test/backend.js'
           const { contractID } = SPMessage.deserializeHEAD(msg.data as string)
@@ -1413,7 +1413,7 @@ export default sbp('sbp/selectors/register', {
     })
     // Call the internal sync selector. `force` is always true as using `/sync`
     // besides internally is only needed to force sync a contract
-    return sbp('chelonia/private/out/sync', listOfIds, { ...params, force: true })
+    return sbp('chelonia/private/in/sync', listOfIds, { ...params, force: true })
   },
   'chelonia/contract/isSyncing': function (
     this: CheloniaContext,
@@ -1531,7 +1531,7 @@ export default sbp('sbp/selectors/register', {
         }
       })
     }
-    return await sbp('chelonia/private/out/sync', listOfIds)
+    return await sbp('chelonia/private/in/sync', listOfIds)
   },
   // the `try` parameter does not affect (ephemeral or persistent) reference
   // counts, but rather removes a contract if the reference count is zero
@@ -1979,7 +1979,7 @@ export default sbp('sbp/selectors/register', {
         postpublish: hooks.postpublishContract
       }
     )
-    await sbp('chelonia/private/out/sync', contractID)
+    await sbp('chelonia/private/in/sync', contractID)
     const msg = await sbp(
       actionEncryptionKeyId ? 'chelonia/out/actionEncrypted' : 'chelonia/out/actionUnencrypted',
       {

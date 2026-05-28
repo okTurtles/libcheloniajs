@@ -692,7 +692,7 @@ export default sbp('sbp/selectors/register', {
   },
   // used by, e.g. 'chelonia/contract/wait'
   'chelonia/private/noop': function () {},
-  'chelonia/private/out/sync': function (
+  'chelonia/private/in/sync': function (
     this: CheloniaContext,
     contractIDs: string | string[],
     params?: { force?: boolean; resync?: boolean }
@@ -882,7 +882,7 @@ export default sbp('sbp/selectors/register', {
             // a call to sync and the subscription time. This is a temporary measure
             // to handle this until [pubsub] is updated.
             if (!entry.isFirstMessage() && entry.height() === lastAttemptedHeight) {
-              await sbp('chelonia/private/out/sync', contractID, { force: true })
+              await sbp('chelonia/private/in/sync', contractID, { force: true })
             }
           } else {
             const message = (await r.json())?.message
@@ -1382,7 +1382,7 @@ export default sbp('sbp/selectors/register', {
                   // Now, if we're subscribed to any of the contracts that were
                   // marked as dirty, re-sync them
                   sbp(
-                    'chelonia/private/out/sync',
+                    'chelonia/private/in/sync',
                     contractIdsToUpdate.filter((contractID) => {
                       return self.subscriptionSet.has(contractID)
                     }),
@@ -1965,7 +1965,7 @@ export default sbp('sbp/selectors/register', {
   },
   'chelonia/private/in/enqueueHandleEvent': function (contractID: string, event: string) {
     // make sure handleEvent is called AFTER any currently-running invocations
-    // to 'chelonia/private/out/sync', to prevent gi.db from throwing
+    // to 'chelonia/private/in/sync', to prevent gi.db from throwing
     // "bad previousHEAD" errors
     return sbp('chelonia/private/queueEvent', contractID, async () => {
       await sbp('chelonia/private/in/handleEvent', contractID, event)
@@ -3132,11 +3132,11 @@ const reprocessDebounced = (contractID: string): void => {
     // firing a force-sync against the wrong contract.
     d = debounce(() => {
       // Drop our slot before firing so a follow-up call after the timer
-      // has fired but before `chelonia/private/out/sync` resolves gets a
+      // has fired but before `chelonia/private/in/sync` resolves gets a
       // fresh debounce rather than reusing a stale one (whose internal
       // `timeout` is already `undefined` so it'd fire instantly).
       reprocessDebounceMap.delete(contractID)
-      sbp('chelonia/private/out/sync', contractID, { force: true }).catch((e: unknown) => {
+      sbp('chelonia/private/in/sync', contractID, { force: true }).catch((e: unknown) => {
         console.error(`[chelonia] Error at reprocessDebounced for ${contractID}`, e)
       })
     }, 1000)
