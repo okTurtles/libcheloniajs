@@ -23,7 +23,6 @@ import {
   CONTRACTS_MODIFIED
 } from './events.js'
 import type {
-  ChelKvOnConflictCallback,
   CheloniaContext,
   ChelRootState,
   JSONType,
@@ -1076,7 +1075,7 @@ export default (sbp('sbp/selectors/register', {
         contractID,
         key,
         data: { __chelKvNonce: firstNonce, value: nextValue },
-        onconflict: onconflict as ChelKvOnConflictCallback,
+        onconflict,
         ifMatch,
         maxAttempts,
         signal,
@@ -1384,6 +1383,7 @@ export default (sbp('sbp/selectors/register', {
   // "own identity" predicate. The reconciler is idempotent: a slot
   // whose match result hasn't changed is a no-op apart from the
   // `_reconcileForSlot` walk itself.
+
   // Private convenience used by `chelonia/defineContract`. Accepts the
   // `kv: { ... }` block declared inline on a contract definition and
   // registers each entry as a `defineSlot` call scoped to the

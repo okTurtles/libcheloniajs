@@ -444,4 +444,4 @@ export type ChelKvOnConflictCallback = (args: {
     etag: string | null | undefined;
     currentData: JSONType | undefined;
     currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string]>;
+}) => Promise<[JSONType, string] | false>;
