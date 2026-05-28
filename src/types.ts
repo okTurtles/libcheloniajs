@@ -208,7 +208,7 @@ export type KvSlotDefinition = {
   autoSubscribe?: boolean;
   autoLoad?: 'on-sync' | 'on-demand' | 'never';
   refreshOnReconnect?: boolean;
-  onUpdate?: (value: JSONType, ctx: KvUpdateCtx) => void | Promise<void>;
+  onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
 };
 
 // Internal, resolved form of a slot definition. Built from a
@@ -229,7 +229,7 @@ export type SlotDefinition = {
   autoSubscribe: boolean;
   autoLoad: 'on-sync' | 'on-demand' | 'never';
   refreshOnReconnect: boolean;
-  onUpdate?: (value: JSONType, ctx: KvUpdateCtx) => void | Promise<void>;
+  onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
 };
 
 export type SendMessageHooks = Partial<{
@@ -346,6 +346,10 @@ export type CheloniaContext = {
     { added, removed }: { added: string[]; removed: string[] },
   ) => void;
   kvReconnectListener: (client: import('./pubsub/index.js').PubSubClient) => void;
+  kvContractsModifiedListener: (
+    contracts: Set<string>,
+    { added, removed }: { added: string[]; removed: string[] },
+  ) => void;
   defContractSelectors: string[];
   defContractManifest: string;
   defContractSBP: typeof sbp;

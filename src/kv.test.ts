@@ -110,8 +110,10 @@ const reactiveDel = <T>(obj: T, key: keyof T) => {
 // Mutable stub targets — swapped per-test via assignment
 // ---------------------------------------------------------------------------
 
+type GetResult = ParsedEncryptedOrUnencryptedMessage<JSONType> & { etag?: string | null }
+
 type GetStub = (contractID: string, key: string) =>
-  Promise<ParsedEncryptedOrUnencryptedMessage<JSONType> | null>
+  Promise<GetResult | null>
 
 type QueuedSetStub = (args: {
   contractID: string

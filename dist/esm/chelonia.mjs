@@ -192,6 +192,8 @@ export default sbp('sbp/selectors/register', {
         this.kvFilterDirty = new Set();
         this.kvLocalEchoNonces = new Map();
         this.defContractKvByManifest = new Map();
+        this.kvReconnectListener = () => { };
+        this.kvContractsModifiedListener = () => { };
         // pending includes contracts that are scheduled for syncing or in the
         // process of syncing for the first time. After sync completes for the
         // first time, they are removed from pending and added to subscriptionSet
@@ -855,6 +857,20 @@ export default sbp('sbp/selectors/register', {
                 }
             };
             sbp('okTurtles.events/on', PUBSUB_RECONNECTION_SUCCEEDED, this.kvReconnectListener);
+        }
+        if (!this.kvContractsModifiedListener) {
+            // KV-REVAMPED §11.4: on CONTRACTS_MODIFIED(added), reconcile every
+            // matching slot for newly-synced contracts. Registered per-instance
+            // so multi-instance deployments dispatch against the correct context.
+            this.kvContractsModifiedListener = (_contracts, payload) => {
+                try {
+                    sbp('chelonia/kv/_onContractsModified', payload);
+                }
+                catch (e) {
+                    console.error('[chelonia/kv] CONTRACTS_MODIFIED listener threw', e);
+                }
+            };
+            sbp('okTurtles.events/on', CONTRACTS_MODIFIED, this.kvContractsModifiedListener);
         }
         return this.pubsub;
     },
@@ -2130,12 +2146,14 @@ export default sbp('sbp/selectors/register', {
         if (!response.ok) {
             throw new Error('Invalid response status: ' + response.status);
         }
+        const etag = response.headers.get('x-cid') || response.headers.get('etag');
         const data = await response.json();
-        return parseEncryptedOrUnencryptedMessage(this, {
+        const parsed = parseEncryptedOrUnencryptedMessage(this, {
             contractID,
             serializedData: data,
             meta: key
         });
+        return { ...parsed, etag };
     },
     // To set filters for a contract, call with `filter` set to an array of KV
     // keys to receive updates for over the WebSocket. An empty array means that
