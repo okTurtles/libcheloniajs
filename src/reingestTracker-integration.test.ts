@@ -55,9 +55,9 @@ describe('reingestTracker: integration with chelonia selectors', () => {
   it('removeImmediately({ resync: true }) clears the per-contract entries', () => {
     ensureContractStub(CID_A)
     ensureContractStub(CID_B)
-    noteFutureEvent(CID_A, 'h-stale-a-1')
-    noteFutureEvent(CID_A, 'h-stale-a-2')
-    noteFutureEvent(CID_B, 'h-stale-b-1')
+    noteFutureEvent(CID_A, 'h-stale-a-1', 10)
+    noteFutureEvent(CID_A, 'h-stale-a-2', 20)
+    noteFutureEvent(CID_B, 'h-stale-b-1', 10)
     assert.strictEqual(pendingReingestCount(CID_A), 2)
 
     sbp('chelonia/private/removeImmediately', CID_A, { resync: true })
@@ -80,8 +80,8 @@ describe('reingestTracker: integration with chelonia selectors', () => {
     // pin that the clear is scoped to CID_A: a regression that
     // accidentally drained the whole map would surface here.
     ensureContractStub(CID_A)
-    noteFutureEvent(CID_A, 'h-stale-a-1')
-    noteFutureEvent(CID_B, 'h-stale-b-1')
+    noteFutureEvent(CID_A, 'h-stale-a-1', 10)
+    noteFutureEvent(CID_B, 'h-stale-b-1', 10)
     sbp('chelonia/private/removeImmediately', CID_A)
     assert.strictEqual(pendingReingestCount(CID_A), 0)
     assert.strictEqual(pendingReingestCount(CID_B), 1)
@@ -95,7 +95,7 @@ describe('reingestTracker: integration with chelonia selectors', () => {
     // indefinitely. Moving the clear above the early-return makes it
     // unconditional. We deliberately do NOT call `ensureContractStub`
     // here so the selector takes the early-return branch.
-    noteFutureEvent(CID_C, 'h-stale-c-1')
+    noteFutureEvent(CID_C, 'h-stale-c-1', 10)
     assert.strictEqual(pendingReingestCount(CID_C), 1)
     sbp('chelonia/private/removeImmediately', CID_C)
     assert.strictEqual(pendingReingestCount(CID_C), 0)
@@ -104,8 +104,8 @@ describe('reingestTracker: integration with chelonia selectors', () => {
   it('chelonia/reset wipes the tracker for every contract', async () => {
     ensureContractStub(CID_A)
     ensureContractStub(CID_B)
-    noteFutureEvent(CID_A, 'h-a')
-    noteFutureEvent(CID_B, 'h-b')
+    noteFutureEvent(CID_A, 'h-a', 10)
+    noteFutureEvent(CID_B, 'h-b', 10)
     assert.strictEqual(pendingReingestCount(CID_A), 1)
     assert.strictEqual(pendingReingestCount(CID_B), 1)
 
@@ -117,12 +117,12 @@ describe('reingestTracker: integration with chelonia selectors', () => {
 
   it('after removeImmediately({ resync: true }), re-noting the same hash is accepted (regression for "Already attempted to reingest")', () => {
     ensureContractStub(CID_A)
-    noteFutureEvent(CID_A, 'h-stale')
+    noteFutureEvent(CID_A, 'h-stale', 10)
     sbp('chelonia/private/removeImmediately', CID_A, { resync: true })
     // Before the fix, the hash would still be in the global tracker
     // and noteFutureEvent would return 'duplicate' (which the caller
     // then escalates to ChelErrorDBBadPreviousHEAD). After the fix,
     // the tracker has been cleared for this contract.
-    assert.strictEqual(noteFutureEvent(CID_A, 'h-stale'), 'added')
+    assert.strictEqual(noteFutureEvent(CID_A, 'h-stale', 10), 'added')
   })
 })

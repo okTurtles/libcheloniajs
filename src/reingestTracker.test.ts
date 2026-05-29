@@ -2,10 +2,11 @@
 //
 // Background: when `checkMessageOrdering` sees an event whose height is
 // strictly greater than `latestProcessedHeight + 1` (a "future" event,
-// i.e. there's a gap), it records the event's hash and schedules a
-// forced re-sync to fill the gap. Originally this bookkeeping was a
-// single module-level `string[]` shared across every contract, with a
-// global cap of 100 entries. That design has three failure modes:
+// i.e. there's a gap), it records the event's hash and height and
+// schedules a forced re-sync to fill the gap. Originally this
+// bookkeeping was a single module-level `string[]` shared across every
+// contract, with a global cap of 100 entries. That design has three
+// failure modes:
 //
 //   1. Cross-contract pollution: one chatty contract can exhaust the
 //      shared cap and starve every other contract. The cap's intent
@@ -37,6 +38,7 @@ import {
   noteReingestSuccess,
   noteFutureEvent,
   pendingReingestCount,
+  pruneStaleEntries,
   REINGEST_PER_CONTRACT_CAP
 } from './reingestTracker.js'
 
@@ -49,19 +51,19 @@ describe('reingestTracker', () => {
   })
 
   it('noteFutureEvent returns "added" the first time a hash is seen', () => {
-    assert.strictEqual(noteFutureEvent(CID_A, 'h1'), 'added')
+    assert.strictEqual(noteFutureEvent(CID_A, 'h1', 10), 'added')
     assert.strictEqual(hasPendingReingest(CID_A, 'h1'), true)
     assert.strictEqual(pendingReingestCount(CID_A), 1)
   })
 
   it('noteFutureEvent returns "duplicate" the second time the same hash is seen', () => {
-    noteFutureEvent(CID_A, 'h1')
-    assert.strictEqual(noteFutureEvent(CID_A, 'h1'), 'duplicate')
+    noteFutureEvent(CID_A, 'h1', 10)
+    assert.strictEqual(noteFutureEvent(CID_A, 'h1', 10), 'duplicate')
     assert.strictEqual(pendingReingestCount(CID_A), 1)
   })
 
   it('noteReingestSuccess drops the hash if present, no-ops otherwise', () => {
-    noteFutureEvent(CID_A, 'h1')
+    noteFutureEvent(CID_A, 'h1', 10)
     assert.strictEqual(noteReingestSuccess(CID_A, 'h1'), true)
     assert.strictEqual(hasPendingReingest(CID_A, 'h1'), false)
     // Idempotent: calling again on the now-absent hash returns false.
@@ -72,34 +74,34 @@ describe('reingestTracker', () => {
     // Fill A right up to (but not past) the per-contract cap. Contract
     // B must remain completely empty and able to accept a fresh entry.
     for (let i = 0; i < REINGEST_PER_CONTRACT_CAP; i++) {
-      assert.strictEqual(noteFutureEvent(CID_A, `a-${i}`), 'added')
+      assert.strictEqual(noteFutureEvent(CID_A, `a-${i}`, 100 + i), 'added')
     }
     assert.strictEqual(pendingReingestCount(CID_A), REINGEST_PER_CONTRACT_CAP)
     assert.strictEqual(pendingReingestCount(CID_B), 0)
-    assert.strictEqual(noteFutureEvent(CID_B, 'b-0'), 'added')
+    assert.strictEqual(noteFutureEvent(CID_B, 'b-0', 5), 'added')
     assert.strictEqual(pendingReingestCount(CID_B), 1)
   })
 
   it('enforces a PER-CONTRACT cap and throws ChelErrorUnrecoverable on overflow', () => {
     for (let i = 0; i < REINGEST_PER_CONTRACT_CAP; i++) {
-      noteFutureEvent(CID_A, `a-${i}`)
+      noteFutureEvent(CID_A, `a-${i}`, 100 + i)
     }
     // The (CAP+1)-th distinct hash on the same contract must throw.
     assert.throws(
-      () => noteFutureEvent(CID_A, 'overflow'),
+      () => noteFutureEvent(CID_A, 'overflow', 200),
       (err: Error) => err.name === 'ChelErrorUnrecoverable'
     )
     // ...but the same number of distinct hashes on a *different*
     // contract must still succeed (proves cap is per-contract).
     for (let i = 0; i < REINGEST_PER_CONTRACT_CAP; i++) {
-      assert.strictEqual(noteFutureEvent(CID_B, `b-${i}`), 'added')
+      assert.strictEqual(noteFutureEvent(CID_B, `b-${i}`, 100 + i), 'added')
     }
   })
 
   it('clearReingestTrackerForContract drops only that contract\'s entries', () => {
-    noteFutureEvent(CID_A, 'a-1')
-    noteFutureEvent(CID_A, 'a-2')
-    noteFutureEvent(CID_B, 'b-1')
+    noteFutureEvent(CID_A, 'a-1', 10)
+    noteFutureEvent(CID_A, 'a-2', 20)
+    noteFutureEvent(CID_B, 'b-1', 10)
     clearReingestTrackerForContract(CID_A)
     assert.strictEqual(pendingReingestCount(CID_A), 0)
     assert.strictEqual(hasPendingReingest(CID_A, 'a-1'), false)
@@ -112,8 +114,8 @@ describe('reingestTracker', () => {
   })
 
   it('clearReingestTrackerAll wipes every contract', () => {
-    noteFutureEvent(CID_A, 'a-1')
-    noteFutureEvent(CID_B, 'b-1')
+    noteFutureEvent(CID_A, 'a-1', 10)
+    noteFutureEvent(CID_B, 'b-1', 10)
     clearReingestTrackerAll()
     assert.strictEqual(pendingReingestCount(CID_A), 0)
     assert.strictEqual(pendingReingestCount(CID_B), 0)
@@ -126,9 +128,9 @@ describe('reingestTracker', () => {
     // the simpler case below, when fresh events arrive after the
     // resync). After a per-contract clear, the tracker must accept the
     // same hash again without throwing.
-    noteFutureEvent(CID_A, 'h-stale')
+    noteFutureEvent(CID_A, 'h-stale', 10)
     clearReingestTrackerForContract(CID_A)
-    assert.strictEqual(noteFutureEvent(CID_A, 'h-stale'), 'added')
+    assert.strictEqual(noteFutureEvent(CID_A, 'h-stale', 10), 'added')
   })
 
   it('cumulative gap events across many contracts must not trip a shared cap (okTurtles/libcheloniajs#77)', () => {
@@ -191,8 +193,60 @@ describe('reingestTracker', () => {
     for (let c = 0; c < N_CONTRACTS; c++) {
       const cid = `cid-storm-${c}`
       for (let h = 0; h < PER_CONTRACT; h++) {
-        assert.strictEqual(noteFutureEvent(cid, `h-${c}-${h}`), 'added')
+        assert.strictEqual(noteFutureEvent(cid, `h-${c}-${h}`, 100 + h), 'added')
       }
+    }
+  })
+
+  it('pruneStaleEntries removes entries at or below the given height', () => {
+    noteFutureEvent(CID_A, 'h-10', 10)
+    noteFutureEvent(CID_A, 'h-20', 20)
+    noteFutureEvent(CID_A, 'h-30', 30)
+    assert.strictEqual(pendingReingestCount(CID_A), 3)
+
+    // Pruning at height 20 removes entries at height 10 and 20
+    assert.strictEqual(pruneStaleEntries(CID_A, 20), 2)
+    assert.strictEqual(pendingReingestCount(CID_A), 1)
+    assert.strictEqual(hasPendingReingest(CID_A, 'h-10'), false)
+    assert.strictEqual(hasPendingReingest(CID_A, 'h-20'), false)
+    assert.strictEqual(hasPendingReingest(CID_A, 'h-30'), true)
+  })
+
+  it('pruneStaleEntries returns 0 and is a no-op for unknown contracts', () => {
+    assert.strictEqual(pruneStaleEntries('never-seen', 100), 0)
+  })
+
+  it('pruneStaleEntries prunes the map key when the set becomes empty', () => {
+    noteFutureEvent(CID_A, 'h-10', 10)
+    assert.strictEqual(pruneStaleEntries(CID_A, 10), 1)
+    assert.strictEqual(pendingReingestCount(CID_A), 0)
+    // The contract's map entry should be gone entirely
+    assert.strictEqual(pruneStaleEntries(CID_A, 10), 0)
+  })
+
+  it('pruneStaleEntries does not affect other contracts', () => {
+    noteFutureEvent(CID_A, 'h-10', 10)
+    noteFutureEvent(CID_B, 'h-10', 10)
+    pruneStaleEntries(CID_A, 20)
+    assert.strictEqual(pendingReingestCount(CID_A), 0)
+    assert.strictEqual(pendingReingestCount(CID_B), 1)
+  })
+
+  it('orphaned hash is pruned when the gap is closed by a different hash at the same height', () => {
+    // Simulate: contract at height 9, sees hash 'fork-a' at height 10
+    noteFutureEvent(CID_A, 'fork-a', 10)
+    assert.strictEqual(pendingReingestCount(CID_A), 1)
+
+    // Force-sync fills the gap with a *different* hash 'fork-b' at
+    // height 10. The exact-hash success path won't match, but pruning
+    // at height 10 removes the stale entry.
+    assert.strictEqual(noteReingestSuccess(CID_A, 'fork-b'), false)
+    assert.strictEqual(pruneStaleEntries(CID_A, 10), 1)
+    assert.strictEqual(pendingReingestCount(CID_A), 0)
+
+    // The cap is fully recovered
+    for (let i = 0; i < REINGEST_PER_CONTRACT_CAP; i++) {
+      assert.strictEqual(noteFutureEvent(CID_A, `fresh-${i}`, 200 + i), 'added')
     }
   })
 })

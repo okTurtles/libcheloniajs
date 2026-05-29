@@ -14,7 +14,7 @@ export declare const REINGEST_PER_CONTRACT_CAP = 20;
  * exceeded. The cap is per-contract; reaching it indicates this
  * specific contract is wedged.
  */
-export declare const noteFutureEvent: (contractID: string, hash: string) => "added" | "duplicate";
+export declare const noteFutureEvent: (contractID: string, hash: string, height: number) => "added" | "duplicate";
 /**
  * Drop a previously-recorded hash, signalling that the contract caught
  * up and the missed event was successfully processed. Returns `true`
@@ -23,6 +23,16 @@ export declare const noteFutureEvent: (contractID: string, hash: string) => "add
  * reality and the map doesn't accumulate dead keys.
  */
 export declare const noteReingestSuccess: (contractID: string, hash: string) => boolean;
+/**
+ * Remove entries whose recorded height is ≤ `processedHeight`. Called
+ * from the in-order success branch in `checkMessageOrdering`: once the
+ * contract has advanced past a recorded gap height, that entry is stale
+ * regardless of whether the exact hash matched (the gap may have been
+ * filled by a different message, e.g. a fork).
+ *
+ * Returns the number of entries pruned.
+ */
+export declare const pruneStaleEntries: (contractID: string, processedHeight: number) => number;
 export declare const hasPendingReingest: (contractID: string, hash: string) => boolean;
 export declare const pendingReingestCount: (contractID: string) => number;
 /**

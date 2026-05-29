@@ -9,7 +9,7 @@ import { encryptedIncomingData, encryptedOutgoingData } from './encryptedData.mj
 import { ChelErrorAlreadyProcessed, ChelErrorDBBadPreviousHEAD, ChelErrorFetchServerTimeFailed, ChelErrorForkedChain, ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnrecoverable, ChelErrorWarning } from './errors.mjs';
 import { CONTRACTS_MODIFIED, CONTRACT_HAS_RECEIVED_KEYS, CONTRACT_IS_SYNCING, EVENT_HANDLED, EVENT_PUBLISHED, EVENT_PUBLISHING_ERROR } from './events.mjs';
 import { multicodes } from './functions.mjs';
-import { clearReingestTrackerForContract, noteFutureEvent, noteReingestSuccess } from './reingestTracker.mjs';
+import { clearReingestTrackerForContract, noteFutureEvent, noteReingestSuccess, pruneStaleEntries } from './reingestTracker.mjs';
 import { isSignedData, signedIncomingData } from './signedData.mjs';
 import { buildShelterAuthorizationHeader, deleteKeyHelper, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, updateKey, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
 // Used for temporarily storing the missing decryption key IDs in a given
@@ -2378,10 +2378,11 @@ const reprocessDebounced = (contractID) => {
         // the capture must be made explicit (e.g. via `.bind`) to avoid
         // firing a force-sync against the wrong contract.
         d = debounce(() => {
-            // Drop our slot before firing so a follow-up call after the timer
-            // has fired but before `chelonia/private/in/sync` resolves gets a
-            // fresh debounce rather than reusing a stale one (whose internal
-            // `timeout` is already `undefined` so it'd fire instantly).
+            // Remove our map slot before firing. The debounce has already fired
+            // (its internal timeout is now cleared), so keeping it would just leave
+            // a dead entry in the map until the next gap event re-arms it. Dropping
+            // it now means each force-sync cycle is self-contained and the map only
+            // holds contracts with a currently-pending timer.
             reprocessDebounceMap.delete(contractID);
             sbp('chelonia/private/in/sync', contractID, { force: true }).catch((e) => {
                 console.error(`[chelonia] Error at reprocessDebounced for ${contractID}`, e);
@@ -2449,7 +2450,7 @@ const handleEvent = {
             // others, and its cap (REINGEST_PER_CONTRACT_CAP) is enforced by
             // `noteFutureEvent` which throws `ChelErrorUnrecoverable` on
             // overflow — only when *this* contract is genuinely wedged.
-            const note = noteFutureEvent(contractID, hash);
+            const note = noteFutureEvent(contractID, hash, height);
             if (note === 'added') {
                 console.warn(`[chelonia] WARN bad previousHEAD for ${message.description()}, will attempt to re-sync contract to reingest message`);
                 reprocessDebounced(contractID);
@@ -2463,6 +2464,13 @@ const handleEvent = {
         if (noteReingestSuccess(contractID, hash)) {
             console.warn(`[chelonia] WARN: successfully reingested ${message.description()}`);
         }
+        // Prune any stale entries whose recorded height is now ≤ the
+        // contract's current processed height. This handles the case where
+        // a forced re-sync fills a gap with a *different* hash (e.g. a
+        // fork/orphan) — the originally recorded hash would never match
+        // in `noteReingestSuccess` and would linger indefinitely, slowly
+        // consuming the per-contract cap.
+        pruneStaleEntries(contractID, height);
     },
     async processMutation(message, state, internalSideEffectStack) {
         const contractID = message.contractID();

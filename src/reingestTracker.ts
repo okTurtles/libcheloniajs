@@ -3,9 +3,9 @@
 // When `checkMessageOrdering` sees an event whose height is strictly
 // greater than `latestProcessedHeight + 1`, there is a gap in the
 // per-contract log and the event cannot be applied yet. The handler
-// records the hash here and schedules a forced re-sync to backfill the
-// missing events. When the missed event is re-delivered after that
-// re-sync, the hash is dropped from this tracker via
+// records the hash and height here and schedules a forced re-sync to
+// backfill the missing events. When the missed event is re-delivered
+// after that re-sync, the hash is dropped from this tracker via
 // `noteReingestSuccess`.
 //
 // Design notes (why this is per-contract):
@@ -36,6 +36,16 @@
 //         the contract is being torn down (release-to-zero / permanent
 //         deletion) and the entries can never re-ingest there.
 //
+//   * Stale entry pruning: when a forced re-sync fills a gap, the
+//     actual message at the missing height may differ from the
+//     originally recorded hash (e.g. a fork/orphan). To prevent such
+//     orphaned hashes from consuming the per-contract cap indefinitely,
+//     `pruneStaleEntries` removes any entry whose recorded height is
+//     ≤ the contract's current processed height. This is called from
+//     the in-order success branch in `checkMessageOrdering`, so the
+//     cap accurately reflects "concurrent pending gaps" rather than
+//     "distinct unrecovered gaps over the entire session lifetime".
+//
 // This module exposes a small functional API and no SBP selectors —
 // it is consumed directly by `internals.ts` (the producer/consumer of
 // gap events) and `chelonia.ts` (the reset hook).
@@ -49,9 +59,14 @@ import { ChelErrorUnrecoverable } from './errors.js'
 // shared.
 export const REINGEST_PER_CONTRACT_CAP = 20
 
-const trackers: Map<string, Set<string>> = new Map()
+interface TrackedEntry {
+  hash: string
+  height: number
+}
 
-const ensure = (contractID: string): Set<string> => {
+const trackers: Map<string, Set<TrackedEntry>> = new Map()
+
+const ensure = (contractID: string): Set<TrackedEntry> => {
   let s = trackers.get(contractID)
   if (!s) {
     s = new Set()
@@ -77,16 +92,19 @@ const ensure = (contractID: string): Set<string> => {
  */
 export const noteFutureEvent = (
   contractID: string,
-  hash: string
+  hash: string,
+  height: number
 ): 'added' | 'duplicate' => {
   const s = ensure(contractID)
-  if (s.has(hash)) return 'duplicate'
+  for (const entry of s) {
+    if (entry.hash === hash) return 'duplicate'
+  }
   if (s.size >= REINGEST_PER_CONTRACT_CAP) {
     throw new ChelErrorUnrecoverable(
       `more than ${REINGEST_PER_CONTRACT_CAP} different bad previousHEAD errors for contract ${contractID}`
     )
   }
-  s.add(hash)
+  s.add({ hash, height })
   return 'added'
 }
 
@@ -100,13 +118,46 @@ export const noteFutureEvent = (
 export const noteReingestSuccess = (contractID: string, hash: string): boolean => {
   const s = trackers.get(contractID)
   if (!s) return false
-  const had = s.delete(hash)
+  for (const entry of s) {
+    if (entry.hash === hash) {
+      s.delete(entry)
+      if (s.size === 0) trackers.delete(contractID)
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Remove entries whose recorded height is ≤ `processedHeight`. Called
+ * from the in-order success branch in `checkMessageOrdering`: once the
+ * contract has advanced past a recorded gap height, that entry is stale
+ * regardless of whether the exact hash matched (the gap may have been
+ * filled by a different message, e.g. a fork).
+ *
+ * Returns the number of entries pruned.
+ */
+export const pruneStaleEntries = (contractID: string, processedHeight: number): number => {
+  const s = trackers.get(contractID)
+  if (!s) return 0
+  let pruned = 0
+  for (const entry of s) {
+    if (entry.height <= processedHeight) {
+      s.delete(entry)
+      pruned++
+    }
+  }
   if (s.size === 0) trackers.delete(contractID)
-  return had
+  return pruned
 }
 
 export const hasPendingReingest = (contractID: string, hash: string): boolean => {
-  return !!trackers.get(contractID)?.has(hash)
+  const s = trackers.get(contractID)
+  if (!s) return false
+  for (const entry of s) {
+    if (entry.hash === hash) return true
+  }
+  return false
 }
 
 export const pendingReingestCount = (contractID: string): number => {
