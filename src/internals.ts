@@ -678,6 +678,12 @@ export default sbp('sbp/selectors/register', {
       this.kvSlotsByContractID.delete(contractID)
       this.kvActiveFilters.delete(contractID)
       this.kvFilterDirty.delete(contractID)
+      // Clear any lingering echo nonces for this contract.
+      for (const key of this.kvLocalEchoNonces.keys()) {
+        if (key.startsWith(`${contractID}::`)) {
+          this.kvLocalEchoNonces.delete(key)
+        }
+      }
     }
 
     this.subscriptionSet.delete(contractID)

@@ -2102,7 +2102,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // Rationale: 409 and 412 indicate conflict resolution is needed
                 if (response.status === 409 || response.status === 412) {
                     if (--maxAttempts <= 0) {
-                        throw new Error('kv/set conflict setting KV value');
+                        throw new errors_js_1.ChelErrorKvMaxAttempts('kv/set conflict setting KV value');
                     }
                     // Honour caller-side abort at every retry boundary so a
                     // cancellation that lands between requests is respected

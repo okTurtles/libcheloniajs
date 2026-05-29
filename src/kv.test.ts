@@ -11,6 +11,7 @@ import { afterEach, before, beforeEach, describe, it } from 'node:test'
 import '@sbp/okturtles.events'
 import {
   ChelErrorKvConflict,
+  ChelErrorKvMaxAttempts,
   ChelErrorKvSlotInvalid,
   ChelErrorKvUpdateInvalid,
   ChelErrorKvValidation
@@ -741,7 +742,7 @@ describe('KV slot API', () => {
 
     // 19a: conflict exhaustion
     stubQueuedSet = async () => {
-      throw new Error('kv/set conflict setting KV value')
+      throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value')
     }
     await assert.rejects(
       () => sbp('chelonia/kv/update', {
@@ -800,26 +801,21 @@ describe('KV slot API', () => {
   // 21
   // -----------------------------------------------------------------------
   it('21: defaultValue round-trip guard', () => {
-    // A schema whose parse produces a different JSON string on second call.
-    let callCount = 0
-    const coercing = {
-      parse: (v: unknown): { x: number } => {
+    // A schema whose parse is not idempotent — each invocation appends
+    // a new element to an array field, so parse(parse(x)) !== parse(x).
+    const nonIdempotent = {
+      parse: (v: unknown): { xs: number[] } => {
         if (v === null || v === undefined) throw new Error('no')
-        callCount++
-        // First call: include y. Second call: drop y. This makes
-        // JSON.stringify differ between first and second parse.
-        const obj = v as Record<string, unknown>
-        return callCount === 1
-          ? { x: obj.x as number, y: obj.y as number } as unknown as { x: number }
-          : { x: obj.x as number }
+        const obj = v as { xs: number[] }
+        return { xs: [...(obj.xs ?? []), 0] }
       }
     }
     assert.throws(
       () => sbp('chelonia/kv/defineSlot', {
         key: 'cg',
         contractType: CTYPE,
-        defaultValue: { x: 1, y: 2 },
-        schema: coercing
+        defaultValue: { xs: [] },
+        schema: nonIdempotent
       }),
       (e: unknown) => e instanceof ChelErrorKvSlotInvalid
     )
@@ -1125,9 +1121,15 @@ describe('KV slot API', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 31: issue 5 – stable coercion/drop caught at registration
+  // 31: issue 5 – schema that alters the resolved default on first parse
+  // is rejected (§4.1 guard 3 fidelity check). Idempotent coercion of
+  // the *parsed* output is not sufficient; the default itself must
+  // survive parsing unchanged. Schemas like
+  // `NotificationsSchema.transform(applyStorageRules)` are fine because
+  // they don't alter an empty default — the transform only affects
+  // non-empty loaded values.
   // -----------------------------------------------------------------------
-  it('31: stable coercion caught at registration', () => {
+  it('31: schema altering default on first parse is rejected', () => {
     const schema = {
       parse (value: unknown): { x: number } {
         if (value === null || value === undefined) throw new Error('reserved')
@@ -1135,6 +1137,8 @@ describe('KV slot API', () => {
       }
     }
 
+    // A schema that drops fields / coerces the default is rejected —
+    // the fidelity check requires the default to survive parse unchanged.
     assert.throws(
       () => sbp('chelonia/kv/defineSlot', {
         key: 'sc',
@@ -1142,7 +1146,20 @@ describe('KV slot API', () => {
         defaultValue: { x: '1', extra: true },
         schema
       }),
-      (e: unknown) => e instanceof ChelErrorKvSlotInvalid
+      {
+        name: 'ChelErrorKvSlotInvalid',
+        message: /\baltered the resolved defaultValue on first parse\b/
+      }
+    )
+
+    // Same schema is fine when the default survives parse unchanged.
+    assert.doesNotThrow(
+      () => sbp('chelonia/kv/defineSlot', {
+        key: 'sc2',
+        contractType: CTYPE,
+        defaultValue: { x: 1 },
+        schema
+      })
     )
   })
 })

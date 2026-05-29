@@ -126,6 +126,15 @@ export type JournalConfig = {
 };
 export type KvUpdater<T> = (prev: T) => T | symbol;
 export type KvLoadStatus = 'non-init' | 'loading' | 'loaded' | 'error';
+export type KvMirrorEntry = {
+    value: JSONType | undefined;
+    etag: string | null;
+    status: KvLoadStatus;
+    lastError?: {
+        name: string;
+        message: string;
+    };
+};
 export type KvUpdateCtx = {
     contractID: string;
     contractType: string;
@@ -148,7 +157,7 @@ export type KvSlotDefinition = {
     autoSubscribe?: boolean;
     autoLoad?: 'on-sync' | 'on-demand' | 'never';
     refreshOnReconnect?: boolean;
-    onUpdate?: (value: JSONType, ctx: KvUpdateCtx) => void | Promise<void>;
+    onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
 };
 export type SlotDefinition = {
     contractType: string;
@@ -165,7 +174,7 @@ export type SlotDefinition = {
     autoSubscribe: boolean;
     autoLoad: 'on-sync' | 'on-demand' | 'never';
     refreshOnReconnect: boolean;
-    onUpdate?: (value: JSONType, ctx: KvUpdateCtx) => void | Promise<void>;
+    onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
 };
 export type SendMessageHooks = Partial<{
     prepublish: (entry: SPMessage) => void | Promise<void>;
@@ -416,15 +425,7 @@ export type ChelRootState = {
         };
     }>;
     secretKeys: Record<string, string>;
-    _kv?: Record<string, Record<string, {
-        value: JSONType | undefined;
-        etag: string | null;
-        status: KvLoadStatus;
-        lastError?: {
-            name: string;
-            message: string;
-        };
-    }>>;
+    _kv?: Record<string, Record<string, KvMirrorEntry>>;
 };
 export type Response = {
     type: ResType;
@@ -448,4 +449,4 @@ export type ChelKvOnConflictCallback = (args: {
     etag: string | null | undefined;
     currentData: JSONType | undefined;
     currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string] | false>;
+}) => Promise<[JSONType, string | undefined] | false>;

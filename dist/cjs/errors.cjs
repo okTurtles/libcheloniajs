@@ -2,7 +2,7 @@
 // ugly boilerplate because JavaScript is stupid
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ChelErrorKvConflict = exports.ChelErrorKvValidation = exports.ChelErrorKvUpdateInvalid = exports.ChelErrorKvSlotInvalid = exports.ChelErrorKvSlotUnknown = exports.ChelErrorJournalCorrupt = exports.ChelErrorResourceGone = exports.ChelErrorUnexpectedHttpResponseCode = exports.ChelErrorFetchServerTimeFailed = exports.ChelErrorSignatureKeyNotFound = exports.ChelErrorSignatureKeyUnauthorized = exports.ChelErrorSignatureError = exports.ChelErrorDecryptionKeyNotFound = exports.ChelErrorDecryptionError = exports.ChelErrorForkedChain = exports.ChelErrorUnrecoverable = exports.ChelErrorKeyAlreadyExists = exports.ChelErrorUnexpected = exports.ChelErrorDBConnection = exports.ChelErrorDBBadPreviousHEAD = exports.ChelErrorAlreadyProcessed = exports.ChelErrorWarning = exports.ChelErrorGenerator = void 0;
+exports.ChelErrorKvMaxAttempts = exports.ChelErrorKvConflict = exports.ChelErrorKvValidation = exports.ChelErrorKvUpdateInvalid = exports.ChelErrorKvSlotInvalid = exports.ChelErrorKvSlotUnknown = exports.ChelErrorJournalCorrupt = exports.ChelErrorResourceGone = exports.ChelErrorUnexpectedHttpResponseCode = exports.ChelErrorFetchServerTimeFailed = exports.ChelErrorSignatureKeyNotFound = exports.ChelErrorSignatureKeyUnauthorized = exports.ChelErrorSignatureError = exports.ChelErrorDecryptionKeyNotFound = exports.ChelErrorDecryptionError = exports.ChelErrorForkedChain = exports.ChelErrorUnrecoverable = exports.ChelErrorKeyAlreadyExists = exports.ChelErrorUnexpected = exports.ChelErrorDBConnection = exports.ChelErrorDBBadPreviousHEAD = exports.ChelErrorAlreadyProcessed = exports.ChelErrorWarning = exports.ChelErrorGenerator = void 0;
 const ChelErrorGenerator = (name, base = Error) => class extends base {
     constructor(...params) {
         super(...params);
@@ -43,3 +43,4 @@ exports.ChelErrorKvSlotInvalid = (0, exports.ChelErrorGenerator)('ChelErrorKvSlo
 exports.ChelErrorKvUpdateInvalid = (0, exports.ChelErrorGenerator)('ChelErrorKvUpdateInvalid');
 exports.ChelErrorKvValidation = (0, exports.ChelErrorGenerator)('ChelErrorKvValidation');
 exports.ChelErrorKvConflict = (0, exports.ChelErrorGenerator)('ChelErrorKvConflict');
+exports.ChelErrorKvMaxAttempts = (0, exports.ChelErrorGenerator)('ChelErrorKvMaxAttempts');

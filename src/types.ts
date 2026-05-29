@@ -179,6 +179,15 @@ export type KvUpdater<T> = (prev: T) => T | symbol;
 // Status of a KV slot's mirror entry. See KV-REVAMPED.md §5.
 export type KvLoadStatus = 'non-init' | 'loading' | 'loaded' | 'error';
 
+// Shape of a single KV mirror entry under `rootState._kv[contractID][key]`.
+// See KV-REVAMPED.md §5.
+export type KvMirrorEntry = {
+  value: JSONType | undefined;
+  etag: string | null;
+  status: KvLoadStatus;
+  lastError?: { name: string; message: string };
+};
+
 // Context passed to `onUpdate` and embedded in the `CHELONIA_KV_UPDATED`
 // event payload. See KV-REVAMPED.md §4.1.
 export type KvUpdateCtx = {
@@ -517,18 +526,7 @@ export type ChelRootState = {
   // KV slot mirror — see KV-REVAMPED.md §5. Indexed by contractID then
   // slot key. `null` is reserved as the wire-level clear sentinel and
   // MUST NOT appear as a stored value.
-  _kv?: Record<
-    string,
-    Record<
-      string,
-      {
-        value: JSONType | undefined;
-        etag: string | null;
-        status: KvLoadStatus;
-        lastError?: { name: string; message: string };
-      }
-    >
-  >;
+  _kv?: Record<string, Record<string, KvMirrorEntry>>;
 };
 
 export type Response = {
@@ -555,4 +553,4 @@ export type ChelKvOnConflictCallback = (args: {
   etag: string | null | undefined;
   currentData: JSONType | undefined;
   currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string] | false>;
+}) => Promise<[JSONType, string | undefined] | false>;
