@@ -1210,22 +1210,7 @@ export default sbp('sbp/selectors/register', {
       // duplicating the load that `_reconcileForSlot` already scheduled.
       this.kvReconnectListener = (client: PubSubClient) => {
         if (client.isNew) return
-        this.kvLocalEchoNonces.clear()
-        for (const [contractID, perKey] of this.kvSlotsByContractID) {
-          for (const [key, slot] of perKey) {
-            if (!slot.refreshOnReconnect) continue
-            sbp('chelonia/kv/_loadSlot', {
-              contractID,
-              slot,
-              reason: 'reconnect' as const
-            }).catch((e: unknown) => {
-              console.error(
-                `[chelonia/kv] reconnect _loadSlot failed for ${contractID}::${key}`,
-                e
-              )
-            })
-          }
-        }
+        sbp('chelonia/kv/_onReconnect')
       }
       sbp('okTurtles.events/on', PUBSUB_RECONNECTION_SUCCEEDED, this.kvReconnectListener)
     }

@@ -851,20 +851,7 @@ export default sbp('sbp/selectors/register', {
             this.kvReconnectListener = (client) => {
                 if (client.isNew)
                     return;
-                this.kvLocalEchoNonces.clear();
-                for (const [contractID, perKey] of this.kvSlotsByContractID) {
-                    for (const [key, slot] of perKey) {
-                        if (!slot.refreshOnReconnect)
-                            continue;
-                        sbp('chelonia/kv/_loadSlot', {
-                            contractID,
-                            slot,
-                            reason: 'reconnect'
-                        }).catch((e) => {
-                            console.error(`[chelonia/kv] reconnect _loadSlot failed for ${contractID}::${key}`, e);
-                        });
-                    }
-                }
+                sbp('chelonia/kv/_onReconnect');
             };
             sbp('okTurtles.events/on', PUBSUB_RECONNECTION_SUCCEEDED, this.kvReconnectListener);
         }

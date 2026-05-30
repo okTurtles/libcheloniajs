@@ -158,6 +158,13 @@ export type KvSlotDefinition = {
     autoLoad?: 'on-sync' | 'on-demand' | 'never';
     refreshOnReconnect?: boolean;
     onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
+    _source?: SlotDefinitionSource;
+};
+export type SlotDefinitionSource = {
+    kind: 'defineContract';
+    manifest: string;
+} | {
+    kind: 'defineSlot';
 };
 export type SlotDefinition = {
     contractType: string;
@@ -175,6 +182,7 @@ export type SlotDefinition = {
     autoLoad: 'on-sync' | 'on-demand' | 'never';
     refreshOnReconnect: boolean;
     onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
+    source?: SlotDefinitionSource;
 };
 export type SendMessageHooks = Partial<{
     prepublish: (entry: SPMessage) => void | Promise<void>;

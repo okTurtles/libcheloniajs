@@ -218,7 +218,14 @@ export type KvSlotDefinition = {
   autoLoad?: 'on-sync' | 'on-demand' | 'never';
   refreshOnReconnect?: boolean;
   onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
+  // Internal: set by `_registerContractSlots` to track manifest-scoped
+  // ownership so that `_cleanupContractSlots` only removes slots it owns.
+  _source?: SlotDefinitionSource;
 };
+
+export type SlotDefinitionSource =
+  | { kind: 'defineContract'; manifest: string }
+  | { kind: 'defineSlot' }
 
 // Internal, resolved form of a slot definition. Built from a
 // `KvSlotDefinition` at `chelonia/kv/defineSlot` time: defaults applied,
@@ -239,6 +246,7 @@ export type SlotDefinition = {
   autoLoad: 'on-sync' | 'on-demand' | 'never';
   refreshOnReconnect: boolean;
   onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
+  source?: SlotDefinitionSource;
 };
 
 export type SendMessageHooks = Partial<{

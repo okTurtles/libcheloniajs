@@ -1129,7 +1129,7 @@ describe('KV slot API', () => {
   // they don't alter an empty default — the transform only affects
   // non-empty loaded values.
   // -----------------------------------------------------------------------
-  it('31: schema altering default on first parse is rejected', () => {
+  it('31: schema transforming default on first parse is normalised', async () => {
     const schema = {
       parse (value: unknown): { x: number } {
         if (value === null || value === undefined) throw new Error('reserved')
@@ -1137,22 +1137,26 @@ describe('KV slot API', () => {
       }
     }
 
-    // A schema that drops fields / coerces the default is rejected —
-    // the fidelity check requires the default to survive parse unchanged.
-    assert.throws(
+    // A schema that transforms the default on first parse is accepted
+    // (idempotence check: parse(parse(x)) === parse(x)). The resolved
+    // default is normalised to the schema-parsed output.
+    assert.doesNotThrow(
       () => sbp('chelonia/kv/defineSlot', {
         key: 'sc',
         contractType: CTYPE,
         defaultValue: { x: '1', extra: true },
         schema
-      }),
-      {
-        name: 'ChelErrorKvSlotInvalid',
-        message: /\baltered the resolved defaultValue on first parse\b/
-      }
+      })
     )
 
-    // Same schema is fine when the default survives parse unchanged.
+    // Verify the resolved default was normalised to the schema output
+    // by setting up a contract and reading the default.
+    const c = 'cid-31'
+    await setupContract(c)
+    const val = sbp('chelonia/kv/read', c, 'sc')
+    assert.deepStrictEqual(val, { x: 1 })
+
+    // Same schema is also fine when the default survives parse unchanged.
     assert.doesNotThrow(
       () => sbp('chelonia/kv/defineSlot', {
         key: 'sc2',
@@ -1161,5 +1165,59 @@ describe('KV slot API', () => {
         schema
       })
     )
+  })
+
+  // -----------------------------------------------------------------------
+  // 32: 404 with previous value emits CHELONIA_KV_UPDATED with value:undefined
+  // -----------------------------------------------------------------------
+  it('32: 404 with previous value emits update event', async () => {
+    const onUpdateValues: unknown[] = []
+    sbp('chelonia/kv/defineSlot', {
+      key: 'p404',
+      contractType: CTYPE,
+      defaultValue: { x: 0 },
+      schema: objectSchema,
+      onUpdate: (value: unknown) => { onUpdateValues.push(value) }
+    })
+    const c = 'cid-32'
+    await setupContract(c)
+
+    // First load returns a value so the mirror has one.
+    stubGet = async () => fakeParsed({ x: 42 })
+    await sbp('chelonia/kv/sync', c, 'p404')
+    assert.deepStrictEqual(
+      (rootState()._kv![c]!.p404 as { value: unknown }).value, { x: 42 }
+    )
+
+    // Second load returns null (404) — server key was deleted.
+    const { log, offs } = collectEvents()
+    stubGet = async () => null
+
+    await sbp('chelonia/kv/sync', c, 'p404')
+
+    // The mirror should now hold undefined (reverted to default).
+    assert.strictEqual(
+      (rootState()._kv![c]!.p404 as { value: unknown }).value, undefined
+    )
+
+    // CHELONIA_KV_UPDATED must have fired with value:undefined and
+    // previousValue:{x:42}.
+    const updateEvents = log.filter(
+      (e) => e.type === CHELONIA_KV_UPDATED && (e.payload as { key: string }).key === 'p404'
+    )
+    assert.ok(updateEvents.length >= 1, 'expected at least one CHELONIA_KV_UPDATED')
+    const lastEvent = updateEvents[updateEvents.length - 1].payload as {
+      value: unknown; previousValue: unknown
+    }
+    assert.strictEqual(lastEvent.value, undefined)
+    assert.deepStrictEqual(lastEvent.previousValue, { x: 42 })
+
+    // onUpdate should have been called with the cloned default.
+    assert.ok(
+      onUpdateValues.some((v) => v !== undefined && (v as { x: number }).x === 0),
+      'onUpdate should have been called with the default value'
+    )
+
+    offs.forEach((off) => off())
   })
 })
