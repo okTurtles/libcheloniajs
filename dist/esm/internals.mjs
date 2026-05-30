@@ -457,6 +457,27 @@ export default sbp('sbp/selectors/register', {
             }
             this.config.reactiveDel(state, contractID);
         }
+        // Drop per-contract KV runtime state (only on real removal, not resync).
+        // The empty-filter frame must reach the server before the state is cleared
+        // so that stale notifications stop flowing.
+        if (!params?.resync) {
+            try {
+                sbp('chelonia/kv/setFilter', contractID, []);
+            }
+            catch { /* best-effort; pubsub may already be gone */ }
+            if (state._kv?.[contractID] !== undefined) {
+                this.config.reactiveDel(state._kv, contractID);
+            }
+            this.kvSlotsByContractID.delete(contractID);
+            this.kvActiveFilters.delete(contractID);
+            this.kvFilterDirty.delete(contractID);
+            // Clear any lingering echo nonces for this contract.
+            for (const key of this.kvLocalEchoNonces.keys()) {
+                if (key.startsWith(`${contractID}::`)) {
+                    this.kvLocalEchoNonces.delete(key);
+                }
+            }
+        }
         this.subscriptionSet.delete(contractID);
         // (Tracker + debounce cancellation moved to the top of this selector
         // so the early-return path on a missing contract row also clears.

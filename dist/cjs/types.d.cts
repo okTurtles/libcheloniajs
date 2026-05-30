@@ -124,6 +124,66 @@ export type JournalConfig = {
     diff?: (before: unknown, after: unknown) => JournalPatch[];
     applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };
+export type KvUpdater<T> = (prev: T) => T | symbol;
+export type KvLoadStatus = 'non-init' | 'loading' | 'loaded' | 'error';
+export type KvMirrorEntry = {
+    value: JSONType | undefined;
+    etag: string | null;
+    status: KvLoadStatus;
+    lastError?: {
+        name: string;
+        message: string;
+    };
+};
+export type KvUpdateCtx = {
+    contractID: string;
+    contractType: string;
+    key: string;
+    reason: 'load' | 'remote' | 'local' | 'reconnect';
+    etag: string | null;
+    previousValue: JSONType | undefined;
+};
+export type KvSlotDefinition = {
+    contractType: string | string[];
+    key: string;
+    defaultValue?: JSONType | (() => JSONType);
+    schema?: {
+        parse: (value: unknown) => JSONType;
+    };
+    match?: (contractID: string, contractState: object, rootState: object) => boolean;
+    encryptionKeyName?: string;
+    signingKeyName?: string;
+    defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
+    autoSubscribe?: boolean;
+    autoLoad?: 'on-sync' | 'on-demand' | 'never';
+    refreshOnReconnect?: boolean;
+    onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
+    _source?: SlotDefinitionSource;
+};
+export type SlotDefinitionSource = {
+    kind: 'defineContract';
+    manifest: string;
+} | {
+    kind: 'defineSlot';
+};
+export type SlotDefinition = {
+    contractType: string;
+    key: string;
+    defaultValue?: JSONType | (() => JSONType);
+    resolvedDefault: JSONType | undefined;
+    schema?: {
+        parse: (value: unknown) => JSONType;
+    };
+    match?: (contractID: string, contractState: object, rootState: object) => boolean;
+    encryptionKeyName: string;
+    signingKeyName: string;
+    defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
+    autoSubscribe: boolean;
+    autoLoad: 'on-sync' | 'on-demand' | 'never';
+    refreshOnReconnect: boolean;
+    onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
+    source?: SlotDefinitionSource;
+};
 export type SendMessageHooks = Partial<{
     prepublish: (entry: SPMessage) => void | Promise<void>;
     onprocessed: (entry: SPMessage) => void;
@@ -184,6 +244,7 @@ export type CheloniaContractCtx = {
         }) => void | Promise<void>;
     }>;
     methods: Record<string, (...args: unknown[]) => unknown>;
+    kv?: Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>;
 };
 export type CheloniaContext = {
     config: CheloniaConfig;
@@ -222,10 +283,21 @@ export type CheloniaContext = {
         added: string[];
         removed: string[];
     }) => void;
+    kvReconnectListener: (client: import('./pubsub/index.cjs').PubSubClient) => void;
+    kvContractsModifiedListener: (contracts: Set<string>, { added, removed }: {
+        added: string[];
+        removed: string[];
+    }) => void;
     defContractSelectors: string[];
     defContractManifest: string;
     defContractSBP: typeof sbp;
     defContract: CheloniaContractCtx;
+    kvSlots: Map<string, SlotDefinition>;
+    kvSlotsByContractID: Map<string, Map<string, SlotDefinition>>;
+    kvActiveFilters: Map<string, Set<string>>;
+    kvFilterDirty: Set<string>;
+    kvLocalEchoNonces: Map<string, string[]>;
+    defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
 };
 export type ChelContractManifestBody = {
     name: string;
@@ -361,6 +433,7 @@ export type ChelRootState = {
         };
     }>;
     secretKeys: Record<string, string>;
+    _kv?: Record<string, Record<string, KvMirrorEntry>>;
 };
 export type Response = {
     type: ResType;
@@ -384,4 +457,4 @@ export type ChelKvOnConflictCallback = (args: {
     etag: string | null | undefined;
     currentData: JSONType | undefined;
     currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string]>;
+}) => Promise<[JSONType, string | undefined] | false>;

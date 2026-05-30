@@ -3,7 +3,7 @@
 // using `chelonia/*`
 import sbp from '@sbp/sbp';
 import { cloneDeep } from 'turtledash';
-import { CONTRACTS_MODIFIED, CONTRACTS_MODIFIED_READY, EVENT_HANDLED, EVENT_HANDLED_READY } from '../events.mjs';
+import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED, CONTRACTS_MODIFIED, CONTRACTS_MODIFIED_READY, EVENT_HANDLED, EVENT_HANDLED_READY } from '../events.mjs';
 export default sbp('sbp/selectors/register', {
     // This selector sets up event listeners on EVENT_HANDLED and CONTRACTS_MODIFIED
     // to keep Chelonia state in sync with some external state (e.g., Vuex).
@@ -22,9 +22,13 @@ export default sbp('sbp/selectors/register', {
     // 3. Each tab calls this selector once to set up event listeners on EVENT_HANDLED
     //    and CONTRACTS_MODIFIED, which will keep each tab's state updated every
     //    time Chelonia handles an event.
+    //
+    // Returns a teardown function that removes all listeners. Call it on logout
+    // to prevent listener accumulation across sessions.
     'chelonia/externalStateSetup': function ({ stateSelector, reactiveSet = Reflect.set.bind(Reflect), reactiveDel = Reflect.deleteProperty.bind(Reflect) }) {
         this.stateSelector = stateSelector;
-        sbp('okTurtles.events/on', EVENT_HANDLED, (contractID, message) => {
+        const handles = [];
+        handles.push(sbp('okTurtles.events/on', EVENT_HANDLED, (contractID, message) => {
             // The purpose of putting things immediately into a queue is to have
             // state mutations happen in a well-defined order. This is done for two
             // purposes:
@@ -58,30 +62,34 @@ export default sbp('sbp/selectors/register', {
                 // yet).
                 sbp('okTurtles.events/emit', EVENT_HANDLED_READY, contractID, message);
             });
-        });
-        sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (subscriptionSet, { added, removed, permanent }) => {
+        }));
+        handles.push(sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (subscriptionSet, { added, removed, permanent }) => {
             sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
                 const states = added.length ? await sbp('chelonia/contract/fullState', added) : {};
-                const vuexState = sbp('state/vuex/state');
-                if (!vuexState.contracts) {
-                    reactiveSet(vuexState, 'contracts', Object.create(null));
+                const externalState = sbp(stateSelector);
+                if (!externalState.contracts) {
+                    reactiveSet(externalState, 'contracts', Object.create(null));
                 }
                 removed.forEach((contractID) => {
                     if (permanent) {
-                        reactiveSet(vuexState.contracts, contractID, null);
+                        reactiveSet(externalState.contracts, contractID, null);
                     }
                     else {
-                        reactiveDel(vuexState.contracts, contractID);
+                        reactiveDel(externalState.contracts, contractID);
                     }
-                    reactiveDel(vuexState, contractID);
+                    reactiveDel(externalState, contractID);
+                    // Drop KV mirror for removed contracts
+                    if (externalState._kv) {
+                        reactiveDel(externalState._kv, contractID);
+                    }
                 });
                 for (const contractID of added) {
                     const { contractState, cheloniaState } = states[contractID];
                     if (cheloniaState) {
-                        reactiveSet(vuexState.contracts, contractID, cloneDeep(cheloniaState));
+                        reactiveSet(externalState.contracts, contractID, cloneDeep(cheloniaState));
                     }
                     if (contractState) {
-                        reactiveSet(vuexState, contractID, cloneDeep(contractState));
+                        reactiveSet(externalState, contractID, cloneDeep(contractState));
                     }
                 }
                 sbp('okTurtles.events/emit', CONTRACTS_MODIFIED_READY, subscriptionSet, {
@@ -89,7 +97,48 @@ export default sbp('sbp/selectors/register', {
                     removed
                 });
             });
-        });
+        }));
+        // Mirror `rootState._kv[contractID]` into the external store on every
+        // KV value change. KV updates don't fire EVENT_HANDLED (on-chain only).
+        // `fullState` now returns a `kvState` field sourced from `rootState._kv[contractID]`.
+        handles.push(sbp('okTurtles.events/on', CHELONIA_KV_UPDATED, ({ contractID }) => {
+            sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
+                const { kvState } = await sbp('chelonia/contract/fullState', contractID);
+                const externalState = sbp(stateSelector);
+                if (kvState) {
+                    if (!externalState._kv) {
+                        reactiveSet(externalState, '_kv', Object.create(null));
+                    }
+                    reactiveSet(externalState._kv, contractID, cloneDeep(kvState));
+                }
+                else if (externalState._kv) {
+                    reactiveDel(externalState._kv, contractID);
+                }
+            });
+        }));
+        // Re-project on status changes (e.g. 'loaded' → 'error') where the value
+        // is unchanged but status / lastError need to be visible in the store.
+        // Uses the same `kvState` field from `fullState`.
+        handles.push(sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, ({ contractID }) => {
+            sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
+                const { kvState } = await sbp('chelonia/contract/fullState', contractID);
+                const externalState = sbp(stateSelector);
+                if (kvState) {
+                    if (!externalState._kv) {
+                        reactiveSet(externalState, '_kv', Object.create(null));
+                    }
+                    reactiveSet(externalState._kv, contractID, cloneDeep(kvState));
+                }
+                else if (externalState._kv) {
+                    reactiveDel(externalState._kv, contractID);
+                }
+            });
+        }));
+        return () => {
+            for (const off of handles)
+                off();
+            handles.length = 0;
+        };
     },
     // This function is similar in purpose to `chelonia/contract/wait`, except
     // that it's also designed to take into account delays copying Chelonia state

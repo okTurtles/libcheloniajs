@@ -145,4 +145,52 @@ export declare const ChelErrorJournalCorrupt: {
         cause?: unknown;
     };
 };
+export declare const ChelErrorKvSlotUnknown: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvSlotInvalid: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvUpdateInvalid: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvValidation: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvConflict: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvMaxAttempts: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
 export {};
