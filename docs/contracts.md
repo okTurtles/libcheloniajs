@@ -264,7 +264,7 @@ const contractID = msg.contractID()
 `registerContract` internally:
 
 1. Publishes `OP_CONTRACT`,
-2. Calls `chelonia/private/out/sync` to load the new contract,
+2. Calls `chelonia/private/in/sync` to load the new contract,
 3. Publishes the initial `OP_ACTION_(EN|UN)CRYPTED` carrying `data`.
 
 The returned `msg` is the second of those two (the initial action).

@@ -8,3 +8,5 @@ export type PublishOptions = {
 };
 declare const _default: string[];
 export default _default;
+export declare const clearReprocessDebounceForContract: (contractID: string) => void;
+export declare const clearReprocessDebounceAll: () => void;
