@@ -92,7 +92,8 @@ import {
   CheloniaContractCtx,
   JSONType,
   JournalConfig,
-  ParsedEncryptedOrUnencryptedMessage
+  ParsedEncryptedOrUnencryptedMessage,
+  ChelKvGetResult
 } from './types.js'
 import type { Options as PubSubOptions, PubSubClient } from './pubsub/index.js'
 
@@ -2844,7 +2845,7 @@ export default sbp('sbp/selectors/register', {
     }
     return { etag: lastEtag }
   },
-  'chelonia/kv/get': async function (this: CheloniaContext, contractID: string, key: string) {
+  'chelonia/kv/get': async function (this: CheloniaContext, contractID: string, key: string): Promise<ChelKvGetResult | null> {
     const response = await this.config.fetch(
       `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`,
       {
@@ -2867,7 +2868,7 @@ export default sbp('sbp/selectors/register', {
       serializedData: data,
       meta: key
     })
-    return { ...parsed, etag }
+    return { ...parsed, etag } as ChelKvGetResult
   },
   // To set filters for a contract, call with `filter` set to an array of KV
   // keys to receive updates for over the WebSocket. An empty array means that

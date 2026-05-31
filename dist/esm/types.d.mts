@@ -449,6 +449,9 @@ export type ParsedEncryptedOrUnencryptedMessage<T> = Readonly<{
     signingContractID?: string | null | undefined;
     innerSigningContractID?: string | null | undefined;
 }>;
+export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<T> & {
+    etag: string | null;
+};
 export type ChelKvOnConflictCallback = (args: {
     contractID: string;
     key: string;

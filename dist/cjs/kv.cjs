@@ -1650,7 +1650,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // Only unregister slots that were registered by this manifest's
             // defineContract call — standalone `defineSlot` registrations
             // for the same key must survive.
-            if (slot.source?.kind === 'defineContract' && slot.source.manifest !== manifest)
+            if (!slot.source)
+                continue;
+            if (slot.source.kind !== 'defineContract')
+                continue;
+            if (slot.source.manifest !== manifest)
                 continue;
             this.kvSlots.delete(rKey);
             // Scrub every per-contract index entry pointing at this slot.

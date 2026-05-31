@@ -31,6 +31,7 @@ import type {
   KvUpdateCtx,
   KvUpdater,
   ParsedEncryptedOrUnencryptedMessage,
+  ChelKvGetResult,
   SlotDefinition,
   SlotDefinitionSource
 } from './types.js'
@@ -885,10 +886,9 @@ export default (sbp('sbp/selectors/register', {
       }
       const priorStatus = perContract[slot.key]?.status
       setSlotStatus(this, rootState, contractID, slot.contractType, slot.key, 'loading')
-      let parsed: (ParsedEncryptedOrUnencryptedMessage<JSONType> & { etag?: string | null }) | null
+      let parsed: ChelKvGetResult | null
       try {
-        parsed = await sbp('chelonia/kv/get', contractID, slot.key) as
-          (ParsedEncryptedOrUnencryptedMessage<JSONType> & { etag?: string | null }) | null
+        parsed = await sbp('chelonia/kv/get', contractID, slot.key)
       } catch (e) {
         const lastError = normalizeError(e)
         setSlotStatus(
@@ -1890,7 +1890,9 @@ export default (sbp('sbp/selectors/register', {
       // Only unregister slots that were registered by this manifest's
       // defineContract call — standalone `defineSlot` registrations
       // for the same key must survive.
-      if (slot.source?.kind === 'defineContract' && slot.source.manifest !== manifest) continue
+      if (!slot.source) continue
+      if (slot.source.kind !== 'defineContract') continue
+      if (slot.source.manifest !== manifest) continue
       this.kvSlots.delete(rKey)
       // Scrub every per-contract index entry pointing at this slot.
       for (const [cID, perKey] of this.kvSlotsByContractID) {

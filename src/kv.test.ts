@@ -23,6 +23,7 @@ import {
 } from './events.js'
 import { KV_NOOP } from './kv.js'
 import type {
+  ChelKvGetResult,
   ChelRootState,
   CheloniaConfig,
   CheloniaContext,
@@ -67,12 +68,13 @@ const CTYPE = 'test-contract'
 
 const fakeParsed = (
   data: JSONType
-): ParsedEncryptedOrUnencryptedMessage<JSONType> => ({
+): ParsedEncryptedOrUnencryptedMessage<JSONType> & { etag: string | null } => ({
   data,
   encryptionKeyId: 'ek',
   signingKeyId: 'sk',
+  etag: 'etag-fake',
   get: () => undefined
-}) as unknown as ParsedEncryptedOrUnencryptedMessage<JSONType>
+}) as unknown as ParsedEncryptedOrUnencryptedMessage<JSONType> & { etag: string | null }
 
 type EventLogEntry = { type: string; payload: unknown }
 const collectEvents = (): { log: EventLogEntry[]; offs: Array<() => void> } => {
@@ -111,7 +113,7 @@ const reactiveDel = <T>(obj: T, key: keyof T) => {
 // Mutable stub targets — swapped per-test via assignment
 // ---------------------------------------------------------------------------
 
-type GetResult = ParsedEncryptedOrUnencryptedMessage<JSONType> & { etag?: string | null }
+type GetResult = ChelKvGetResult
 
 type GetStub = (contractID: string, key: string) =>
   Promise<GetResult | null>
