@@ -1,4 +1,6 @@
-// KV slot API tests — KV-REVAMPED.md §11.6 (27 test cases).
+// KV slot API tests — 32 cases total: 27 from KV-REVAMPED.md §11.6
+// plus 5 implementation-specific (cases 28-32) covering REVIEW.md
+// follow-ups (issues 1/2/3/5/§11.3 step 3 exception).
 //
 // We register simplified infrastructure selectors once (mutable stub
 // closures) and swap the stub targets per-test in beforeEach. No
@@ -11,11 +13,11 @@ import { afterEach, before, beforeEach, describe, it } from 'node:test'
 import '@sbp/okturtles.events'
 import {
   ChelErrorKvConflict,
-  ChelErrorKvMaxAttempts,
   ChelErrorKvSlotInvalid,
   ChelErrorKvUpdateInvalid,
   ChelErrorKvValidation
 } from './errors.js'
+import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import {
   CHELONIA_KV_STATUS_CHANGED,
   CHELONIA_KV_UPDATED,
@@ -1170,9 +1172,11 @@ describe('KV slot API', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 32: 404 with previous value emits CHELONIA_KV_UPDATED with value:undefined
+  // 32: 404 with previous value emits CHELONIA_KV_UPDATED with the cloned
+  // default in `value` (so the event payload matches what `read` returns
+  // after the transition, and what `safeOnUpdate` is dispatched with).
   // -----------------------------------------------------------------------
-  it('32: 404 with previous value emits update event', async () => {
+  it('32: 404 with previous value emits update event with cloned default', async () => {
     const onUpdateValues: unknown[] = []
     sbp('chelonia/kv/defineSlot', {
       key: 'p404',
@@ -1197,13 +1201,15 @@ describe('KV slot API', () => {
 
     await sbp('chelonia/kv/sync', c, 'p404')
 
-    // The mirror should now hold undefined (reverted to default).
+    // The mirror itself holds undefined (status: 'non-init'); `read`
+    // substitutes the default at access time.
     assert.strictEqual(
       (rootState()._kv![c]!.p404 as { value: unknown }).value, undefined
     )
 
-    // CHELONIA_KV_UPDATED must have fired with value:undefined and
-    // previousValue:{x:42}.
+    // CHELONIA_KV_UPDATED must have fired with the cloned default as
+    // `value` and previousValue:{x:42}, so external mirrors and event
+    // listeners see the same value `read` will return next.
     const updateEvents = log.filter(
       (e) => e.type === CHELONIA_KV_UPDATED && (e.payload as { key: string }).key === 'p404'
     )
@@ -1211,7 +1217,7 @@ describe('KV slot API', () => {
     const lastEvent = updateEvents[updateEvents.length - 1].payload as {
       value: unknown; previousValue: unknown
     }
-    assert.strictEqual(lastEvent.value, undefined)
+    assert.deepStrictEqual(lastEvent.value, { x: 0 })
     assert.deepStrictEqual(lastEvent.previousValue, { x: 42 })
 
     // onUpdate should have been called with the cloned default.

@@ -7,7 +7,8 @@ import { Buffer } from 'buffer';
 import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, createClient } from './pubsub/index.mjs';
 import { clearReingestTrackerAll } from './reingestTracker.mjs';
 import { EDWARDS25519SHA512BATCH, deserializeKey, keyId, keygen, serializeKey } from '@chelonia/crypto';
-import { ChelErrorKvMaxAttempts, ChelErrorResourceGone, ChelErrorUnexpected, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable } from './errors.mjs';
+import { ChelErrorResourceGone, ChelErrorUnexpected, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable } from './errors.mjs';
+import { ChelErrorKvMaxAttempts } from './internal-errors.mjs';
 import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './events.mjs';
 import { SPMessage } from './SPMessage.mjs';
 import './chelonia-utils.mjs';
@@ -193,8 +194,6 @@ export default sbp('sbp/selectors/register', {
         this.kvFilterDirty = new Set();
         this.kvLocalEchoNonces = new Map();
         this.defContractKvByManifest = new Map();
-        this.kvReconnectListener = () => { };
-        this.kvContractsModifiedListener = () => { };
         // pending includes contracts that are scheduled for syncing or in the
         // process of syncing for the first time. After sync completes for the
         // first time, they are removed from pending and added to subscriptionSet
@@ -801,7 +800,19 @@ export default sbp('sbp/selectors/register', {
                                             meta: msg.key,
                                             serializedData: JSON.parse(Buffer.from(msg.data).toString())
                                         });
-                                        v.call(this.pubsub, [msg.key, parsed]);
+                                        // Dispatch order: legacy raw-pubsub callback first,
+                                        // then the slot machinery. Wrapped in its own
+                                        // try/catch so a buggy legacy callback can't
+                                        // suppress `_handleRemote` (KV-REVAMPED §11.4
+                                        // bullet 1 mandates "in addition to, not instead
+                                        // of, the legacy callback").
+                                        try {
+                                            ;
+                                            v.call(this.pubsub, [msg.key, parsed]);
+                                        }
+                                        catch (e) {
+                                            console.error(`[chelonia] legacy kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
+                                        }
                                         // Additionally feed the slot machinery (KV-REVAMPED §11.4
                                         // bullet 1). Must run in the same queueInvocation lane so
                                         // it serialises with `chelonia/kv/update` writes against
@@ -2150,7 +2161,20 @@ export default sbp('sbp/selectors/register', {
             serializedData: data,
             meta: key
         });
-        return { ...parsed, etag };
+        // Attach `etag` in place rather than spreading: `parsed` exposes
+        // `data` / `encryptionKeyId` / `innerSigningKeyId` / etc. as
+        // accessors that force eager unwrap (and throw on decryption
+        // failure) — spreading would materialise them synchronously here,
+        // changing the failure mode for callers that only need headers and
+        // collapsing the laziness `parseEncryptedOrUnencryptedMessage` is
+        // designed for.
+        Object.defineProperty(parsed, 'etag', {
+            value: etag,
+            enumerable: true,
+            writable: true,
+            configurable: true
+        });
+        return parsed;
     },
     // To set filters for a contract, call with `filter` set to an array of KV
     // keys to receive updates for over the WebSocket. An empty array means that

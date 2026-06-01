@@ -130,8 +130,8 @@ Often the source file's default export is an array of the selector names it regi
 | `chelonia.persistentActions/*` | `persistent-actions.ts` | Retry queue — configure, enqueue, cancel, status |
 | `chelonia/journal/*` | `journal.ts` | Public journal API — get, reconstruct, clear |
 | `chelonia/private/journal/*` | `journal.ts` | Internal journal recorder — recordEvent |
-| `chelonia/kv/*` | `chelonia-utils.ts` | Key-value store — queuedSet |
-| `chelonia/kv/*` | `kv.ts` | KV slots — defineSlot, update, read, sync, clear, status, refreshFilters |
+| `chelonia/kv/queuedSet` | `chelonia-utils.ts` | Optional queued raw KV setter |
+| `chelonia/kv/{defineSlot,update,read,sync,clear,status,refreshFilters}` | `kv.ts` | KV slots — declarative typed key/value API |
 | `chelonia/externalStateSetup` | `local-selectors/` | External state synchronization |
 
 #### Key Public Selectors

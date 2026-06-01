@@ -10,12 +10,12 @@ import sbp from '@sbp/sbp'
 import { cloneDeep } from 'turtledash'
 import {
   ChelErrorKvConflict,
-  ChelErrorKvMaxAttempts,
   ChelErrorKvSlotInvalid,
   ChelErrorKvSlotUnknown,
   ChelErrorKvUpdateInvalid,
   ChelErrorKvValidation
 } from './errors.js'
+import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import {
   CHELONIA_KV_STATUS_CHANGED,
   CHELONIA_KV_UPDATED,
@@ -66,6 +66,33 @@ const KV_NOOP_ABORT = Symbol.for('@chelonia/lib/KV_NOOP_ABORT')
 
 const registryKey = (contractType: string, key: string): string =>
   `${contractType}::${key}`
+
+// Stable structural stringify used for the `defineSlot` idempotence
+// check. Plain `JSON.stringify` is sensitive to object key order, but
+// JSON / spec-equivalence treats `{a:1,b:2}` and `{b:2,a:1}` as the
+// same value — schemas that re-emit keys in a different order (e.g.
+// `z.object({...}).strict()` normalising key order across parse
+// passes) would otherwise falsely fail the round-trip guard at
+// registration. Walks plain objects and arrays only; primitives are
+// emitted verbatim and any non-plain values fall through to
+// `JSON.stringify`'s default handling.
+function canonicalStringify (value: unknown): string {
+  return JSON.stringify(value, (_key, val) => {
+    if (
+      val &&
+      typeof val === 'object' &&
+      !Array.isArray(val) &&
+      Object.getPrototypeOf(val) === Object.prototype
+    ) {
+      const sorted: Record<string, unknown> = {}
+      for (const k of Object.keys(val).sort()) {
+        sorted[k] = (val as Record<string, unknown>)[k]
+      }
+      return sorted
+    }
+    return val
+  })
+}
 
 // Resolve a public `KvSlotDefinition` into its internal `SlotDefinition`
 // form. `contractType` arrays are flattened by the caller; this helper
@@ -176,7 +203,7 @@ function assertSchemaGuards (slot: SlotDefinition): void {
         { cause: e }
       )
     }
-    if (JSON.stringify(first) !== JSON.stringify(second)) {
+    if (canonicalStringify(first) !== canonicalStringify(second)) {
       throw new ChelErrorKvSlotInvalid(
         `[chelonia/kv] slot ${slot.contractType}::${slot.key} schema ` +
         'is not idempotent on its own parsed output (defaultValue round-trip failed)'
@@ -266,7 +293,6 @@ function setSlotStatus (
     (lastError && entry.lastError &&
       (lastError.name !== entry.lastError.name ||
        lastError.message !== entry.lastError.message))
-  if (statusUnchanged && !lastErrorChanged && !lastError && !entry.lastError) return
   // Clear stale lastError even when status hasn't changed.
   if (!lastError && entry.lastError) {
     ctx.config.reactiveDel(entry as unknown as Record<string, unknown>, 'lastError')
@@ -376,13 +402,11 @@ function unwrapData (data: JSONType): { nonce: string | undefined; value: JSONTy
     typeof data === 'object' &&
     !Array.isArray(data) &&
     '__chelKvNonce' in (data as object) &&
+    typeof (data as { __chelKvNonce?: unknown }).__chelKvNonce === 'string' &&
     'value' in (data as object)
   ) {
-    const wrapper = data as { __chelKvNonce?: unknown; value: JSONType }
-    const nonce = typeof wrapper.__chelKvNonce === 'string'
-      ? wrapper.__chelKvNonce
-      : undefined
-    return { nonce, value: wrapper.value }
+    const wrapper = data as { __chelKvNonce: string; value: JSONType }
+    return { nonce: wrapper.__chelKvNonce, value: wrapper.value }
   }
   return { nonce: undefined, value: data }
 }
@@ -625,9 +649,30 @@ export default (sbp('sbp/selectors/register', {
   // Public API. See KV-REVAMPED.md §4.1. Idempotent per
   // `(contractType, key)` — last call wins, with re-validation of any
   // persisted mirror values against the new schema.
+  //
+  // This is a thin wrapper around the internal
+  // `chelonia/kv/_defineSlotInternal` selector — it always tags the
+  // resulting slot with `_source: { kind: 'defineSlot' }`. The internal
+  // selector is what `chelonia/kv/_registerContractSlots` uses to tag
+  // manifest-scoped slots; userland callers can never spoof a
+  // `kind: 'defineContract'` source through this selector because the
+  // public `KvSlotDefinition` type has no `_source` field.
   'chelonia/kv/defineSlot': function (
     this: CheloniaContext,
     def: KvSlotDefinition
+  ): void {
+    sbp('chelonia/kv/_defineSlotInternal', def, { kind: 'defineSlot' as const })
+  },
+
+  // Private. The actual `defineSlot` implementation. Accepts an
+  // explicit `source` so `_registerContractSlots` can mark slots as
+  // manifest-owned for `_cleanupContractSlots` to scope removals
+  // correctly. Not re-exported; not callable from userland through
+  // typed APIs.
+  'chelonia/kv/_defineSlotInternal': function (
+    this: CheloniaContext,
+    def: KvSlotDefinition,
+    source: SlotDefinitionSource
   ): void {
     if (!def || typeof def !== 'object') {
       throw new ChelErrorKvSlotInvalid('[chelonia/kv] defineSlot: invalid definition')
@@ -716,9 +761,29 @@ export default (sbp('sbp/selectors/register', {
     }
     const resolvedDefault: JSONType | undefined =
       rawDefault === undefined ? undefined : cloneDeep(rawDefault)
+    // Run the schema guards once on a probe slot regardless of how many
+    // contract types are listed. The guards parse `resolvedDefault` up
+    // to four times (two sentinel probes + a two-step idempotence
+    // round-trip), so the per-type loop below would otherwise multiply
+    // that work by N and produce N sibling slots sharing the same
+    // post-parse `resolvedDefault` object identity — a fragile invariant
+    // if anything ever mutates `resolvedDefault` in place. Cloning
+    // per-type keeps each slot independent.
+    let postParseDefault: JSONType | undefined = resolvedDefault
+    if (def.schema && resolvedDefault !== undefined) {
+      const probe = resolveSlotDefinition(def, types[0], resolvedDefault, source)
+      assertSchemaGuards(probe)
+      postParseDefault = probe.resolvedDefault
+    } else {
+      // No schema (or no resolved default) → guards are pure checks on
+      // the schema itself; run once with the first type.
+      const probe = resolveSlotDefinition(def, types[0], resolvedDefault, source)
+      assertSchemaGuards(probe)
+    }
     for (const contractType of types) {
-      const slot = resolveSlotDefinition(def, contractType, resolvedDefault, def._source ?? { kind: 'defineSlot' })
-      assertSchemaGuards(slot)
+      const perTypeDefault: JSONType | undefined =
+        postParseDefault === undefined ? undefined : cloneDeep(postParseDefault)
+      const slot = resolveSlotDefinition(def, contractType, perTypeDefault, source)
       const rKey = registryKey(contractType, def.key)
       const previous = this.kvSlots.get(rKey)
       this.kvSlots.set(rKey, slot)
@@ -913,6 +978,12 @@ export default (sbp('sbp/selectors/register', {
         // `etag: null`) and surface `'non-init'` rather than `'loaded'`
         // (§4.3). If the slot previously held a value, emit
         // `CHELONIA_KV_UPDATED` so consumers observe the transition.
+        // The event payload carries the *resolved default* (cloned)
+        // — not `undefined` — so consumers (and the externalState
+        // projection) see the value `read` will subsequently return
+        // (§4.5 / §4.9). The mirror itself keeps `value: undefined`
+        // so the `'non-init'` status remains observable via `read`'s
+        // default-substitution path.
         const existingEntry = perContract[slot.key]
         let previousValue: JSONType | undefined
         if (existingEntry) {
@@ -920,11 +991,14 @@ export default (sbp('sbp/selectors/register', {
           this.config.reactiveSet(existingEntry, 'value', undefined)
           this.config.reactiveSet(existingEntry, 'etag', null)
           if (previousValue !== undefined) {
+            const defaultedValue = slot.resolvedDefault !== undefined
+              ? cloneDeep(slot.resolvedDefault)
+              : undefined
             sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
               contractID,
               contractType: slot.contractType,
               key: slot.key,
-              value: undefined,
+              value: defaultedValue,
               previousValue,
               reason,
               etag: null
@@ -1198,6 +1272,12 @@ export default (sbp('sbp/selectors/register', {
           this, rootState, contractID, slot.contractType, key,
           'error', normalizeError(e)
         )
+        // Deliberately leave `entry.etag` alone: validation failed, so
+        // the mirror `value` is unchanged from the last successful
+        // load/write — the etag still describes that value. Nulling
+        // it here would diverge from the "value and etag move
+        // together" invariant on the success path below (and on
+        // §4.9's pubsub-success branch).
         return Promise.resolve()
       }
     } else {
@@ -1254,6 +1334,12 @@ export default (sbp('sbp/selectors/register', {
   //                                  registered for `(contractType, key)`.
   //   - `ChelErrorKvUpdateInvalid` — `updater`/`value` misuse; thrown
   //                                  synchronously before any I/O.
+  //                                  Also covers reducer throws and
+  //                                  reducer returns of `null` /
+  //                                  `undefined` (use `KV_NOOP` to
+  //                                  abort explicitly). The original
+  //                                  thrown value is preserved on
+  //                                  `.cause`.
   //   - `ChelErrorKvValidation`    — reducer output (or server
   //                                  `currentData` on retry) fails
   //                                  `schema.parse`. Original Zod
@@ -1372,8 +1458,10 @@ export default (sbp('sbp/selectors/register', {
     }
     if (reducerOut === null || reducerOut === undefined) {
       // Reducer may not produce the reserved wire sentinels; clear
-      // is its own selector (§4.5).
-      throw new ChelErrorKvValidation(
+      // is its own selector (§4.5). This is a caller-contract
+      // violation (reducer shape), not a schema failure, so the
+      // taxonomy bucket is ChelErrorKvUpdateInvalid (§4.6).
+      throw new ChelErrorKvUpdateInvalid(
         `[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
         `${String(reducerOut)}; use chelonia/kv/clear or KV_NOOP instead`
       )
@@ -1455,7 +1543,7 @@ export default (sbp('sbp/selectors/register', {
         )
       }
       if (retried === null || retried === undefined) {
-        throw new ChelErrorKvValidation(
+        throw new ChelErrorKvUpdateInvalid(
           `[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
           `${String(retried)} on retry; use KV_NOOP instead`
         )
@@ -1501,7 +1589,7 @@ export default (sbp('sbp/selectors/register', {
       // reducer chose not to write. The lower-level kv/set propagates
       // this throw, breaking the retry loop. Resolve as a no-op.
       // Use the Symbol.for marker (not instanceof) for realm safety.
-      if (e && typeof e === 'object' && (e as Record<symbol, unknown>)[KV_NOOP_ABORT]) {
+      if (e && typeof e === 'object' && KV_NOOP_ABORT in (e as object)) {
         removeEchoNonces(this, contractID, key, attemptNonces)
         return undefined
       }
@@ -1542,15 +1630,22 @@ export default (sbp('sbp/selectors/register', {
     // The network write succeeded against the *old* slot's keys/config,
     // but the mirror and events must reflect the *current* slot. Bail
     // out and let the new slot's reconcile pass handle the state.
+    // Resolve with `undefined` (matching the symmetric `clear` staleness
+    // path): the reducer's output was *not* written to the mirror under
+    // the new slot, so returning `nextValue` would mislead the caller
+    // into treating an unstored value as canonical.
     if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
-      return nextValue
+      return undefined
     }
     const perContractAfter = ensureContractKv(this, rootState, contractID)
     const entryAfter = perContractAfter[key]
     const previousValue = entryAfter?.value
     if (!entryAfter) {
       // Reconcile dropped the slot mid-write — nothing to mirror into.
-      return nextValue
+      // Same rationale as the staleness path above: the value was not
+      // written to a live mirror entry, so resolve with `undefined`
+      // rather than misleading the caller with an unstored value.
+      return undefined
     }
     this.config.reactiveSet(entryAfter, 'value', nextValue)
     this.config.reactiveSet(entryAfter, 'etag', setResult.etag)
@@ -1589,6 +1684,15 @@ export default (sbp('sbp/selectors/register', {
   // — see the note in §4.3). Returned value is the cloned default,
   // or `undefined` if the slot has no `defaultValue` and the mirror
   // is empty.
+  //
+  // **Defensive deep-cloning.** Spec §4.1 only requires deep-cloning
+  // the default, but the implementation goes further and deep-clones
+  // every non-primitive mirror value on the way out. This prevents
+  // the worst footgun — a caller mutating the returned object and
+  // silently corrupting the mirror (and confusing every reactive
+  // observer downstream). For very large slot values (e.g. namespace
+  // caches) this is a non-trivial per-read cost; budget accordingly
+  // or read-and-cache instead of reading-on-every-frame.
   'chelonia/kv/read': function (
     this: CheloniaContext,
     contractID: string,
@@ -1650,13 +1754,13 @@ export default (sbp('sbp/selectors/register', {
     const slots = Array.from(perKey.values())
     await Promise.all(slots.map((slot) =>
       sbp('chelonia/kv/_loadSlot', { contractID, slot, reason: 'load' })
-        .catch((err: unknown) => {
-          // Per-slot failures are surfaced via status/events (the
-          // spec-mandated aggregate contract); log in non-production
-          // builds for DX.
-          if (process.env.NODE_ENV === 'production') return
-          console.warn(`[chelonia/kv] sync: per-slot load failed for ${contractID}`, err)
-        })
+        // Per §4.4 the aggregate form never rejects. Per-slot failures
+        // are the single source of truth for sync errors and are
+        // surfaced through the slot's status/lastError and the
+        // `CHELONIA_KV_STATUS_CHANGED` / `CHELONIA_KV_VALIDATION_ERROR`
+        // events emitted from inside `_loadSlot` — listen to those
+        // rather than relying on console output.
+        .catch(() => {})
     ))
   },
 
@@ -1855,12 +1959,11 @@ export default (sbp('sbp/selectors/register', {
   ): void {
     for (const key of Object.keys(kv)) {
       const entry = kv[key]
-      sbp('chelonia/kv/defineSlot', {
+      sbp('chelonia/kv/_defineSlotInternal', {
         ...entry,
         contractType: manifest,
-        key,
-        _source: { kind: 'defineContract' as const, manifest }
-      })
+        key
+      }, { kind: 'defineContract' as const, manifest })
     }
   },
 

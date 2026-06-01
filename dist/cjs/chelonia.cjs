@@ -14,6 +14,7 @@ const index_js_1 = require("./pubsub/index.cjs");
 const reingestTracker_js_1 = require("./reingestTracker.cjs");
 const crypto_1 = require("@chelonia/crypto");
 const errors_js_1 = require("./errors.cjs");
+const internal_errors_js_1 = require("./internal-errors.cjs");
 const events_js_1 = require("./events.cjs");
 const SPMessage_js_1 = require("./SPMessage.cjs");
 Object.defineProperty(exports, "SPMessage", { enumerable: true, get: function () { return SPMessage_js_1.SPMessage; } });
@@ -199,8 +200,6 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.kvFilterDirty = new Set();
         this.kvLocalEchoNonces = new Map();
         this.defContractKvByManifest = new Map();
-        this.kvReconnectListener = () => { };
-        this.kvContractsModifiedListener = () => { };
         // pending includes contracts that are scheduled for syncing or in the
         // process of syncing for the first time. After sync completes for the
         // first time, they are removed from pending and added to subscriptionSet
@@ -807,7 +806,19 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                             meta: msg.key,
                                             serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
                                         });
-                                        v.call(this.pubsub, [msg.key, parsed]);
+                                        // Dispatch order: legacy raw-pubsub callback first,
+                                        // then the slot machinery. Wrapped in its own
+                                        // try/catch so a buggy legacy callback can't
+                                        // suppress `_handleRemote` (KV-REVAMPED §11.4
+                                        // bullet 1 mandates "in addition to, not instead
+                                        // of, the legacy callback").
+                                        try {
+                                            ;
+                                            v.call(this.pubsub, [msg.key, parsed]);
+                                        }
+                                        catch (e) {
+                                            console.error(`[chelonia] legacy kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
+                                        }
                                         // Additionally feed the slot machinery (KV-REVAMPED §11.4
                                         // bullet 1). Must run in the same queueInvocation lane so
                                         // it serialises with `chelonia/kv/update` writes against
@@ -2099,7 +2110,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // Rationale: 409 and 412 indicate conflict resolution is needed
                 if (response.status === 409 || response.status === 412) {
                     if (--maxAttempts <= 0) {
-                        throw new errors_js_1.ChelErrorKvMaxAttempts('kv/set conflict setting KV value');
+                        throw new internal_errors_js_1.ChelErrorKvMaxAttempts('kv/set conflict setting KV value');
                     }
                     // Honour caller-side abort at every retry boundary so a
                     // cancellation that lands between requests is respected
@@ -2156,7 +2167,20 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             serializedData: data,
             meta: key
         });
-        return { ...parsed, etag };
+        // Attach `etag` in place rather than spreading: `parsed` exposes
+        // `data` / `encryptionKeyId` / `innerSigningKeyId` / etc. as
+        // accessors that force eager unwrap (and throw on decryption
+        // failure) — spreading would materialise them synchronously here,
+        // changing the failure mode for callers that only need headers and
+        // collapsing the laziness `parseEncryptedOrUnencryptedMessage` is
+        // designed for.
+        Object.defineProperty(parsed, 'etag', {
+            value: etag,
+            enumerable: true,
+            writable: true,
+            configurable: true
+        });
+        return parsed;
     },
     // To set filters for a contract, call with `filter` set to an array of KV
     // keys to receive updates for over the WebSocket. An empty array means that

@@ -147,6 +147,21 @@ export type KvSlotDefinition = {
     contractType: string | string[];
     key: string;
     defaultValue?: JSONType | (() => JSONType);
+    /**
+     * Synchronous validator with a `parse(value)` method (Zod-shaped).
+     * Runs on every read, write, remote update, and reconnect (see
+     * KV-REVAMPED.md §6).
+     *
+     * Side effect of registration: if the schema is a `.transform()`
+     * (or otherwise mutating) parser, `defineSlot` runs the resolved
+     * `defaultValue` through `schema.parse` once and stores the
+     * **post-parse** value as the slot's effective default. Every
+     * subsequent `chelonia/kv/read` that returns the default returns
+     * a deep clone of that post-parse value, not the raw
+     * `defaultValue` you passed in. The parse must be idempotent
+     * (`parse(parse(x))` structurally equal to `parse(x)`), which
+     * `defineSlot` enforces at registration time.
+     */
     schema?: {
         parse: (value: unknown) => JSONType;
     };
@@ -158,7 +173,6 @@ export type KvSlotDefinition = {
     autoLoad?: 'on-sync' | 'on-demand' | 'never';
     refreshOnReconnect?: boolean;
     onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
-    _source?: SlotDefinitionSource;
 };
 export type SlotDefinitionSource = {
     kind: 'defineContract';
@@ -283,8 +297,8 @@ export type CheloniaContext = {
         added: string[];
         removed: string[];
     }) => void;
-    kvReconnectListener: (client: import('./pubsub/index.mjs').PubSubClient) => void;
-    kvContractsModifiedListener: (contracts: Set<string>, { added, removed }: {
+    kvReconnectListener?: (client: import('./pubsub/index.mjs').PubSubClient) => void;
+    kvContractsModifiedListener?: (contracts: Set<string>, { added, removed }: {
         added: string[];
         removed: string[];
     }) => void;
@@ -452,6 +466,30 @@ export type ParsedEncryptedOrUnencryptedMessage<T> = Readonly<{
 export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<T> & {
     etag: string | null;
 };
+/**
+ * Callback supplied to `chelonia/kv/set` to resolve a `409` / `412`
+ * conflict (or to populate the body when `data` was omitted and the
+ * primitive performs a fetch-first GET — see the `data === undefined`
+ * branch in `src/chelonia.ts`).
+ *
+ * Return either:
+ *   - `[newData, ifMatch]` to retry the write with `newData` against
+ *     etag `ifMatch`. `ifMatch` may be `undefined` when the server
+ *     returned neither `x-cid` nor `etag` (typical for 404 / 410
+ *     fall-throughs) — the primitive substitutes `''` at the wire so
+ *     the POST still goes through.
+ *   - **any falsy value** (`false`, `null`, `undefined`, `0`, `''`)
+ *     to abort the write without an HTTP call. The slot API
+ *     (`chelonia/kv/update`) relies on this to honour `KV_NOOP` and
+ *     to short-circuit empty-data GETs.
+ *
+ * NOTE: this is a behaviour change vs. pre-KV-revamp consumers, who
+ * could only return a tuple. Any consumer that previously returned a
+ * non-tuple falsy value (rare — historically this threw downstream)
+ * will now silently no-op. Direct callers of `chelonia/kv/set` should
+ * audit their implementations accordingly; the high-level
+ * `chelonia/kv/update` API is unaffected.
+ */
 export type ChelKvOnConflictCallback = (args: {
     contractID: string;
     key: string;

@@ -58,4 +58,3 @@ export const ChelErrorKvSlotInvalid = ChelErrorGenerator('ChelErrorKvSlotInvalid
 export const ChelErrorKvUpdateInvalid = ChelErrorGenerator('ChelErrorKvUpdateInvalid')
 export const ChelErrorKvValidation = ChelErrorGenerator('ChelErrorKvValidation')
 export const ChelErrorKvConflict = ChelErrorGenerator('ChelErrorKvConflict')
-export const ChelErrorKvMaxAttempts = ChelErrorGenerator('ChelErrorKvMaxAttempts')

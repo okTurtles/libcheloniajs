@@ -204,6 +204,49 @@ All slot selectors live in `src/kv.ts`.
 
 `chelonia/kv/set` now resolves to `{ etag: string | null }` instead of `void`; the return value is forwarded through `chelonia/kv/queuedSet` as well.
 
+#### Migration notes for direct `chelonia/kv/set` callers
+
+The `onconflict` callback contract has been widened to support the
+slot-API plumbing. Two changes are observable to existing direct
+callers (the high-level slot API hides both):
+
+- **Return type is now `Promise<[JSONType, string | undefined] | false>`**
+  (previously `Promise<[JSONType, string]>`). The `etag` element may be
+  `undefined` when the server returned neither `x-cid` nor `etag`
+  (typical for 404 / 410 fall-throughs); the primitive substitutes
+  `''` at the wire so the POST still goes through.
+- **Any falsy return aborts the write** (including `false`, `null`,
+  `undefined`, `0`, `''`). Pre-revamp consumers that accidentally
+  returned a non-tuple falsy value would have crashed downstream; they
+  now silently no-op. Audit existing `onconflict` implementations for
+  this change.
+
+#### Schema-driven default normalization
+
+If a slot's `schema` is a `.transform()` (or otherwise mutating)
+parser, `defineSlot` runs the resolved `defaultValue` through
+`schema.parse` once and stores the **post-parse** value as the slot's
+effective default. Every `chelonia/kv/read` that falls back to the
+default returns a deep clone of the post-parse value, not the raw
+`defaultValue` you passed in. The parse must be idempotent
+(`parse(parse(x))` structurally equal to `parse(x)`); registration
+throws `ChelErrorKvSlotInvalid` otherwise.
+
+#### `chelonia/kv/update` rejection taxonomy (extended)
+
+In addition to the cases listed in KV-REVAMPED.md §4.6,
+`chelonia/kv/update` (and `chelonia/kv/clear`) reject with
+`ChelErrorKvUpdateInvalid` when:
+
+- The reducer (or `defaultUpdater` factory) **throws**. The original
+  error is preserved on `.cause`.
+- The reducer returns `null` or `undefined`. Use `KV_NOOP` to abort a
+  write explicitly; bare `null`/`undefined` collides with the wire
+  clear sentinel and the "not yet loaded" mirror representation.
+
+Both rules apply identically on the first attempt and on every
+conflict-retry pass.
+
 ### Inline definition via `chelonia/defineContract`
 
 Slots can also be declared inline on a contract definition under the
