@@ -19,7 +19,7 @@
 ### 1. Decide what to work on
 
 - Check the [open issues](https://github.com/okTurtles/libcheloniajs/issues).
-- Read some docs like __[the deep wiki](https://deepwiki.com/okTurtles/libcheloniajs)__ (although be careful, it might be out of date, so we also recommend using a local coding agent to explore the codebase and answer questions).
+- Read the [docs](https://github.com/okTurtles/libcheloniajs/tree/main/docs) and [the deep wiki](https://deepwiki.com/okTurtles/libcheloniajs) (although be careful, it might be out of date, so we also recommend using a local coding agent to explore the codebase and answer questions).
 
 We recommend [joining `#e2e-protocol` on Slack](https://join.slack.com/t/okturtles/shared_invite/zt-10jmpfgxj-tXQ1MKW7t8qqdyY6fB7uyQ) and telling folks what you're interested in working on.
 
