@@ -4,6 +4,8 @@
 and events for an application to plug in whatever observability stack
 it likes. This page collects the surfaces you have available.
 
+Also, see the [`chel`](https://github.com/okTurtles/chel) CLI utility for useful commands to inspect the chain of events like `chel eventsAfter`.
+
 ## Table of contents
 
 1. [Error hooks](#error-hooks)
