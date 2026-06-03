@@ -120,25 +120,27 @@ type GetResult = ChelKvGetResult
 type GetStub = (contractID: string, key: string) =>
   Promise<GetResult | null>
 
-type QueuedSetStub = (args: {
-  contractID: string
-  key: string
-  data: JSONType
-  onconflict?: (a: { currentData?: JSONType; etag?: string | null; status?: number }) =>
-    Promise<[JSONType, string] | false>
-  ifMatch?: string
-  maxAttempts?: number
-  signal?: AbortSignal
-  encryptionKeyName: string
-  signingKeyName: string
-}) => Promise<{ etag: string | null }>
+type SetStub = (
+  contractID: string,
+  key: string,
+  data: JSONType | undefined,
+  opts: {
+    ifMatch?: string
+    encryptionKeyId?: string | null | undefined
+    signingKeyId: string
+    maxAttempts?: number | null | undefined
+    onconflict?: (a: { currentData?: JSONType; etag?: string | null; status?: number }) =>
+      Promise<[JSONType, string] | false>
+    signal?: AbortSignal
+  }
+) => Promise<{ etag: string | null }>
 
 type SetFilterStub = (contractID: string, filter?: string[]) => void
 
 type QueueInvocationStub = (contractID: string, fn: () => unknown) => Promise<unknown>
 
 let stubGet: GetStub
-let stubQueuedSet: QueuedSetStub
+let stubSet: SetStub
 let stubSetFilter: SetFilterStub
 let stubQueueInvocation: QueueInvocationStub
 
@@ -196,8 +198,20 @@ sbp('sbp/selectors/register', {
     return stubGet(_contractID, _key)
   },
 
-  'chelonia/kv/queuedSet': function (args: Parameters<QueuedSetStub>[0]) {
-    return stubQueuedSet(args)
+  'chelonia/kv/set': function (
+    contractID: string,
+    key: string,
+    data: JSONType | undefined,
+    opts: Parameters<SetStub>[3]
+  ) {
+    return stubSet(contractID, key, data, opts)
+  },
+
+  'chelonia/contract/currentKeyIdByName': function (
+    _contractID: string,
+    name: string
+  ) {
+    return name
   },
 
   'chelonia/kv/setFilter': function (_contractID: string, _filter?: string[]) {
@@ -235,7 +249,7 @@ describe('KV slot API', () => {
     stubSetFilterCalls = []
 
     stubGet = async () => null
-    stubQueuedSet = async () => ({ etag: 'new-etag' })
+    stubSet = async () => ({ etag: 'new-etag' })
     stubSetFilter = (contractID, filter) => {
       stubSetFilterCalls.push({ contractID, keys: filter ?? [] })
     }
@@ -308,18 +322,14 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     let setCalls = 0
-    stubQueuedSet = async (args) => {
+    stubSet = async (_cID, _key, _data, opts) => {
       setCalls++
-      if (setCalls === 1 && args.onconflict) {
-        const result = await args.onconflict({
+      if (setCalls === 1 && opts.onconflict) {
+        await opts.onconflict({
           currentData: { __chelKvNonce: 'rn', value: { x: 5 } },
           etag: 're',
           status: 412
         })
-        if (result !== false) {
-          args.data = result[0]
-          args.ifMatch = result[1]
-        }
       }
       return { etag: 'final-etag' }
     }
@@ -355,7 +365,7 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     let networkCalled = false
-    stubQueuedSet = async () => { networkCalled = true; return { etag: 'e' } }
+    stubSet = async () => { networkCalled = true; return { etag: 'e' } }
 
     await assert.rejects(
       () => sbp('chelonia/kv/update', {
@@ -464,7 +474,7 @@ describe('KV slot API', () => {
     entry.status = 'loaded'
 
     let writtenData: JSONType | undefined
-    stubQueuedSet = async (args) => { writtenData = args.data; return { etag: 'clear-etag' } }
+    stubSet = async (_cID, _key, data) => { writtenData = data; return { etag: 'clear-etag' } }
 
     const { log, offs } = collectEvents()
     await sbp('chelonia/kv/clear', c, 'clr')
@@ -521,9 +531,9 @@ describe('KV slot API', () => {
     const c = 'cid-11'
     await setupContract(c)
 
-    stubQueuedSet = async (args) => {
-      if (args.onconflict) {
-        await args.onconflict({ currentData: { x: -10 }, etag: 'bad' })
+    stubSet = async (_cID, _key, _data, opts) => {
+      if (opts.onconflict) {
+        await opts.onconflict({ currentData: { x: -10 }, etag: 'bad' })
       }
       return { etag: 'e' }
     }
@@ -547,10 +557,10 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     let call = 0
-    stubQueuedSet = async (args) => {
-      if (args.onconflict && call === 0) {
+    stubSet = async (_cID, _key, _data, opts) => {
+      if (opts.onconflict && call === 0) {
         call++
-        await args.onconflict({
+        await opts.onconflict({
           currentData: { __chelKvNonce: 'n', value: { x: 99 } }, etag: 'c'
         })
       }
@@ -703,8 +713,8 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     let capturedNonce: string | undefined
-    stubQueuedSet = async (args) => {
-      const d = args.data as { __chelKvNonce?: string }
+    stubSet = async (_cID, _key, data) => {
+      const d = data as { __chelKvNonce?: string }
       capturedNonce = d.__chelKvNonce
       return { etag: 'e' }
     }
@@ -746,7 +756,7 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     // 19a: conflict exhaustion
-    stubQueuedSet = async () => {
+    stubSet = async () => {
       throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value')
     }
     await assert.rejects(
@@ -757,7 +767,7 @@ describe('KV slot API', () => {
     )
 
     // 19b: 5xx
-    stubQueuedSet = async () => { throw new Error('Internal Server Error') }
+    stubSet = async () => { throw new Error('Internal Server Error') }
     await assert.rejects(
       () => sbp('chelonia/kv/update', {
         contractID: c, key: 'rej', updater: () => ({ x: 2 })
@@ -766,7 +776,7 @@ describe('KV slot API', () => {
     )
 
     // 19c: abort
-    stubQueuedSet = async () => ({ etag: 'e' })
+    stubSet = async () => ({ etag: 'e' })
     const ac = new AbortController()
     ac.abort()
     await assert.rejects(
@@ -860,9 +870,9 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     const ts: number[] = []
-    stubQueuedSet = async (args) => {
-      if (args.onconflict) {
-        await args.onconflict({
+    stubSet = async (_cID, _key, _data, opts) => {
+      if (opts.onconflict) {
+        await opts.onconflict({
           currentData: { __chelKvNonce: 'n', value: { x: 0, t: 0 } }, etag: 'c'
         })
       }
@@ -941,17 +951,13 @@ describe('KV slot API', () => {
     ;(rootState()._kv![c]!.dh as { value: unknown }).value = { x: 1, y: 2 }
 
     let onconflictCalled = false
-    stubQueuedSet = async (args) => {
-      if (args.onconflict && !onconflictCalled) {
+    stubSet = async (_cID, _key, _data, opts) => {
+      if (opts.onconflict && !onconflictCalled) {
         onconflictCalled = true
-        const result = await args.onconflict({
+        await opts.onconflict({
           currentData: { __chelKvNonce: 'n', value: { x: 10, y: 20 } },
           etag: 're'
         })
-        if (result !== false) {
-          args.data = result[0]
-          args.ifMatch = result[1]
-        }
       }
       return { etag: 'f' }
     }
@@ -1016,7 +1022,7 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     let networkCalled = false
-    stubQueuedSet = async () => { networkCalled = true; return { etag: 'e' } }
+    stubSet = async () => { networkCalled = true; return { etag: 'e' } }
 
     const result = await sbp('chelonia/kv/update', {
       contractID: c, key: 'dn', value: { x: 1 }
@@ -1078,8 +1084,8 @@ describe('KV slot API', () => {
     entry.status = 'loaded'
 
     let capturedIfMatch: string | undefined
-    stubQueuedSet = async (args) => {
-      capturedIfMatch = args.ifMatch
+    stubSet = async (_cID, _key, _data, opts) => {
+      capturedIfMatch = opts.ifMatch
       return { etag: 'new-etag' }
     }
 
