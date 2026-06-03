@@ -7,7 +7,7 @@
 
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
-import { cloneDeep } from 'turtledash'
+import { cloneDeep, has } from 'turtledash'
 import {
   ChelErrorKvConflict,
   ChelErrorKvSlotInvalid,
@@ -15,13 +15,14 @@ import {
   ChelErrorKvUpdateInvalid,
   ChelErrorKvValidation
 } from './errors.js'
-import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import {
   CHELONIA_KV_STATUS_CHANGED,
   CHELONIA_KV_UPDATED,
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
+import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import type {
+  ChelKvGetResult,
   CheloniaContext,
   ChelRootState,
   JSONType,
@@ -31,7 +32,6 @@ import type {
   KvUpdateCtx,
   KvUpdater,
   ParsedEncryptedOrUnencryptedMessage,
-  ChelKvGetResult,
   SlotDefinition,
   SlotDefinitionSource
 } from './types.js'
@@ -1375,8 +1375,8 @@ export default (sbp('sbp/selectors/register', {
     // `value` must be provided" discriminates on which channel the
     // caller chose, not on the runtime value (so `value: undefined`
     // counts as "value was provided").
-    const hasUpdater = Object.prototype.hasOwnProperty.call(args, 'updater')
-    const hasValue = Object.prototype.hasOwnProperty.call(args, 'value')
+    const hasUpdater = has(args, 'updater')
+    const hasValue = has(args, 'value')
     if (hasUpdater && hasValue) {
       throw new ChelErrorKvUpdateInvalid(
         `[chelonia/kv] update: ${contractID}::${key} — pass exactly one ` +

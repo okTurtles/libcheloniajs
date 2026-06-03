@@ -1,9 +1,10 @@
-import chelonia from './chelonia.mjs';
 import db from './db.mjs';
 import files from './files.mjs';
 import journal from './journal.mjs';
 import kv from './kv.mjs';
 import persistentActions from './persistent-actions.mjs';
+// Last because this implicitly locks the domain
+import chelonia from './chelonia.mjs';
 export * from './SPMessage.mjs';
 export * from './Secret.mjs';
 export * from './chelonia.mjs';

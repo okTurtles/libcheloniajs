@@ -2749,8 +2749,33 @@ export default sbp('sbp/selectors/register', {
           '[kv/set] Invalid response code: ' + response.status
         )
       }
-      const headerEtag = response.headers.get('x-cid') || response.headers.get('etag')
+      let headerEtag = response.headers.get('x-cid') || response.headers.get('etag')
       if (headerEtag) lastEtag = headerEtag
+      // When a 409/412 response provides neither an etag header nor a
+      // body, the retry loop cannot recover — it would re-send
+      // if-match: '""' and loop until maxAttempts. Do a GET to recover
+      // the current etag and value so onconflict can produce a valid
+      // retry.
+      if (!headerEtag && !currentValue && (response.status === 409 || response.status === 412)) {
+        const getResp = await this.config.fetch(url, {
+          headers: new Headers([
+            ['authorization', buildShelterAuthorizationHeader.call(this, contractID)]
+          ]),
+          signal: fetchSignal
+        })
+        if (getResp.ok) {
+          const getText = await getResp.text()
+          if (getText) {
+            currentValue = parseEncryptedOrUnencryptedMessage(this, {
+              contractID,
+              serializedData: JSON.parse(getText),
+              meta: key
+            })
+          }
+          headerEtag = getResp.headers.get('x-cid') || getResp.headers.get('etag')
+        }
+        if (headerEtag) lastEtag = headerEtag
+      }
       const result = await onconflict!({
         contractID,
         key,

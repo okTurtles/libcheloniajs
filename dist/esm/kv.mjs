@@ -6,10 +6,10 @@
 // Behaviour lands incrementally — see the kv-revamped task plan.
 import '@sbp/okturtles.events';
 import sbp from '@sbp/sbp';
-import { cloneDeep } from 'turtledash';
+import { cloneDeep, has } from 'turtledash';
 import { ChelErrorKvConflict, ChelErrorKvSlotInvalid, ChelErrorKvSlotUnknown, ChelErrorKvUpdateInvalid, ChelErrorKvValidation } from './errors.mjs';
-import { ChelErrorKvMaxAttempts } from './internal-errors.mjs';
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED, CHELONIA_KV_VALIDATION_ERROR } from './events.mjs';
+import { ChelErrorKvMaxAttempts } from './internal-errors.mjs';
 // Reserved sentinel returned by a `KvUpdater` to abort a write without
 // touching the server (replaces the legacy `return null` idiom from
 // `chelonia/kv/set`'s `onconflict`).
@@ -1188,8 +1188,8 @@ export default sbp('sbp/selectors/register', {
         // `value` must be provided" discriminates on which channel the
         // caller chose, not on the runtime value (so `value: undefined`
         // counts as "value was provided").
-        const hasUpdater = Object.prototype.hasOwnProperty.call(args, 'updater');
-        const hasValue = Object.prototype.hasOwnProperty.call(args, 'value');
+        const hasUpdater = has(args, 'updater');
+        const hasValue = has(args, 'value');
         if (hasUpdater && hasValue) {
             throw new ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} — pass exactly one ` +
                 'of `updater` or `value` (both were provided)');

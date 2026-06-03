@@ -1,9 +1,11 @@
-import chelonia from './chelonia.js'
 import db from './db.js'
 import files from './files.js'
 import journal from './journal.js'
 import kv from './kv.js'
 import persistentActions from './persistent-actions.js'
+
+// Last because this implicitly locks the domain
+import chelonia from './chelonia.js'
 
 export * from './SPMessage.js'
 export * from './Secret.js'

@@ -14,8 +14,8 @@ require("@sbp/okturtles.events");
 const sbp_1 = __importDefault(require("@sbp/sbp"));
 const turtledash_1 = require("turtledash");
 const errors_js_1 = require("./errors.cjs");
-const internal_errors_js_1 = require("./internal-errors.cjs");
 const events_js_1 = require("./events.cjs");
+const internal_errors_js_1 = require("./internal-errors.cjs");
 // Reserved sentinel returned by a `KvUpdater` to abort a write without
 // touching the server (replaces the legacy `return null` idiom from
 // `chelonia/kv/set`'s `onconflict`).
@@ -1194,8 +1194,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // `value` must be provided" discriminates on which channel the
         // caller chose, not on the runtime value (so `value: undefined`
         // counts as "value was provided").
-        const hasUpdater = Object.prototype.hasOwnProperty.call(args, 'updater');
-        const hasValue = Object.prototype.hasOwnProperty.call(args, 'value');
+        const hasUpdater = (0, turtledash_1.has)(args, 'updater');
+        const hasValue = (0, turtledash_1.has)(args, 'value');
         if (hasUpdater && hasValue) {
             throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} — pass exactly one ` +
                 'of `updater` or `value` (both were provided)');

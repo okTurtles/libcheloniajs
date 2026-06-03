@@ -17,12 +17,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-const chelonia_js_1 = __importDefault(require("./chelonia.cjs"));
 const db_js_1 = __importDefault(require("./db.cjs"));
 const files_js_1 = __importDefault(require("./files.cjs"));
 const journal_js_1 = __importDefault(require("./journal.cjs"));
 const kv_js_1 = __importDefault(require("./kv.cjs"));
 const persistent_actions_js_1 = __importDefault(require("./persistent-actions.cjs"));
+// Last because this implicitly locks the domain
+const chelonia_js_1 = __importDefault(require("./chelonia.cjs"));
 __exportStar(require("./SPMessage.cjs"), exports);
 __exportStar(require("./Secret.cjs"), exports);
 __exportStar(require("./chelonia.cjs"), exports);

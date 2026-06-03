@@ -162,6 +162,7 @@ sbp('sbp/selectors/register', {
       reactiveSet,
       reactiveDel
     } as unknown as CheloniaConfig
+    this.abortController = new AbortController()
     this.subscriptionSet = new Set()
     this.kvSlots = new Map()
     this.kvSlotsByContractID = new Map()
