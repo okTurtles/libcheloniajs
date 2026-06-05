@@ -2146,19 +2146,16 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                             ? callerSignal.reason
                             : new DOMException('Aborted', 'AbortError');
                     }
-                    // Only retry if an onconflict handler exists to potentially resolve it
-                    await (0, turtledash_1.delay)((0, turtledash_1.randomIntFromRange)(0, 1500));
-                    if (hasOnconflict) {
-                        if (await resolveData()) {
-                            continue;
-                        }
-                        else {
-                            break;
-                        }
-                    }
-                    else {
+                    if (!hasOnconflict) {
                         // Can't resolve automatically if there's no conflict handler
                         throw new Error(`kv/set failed with status ${response.status} and no onconflict handler was provided`);
+                    }
+                    await (0, turtledash_1.delay)((0, turtledash_1.randomIntFromRange)(0, 1500));
+                    if (await resolveData()) {
+                        continue;
+                    }
+                    else {
+                        break;
                     }
                 }
                 throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode('kv/set invalid response status: ' + response.status);

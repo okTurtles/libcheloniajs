@@ -1778,7 +1778,7 @@ export default (sbp('sbp/selectors/register', {
 
   // Public. See KV-REVAMPED §4.5. Resets a slot to its declared
   // default by writing the wrapper `{ __chelKvNonce, value: null }`
-  // through the existing `chelonia/kv/queuedSet`. The inner
+  // through the per-contract serial queue via `chelonia/kv/set`. The inner
   // `value: null` is the wire-level clear sentinel; `_handleRemote`
   // on other clients maps it back to the declared default before
   // any `schema.parse`.
@@ -1835,7 +1835,8 @@ export default (sbp('sbp/selectors/register', {
     let setResult: { etag: string | null }
     try {
       setResult = await sbp('chelonia/queueInvocation', contractID, async () => {
-        const mirrorEtag = rootState._kv?.[contractID]?.[key]?.etag ?? undefined
+        const liveState = sbp(this.config.stateSelector) as ChelRootState
+        const mirrorEtag = liveState._kv?.[contractID]?.[key]?.etag ?? undefined
         return sbp('chelonia/kv/set', contractID, key,
           { __chelKvNonce: nonce, value: null },
           {

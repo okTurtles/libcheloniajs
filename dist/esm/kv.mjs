@@ -1281,7 +1281,7 @@ export default sbp('sbp/selectors/register', {
                         'failed schema.parse', { cause: e });
                 }
             }
-            // ----- Step 5: nonce + wrap + queuedSet with onconflict. -----
+            // ----- Step 5: nonce + wrap + kv/set with onconflict. -----
             const attemptNonces = [];
             const firstNonce = base64Nonce();
             attemptNonces.push(firstNonce);
@@ -1447,7 +1447,7 @@ export default sbp('sbp/selectors/register', {
                 etag: setResult.etag
             });
             if (entryAfter.status !== 'loaded') {
-                setSlotStatus(this, rootState, contractID, slot.contractType, key, 'loaded');
+                setSlotStatus(this, liveState, contractID, slot.contractType, key, 'loaded');
             }
             await safeOnUpdate(slot, nextValue, {
                 contractID,
@@ -1541,7 +1541,7 @@ export default sbp('sbp/selectors/register', {
     },
     // Public. See KV-REVAMPED §4.5. Resets a slot to its declared
     // default by writing the wrapper `{ __chelKvNonce, value: null }`
-    // through the existing `chelonia/kv/queuedSet`. The inner
+    // through the per-contract serial queue via `chelonia/kv/set`. The inner
     // `value: null` is the wire-level clear sentinel; `_handleRemote`
     // on other clients maps it back to the declared default before
     // any `schema.parse`.
@@ -1582,10 +1582,11 @@ export default sbp('sbp/selectors/register', {
             recordEchoNonce(this, contractID, key, retryNonce);
             return [{ __chelKvNonce: retryNonce, value: null }, typeof etag === 'string' ? etag : undefined];
         };
-        const mirrorEtag = rootState._kv?.[contractID]?.[key]?.etag ?? undefined;
         let setResult;
         try {
             setResult = await sbp('chelonia/queueInvocation', contractID, async () => {
+                const liveState = sbp(this.config.stateSelector);
+                const mirrorEtag = liveState._kv?.[contractID]?.[key]?.etag ?? undefined;
                 return sbp('chelonia/kv/set', contractID, key, { __chelKvNonce: nonce, value: null }, {
                     ifMatch: mirrorEtag,
                     encryptionKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, slot.encryptionKeyName),

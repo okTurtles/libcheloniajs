@@ -2853,19 +2853,17 @@ export default sbp('sbp/selectors/register', {
               ? callerSignal.reason
               : new DOMException('Aborted', 'AbortError')
           }
-          // Only retry if an onconflict handler exists to potentially resolve it
-          await delay(randomIntFromRange(0, 1500))
-          if (hasOnconflict) {
-            if (await resolveData()) {
-              continue
-            } else {
-              break
-            }
-          } else {
+          if (!hasOnconflict) {
             // Can't resolve automatically if there's no conflict handler
             throw new Error(
               `kv/set failed with status ${response.status} and no onconflict handler was provided`
             )
+          }
+          await delay(randomIntFromRange(0, 1500))
+          if (await resolveData()) {
+            continue
+          } else {
+            break
           }
         }
         throw new ChelErrorUnexpectedHttpResponseCode(
