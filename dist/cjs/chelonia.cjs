@@ -452,6 +452,19 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         await (0, sbp_1.default)('chelonia/contract/waitPublish');
         await (0, sbp_1.default)('chelonia/contract/wait');
         const result = await postCleanupFn?.();
+        // Drain (not cancel) in-flight KV writes before tearing down state.
+        // `chelonia/kv/update` / `chelonia/kv/clear` run inside the
+        // per-contract `chelonia/queueInvocation` lane, so this resolves
+        // only once they settle — symmetric with the message-queue
+        // `wait`/`waitPublish` barrier above. The trailing `wait` drains any
+        // follow-up work a KV continuation itself enqueued. `abortController`
+        // below remains the backstop for genuinely stuck/offline writes.
+        // Guarded because `kv.ts` is an optional module that may not be
+        // registered (e.g. consumers that only import `./chelonia.js`).
+        if ((0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_waitInFlight')) {
+            await (0, sbp_1.default)('chelonia/kv/_waitInFlight');
+            await (0, sbp_1.default)('chelonia/contract/wait');
+        }
         // The following are all synchronous operations
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         // Cancel all outgoing messages by replacing this._instance
@@ -466,7 +479,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // along with everything else. Slot definitions (`kvSlots`) and the
         // per-manifest cache (`defContractKvByManifest`) survive reset
         // because they are code-level state; the four per-subscription maps
-        // are cleared in lock-step with `subscriptionSet` below.
+        // are cleared in lock-step with `subscriptionSet` below. In-flight
+        // KV writes were already drained via `chelonia/kv/_waitInFlight`
+        // above, so clearing `kvLocalEchoNonces` here cannot strand a
+        // continuation mid-write.
         this.config.reactiveSet(rootState, '_kv', Object.create(null));
         this.kvSlotsByContractID.clear();
         this.kvActiveFilters.clear();

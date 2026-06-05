@@ -1007,6 +1007,25 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             this.config.reactiveDel(rootState._kv, contractID);
         }
     },
+    // Private. Drain (not cancel) in-flight `chelonia/kv/update` /
+    // `chelonia/kv/clear` writes before `chelonia/reset` tears down state.
+    // KV writes run inside the per-contract `chelonia/queueInvocation`
+    // lane, so enqueuing a noop behind them resolves only once they
+    // settle — symmetric with `chelonia/contract/wait`. The contract set
+    // is the union of contracts with an active slot index and contracts
+    // that still own an echo-suppression nonce (an in-flight write whose
+    // slot index was already cleaned up). `chelonia/reset` awaits this
+    // before clearing the KV runtime maps so continuations never run
+    // against a torn-down mirror or a swapped-out `kvLocalEchoNonces`.
+    'chelonia/kv/_waitInFlight': function () {
+        const ids = new Set(this.kvSlotsByContractID.keys());
+        this.kvLocalEchoNonces.forEach((_fifo, echoKey) => {
+            const idx = echoKey.indexOf('::');
+            if (idx > 0)
+                ids.add(echoKey.slice(0, idx));
+        });
+        return Promise.all(Array.from(ids).map((cID) => (0, sbp_1.default)('chelonia/queueInvocation', cID, ['chelonia/private/noop'])));
+    },
     // Private. See KV-REVAMPED §11.4 bullet 3 (reconnect hook).
     // Called from the pubsub reconnect path after re-subscription frames
     // are sent. Clears pending local echo nonces (any echo from a

@@ -373,6 +373,13 @@ Mirror state lives at `rootState._kv[contractID][key]` and contains
 `chelonia/kv/defineSlot` / `_loadSlot` / `_handleRemote` and cleaned up
 on contract release.
 
+`chelonia/reset` **drains** (does not cancel) in-flight
+`chelonia/kv/update` / `chelonia/kv/clear` writes via
+`chelonia/kv/_waitInFlight` before clearing the KV runtime maps —
+matching `chelonia/contract/wait` — so a continuation never runs against
+a torn-down mirror; `abortController.abort()` is the backstop for stuck
+writes.
+
 Slot definitions (`KvSlotDefinition`) declare a `contractType`, `key`,
 `defaultValue`, optional `schema` (sync `.parse`), `match` predicate,
 `onUpdate` callback, and a handful of boolean flags (`autoSubscribe`,

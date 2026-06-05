@@ -137,7 +137,14 @@ type SetStub = (
 
 type SetFilterStub = (contractID: string, filter?: string[]) => void
 
-type QueueInvocationStub = (contractID: string, fn: () => unknown) => Promise<unknown>
+type QueueInvocationStub = (contractID: string, fn: unknown) => Promise<unknown>
+
+// Normalises the value `chelonia/queueInvocation` is called with: kv/update
+// passes a function; `_waitInFlight` passes an sbp invocation array.
+const runQueued = (fn: unknown): unknown =>
+  typeof fn === 'function'
+    ? (fn as () => unknown)()
+    : sbp(...(fn as Parameters<typeof sbp>))
 
 let stubGet: GetStub
 let stubSet: SetStub
@@ -178,8 +185,11 @@ sbp('sbp/selectors/register', {
     if (!this.state) sbp('chelonia/_init')
   },
 
-  'chelonia/reset': function (this: CheloniaContext) {
+  'chelonia/reset': async function (this: CheloniaContext) {
     if (!this.state) return
+    // Mirror production ordering: drain in-flight KV writes before
+    // clearing the runtime maps.
+    await sbp('chelonia/kv/_waitInFlight')
     const s = this.state as Record<string, unknown>
     reactiveDel(s, 'contracts')
     reactiveSet(s, 'contracts', Object.create(null))
@@ -218,13 +228,21 @@ sbp('sbp/selectors/register', {
     stubSetFilter(_contractID, _filter)
   },
 
-  'chelonia/queueInvocation': function (_contractID: string, fn: () => unknown) {
-    return stubQueueInvocation(_contractID, fn)
+  'chelonia/queueInvocation': function (_contractID: string, fn: unknown) {
+    return stubQueueInvocation(_contractID, fn as () => unknown)
   },
+
+  // Real chelonia registers this; _waitInFlight enqueues it as a noop.
+  'chelonia/private/noop': function () {},
 
   // Test helper: add contract to subscriptionSet.
   'chelonia/test/addSubscription': function (this: CheloniaContext, contractID: string) {
     this.subscriptionSet.add(contractID)
+  },
+
+  // Test helper: seed an echo nonce for a contract with no slot index.
+  'chelonia/test/seedEchoNonce': function (this: CheloniaContext, echoKey: string) {
+    this.kvLocalEchoNonces.set(echoKey, ['nonce'])
   },
 
   // Test helper: simulate removeImmediately's KV cleanup for a contract.
@@ -253,12 +271,12 @@ describe('KV slot API', () => {
     stubSetFilter = (contractID, filter) => {
       stubSetFilterCalls.push({ contractID, keys: filter ?? [] })
     }
-    stubQueueInvocation = (_cID, fn) => Promise.resolve(fn())
+    stubQueueInvocation = (_cID, fn) => Promise.resolve(runQueued(fn))
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     sbp('chelonia/kv/_assertIndexConsistent')
-    sbp('chelonia/reset')
+    await sbp('chelonia/reset')
   })
 
   // -----------------------------------------------------------------------
@@ -500,7 +518,7 @@ describe('KV slot API', () => {
     await setupContract(c)
     assert.ok(rootState()._kv?.[c]?.pers)
 
-    sbp('chelonia/reset')
+    await sbp('chelonia/reset')
     const kv = rootState()._kv
     assert.ok(!kv || Object.keys(kv).length === 0, '_kv should be empty after reset')
 
@@ -1050,7 +1068,7 @@ describe('KV slot API', () => {
     stubQueueInvocation = (_cID, fn) => {
       queueDepth++
       if (queueDepth > maxDepth) maxDepth = queueDepth
-      const result = Promise.resolve(fn())
+      const result = Promise.resolve(runQueued(fn))
       queueDepth--
       return result
     }
@@ -1234,5 +1252,77 @@ describe('KV slot API', () => {
     )
 
     offs.forEach((off) => off())
+  })
+
+  // -----------------------------------------------------------------------
+  // 33: _waitInFlight drains active per-contract queueInvocation lanes
+  // -----------------------------------------------------------------------
+  it('33: _waitInFlight drains in-flight update before resolving', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'drain', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-33'
+    await setupContract(c)
+
+    // Make the per-contract lane serial so the noop enqueued by
+    // _waitInFlight resolves only after the in-flight set settles.
+    const lanes = new Map<string, Promise<unknown>>()
+    stubQueueInvocation = (cID, fn) => {
+      const prev = lanes.get(cID) ?? Promise.resolve()
+      const next = prev.then(() => runQueued(fn))
+      lanes.set(cID, next.catch(() => {}))
+      return next
+    }
+
+    // Gate the network write on a deferred promise.
+    let releaseSet!: () => void
+    const setGate = new Promise<void>((resolve) => { releaseSet = resolve })
+    let setResolved = false
+    stubSet = async () => {
+      await setGate
+      setResolved = true
+      return { etag: 'new-etag' }
+    }
+
+    const updateP = sbp('chelonia/kv/update', {
+      contractID: c, key: 'drain', updater: (prev: { x: number }) => ({ x: prev.x + 1 })
+    })
+    // Let the update reach the gated set.
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+
+    let drainResolved = false
+    const drainP = sbp('chelonia/kv/_waitInFlight').then(() => { drainResolved = true })
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    assert.strictEqual(drainResolved, false, 'drain must not resolve while set is gated')
+    assert.strictEqual(setResolved, false)
+
+    releaseSet()
+    await Promise.all([updateP, drainP])
+    assert.strictEqual(setResolved, true)
+    assert.strictEqual(drainResolved, true, 'drain resolves once the in-flight write settles')
+  })
+
+  // -----------------------------------------------------------------------
+  // 34: _waitInFlight covers contracts that only own an echo nonce
+  // -----------------------------------------------------------------------
+  it('34: _waitInFlight includes contracts with only echo nonces', async () => {
+    // Seed an echo nonce for a contract that has no slot index entry
+    // (in-flight write whose slot index was already cleaned up).
+    const cid = 'cid-34'
+    const queued: string[] = []
+    stubQueueInvocation = (cID, fn) => { queued.push(cID); return Promise.resolve(runQueued(fn)) }
+    sbp('chelonia/test/seedEchoNonce', `${cid}::k`)
+    await sbp('chelonia/kv/_waitInFlight')
+    assert.ok(queued.includes(cid), 'drain must enqueue a noop for the nonce-only contract')
+  })
+
+  // -----------------------------------------------------------------------
+  // 35: _waitInFlight is a no-op when nothing is in flight
+  // -----------------------------------------------------------------------
+  it('35: _waitInFlight resolves immediately with no active KV state', async () => {
+    const queued: string[] = []
+    stubQueueInvocation = (cID, fn) => { queued.push(cID); return Promise.resolve(runQueued(fn)) }
+    await sbp('chelonia/kv/_waitInFlight')
+    assert.strictEqual(queued.length, 0)
   })
 })
