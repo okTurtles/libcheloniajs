@@ -4,6 +4,7 @@ import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.cjs';
 import type { EncryptedData } from './encryptedData.cjs';
 import type { PubSubClient } from './pubsub/index.cjs';
 import type { SignedDataContext } from './signedData.cjs';
+import type { KvNoop } from './kv.cjs';
 export type JSONType = null | string | number | boolean | JSONObject | JSONArray;
 export interface JSONObject {
     [x: string]: JSONType;
@@ -124,7 +125,7 @@ export type JournalConfig = {
     diff?: (before: unknown, after: unknown) => JournalPatch[];
     applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };
-export type KvUpdater<T> = (prev: T) => T | symbol;
+export type KvUpdater<T> = (prev: T) => T | KvNoop;
 export type KvLoadStatus = 'non-init' | 'loading' | 'loaded' | 'error';
 export type KvMirrorEntry = {
     value: JSONType | undefined;
@@ -149,7 +150,9 @@ export type KvSlotDefinition = {
     defaultValue?: JSONType | (() => JSONType);
     /**
      * Synchronous validator with a `parse(value)` method (Zod-shaped).
-     * Runs on every read, write, remote update, and reconnect (see
+     * Runs on writes, remote updates, reconnect, and first activation of
+     * persisted mirror entries; reads return already-validated values and
+     * substitute the default for entries currently in `error` status (see
      * KV-REVAMPED.md §6).
      *
      * Side effect of registration: if the schema is a `.transform()`

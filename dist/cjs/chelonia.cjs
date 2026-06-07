@@ -755,6 +755,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             (0, sbp_1.default)('chelonia/private/stopClockSync');
         }
         (0, sbp_1.default)('chelonia/private/startClockSync');
+        const legacyKvHandler = options.messageHandlers?.[index_js_1.NOTIFICATION_TYPE.KV];
         this.pubsub = (0, index_js_1.createClient)(pubsubURL, {
             ...this.config.connectionOptions,
             handlers: {
@@ -804,53 +805,6 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                     });
                                 }
                             ];
-                        case index_js_1.NOTIFICATION_TYPE.KV:
-                            return [
-                                k,
-                                (msg) => {
-                                    if (!msg.channelID || !msg.key) {
-                                        console.info('[chelonia] Discarding kv event without channelID or key');
-                                        return;
-                                    }
-                                    if (!this.subscriptionSet.has(msg.channelID)) {
-                                        console.info(`[chelonia] Discarding kv event for ${msg.channelID} because it's not in the current subscriptionSet`);
-                                        return;
-                                    }
-                                    (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, async () => {
-                                        const parsed = parseEncryptedOrUnencryptedMessage(this, {
-                                            contractID: msg.channelID,
-                                            meta: msg.key,
-                                            serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
-                                        });
-                                        // Dispatch order: legacy raw-pubsub callback first,
-                                        // then the slot machinery. Wrapped in its own
-                                        // try/catch so a buggy legacy callback can't
-                                        // suppress `_handleRemote` (KV-REVAMPED §11.4
-                                        // bullet 1 mandates "in addition to, not instead
-                                        // of, the legacy callback").
-                                        try {
-                                            ;
-                                            v.call(this.pubsub, [msg.key, parsed]);
-                                        }
-                                        catch (e) {
-                                            console.error(`[chelonia] legacy kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
-                                        }
-                                        // Additionally feed the slot machinery (KV-REVAMPED §11.4
-                                        // bullet 1). Must run in the same queueInvocation lane so
-                                        // it serialises with `chelonia/kv/update` writes against
-                                        // this contract. `_handleRemote` is a no-op when no slot
-                                        // is registered for `(channelID, key)`.
-                                        try {
-                                            await (0, sbp_1.default)('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed);
-                                        }
-                                        catch (e) {
-                                            console.error(`[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`, e);
-                                        }
-                                    }).catch((e) => {
-                                        console.error(`[chelonia] Error processing kv event for ${msg.channelID} and key ${msg.key}`, msg, e);
-                                    });
-                                }
-                            ];
                         case index_js_1.NOTIFICATION_TYPE.DELETION:
                             return [
                                 k,
@@ -860,6 +814,40 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                             return [k, v];
                     }
                 })),
+                [index_js_1.NOTIFICATION_TYPE.KV]: (msg) => {
+                    if (!msg.channelID || !msg.key) {
+                        console.info('[chelonia] Discarding kv event without channelID or key');
+                        return;
+                    }
+                    if (!this.subscriptionSet.has(msg.channelID)) {
+                        console.info(`[chelonia] Discarding kv event for ${msg.channelID} because it's not in the current subscriptionSet`);
+                        return;
+                    }
+                    (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, async () => {
+                        const parsed = parseEncryptedOrUnencryptedMessage(this, {
+                            contractID: msg.channelID,
+                            meta: msg.key,
+                            serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
+                        });
+                        if (legacyKvHandler) {
+                            try {
+                                ;
+                                legacyKvHandler.call(this.pubsub, [msg.key, parsed]);
+                            }
+                            catch (e) {
+                                console.error(`[chelonia] legacy kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
+                            }
+                        }
+                        try {
+                            await (0, sbp_1.default)('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed);
+                        }
+                        catch (e) {
+                            console.error(`[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`, e);
+                        }
+                    }).catch((e) => {
+                        console.error(`[chelonia] Error processing kv event for ${msg.channelID} and key ${msg.key}`, msg, e);
+                    });
+                },
                 [index_js_1.NOTIFICATION_TYPE.ENTRY](msg) {
                     // We MUST use 'chelonia/private/in/enqueueHandleEvent' to ensure handleEvent()
                     // is called AFTER any currently-running calls to 'chelonia/private/in/sync'
@@ -876,8 +864,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             (0, sbp_1.default)('okTurtles.events/on', events_js_1.CONTRACTS_MODIFIED, this.contractsModifiedListener);
         }
         if (!this.kvReconnectListener) {
-            // KV-REVAMPED §11.4 bullet 3: on websocket reconnect, clear echo
-            // nonces and re-fetch every slot with `refreshOnReconnect: true`.
+            // KV-REVAMPED §11.4 bullet 3: on websocket reconnect-open, clear
+            // echo nonces and re-fetch every slot with `refreshOnReconnect: true`.
             // `client.isNew` is `true` on the initial connection and `false`
             // on reconnects, so we skip the initial connection to avoid
             // duplicating the load that `_reconcileForSlot` already scheduled.

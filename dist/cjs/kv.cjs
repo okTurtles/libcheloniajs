@@ -190,7 +190,43 @@ function parseSyncSlotValue(slot, input, where) {
             `schema.parse returned the reserved sentinel ${String(parsed)}; ` +
             'null and undefined are reserved for wire/clear semantics');
     }
-    return parsed;
+    return assertJsonShape(parsed, where);
+}
+function assertJsonShape(input, where) {
+    const visit = (value, path) => {
+        if (value === null || value === undefined) {
+            throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} is the reserved sentinel ${String(value)}`);
+        }
+        const t = typeof value;
+        if (t === 'string' || t === 'boolean')
+            return;
+        if (t === 'number') {
+            if (Number.isFinite(value))
+                return;
+            throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} has non-finite number ${String(value)}`);
+        }
+        if (t === 'bigint' || t === 'function' || t === 'symbol') {
+            throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} has non-JSON type ${t}`);
+        }
+        if (Array.isArray(value)) {
+            for (let i = 0; i < value.length; i++)
+                visit(value[i], `${path}[${i}]`);
+            return;
+        }
+        if (value && typeof value === 'object') {
+            const proto = Object.getPrototypeOf(value);
+            if (proto !== Object.prototype && proto !== null) {
+                throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} has non-plain object prototype`);
+            }
+            for (const [k, v] of Object.entries(value)) {
+                visit(v, `${path}.${k}`);
+            }
+            return;
+        }
+        throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} is not JSON-shaped`);
+    };
+    visit(input, 'value');
+    return input;
 }
 // Ensure `rootState._kv[contractID]` exists as a reactive object. Returns
 // the per-contract record. Idempotent.
@@ -416,7 +452,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     //     (a) kvSlots has a registration for `${contractType}::${key}` whose
     //         contractType matches rootState.contracts[cID]._vm.type, AND
     //     (b) cID ∈ subscriptionSet, AND
-    //     (c) kvActiveFilters[cID].has(key).
+    //     (c) autoSubscribe slots are present in kvActiveFilters[cID], while
+    //         autoSubscribe:false slots are absent from kvActiveFilters[cID].
     //
     // Throws a plain Error on the first inconsistency found — this is a
     // CI / test-suite assertion, not a user-facing error class. Intended
@@ -612,6 +649,14 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             throw new errors_js_1.ChelErrorKvSlotInvalid('[chelonia/kv] defineSlot: defaultValue may not be null; ' +
                 'null is the reserved wire clear sentinel');
         }
+        if (rawDefault !== undefined) {
+            try {
+                assertJsonShape(rawDefault, `defineSlot defaultValue ${def.key}`);
+            }
+            catch (e) {
+                throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] defineSlot: defaultValue for key '${def.key}' is not JSON-shaped`, { cause: e });
+            }
+        }
         // Reject defaultValue with the reserved { __chelKvNonce, value }
         // top-level shape. `unwrapData` strips this envelope on read, so a
         // consumer storing { __chelKvNonce, value } would silently lose the
@@ -656,8 +701,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             this.kvSlots.set(rKey, slot);
             // Walk every synced contract whose type matches and reconcile.
             // This both wires up newly-eligible contracts and re-validates
-            // persisted mirror entries when `previous` exists (§4.1
-            // "Cached-value re-validation on slot replacement").
+            // persisted mirror entries on first activation and slot replacement.
             const rootState = (0, sbp_1.default)(this.config.stateSelector);
             for (const cID of this.subscriptionSet) {
                 const meta = rootState.contracts?.[cID];
@@ -675,13 +719,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     }
                 }
                 (0, sbp_1.default)('chelonia/kv/_reconcileForSlot', slot, cID);
-                // Re-validate any persisted mirror entry against the new
-                // schema *after* reconcile so the index invariant holds;
-                // gate on the slot still being registered (reconcile may
-                // have removed it if the contract was released or the match
-                // filter changed). Surface failures via status/event but
-                // keep the old value (§4.1).
-                if (previous && this.kvSlotsByContractID.get(cID)?.get(def.key) === slot) {
+                // Re-validate any persisted mirror entry *after* reconcile so
+                // the index invariant holds; gate on the slot still being
+                // registered (reconcile may have removed it if the contract was
+                // released or the match filter changed). Surface failures via
+                // status/event but keep the old value (§4.1).
+                if (this.kvSlotsByContractID.get(cID)?.get(def.key) === slot) {
                     revalidateMirrorEntry(this, rootState, cID, slot);
                 }
             }
@@ -692,7 +735,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // whose contract type cannot be confirmed to match — re-validating
             // against the wrong slot type would spuriously flip foreign
             // entries to 'error'.
-            if (previous && rootState._kv) {
+            if (rootState._kv) {
                 for (const cID of Object.keys(rootState._kv)) {
                     if (this.subscriptionSet.has(cID))
                         continue;
@@ -832,12 +875,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // `etag: null`) and surface `'non-init'` rather than `'loaded'`
                 // (§4.3). If the slot previously held a value, emit
                 // `CHELONIA_KV_UPDATED` so consumers observe the transition.
-                // The event payload carries the *resolved default* (cloned)
-                // — not `undefined` — so consumers (and the externalState
-                // projection) see the value `read` will subsequently return
-                // (§4.5 / §4.9). The mirror itself keeps `value: undefined`
-                // so the `'non-init'` status remains observable via `read`'s
-                // default-substitution path.
+                // The event payload carries `undefined`, matching the mirror;
+                // `onUpdate` receives the resolved default so callbacks observe
+                // the same value `read` will subsequently return.
                 const existingEntry = perContract[slot.key];
                 let previousValue;
                 if (existingEntry) {
@@ -845,14 +885,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     this.config.reactiveSet(existingEntry, 'value', undefined);
                     this.config.reactiveSet(existingEntry, 'etag', null);
                     if (previousValue !== undefined) {
-                        const defaultedValue = slot.resolvedDefault !== undefined
-                            ? (0, turtledash_1.cloneDeep)(slot.resolvedDefault)
-                            : undefined;
                         (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_UPDATED, {
                             contractID,
                             contractType: slot.contractType,
                             key: slot.key,
-                            value: defaultedValue,
+                            value: undefined,
                             previousValue,
                             reason,
                             etag: null
@@ -924,7 +961,20 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 }
             }
             else {
-                nextValue = unwrapped;
+                try {
+                    nextValue = assertJsonShape(unwrapped, `load ${contractID}::${slot.key}`);
+                }
+                catch (e) {
+                    (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_VALIDATION_ERROR, {
+                        contractID,
+                        contractType: slot.contractType,
+                        key: slot.key,
+                        error: e,
+                        reason
+                    });
+                    setSlotStatus(this, rootState, contractID, slot.contractType, slot.key, 'error', normalizeError(e));
+                    throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] load: ${contractID}::${slot.key} validation failed`, { cause: e });
+                }
             }
             // Write mirror — entry definitely exists (we seeded it
             // upstream and bail out if reconcile dropped it).
@@ -951,7 +1001,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         });
     },
     // Private listener for CONTRACTS_MODIFIED. Mounted from
-    // `chelonia/_init` (see chelonia.ts) so that newly-synced
+    // `chelonia/connect` (see chelonia.ts) so that newly-synced
     // contracts automatically wire up every matching slot, and
     // removed contracts have their per-contract KV runtime state
     // cleaned up (KV-REVAMPED §11.4).
@@ -989,8 +1039,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     'chelonia/kv/_cleanupContractRuntime': function (contractID) {
         // Queue a filter flush for this contract *before* dropping state so
         // the server receives the empty-filter frame (§11.5 empty
-        // transitions). The flush reads kvActiveFilters at microtask time,
-        // so removing the entry below won't affect the emitted filter.
+        // transitions). The flush reads kvActiveFilters at microtask time;
+        // deleting the entry below is what makes the emitted filter empty.
         // We intentionally do NOT delete from kvFilterDirty here — the
         // microtask must see this contract in the dirty set to send the
         // empty-filter frame.
@@ -1027,12 +1077,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         return Promise.all(Array.from(ids).map((cID) => (0, sbp_1.default)('chelonia/queueInvocation', cID, ['chelonia/private/noop'])));
     },
     // Private. See KV-REVAMPED §11.4 bullet 3 (reconnect hook).
-    // Called from the pubsub reconnect path after re-subscription frames
-    // are sent. Clears pending local echo nonces (any echo from a
-    // pre-disconnect write has either been delivered or is lost) and
-    // re-fetches every active slot with `refreshOnReconnect === true`
-    // through the per-contract queueInvocation lane so reconnect fetches
-    // are serialized with in-flight writes.
+    // Called from the pubsub reconnect-open path. Clears pending local
+    // echo nonces (any echo from a pre-disconnect write has either been
+    // delivered or is lost) and re-fetches every active slot with
+    // `refreshOnReconnect === true` through the per-contract
+    // queueInvocation lane so reconnect fetches are serialized with
+    // in-flight writes.
     'chelonia/kv/_onReconnect': function () {
         this.kvLocalEchoNonces.clear();
         for (const [cID, perKey] of this.kvSlotsByContractID) {
@@ -1134,7 +1184,20 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             }
         }
         else {
-            nextValue = unwrapped;
+            try {
+                nextValue = assertJsonShape(unwrapped, `remote ${contractID}::${key}`);
+            }
+            catch (e) {
+                (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_VALIDATION_ERROR, {
+                    contractID,
+                    contractType: slot.contractType,
+                    key,
+                    error: e,
+                    reason: 'remote'
+                });
+                setSlotStatus(this, rootState, contractID, slot.contractType, key, 'error', normalizeError(e));
+                return Promise.resolve();
+            }
         }
         this.config.reactiveSet(entry, 'value', nextValue);
         // Pubsub frames carry no etag — null it out so the next local
@@ -1171,9 +1234,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     },
     // Public. See KV-REVAMPED §4.2, §11.3 step 5. The ergonomic write
     // path: resolves the slot, runs the reducer, validates, wraps with
-    // a self-echo nonce, and writes via `chelonia/kv/queuedSet` (which
-    // serialises writes per-contract through the same queueInvocation
-    // lane used by `_handleRemote`).
+    // a self-echo nonce, and writes via `chelonia/kv/set` directly inside
+    // the same per-contract queueInvocation lane used by `_handleRemote`.
     //
     // Resolves with the stored value (the reducer's last accepted
     // output), or `undefined` when the reducer returned `KV_NOOP`.
@@ -1266,6 +1328,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         return (0, sbp_1.default)('chelonia/queueInvocation', contractID, async () => {
             // Re-read rootState inside the queue for fresh mirror state.
             const liveState = (0, sbp_1.default)(this.config.stateSelector);
+            if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
+                throw new errors_js_1.ChelErrorKvSlotUnknown(`[chelonia/kv] update: no active slot for ${contractID}::${key}`);
+            }
             // ----- Step 2: read current mirror value. -----
             const perContract = ensureContractKv(this, liveState, contractID);
             const mirrorEntry = perContract[key];
@@ -1306,6 +1371,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         'failed schema.parse', { cause: e });
                 }
             }
+            else {
+                try {
+                    nextValue = assertJsonShape(nextValue, `update ${contractID}::${key}`);
+                }
+                catch (e) {
+                    throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
+                        'is not JSON-shaped', { cause: e });
+                }
+            }
             // ----- Step 5: nonce + wrap + kv/set with onconflict. -----
             const attemptNonces = [];
             const firstNonce = base64Nonce();
@@ -1343,7 +1417,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         }
                     }
                     else {
-                        basis = unwrapped;
+                        try {
+                            basis = assertJsonShape(unwrapped, `update onconflict currentData ${contractID}::${key}`);
+                        }
+                        catch (e) {
+                            throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} server ` +
+                                'currentData is not JSON-shaped on conflict retry', { cause: e });
+                        }
                     }
                 }
                 lastCurrentData = basis;
@@ -1373,6 +1453,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     catch (e) {
                         throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
                             'failed schema.parse on conflict retry', { cause: e });
+                    }
+                }
+                else {
+                    try {
+                        validated = assertJsonShape(validated, `update onconflict retry ${contractID}::${key}`);
+                    }
+                    catch (e) {
+                        throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
+                            'is not JSON-shaped on conflict retry', { cause: e });
                     }
                 }
                 // Each retry gets a fresh nonce so the eventual pubsub echo of
@@ -1508,7 +1597,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         const slot = resolveActiveSlot(this, rootState, contractID, key, 'read');
         const entry = rootState._kv?.[contractID]?.[key];
-        if (!entry || entry.value === undefined) {
+        if (!entry || entry.value === undefined || entry.status === 'error') {
             return slot.resolvedDefault !== undefined
                 ? (0, turtledash_1.cloneDeep)(slot.resolvedDefault)
                 : undefined;
@@ -1591,9 +1680,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 : new DOMException('Aborted', 'AbortError');
         }
         const attemptNonces = [];
-        const nonce = base64Nonce();
-        attemptNonces.push(nonce);
-        recordEchoNonce(this, contractID, key, nonce);
+        let nonce;
         let lastEtag;
         const onconflict = async ({ etag }) => {
             lastEtag = etag;
@@ -1611,6 +1698,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         try {
             setResult = await (0, sbp_1.default)('chelonia/queueInvocation', contractID, async () => {
                 const liveState = (0, sbp_1.default)(this.config.stateSelector);
+                if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
+                    throw new errors_js_1.ChelErrorKvSlotUnknown(`[chelonia/kv] clear: no active slot for ${contractID}::${key}`);
+                }
+                nonce = base64Nonce();
+                attemptNonces.push(nonce);
+                recordEchoNonce(this, contractID, key, nonce);
                 const mirrorEtag = liveState._kv?.[contractID]?.[key]?.etag ?? undefined;
                 return (0, sbp_1.default)('chelonia/kv/set', contractID, key, { __chelKvNonce: nonce, value: null }, {
                     ifMatch: mirrorEtag,
@@ -1848,17 +1941,11 @@ function revalidateMirrorEntry(ctx, rootState, contractID, slot) {
     const entry = rootState._kv?.[contractID]?.[slot.key];
     if (!entry || entry.value === undefined)
         return;
-    if (!slot.schema) {
-        // No schema → nothing to validate; if previously errored, clear
-        // the error state.
-        if (entry.status === 'error') {
-            setSlotStatus(ctx, rootState, contractID, slot.contractType, slot.key, 'loaded');
-        }
-        return;
-    }
     const previousValue = entry.value;
     try {
-        const parsed = parseSyncSlotValue(slot, previousValue, `re-validate ${contractID}::${slot.key}`);
+        const parsed = slot.schema
+            ? parseSyncSlotValue(slot, previousValue, `re-validate ${contractID}::${slot.key}`)
+            : assertJsonShape(previousValue, `re-validate ${contractID}::${slot.key}`);
         // Successful re-validation: write the (possibly coerced) value
         // back and emit the standard transition events.
         ctx.config.reactiveSet(entry, 'value', parsed);

@@ -1,6 +1,6 @@
-// KV slot API tests — 32 cases total: 27 from KV-REVAMPED.md §11.6
-// plus 5 implementation-specific (cases 28-32) covering REVIEW.md
-// follow-ups (issues 1/2/3/5/§11.3 step 3 exception).
+// KV slot API tests — 38 cases total: 27 from KV-REVAMPED.md §11.6
+// plus 11 implementation-specific (cases 28-38) covering REVIEW.md
+// follow-ups and §11.3 step 3 exceptions.
 //
 // We register simplified infrastructure selectors once (mutable stub
 // closures) and swap the stub targets per-test in beforeEach. No
@@ -14,6 +14,7 @@ import '@sbp/okturtles.events'
 import {
   ChelErrorKvConflict,
   ChelErrorKvSlotInvalid,
+  ChelErrorKvSlotUnknown,
   ChelErrorKvUpdateInvalid,
   ChelErrorKvValidation
 } from './errors.js'
@@ -1197,11 +1198,10 @@ describe('KV slot API', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 32: 404 with previous value emits CHELONIA_KV_UPDATED with the cloned
-  // default in `value` (so the event payload matches what `read` returns
-  // after the transition, and what `safeOnUpdate` is dispatched with).
+  // 32: 404 with previous value emits CHELONIA_KV_UPDATED with the mirror
+  // value (`undefined`) while `safeOnUpdate` receives the cloned default.
   // -----------------------------------------------------------------------
-  it('32: 404 with previous value emits update event with cloned default', async () => {
+  it('32: 404 with previous value emits update event with undefined', async () => {
     const onUpdateValues: unknown[] = []
     sbp('chelonia/kv/defineSlot', {
       key: 'p404',
@@ -1232,9 +1232,8 @@ describe('KV slot API', () => {
       (rootState()._kv![c]!.p404 as { value: unknown }).value, undefined
     )
 
-    // CHELONIA_KV_UPDATED must have fired with the cloned default as
-    // `value` and previousValue:{x:42}, so external mirrors and event
-    // listeners see the same value `read` will return next.
+    // CHELONIA_KV_UPDATED must have fired with the mirror value
+    // (`undefined`) and previousValue:{x:42}.
     const updateEvents = log.filter(
       (e) => e.type === CHELONIA_KV_UPDATED && (e.payload as { key: string }).key === 'p404'
     )
@@ -1242,7 +1241,7 @@ describe('KV slot API', () => {
     const lastEvent = updateEvents[updateEvents.length - 1].payload as {
       value: unknown; previousValue: unknown
     }
-    assert.deepStrictEqual(lastEvent.value, { x: 0 })
+    assert.strictEqual(lastEvent.value, undefined)
     assert.deepStrictEqual(lastEvent.previousValue, { x: 42 })
 
     // onUpdate should have been called with the cloned default.
@@ -1324,5 +1323,134 @@ describe('KV slot API', () => {
     stubQueueInvocation = (cID, fn) => { queued.push(cID); return Promise.resolve(runQueued(fn)) }
     await sbp('chelonia/kv/_waitInFlight')
     assert.strictEqual(queued.length, 0)
+  })
+
+  // -----------------------------------------------------------------------
+  // 36: queued writes re-check slot liveness before network I/O
+  // -----------------------------------------------------------------------
+  it('36: queued update rejects before write when slot became inactive', async () => {
+    let shouldMatch = true
+    sbp('chelonia/kv/defineSlot', {
+      key: 'stale-up',
+      contractType: CTYPE,
+      defaultValue: { x: 0 },
+      match: () => shouldMatch
+    })
+    const c = 'cid-36'
+    await setupContract(c)
+
+    let queuedRun!: () => void
+    let held = false
+    stubQueueInvocation = (_cID, fn) => {
+      if (held) return Promise.resolve(runQueued(fn))
+      held = true
+      return new Promise((resolve, reject) => {
+        queuedRun = () => { Promise.resolve(runQueued(fn)).then(resolve, reject) }
+      })
+    }
+    let networkCalled = false
+    stubSet = async () => { networkCalled = true; return { etag: 'e' } }
+
+    const p = sbp('chelonia/kv/update', {
+      contractID: c, key: 'stale-up', updater: () => ({ x: 1 })
+    })
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    shouldMatch = false
+    sbp('chelonia/kv/refreshFilters', c)
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+
+    queuedRun()
+    await assert.rejects(
+      () => p,
+      (e: unknown) => e instanceof ChelErrorKvSlotUnknown
+    )
+    assert.strictEqual(networkCalled, false)
+    stubQueueInvocation = (_cID, fn) => Promise.resolve(runQueued(fn))
+  })
+
+  // -----------------------------------------------------------------------
+  // 37: queued clear re-checks slot liveness before nonce/network I/O
+  // -----------------------------------------------------------------------
+  it('37: queued clear rejects before write when slot became inactive', async () => {
+    let shouldMatch = true
+    sbp('chelonia/kv/defineSlot', {
+      key: 'stale-clear',
+      contractType: CTYPE,
+      defaultValue: { x: 0 },
+      match: () => shouldMatch
+    })
+    const c = 'cid-37'
+    await setupContract(c)
+
+    let queuedRun!: () => void
+    let held = false
+    stubQueueInvocation = (_cID, fn) => {
+      if (held) return Promise.resolve(runQueued(fn))
+      held = true
+      return new Promise((resolve, reject) => {
+        queuedRun = () => { Promise.resolve(runQueued(fn)).then(resolve, reject) }
+      })
+    }
+    let networkCalled = false
+    stubSet = async () => { networkCalled = true; return { etag: 'e' } }
+
+    const p = sbp('chelonia/kv/clear', c, 'stale-clear')
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    shouldMatch = false
+    sbp('chelonia/kv/refreshFilters', c)
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+
+    queuedRun()
+    await assert.rejects(
+      () => p,
+      (e: unknown) => e instanceof ChelErrorKvSlotUnknown
+    )
+    assert.strictEqual(networkCalled, false)
+    stubQueueInvocation = (_cID, fn) => Promise.resolve(runQueued(fn))
+  })
+
+  // -----------------------------------------------------------------------
+  // 38: JSON-shape guard covers schemaless values and first activation
+  // -----------------------------------------------------------------------
+  it('38: schemaless slots reject non-JSON and first activation validates persisted mirrors', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'json', contractType: CTYPE, defaultValue: { x: 0 }
+    })
+    const c = 'cid-38'
+    await setupContract(c)
+
+    await assert.rejects(
+      () => sbp('chelonia/kv/update', {
+        contractID: c,
+        key: 'json',
+        updater: () => new Date() as unknown as JSONType
+      }),
+      (e: unknown) => e instanceof ChelErrorKvUpdateInvalid
+    )
+
+    const entry = rootState()._kv![c]!.json as { value: unknown; status: string }
+    entry.value = { x: 1 }
+    entry.status = 'loaded'
+    sbp('chelonia/kv/_handleRemote', c, 'json', fakeParsed(new Date() as unknown as JSONType))
+    assert.deepStrictEqual(entry.value, { x: 1 })
+    assert.strictEqual(entry.status, 'error')
+
+    const persisted = 'cid-38-persisted'
+    await setupContract(persisted)
+    const s = rootState()
+    s._kv![persisted] = Object.create(null)
+    s._kv![persisted]!.strictPersisted = {
+      value: { x: -1 }, etag: 'old', status: 'loaded'
+    }
+    sbp('chelonia/kv/defineSlot', {
+      key: 'strictPersisted',
+      contractType: CTYPE,
+      defaultValue: { x: 9 },
+      schema: strictSchema,
+      autoLoad: 'never'
+    })
+    assert.deepStrictEqual(s._kv![persisted]!.strictPersisted.value, { x: -1 })
+    assert.strictEqual(s._kv![persisted]!.strictPersisted.status, 'error')
+    assert.deepStrictEqual(sbp('chelonia/kv/read', persisted, 'strictPersisted'), { x: 9 })
   })
 })
