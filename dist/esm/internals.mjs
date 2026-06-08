@@ -461,7 +461,7 @@ export default sbp('sbp/selectors/register', {
         // Delegated to `chelonia/kv/_cleanupContractRuntime` so the spec-compliant
         // teardown path (queued empty-filter flush per §11.5, reactive deletion of
         // `_kv[contractID]`, dirty-mark retention) lives in a single place.
-        if (!params?.resync) {
+        if (!params?.resync && sbp('sbp/selectors/fn', 'chelonia/kv/_cleanupContractRuntime')) {
             try {
                 sbp('chelonia/kv/_cleanupContractRuntime', contractID);
             }

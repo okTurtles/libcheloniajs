@@ -387,6 +387,9 @@ Slot definitions (`KvSlotDefinition`) declare a `contractType`, `key`,
 a `chelonia/defineContract` call via the `kv` key. `defaultUpdater`
 enables a shorthand `value`-form on `chelonia/kv/update`.
 
+`KvUpdater<T>` receives `T | undefined`: `undefined` is passed when a
+slot has neither a mirror value nor a `defaultValue`.
+
 The `KV_NOOP` symbol (`Symbol.for('@chelonia/lib/KV_NOOP')`) can be
 returned from an updater to abort the write without touching the server.
 
@@ -424,6 +427,18 @@ CHELONIA_KV_UPDATED          — Mirror value changed (load / remote / local / r
 CHELONIA_KV_STATUS_CHANGED   — Slot status transitioned
 CHELONIA_KV_VALIDATION_ERROR — Mirror value failed schema.parse
 ```
+
+Low-level selector extensions: the slot layer extends (does not
+replace) `chelonia/kv/set` (returns `{ etag }`, accepts `signal`,
+`onconflict`, `maxAttempts`), `chelonia/kv/get` (attaches `etag`
+lazily without forcing the `data` accessor), and `chelonia/kv/queuedSet`
+(forwards `signal`, returns `{ etag }`). `chelonia/kv/setFilter` is
+unchanged. These additions are backward-compatible.
+
+Self-echo suppression uses a bounded FIFO of at most 8 nonces per
+`(contractID, key)` stored in `kvLocalEchoNonces` (`Map<string,
+Set<string>>`). When the FIFO overflows, the oldest nonce is evicted;
+the corresponding pubsub echo will surface as `reason: 'remote'`.
 
 Consumer-visible leakage: `rootState._kv` is a separate subtree from
 `rootState.contracts`, but it is projected into external stores by

@@ -441,6 +441,7 @@ export default sbp('sbp/selectors/register', {
     this.kvActiveFilters = new Map()
     this.kvFilterDirty = new Set()
     this.kvLocalEchoNonces = new Map()
+    this.kvPendingWrites = new Map()
     this.defContractKvByManifest = new Map()
     // pending includes contracts that are scheduled for syncing or in the
     // process of syncing for the first time. After sync completes for the
@@ -735,16 +736,17 @@ export default sbp('sbp/selectors/register', {
     // Re-seed the KV mirror — `reactiveClearObject` above stripped it
     // along with everything else. Slot definitions (`kvSlots`) and the
     // per-manifest cache (`defContractKvByManifest`) survive reset
-    // because they are code-level state; the four per-subscription maps
+    // because they are code-level state; the five per-subscription maps
     // are cleared in lock-step with `subscriptionSet` below. In-flight
     // KV writes were already drained via `chelonia/kv/_waitInFlight`
-    // above, so clearing `kvLocalEchoNonces` here cannot strand a
-    // continuation mid-write.
+    // above, so clearing `kvLocalEchoNonces` / `kvPendingWrites` here
+    // cannot strand a continuation mid-write.
     this.config.reactiveSet(rootState, '_kv', Object.create(null))
     this.kvSlotsByContractID.clear()
     this.kvActiveFilters.clear()
     this.kvFilterDirty.clear()
     this.kvLocalEchoNonces.clear()
+    this.kvPendingWrites.clear()
     clearObject(this.ephemeralReferenceCount)
     this.pending.splice(0)
     clearObject(this.currentSyncs)
@@ -1187,13 +1189,15 @@ export default sbp('sbp/selectors/register', {
                 )
               }
             }
-            try {
-              await sbp('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed)
-            } catch (e) {
-              console.error(
-                `[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`,
-                e
-              )
+            if (sbp('sbp/selectors/fn', 'chelonia/kv/_handleRemote')) {
+              try {
+                await sbp('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed)
+              } catch (e) {
+                console.error(
+                  `[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`,
+                  e
+                )
+              }
             }
           }).catch((e: unknown) => {
             console.error(

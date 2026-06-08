@@ -1,10 +1,11 @@
 "use strict";
 // KV slot API — see KV-REVAMPED.md for the full design.
 //
-// This module implements the declarative KV slot API layered on top of the
-// existing `chelonia/kv/*` primitives (`chelonia/kv/set`,
-// `chelonia/kv/get`, `chelonia/kv/setFilter`, `chelonia/kv/queuedSet`).
-// Behaviour lands incrementally — see the kv-revamped task plan.
+// This module implements the declarative KV slot API layered on top of
+// the `chelonia/kv/{set,get,setFilter}` primitives. It also hooks into
+// `chelonia/reset` (via `_waitInFlight`), `chelonia/defineContract`
+// (via `_registerContractSlots` / `_cleanupContractSlots`), and the
+// pubsub reconnect / KV-notification paths in `chelonia.ts`.
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -26,10 +27,12 @@ const internal_errors_js_1 = require("./internal-errors.cjs");
 // (`@chelonia/lib/KV_NOOP`) to make a userland collision implausible.
 exports.KV_NOOP = Symbol.for('@chelonia/lib/KV_NOOP');
 // Internal sentinel thrown by the onconflict callback when the reducer
-// returns KV_NOOP. The outer catch in chelonia/kv/update checks for
-// the realm-safe Symbol.for marker on the prototype (not `instanceof`)
-// to remain safe across realm boundaries (dual ESM/CJS loads, iframes,
-// workers). Not exported — internal to the onconflict/retry plumbing.
+// returns KV_NOOP. The outer catch checks for the Symbol.for marker via
+// `in` (not `instanceof`) so a KvNoopAbort created by another loaded
+// copy of this module — e.g. the dual ESM/CJS build of @chelonia/lib in
+// the same realm — is still recognised. The class is not exported and
+// only this module's onconflict path attaches the marker; it is not a
+// general cross-realm error-bridging mechanism.
 class KvNoopAbort extends Error {
     name = 'KvNoopAbort';
 }
@@ -40,6 +43,7 @@ KvNoopAbort.prototype[KV_NOOP_ABORT] = true;
 // ---------------------------------------------------------------------------
 // Internal helpers (pure — no SBP context required)
 // ---------------------------------------------------------------------------
+const KV_ECHO_NONCE_MAX = 8;
 const registryKey = (contractType, key) => `${contractType}::${key}`;
 // Stable structural stringify used for the `defineSlot` idempotence
 // check. Plain `JSON.stringify` is sensitive to object key order, but
@@ -89,6 +93,27 @@ function resolveSlotDefinition(def, contractType, resolvedDefault, source) {
         onUpdate: def.onUpdate,
         source
     };
+}
+function assertParsedDefaultValue(slot, value, pass) {
+    if (value && typeof value.then === 'function') {
+        Promise.resolve(value).catch(() => { });
+        throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] slot ${slot.contractType}::${slot.key} uses an ` +
+            'async/thenable schema parser; v1 supports synchronous parsers only');
+    }
+    if (value === null || value === undefined) {
+        throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] slot ${slot.contractType}::${slot.key} schema.parse ` +
+            `returned the reserved sentinel ${String(value)} for the defaultValue; ` +
+            'null and undefined are reserved for wire/clear semantics');
+    }
+    try {
+        assertNotReservedWrapper(value, `defineSlot defaultValue ${pass} parse ${slot.contractType}::${slot.key}`, errors_js_1.ChelErrorKvSlotInvalid);
+        assertJsonShape(value, `defineSlot defaultValue ${pass} parse ${slot.contractType}::${slot.key}`);
+    }
+    catch (e) {
+        throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] slot ${slot.contractType}::${slot.key} schema.parse ` +
+            'produced an invalid defaultValue (reserved sentinel, reserved ' +
+            'wrapper shape, or non-JSON value)', { cause: e });
+    }
 }
 // KV-REVAMPED §4.1: three registration-time guards against schemas
 // that collide with the wire sentinels or are async-only.
@@ -142,11 +167,7 @@ function assertSchemaGuards(slot) {
             throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] slot ${slot.contractType}::${slot.key} resolved ` +
                 'defaultValue failed schema.parse at registration', { cause: e });
         }
-        if (first && typeof first.then === 'function') {
-            Promise.resolve(first).catch(() => { });
-            throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] slot ${slot.contractType}::${slot.key} uses an ` +
-                'async/thenable schema parser; v1 supports synchronous parsers only');
-        }
+        assertParsedDefaultValue(slot, first, 'first');
         // Idempotence check (KV-REVAMPED §4.1 guard 3): parse(parse(x))
         // must produce the same result as parse(x). The first parse is
         // allowed to transform the default (e.g. adding normalised
@@ -160,6 +181,7 @@ function assertSchemaGuards(slot) {
             throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] slot ${slot.contractType}::${slot.key} schema is ` +
                 'not idempotent on its own parsed output (defaultValue round-trip failed)', { cause: e });
         }
+        assertParsedDefaultValue(slot, second, 'second');
         if (canonicalStringify(first) !== canonicalStringify(second)) {
             throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] slot ${slot.contractType}::${slot.key} schema ` +
                 'is not idempotent on its own parsed output (defaultValue round-trip failed)');
@@ -175,7 +197,9 @@ function assertSchemaGuards(slot) {
 // that passed `assertSchemaGuards` at registration but now somehow
 // produces a reserved sentinel at runtime (e.g. a schema whose `parse`
 // strips fields until only `undefined` remains). Also rejects thenables
-// that escaped the registration-time async probe.
+// that escaped the registration-time async probe and the reserved
+// `{ __chelKvNonce, value }` wrapper shape that `unwrapData` would
+// silently strip on read.
 //
 // Returns the validated value cast as `JSONType`.
 function parseSyncSlotValue(slot, input, where) {
@@ -190,9 +214,11 @@ function parseSyncSlotValue(slot, input, where) {
             `schema.parse returned the reserved sentinel ${String(parsed)}; ` +
             'null and undefined are reserved for wire/clear semantics');
     }
+    assertNotReservedWrapper(parsed, where, errors_js_1.ChelErrorKvValidation);
     return assertJsonShape(parsed, where);
 }
 function assertJsonShape(input, where) {
+    assertNotReservedWrapper(input, where, errors_js_1.ChelErrorKvValidation);
     const visit = (value, path) => {
         if (value === null || value === undefined) {
             throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} is the reserved sentinel ${String(value)}`);
@@ -367,36 +393,63 @@ function unwrapData(data) {
     }
     return { nonce: undefined, value: data };
 }
-// Push a nonce onto the per-(contractID, key) FIFO, trimming to at
-// most 8 entries (KV-REVAMPED §4.9 step 2). The cap is enough to
-// absorb bursts of concurrent local writes without unbounded growth.
+function assertNotReservedWrapper(value, where, ErrorCtor) {
+    if (value !== null &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        '__chelKvNonce' in value &&
+        'value' in value) {
+        throw new ErrorCtor(`[chelonia/kv] ${where}: value has the reserved shape ` +
+            '{ __chelKvNonce, value }; this top-level key combination is ' +
+            'reserved for internal use');
+    }
+}
+// Track a locally-generated write nonce for self-echo suppression.
 function recordEchoNonce(ctx, contractID, key, nonce) {
     const echoKey = `${contractID}::${key}`;
-    let fifo = ctx.kvLocalEchoNonces.get(echoKey);
-    if (!fifo) {
-        fifo = [];
-        ctx.kvLocalEchoNonces.set(echoKey, fifo);
+    let nonces = ctx.kvLocalEchoNonces.get(echoKey);
+    if (!nonces) {
+        nonces = new Set();
+        ctx.kvLocalEchoNonces.set(echoKey, nonces);
     }
-    fifo.push(nonce);
-    while (fifo.length > 8)
-        fifo.shift();
+    nonces.add(nonce);
+    while (nonces.size > KV_ECHO_NONCE_MAX) {
+        const oldest = nonces.values().next().value;
+        if (oldest === undefined)
+            break;
+        nonces.delete(oldest);
+    }
 }
-// Remove specific nonces from the per-(contractID, key) FIFO.
-// Used on write-failure paths to prevent stale nonces from suppressing
-// pubsub echoes that should update the mirror.
+// Per-contract pending-write counter. `chelonia/kv/update` and
+// `chelonia/kv/clear` increment this at call time (before their queued
+// body runs) and decrement it from inside the body's `finally`. The
+// counter is the third source for `chelonia/kv/_waitInFlight` so a
+// write whose slot index entry and echo nonce have both been removed
+// mid-flight (contract release, match→false, defineSlot replacement)
+// still settles before `chelonia/reset` tears down state. See the
+// `_waitInFlight` comment for the full three-source rationale.
+function incrementPending(ctx, contractID) {
+    ctx.kvPendingWrites.set(contractID, (ctx.kvPendingWrites.get(contractID) ?? 0) + 1);
+}
+function decrementPending(ctx, contractID) {
+    const n = (ctx.kvPendingWrites.get(contractID) ?? 1) - 1;
+    if (n <= 0)
+        ctx.kvPendingWrites.delete(contractID);
+    else
+        ctx.kvPendingWrites.set(contractID, n);
+}
+// Remove specific pending self-echo nonces.
 function removeEchoNonces(ctx, contractID, key, nonces) {
     if (nonces.length === 0)
         return;
     const echoKey = `${contractID}::${key}`;
-    const fifo = ctx.kvLocalEchoNonces.get(echoKey);
-    if (!fifo)
+    const pending = ctx.kvLocalEchoNonces.get(echoKey);
+    if (!pending)
         return;
     for (const n of nonces) {
-        const idx = fifo.indexOf(n);
-        if (idx >= 0)
-            fifo.splice(idx, 1);
+        pending.delete(n);
     }
-    if (fifo.length === 0)
+    if (pending.size === 0)
         ctx.kvLocalEchoNonces.delete(echoKey);
 }
 // Invoke `onUpdate` with the dispatcher's MUST-NOT-throw contract:
@@ -446,11 +499,12 @@ async function flushDirtyFilters(ctx) {
 }
 exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // Dev-time invariant check. See KV-REVAMPED.md §11.2 ("Index
-    // invariant"). Walks the four KV maps + `rootState._kv` and verifies:
+    // invariant"). Walks the five KV maps + `rootState._kv` and verifies:
     //
     //   kvSlotsByContractID[cID].has(key) ⇔
     //     (a) kvSlots has a registration for `${contractType}::${key}` whose
-    //         contractType matches rootState.contracts[cID]._vm.type, AND
+    //         contractType matches getContractType(rootState, cID)
+    //         (rootState.contracts[cID].type with a `_vm.type` fallback), AND
     //     (b) cID ∈ subscriptionSet, AND
     //     (c) autoSubscribe slots are present in kvActiveFilters[cID], while
     //         autoSubscribe:false slots are absent from kvActiveFilters[cID].
@@ -649,6 +703,21 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             throw new errors_js_1.ChelErrorKvSlotInvalid('[chelonia/kv] defineSlot: defaultValue may not be null; ' +
                 'null is the reserved wire clear sentinel');
         }
+        // Reject defaultValue with the reserved { __chelKvNonce, value }
+        // top-level shape. `unwrapData` strips this envelope on read, so a
+        // consumer storing { __chelKvNonce, value } would silently lose the
+        // outer object. This check runs unconditionally (not gated on schema)
+        // so schemaless slots are also protected.
+        if (rawDefault !== undefined) {
+            try {
+                assertNotReservedWrapper(rawDefault, `defineSlot defaultValue ${def.key}`, errors_js_1.ChelErrorKvSlotInvalid);
+            }
+            catch (e) {
+                throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] defineSlot: defaultValue for key '${def.key}' ` +
+                    'has the reserved shape { __chelKvNonce, value }; this top-level ' +
+                    'key combination is reserved for internal use', { cause: e });
+            }
+        }
         if (rawDefault !== undefined) {
             try {
                 assertJsonShape(rawDefault, `defineSlot defaultValue ${def.key}`);
@@ -656,21 +725,6 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             catch (e) {
                 throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] defineSlot: defaultValue for key '${def.key}' is not JSON-shaped`, { cause: e });
             }
-        }
-        // Reject defaultValue with the reserved { __chelKvNonce, value }
-        // top-level shape. `unwrapData` strips this envelope on read, so a
-        // consumer storing { __chelKvNonce, value } would silently lose the
-        // outer object. This check runs unconditionally (not gated on schema)
-        // so schemaless slots are also protected.
-        if (rawDefault !== undefined &&
-            rawDefault !== null &&
-            typeof rawDefault === 'object' &&
-            !Array.isArray(rawDefault) &&
-            '__chelKvNonce' in rawDefault &&
-            'value' in rawDefault) {
-            throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] defineSlot: defaultValue for key '${def.key}' ` +
-                'has the reserved shape { __chelKvNonce, value }; this top-level ' +
-                'key combination is reserved for internal use');
         }
         const resolvedDefault = rawDefault === undefined ? undefined : (0, turtledash_1.cloneDeep)(rawDefault);
         // Run the schema guards once on a probe slot regardless of how many
@@ -747,8 +801,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             }
         }
     },
-    // Private. See KV-REVAMPED §11.3 step 2. Maintains the index
-    // invariant (§11.2) and schedules `autoLoad: 'on-sync'` fetches.
+    // Private. Reconciles a single (slot, contractID) pair: evaluates
+    // `match`, maintains the index invariant (§11.2), updates the active
+    // filter set, and schedules an `autoLoad: 'on-sync'` fetch. This is
+    // the per-contract inner step of KV-REVAMPED §11.3 step 2 — callers
+    // iterate synced contracts and invoke this for each relevant pair.
     'chelonia/kv/_reconcileForSlot': function (slot, contractID) {
         if (!this.subscriptionSet.has(contractID))
             return;
@@ -804,8 +861,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // Schedule a load. The actual fetch is serialised against
             // updates via the per-contract queueInvocation lane.
             if (!wasActive && slot.autoLoad === 'on-sync') {
-                // Fire-and-forget — _loadSlot manages its own status events
-                // and never throws out of its body.
+                // Fire-and-forget — `_loadSlot` manages its own status events and
+                // may reject on GET or validation failure; the `.catch` here
+                // keeps that rejection out of the reconcile dispatch path.
                 (0, sbp_1.default)('chelonia/kv/_loadSlot', { contractID, slot, reason: 'load' })
                     .catch((e) => {
                     console.error(`[chelonia/kv] _loadSlot rejected for ${contractID}::${slot.key}`, e);
@@ -817,13 +875,16 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // stale persisted mirror entry regardless of prior active state.
             if (wasActive) {
                 perKey.delete(slot.key);
-                if (perKey.size === 0)
+                const contractEmptied = perKey.size === 0;
+                if (contractEmptied)
                     this.kvSlotsByContractID.delete(contractID);
                 const filter = this.kvActiveFilters.get(contractID);
                 if (filter?.has(slot.key)) {
                     filter.delete(slot.key);
                     queueFilterFlush(this, contractID);
                 }
+                if (contractEmptied)
+                    this.kvActiveFilters.delete(contractID);
             }
             const perContract = rootState._kv?.[contractID];
             if (perContract && perContract[slot.key]) {
@@ -855,6 +916,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 parsed = await (0, sbp_1.default)('chelonia/kv/get', contractID, slot.key);
             }
             catch (e) {
+                // Staleness guard (symmetric with the success paths below): if
+                // `defineSlot` replaced this slot while the GET was in flight,
+                // bail out before stamping an error onto the replacement slot's
+                // mirror entry. Restore priorStatus if this invocation set
+                // 'loading', matching the null/non-null branches' teardown.
+                if (this.kvSlotsByContractID.get(contractID)?.get(slot.key) !== slot) {
+                    const currentEntry = perContract[slot.key];
+                    if (currentEntry && currentEntry.status === 'loading' && priorStatus != null) {
+                        setSlotStatus(this, rootState, contractID, slot.contractType, slot.key, priorStatus);
+                    }
+                    return;
+                }
                 const lastError = normalizeError(e);
                 setSlotStatus(this, rootState, contractID, slot.contractType, slot.key, 'error', lastError);
                 throw e;
@@ -917,8 +990,32 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // Unwrap the `{ __chelKvNonce, value }` envelope written by
             // `chelonia/kv/update` / `chelonia/kv/clear`. For backwards
             // compatibility with raw-API writers that don't wrap, fall
-            // back to `parsed.data` itself.
-            const { value: unwrapped } = unwrapData(parsed.data);
+            // back to `parsed.data` itself. `parsed.data` is a lazy accessor
+            // that can throw on decrypt/signature failure, so downgrade that
+            // failure through the same status path as schema validation.
+            let unwrapped;
+            try {
+                ;
+                ({ value: unwrapped } = unwrapData(parsed.data));
+            }
+            catch (e) {
+                if (this.kvSlotsByContractID.get(contractID)?.get(slot.key) !== slot) {
+                    const currentEntry = perContract[slot.key];
+                    if (currentEntry && currentEntry.status === 'loading' && priorStatus != null) {
+                        setSlotStatus(this, rootState, contractID, slot.contractType, slot.key, priorStatus);
+                    }
+                    return;
+                }
+                (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_VALIDATION_ERROR, {
+                    contractID,
+                    contractType: slot.contractType,
+                    key: slot.key,
+                    error: e,
+                    reason
+                });
+                setSlotStatus(this, rootState, contractID, slot.contractType, slot.key, 'error', normalizeError(e));
+                throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] load: ${contractID}::${slot.key} decode failed`, { cause: e });
+            }
             // Capture the etag from the GET response before any await point.
             const getEtag = parsed.etag ?? null;
             // Staleness guard: if `defineSlot` replaced this slot while the
@@ -1062,11 +1159,20 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // KV writes run inside the per-contract `chelonia/queueInvocation`
     // lane, so enqueuing a noop behind them resolves only once they
     // settle — symmetric with `chelonia/contract/wait`. The contract set
-    // is the union of contracts with an active slot index and contracts
-    // that still own an echo-suppression nonce (an in-flight write whose
-    // slot index was already cleaned up). `chelonia/reset` awaits this
-    // before clearing the KV runtime maps so continuations never run
-    // against a torn-down mirror or a swapped-out `kvLocalEchoNonces`.
+    // is the union of three sources:
+    //   1. contracts with an active slot index
+    //      (`kvSlotsByContractID`),
+    //   2. contracts that still own an echo-suppression nonce
+    //      (`kvLocalEchoNonces` — an in-flight write whose slot index was
+    //      already cleaned up but whose body has progressed far enough to
+    //      record a nonce), and
+    //   3. contracts with a non-zero pending-write count
+    //      (`kvPendingWrites` — a write whose body is still queued behind
+    //      a prior operation and has not yet recorded a nonce; the slot
+    //      index and nonce sources miss this window).
+    // `chelonia/reset` awaits this before clearing the KV runtime maps so
+    // continuations never run against a torn-down mirror or a swapped-out
+    // `kvLocalEchoNonces`.
     'chelonia/kv/_waitInFlight': function () {
         const ids = new Set(this.kvSlotsByContractID.keys());
         this.kvLocalEchoNonces.forEach((_fifo, echoKey) => {
@@ -1074,6 +1180,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             if (idx > 0)
                 ids.add(echoKey.slice(0, idx));
         });
+        this.kvPendingWrites.forEach((_n, cID) => ids.add(cID));
         return Promise.all(Array.from(ids).map((cID) => (0, sbp_1.default)('chelonia/queueInvocation', cID, ['chelonia/private/noop'])));
     },
     // Private. See KV-REVAMPED §11.4 bullet 3 (reconnect hook).
@@ -1128,21 +1235,37 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (!slot)
             return Promise.resolve();
         // Unwrap `{ __chelKvNonce, value }` envelope, with raw-API
-        // tolerance (mirrors the `_loadSlot` unwrap shape).
-        const { nonce, value: unwrapped } = unwrapData(parsed?.data);
+        // tolerance (mirrors the `_loadSlot` unwrap shape). `parsed.data`
+        // may throw before we can read a local echo nonce; bounded nonce
+        // storage keeps such unsuppressed entries from growing indefinitely.
+        let nonce;
+        let unwrapped;
+        try {
+            ;
+            ({ nonce, value: unwrapped } = unwrapData(parsed?.data));
+        }
+        catch (e) {
+            const rootState = (0, sbp_1.default)(this.config.stateSelector);
+            (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_VALIDATION_ERROR, {
+                contractID,
+                contractType: slot.contractType,
+                key,
+                error: e,
+                reason: 'remote'
+            });
+            setSlotStatus(this, rootState, contractID, slot.contractType, key, 'error', normalizeError(e));
+            return Promise.resolve();
+        }
         // Self-echo suppression: if the nonce matches a pending local
-        // write, drop the frame and pop the FIFO entry.
+        // write, drop the frame and remove the pending entry.
         if (nonce) {
             const echoKey = `${contractID}::${key}`;
-            const fifo = this.kvLocalEchoNonces.get(echoKey);
-            if (fifo) {
-                const idx = fifo.indexOf(nonce);
-                if (idx >= 0) {
-                    fifo.splice(idx, 1);
-                    if (fifo.length === 0)
-                        this.kvLocalEchoNonces.delete(echoKey);
-                    return Promise.resolve();
-                }
+            const pending = this.kvLocalEchoNonces.get(echoKey);
+            if (pending?.has(nonce)) {
+                pending.delete(nonce);
+                if (pending.size === 0)
+                    this.kvLocalEchoNonces.delete(echoKey);
+                return Promise.resolve();
             }
         }
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
@@ -1261,10 +1384,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     //                                  attached on `.cause`.
     //   - `AbortError`               — `signal` aborted. Mirror is
     //                                  unchanged; no event fires.
-    //   - other errors propagated verbatim from `chelonia/kv/queuedSet`
-    //     for non-409/412 HTTP failures (5xx, offline). `status` is
-    //     NOT flipped to `'error'` (that state is reserved for load
-    //     failures — §4.9).
+    //   - other errors propagated verbatim from `chelonia/kv/set` (called
+    //     directly inside the per-contract queue; not via `queuedSet`) for
+    //     non-409/412 HTTP failures (5xx, offline). `status` is NOT flipped
+    //     to `'error'` (that state is reserved for load failures — §4.9).
     'chelonia/kv/update': async function (args) {
         const { contractID, key, updater, value, maxAttempts, signal, ifMatch } = args;
         // ----- Step 1: resolve the slot via active index. -----
@@ -1320,258 +1443,263 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 ? signal.reason
                 : new DOMException('Aborted', 'AbortError');
         }
+        // Track this operation on the pending-writes counter so
+        // `chelonia/kv/_waitInFlight` can drain the contract even if the
+        // slot index / nonce sources miss it (slot torn down mid-flight,
+        // nonce not yet recorded). The increment runs at call time — before
+        // the body is enqueued — so a concurrent `reset` cannot escape the
+        // gate; the decrement runs in the queued body's `finally` so it
+        // clears only when the body has settled.
+        incrementPending(this, contractID);
         // The mirror read, reducer, and network write must all run inside the
         // per-contract serial queue so that each write sees the etag left by
         // the preceding one. Reading the mirror outside the queue means
         // concurrent calls all snapshot the same stale etag → guaranteed 412
         // → ONCONFLICT thrashing.
         return (0, sbp_1.default)('chelonia/queueInvocation', contractID, async () => {
-            // Re-read rootState inside the queue for fresh mirror state.
-            const liveState = (0, sbp_1.default)(this.config.stateSelector);
-            if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
-                throw new errors_js_1.ChelErrorKvSlotUnknown(`[chelonia/kv] update: no active slot for ${contractID}::${key}`);
-            }
-            // ----- Step 2: read current mirror value. -----
-            const perContract = ensureContractKv(this, liveState, contractID);
-            const mirrorEntry = perContract[key];
-            const seedValue = mirrorEntry?.value !== undefined
-                ? (0, turtledash_1.cloneDeep)(mirrorEntry.value)
-                : slot.resolvedDefault !== undefined
-                    ? (0, turtledash_1.cloneDeep)(slot.resolvedDefault)
-                    : undefined;
-            // ----- Step 3: run reducer and validate. -----
-            let reducerOut;
             try {
-                reducerOut = reducer(seedValue);
-            }
-            catch (e) {
-                throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer threw`, { cause: e });
-            }
-            if (typeof reducerOut === 'symbol') {
-                if (reducerOut === exports.KV_NOOP)
-                    return undefined;
-                throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
-                    'an unexpected symbol; use KV_NOOP to abort');
-            }
-            if (reducerOut === null || reducerOut === undefined) {
-                // Reducer may not produce the reserved wire sentinels; clear
-                // is its own selector (§4.5). This is a caller-contract
-                // violation (reducer shape), not a schema failure, so the
-                // taxonomy bucket is ChelErrorKvUpdateInvalid (§4.6).
-                throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
-                    `${String(reducerOut)}; use chelonia/kv/clear or KV_NOOP instead`);
-            }
-            let nextValue = reducerOut;
-            if (slot.schema) {
-                try {
-                    nextValue = parseSyncSlotValue(slot, nextValue, `update ${contractID}::${key}`);
+                // Re-read rootState inside the queue for fresh mirror state.
+                const liveState = (0, sbp_1.default)(this.config.stateSelector);
+                if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
+                    throw new errors_js_1.ChelErrorKvSlotUnknown(`[chelonia/kv] update: no active slot for ${contractID}::${key}`);
                 }
-                catch (e) {
-                    throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
-                        'failed schema.parse', { cause: e });
-                }
-            }
-            else {
-                try {
-                    nextValue = assertJsonShape(nextValue, `update ${contractID}::${key}`);
-                }
-                catch (e) {
-                    throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
-                        'is not JSON-shaped', { cause: e });
-                }
-            }
-            // ----- Step 5: nonce + wrap + kv/set with onconflict. -----
-            const attemptNonces = [];
-            const firstNonce = base64Nonce();
-            attemptNonces.push(firstNonce);
-            recordEchoNonce(this, contractID, key, firstNonce);
-            let lastCurrentData;
-            let lastEtag;
-            const onconflict = async ({ currentData, etag }) => {
-                lastEtag = etag;
-                if (signal?.aborted) {
-                    throw signal.reason instanceof Error
-                        ? signal.reason
-                        : new DOMException('Aborted', 'AbortError');
-                }
-                let basis;
-                if (currentData === undefined) {
-                    basis = slot.resolvedDefault !== undefined
+                // ----- Step 2: read current mirror value. -----
+                const perContract = ensureContractKv(this, liveState, contractID);
+                const mirrorEntry = perContract[key];
+                const seedValue = mirrorEntry?.value !== undefined
+                    ? (0, turtledash_1.cloneDeep)(mirrorEntry.value)
+                    : slot.resolvedDefault !== undefined
                         ? (0, turtledash_1.cloneDeep)(slot.resolvedDefault)
                         : undefined;
+                // ----- Step 3: run reducer and validate. -----
+                let reducerOut;
+                try {
+                    reducerOut = reducer(seedValue);
+                }
+                catch (e) {
+                    throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer threw`, { cause: e });
+                }
+                if (typeof reducerOut === 'symbol') {
+                    if (reducerOut === exports.KV_NOOP)
+                        return undefined;
+                    throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
+                        'an unexpected symbol; use KV_NOOP to abort');
+                }
+                if (reducerOut === null || reducerOut === undefined) {
+                    // Reducer may not produce the reserved wire sentinels; clear
+                    // is its own selector (§4.5). This is a caller-contract
+                    // violation (reducer shape), not a schema failure, so the
+                    // taxonomy bucket is ChelErrorKvUpdateInvalid (§4.6).
+                    throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
+                        `${String(reducerOut)}; use chelonia/kv/clear or KV_NOOP instead`);
+                }
+                let nextValue = reducerOut;
+                if (slot.schema) {
+                    try {
+                        nextValue = parseSyncSlotValue(slot, nextValue, `update ${contractID}::${key}`);
+                    }
+                    catch (e) {
+                        throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
+                            'failed schema.parse', { cause: e });
+                    }
                 }
                 else {
-                    const { value: unwrapped } = unwrapData(currentData);
-                    if (unwrapped === null) {
+                    try {
+                        nextValue = assertJsonShape(nextValue, `update ${contractID}::${key}`);
+                    }
+                    catch (e) {
+                        throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
+                            'is not JSON-shaped', { cause: e });
+                    }
+                }
+                // ----- Step 5: nonce + wrap + kv/set with onconflict. -----
+                const attemptNonces = [];
+                const firstNonce = base64Nonce();
+                attemptNonces.push(firstNonce);
+                recordEchoNonce(this, contractID, key, firstNonce);
+                let lastCurrentData;
+                let lastEtag;
+                const onconflict = async ({ currentData, etag }) => {
+                    lastEtag = etag;
+                    if (signal?.aborted) {
+                        throw signal.reason instanceof Error
+                            ? signal.reason
+                            : new DOMException('Aborted', 'AbortError');
+                    }
+                    let basis;
+                    if (currentData === undefined) {
                         basis = slot.resolvedDefault !== undefined
                             ? (0, turtledash_1.cloneDeep)(slot.resolvedDefault)
                             : undefined;
                     }
-                    else if (slot.schema) {
+                    else {
+                        const { value: unwrapped } = unwrapData(currentData);
+                        if (unwrapped === null) {
+                            basis = slot.resolvedDefault !== undefined
+                                ? (0, turtledash_1.cloneDeep)(slot.resolvedDefault)
+                                : undefined;
+                        }
+                        else if (slot.schema) {
+                            try {
+                                basis = parseSyncSlotValue(slot, unwrapped, `update onconflict currentData ${contractID}::${key}`);
+                            }
+                            catch (e) {
+                                throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} server ` +
+                                    'currentData failed schema.parse on conflict retry', { cause: e });
+                            }
+                        }
+                        else {
+                            try {
+                                basis = assertJsonShape(unwrapped, `update onconflict currentData ${contractID}::${key}`);
+                            }
+                            catch (e) {
+                                throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} server ` +
+                                    'currentData is not JSON-shaped on conflict retry', { cause: e });
+                            }
+                        }
+                    }
+                    lastCurrentData = basis;
+                    let retried;
+                    try {
+                        retried = reducer(basis);
+                    }
+                    catch (e) {
+                        throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer threw on retry`, { cause: e });
+                    }
+                    if (typeof retried === 'symbol') {
+                        if (retried === exports.KV_NOOP) {
+                            throw new KvNoopAbort();
+                        }
+                        throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
+                            'an unexpected symbol on retry; use KV_NOOP to abort');
+                    }
+                    if (retried === null || retried === undefined) {
+                        throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
+                            `${String(retried)} on retry; use KV_NOOP instead`);
+                    }
+                    let validated = retried;
+                    if (slot.schema) {
                         try {
-                            basis = parseSyncSlotValue(slot, unwrapped, `update onconflict currentData ${contractID}::${key}`);
+                            validated = parseSyncSlotValue(slot, retried, `update onconflict retry ${contractID}::${key}`);
                         }
                         catch (e) {
-                            throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} server ` +
-                                'currentData failed schema.parse on conflict retry', { cause: e });
+                            throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
+                                'failed schema.parse on conflict retry', { cause: e });
                         }
                     }
                     else {
                         try {
-                            basis = assertJsonShape(unwrapped, `update onconflict currentData ${contractID}::${key}`);
+                            validated = assertJsonShape(validated, `update onconflict retry ${contractID}::${key}`);
                         }
                         catch (e) {
-                            throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} server ` +
-                                'currentData is not JSON-shaped on conflict retry', { cause: e });
+                            throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
+                                'is not JSON-shaped on conflict retry', { cause: e });
                         }
                     }
-                }
-                lastCurrentData = basis;
-                let retried;
+                    // Each retry gets a fresh nonce so its pubsub echo is suppressed.
+                    nextValue = validated;
+                    const nonce = base64Nonce();
+                    attemptNonces.push(nonce);
+                    recordEchoNonce(this, contractID, key, nonce);
+                    return [{ __chelKvNonce: nonce, value: validated }, typeof etag === 'string' ? etag : undefined];
+                };
+                const mirrorEtag = mirrorEntry?.etag ?? undefined;
+                let setResult;
                 try {
-                    retried = reducer(basis);
+                    // Call chelonia/kv/set directly (not via queuedSet) since we are
+                    // already inside the per-contract serial queue. Resolving key IDs
+                    // here (not at call-site) ensures key rotation that landed before
+                    // this write is seen; the IDs are fixed for kv/set's retries.
+                    setResult = await (0, sbp_1.default)('chelonia/kv/set', contractID, key, { __chelKvNonce: firstNonce, value: nextValue }, {
+                        ifMatch: ifMatch ?? mirrorEtag,
+                        encryptionKeyId: (0, sbp_1.default)('chelonia/contract/currentKeyIdByName', contractID, slot.encryptionKeyName),
+                        signingKeyId: (0, sbp_1.default)('chelonia/contract/currentKeyIdByName', contractID, slot.signingKeyName),
+                        onconflict,
+                        maxAttempts,
+                        signal
+                    });
                 }
                 catch (e) {
-                    throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer threw on retry`, { cause: e });
-                }
-                if (typeof retried === 'symbol') {
-                    if (retried === exports.KV_NOOP) {
-                        throw new KvNoopAbort();
+                    // KV_NOOP abort: onconflict threw KvNoopAbort to signal that the
+                    // reducer chose not to write. The lower-level kv/set propagates
+                    // this throw, breaking the retry loop. Resolve as a no-op.
+                    // Use the Symbol.for marker (not instanceof) for realm safety.
+                    if (e && typeof e === 'object' && KV_NOOP_ABORT in e) {
+                        removeEchoNonces(this, contractID, key, attemptNonces);
+                        return undefined;
                     }
-                    throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
-                        'an unexpected symbol on retry; use KV_NOOP to abort');
-                }
-                if (retried === null || retried === undefined) {
-                    throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
-                        `${String(retried)} on retry; use KV_NOOP instead`);
-                }
-                let validated = retried;
-                if (slot.schema) {
-                    try {
-                        validated = parseSyncSlotValue(slot, retried, `update onconflict retry ${contractID}::${key}`);
+                    // Map the lower-level conflict-exhaustion Error to the public
+                    // taxonomy (§4.2 step 6 / rejection table).
+                    if (e instanceof internal_errors_js_1.ChelErrorKvMaxAttempts) {
+                        removeEchoNonces(this, contractID, key, attemptNonces);
+                        throw new errors_js_1.ChelErrorKvConflict(`[chelonia/kv] update: ${contractID}::${key} ran out of attempts ` +
+                            'resolving conflicts', { cause: { currentData: lastCurrentData, etag: lastEtag ?? null } });
                     }
-                    catch (e) {
-                        throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
-                            'failed schema.parse on conflict retry', { cause: e });
-                    }
+                    // Network / HTTP error. The server may have accepted the write
+                    // (ambiguous failure), but since the mirror was not updated
+                    // locally, removing the nonces lets any pubsub echo reconcile
+                    // the mirror as reason: 'remote' rather than being silently
+                    // suppressed.
+                    removeEchoNonces(this, contractID, key, attemptNonces);
+                    throw e;
                 }
-                else {
-                    try {
-                        validated = assertJsonShape(validated, `update onconflict retry ${contractID}::${key}`);
-                    }
-                    catch (e) {
-                        throw new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] update: ${contractID}::${key} reducer output ` +
-                            'is not JSON-shaped on conflict retry', { cause: e });
-                    }
+                // ----- Step 6: write mirror + emit events. -----
+                // Post-write abort guard: the network write succeeded, but the
+                // caller's signal was aborted between dispatch and resolution.
+                // The spec (§4.2) requires the mirror to remain unchanged and no
+                // event to fire. Remove only this call's nonces so the pubsub echo
+                // is not suppressed for this write — it will reconcile the mirror
+                // as reason: 'remote' — without corrupting a concurrent write's
+                // echo suppression.
+                if (signal?.aborted) {
+                    removeEchoNonces(this, contractID, key, attemptNonces);
+                    throw signal.reason instanceof Error
+                        ? signal.reason
+                        : new DOMException('Aborted', 'AbortError');
                 }
-                // Each retry gets a fresh nonce so the eventual pubsub echo of
-                // *this* attempt is suppressed; the FIFO cap (8) reaps stale
-                // ones automatically. `nextValue` tracks the latest accepted
-                // reducer output — what we ultimately mirror on success.
-                nextValue = validated;
-                const nonce = base64Nonce();
-                attemptNonces.push(nonce);
-                recordEchoNonce(this, contractID, key, nonce);
-                return [{ __chelKvNonce: nonce, value: validated }, typeof etag === 'string' ? etag : undefined];
-            };
-            const mirrorEtag = mirrorEntry?.etag ?? undefined;
-            let setResult;
-            try {
-                // Call chelonia/kv/set directly (not via queuedSet) since we are
-                // already inside the per-contract serial queue. Resolving key IDs
-                // here (not at call-site) ensures key rotation mid-queue is seen.
-                setResult = await (0, sbp_1.default)('chelonia/kv/set', contractID, key, { __chelKvNonce: firstNonce, value: nextValue }, {
-                    ifMatch: ifMatch ?? mirrorEtag,
-                    encryptionKeyId: (0, sbp_1.default)('chelonia/contract/currentKeyIdByName', contractID, slot.encryptionKeyName),
-                    signingKeyId: (0, sbp_1.default)('chelonia/contract/currentKeyIdByName', contractID, slot.signingKeyName),
-                    onconflict,
-                    maxAttempts,
-                    signal
-                });
-            }
-            catch (e) {
-                // KV_NOOP abort: onconflict threw KvNoopAbort to signal that the
-                // reducer chose not to write. The lower-level kv/set propagates
-                // this throw, breaking the retry loop. Resolve as a no-op.
-                // Use the Symbol.for marker (not instanceof) for realm safety.
-                if (e && typeof e === 'object' && KV_NOOP_ABORT in e) {
+                // Staleness guard: `defineSlot` replaced the captured `slot`.
+                // Remove this call's nonces so the pubsub echo reaches the current slot.
+                if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
                     removeEchoNonces(this, contractID, key, attemptNonces);
                     return undefined;
                 }
-                // Map the lower-level conflict-exhaustion Error to the public
-                // taxonomy (§4.2 step 6 / rejection table).
-                if (e instanceof internal_errors_js_1.ChelErrorKvMaxAttempts) {
-                    removeEchoNonces(this, contractID, key, attemptNonces);
-                    throw new errors_js_1.ChelErrorKvConflict(`[chelonia/kv] update: ${contractID}::${key} ran out of attempts ` +
-                        'resolving conflicts', { cause: { currentData: lastCurrentData, etag: lastEtag ?? null } });
+                const perContractAfter = ensureContractKv(this, liveState, contractID);
+                const entryAfter = perContractAfter[key];
+                const previousValue = entryAfter?.value;
+                if (!entryAfter) {
+                    // Reconcile dropped the slot mid-write — nothing to mirror into.
+                    // Same rationale as the staleness path above: the value was not
+                    // written to a live mirror entry, so resolve with `undefined`
+                    // rather than misleading the caller with an unstored value.
+                    return undefined;
                 }
-                // Network / HTTP error. The server may have accepted the write
-                // (ambiguous failure), but since the mirror was not updated
-                // locally, removing the nonces lets any pubsub echo reconcile
-                // the mirror as reason: 'remote' rather than being silently
-                // suppressed.
-                removeEchoNonces(this, contractID, key, attemptNonces);
-                throw e;
+                this.config.reactiveSet(entryAfter, 'value', nextValue);
+                this.config.reactiveSet(entryAfter, 'etag', setResult.etag);
+                (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_UPDATED, {
+                    contractID,
+                    contractType: slot.contractType,
+                    key,
+                    value: nextValue,
+                    previousValue,
+                    reason: 'local',
+                    etag: setResult.etag
+                });
+                if (entryAfter.status !== 'loaded') {
+                    setSlotStatus(this, liveState, contractID, slot.contractType, key, 'loaded');
+                }
+                await safeOnUpdate(slot, nextValue, {
+                    contractID,
+                    contractType: slot.contractType,
+                    key,
+                    reason: 'local',
+                    etag: setResult.etag,
+                    previousValue
+                });
+                return nextValue;
             }
-            // ----- Step 6: write mirror + emit events. -----
-            // Post-write abort guard: the network write succeeded, but the
-            // caller's signal was aborted between dispatch and resolution.
-            // The spec (§4.2) requires the mirror to remain unchanged and no
-            // event to fire. Remove only this call's nonces so the pubsub echo
-            // is not suppressed for this write — it will reconcile the mirror
-            // as reason: 'remote' — without corrupting a concurrent write's
-            // echo suppression.
-            if (signal?.aborted) {
-                removeEchoNonces(this, contractID, key, attemptNonces);
-                throw signal.reason instanceof Error
-                    ? signal.reason
-                    : new DOMException('Aborted', 'AbortError');
+            finally {
+                decrementPending(this, contractID);
             }
-            // Staleness guard: if `defineSlot` replaced this slot while the
-            // network write was in flight, the captured `slot` object is stale.
-            // The network write succeeded against the *old* slot's keys/config,
-            // but the mirror and events must reflect the *current* slot. Bail
-            // out and let the new slot's reconcile pass handle the state.
-            // Resolve with `undefined` (matching the symmetric `clear` staleness
-            // path): the reducer's output was *not* written to the mirror under
-            // the new slot, so returning `nextValue` would mislead the caller
-            // into treating an unstored value as canonical.
-            if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
-                return undefined;
-            }
-            const perContractAfter = ensureContractKv(this, liveState, contractID);
-            const entryAfter = perContractAfter[key];
-            const previousValue = entryAfter?.value;
-            if (!entryAfter) {
-                // Reconcile dropped the slot mid-write — nothing to mirror into.
-                // Same rationale as the staleness path above: the value was not
-                // written to a live mirror entry, so resolve with `undefined`
-                // rather than misleading the caller with an unstored value.
-                return undefined;
-            }
-            this.config.reactiveSet(entryAfter, 'value', nextValue);
-            this.config.reactiveSet(entryAfter, 'etag', setResult.etag);
-            (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_UPDATED, {
-                contractID,
-                contractType: slot.contractType,
-                key,
-                value: nextValue,
-                previousValue,
-                reason: 'local',
-                etag: setResult.etag
-            });
-            if (entryAfter.status !== 'loaded') {
-                setSlotStatus(this, liveState, contractID, slot.contractType, key, 'loaded');
-            }
-            await safeOnUpdate(slot, nextValue, {
-                contractID,
-                contractType: slot.contractType,
-                key,
-                reason: 'local',
-                etag: setResult.etag,
-                previousValue
-            });
-            return nextValue;
         });
     },
     // Public. See KV-REVAMPED §4.3. Synchronous mirror read.
@@ -1669,7 +1797,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     //   - safeOnUpdate dispatched
     //
     // Throws `ChelErrorKvSlotUnknown` on the same conditions as
-    // `chelonia/kv/update`. Other errors from `chelonia/kv/queuedSet`
+    // `chelonia/kv/update`. Other errors from `chelonia/kv/set` (called
+    // directly inside the per-contract queue; not via `queuedSet`)
     // propagate verbatim; the mirror is untouched on failure.
     'chelonia/kv/clear': async function (contractID, key, { maxAttempts, signal } = {}) {
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
@@ -1679,8 +1808,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 ? signal.reason
                 : new DOMException('Aborted', 'AbortError');
         }
+        // Track on the pending-writes counter (see `update` / `_waitInFlight`).
+        incrementPending(this, contractID);
         const attemptNonces = [];
-        let nonce;
         let lastEtag;
         const onconflict = async ({ etag }) => {
             lastEtag = etag;
@@ -1694,84 +1824,90 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             recordEchoNonce(this, contractID, key, retryNonce);
             return [{ __chelKvNonce: retryNonce, value: null }, typeof etag === 'string' ? etag : undefined];
         };
-        let setResult;
-        try {
-            setResult = await (0, sbp_1.default)('chelonia/queueInvocation', contractID, async () => {
+        return (0, sbp_1.default)('chelonia/queueInvocation', contractID, async () => {
+            try {
                 const liveState = (0, sbp_1.default)(this.config.stateSelector);
                 if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
                     throw new errors_js_1.ChelErrorKvSlotUnknown(`[chelonia/kv] clear: no active slot for ${contractID}::${key}`);
                 }
-                nonce = base64Nonce();
+                const nonce = base64Nonce();
                 attemptNonces.push(nonce);
                 recordEchoNonce(this, contractID, key, nonce);
                 const mirrorEtag = liveState._kv?.[contractID]?.[key]?.etag ?? undefined;
-                return (0, sbp_1.default)('chelonia/kv/set', contractID, key, { __chelKvNonce: nonce, value: null }, {
-                    ifMatch: mirrorEtag,
-                    encryptionKeyId: (0, sbp_1.default)('chelonia/contract/currentKeyIdByName', contractID, slot.encryptionKeyName),
-                    signingKeyId: (0, sbp_1.default)('chelonia/contract/currentKeyIdByName', contractID, slot.signingKeyName),
-                    onconflict,
-                    maxAttempts,
-                    signal
+                let setResult;
+                try {
+                    // Resolve key IDs inside the queue so rotations that landed
+                    // before this clear are seen; they stay fixed for kv/set's retries.
+                    setResult = await (0, sbp_1.default)('chelonia/kv/set', contractID, key, { __chelKvNonce: nonce, value: null }, {
+                        ifMatch: mirrorEtag,
+                        encryptionKeyId: (0, sbp_1.default)('chelonia/contract/currentKeyIdByName', contractID, slot.encryptionKeyName),
+                        signingKeyId: (0, sbp_1.default)('chelonia/contract/currentKeyIdByName', contractID, slot.signingKeyName),
+                        onconflict,
+                        maxAttempts,
+                        signal
+                    });
+                }
+                catch (e) {
+                    if (e instanceof internal_errors_js_1.ChelErrorKvMaxAttempts) {
+                        removeEchoNonces(this, contractID, key, attemptNonces);
+                        throw new errors_js_1.ChelErrorKvConflict(`[chelonia/kv] clear: ${contractID}::${key} ran out of attempts ` +
+                            'resolving conflicts', { cause: { currentData: null, etag: lastEtag ?? null } });
+                    }
+                    removeEchoNonces(this, contractID, key, attemptNonces);
+                    throw e;
+                }
+                // Post-write abort guard (§4.2): the network write succeeded, but the
+                // caller's signal was aborted mid-flight. The mirror must remain unchanged;
+                // no event fires. Remove only this call's nonces so the pubsub echo
+                // reconciles the mirror as reason: 'remote' without corrupting a
+                // concurrent write's echo suppression.
+                if (signal?.aborted) {
+                    removeEchoNonces(this, contractID, key, attemptNonces);
+                    throw signal.reason instanceof Error
+                        ? signal.reason
+                        : new DOMException('Aborted', 'AbortError');
+                }
+                // Staleness guard: remove this call's nonces so the echo reaches the current slot.
+                if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
+                    removeEchoNonces(this, contractID, key, attemptNonces);
+                    return;
+                }
+                const perContract = ensureContractKv(this, liveState, contractID);
+                const entry = perContract[key];
+                if (!entry) {
+                    // Reconcile dropped the slot mid-write — nothing to mirror into.
+                    return;
+                }
+                const previousValue = entry.value;
+                const defaultClone = slot.resolvedDefault !== undefined
+                    ? (0, turtledash_1.cloneDeep)(slot.resolvedDefault)
+                    : undefined;
+                this.config.reactiveSet(entry, 'value', defaultClone);
+                this.config.reactiveSet(entry, 'etag', setResult.etag);
+                (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_UPDATED, {
+                    contractID,
+                    contractType: slot.contractType,
+                    key,
+                    value: defaultClone,
+                    previousValue,
+                    reason: 'local',
+                    etag: setResult.etag
                 });
-            });
-        }
-        catch (e) {
-            if (e instanceof internal_errors_js_1.ChelErrorKvMaxAttempts) {
-                removeEchoNonces(this, contractID, key, attemptNonces);
-                throw new errors_js_1.ChelErrorKvConflict(`[chelonia/kv] clear: ${contractID}::${key} ran out of attempts ` +
-                    'resolving conflicts', { cause: { currentData: null, etag: lastEtag ?? null } });
+                if (entry.status !== 'non-init') {
+                    setSlotStatus(this, liveState, contractID, slot.contractType, key, 'non-init');
+                }
+                await safeOnUpdate(slot, defaultClone, {
+                    contractID,
+                    contractType: slot.contractType,
+                    key,
+                    reason: 'local',
+                    etag: setResult.etag,
+                    previousValue
+                });
             }
-            removeEchoNonces(this, contractID, key, attemptNonces);
-            throw e;
-        }
-        // Post-write abort guard (§4.2): the network write succeeded, but the
-        // caller's signal was aborted mid-flight. The mirror must remain unchanged;
-        // no event fires. Remove only this call's nonces so the pubsub echo
-        // reconciles the mirror as reason: 'remote' without corrupting a
-        // concurrent write's echo suppression.
-        if (signal?.aborted) {
-            removeEchoNonces(this, contractID, key, attemptNonces);
-            throw signal.reason instanceof Error
-                ? signal.reason
-                : new DOMException('Aborted', 'AbortError');
-        }
-        // Staleness guard (symmetric with update): if `defineSlot` replaced
-        // this slot while the network write was in flight, bail out and let
-        // the new slot's reconcile pass handle the state.
-        if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
-            return;
-        }
-        const perContract = ensureContractKv(this, rootState, contractID);
-        const entry = perContract[key];
-        if (!entry) {
-            // Reconcile dropped the slot mid-write — nothing to mirror into.
-            return;
-        }
-        const previousValue = entry.value;
-        const defaultClone = slot.resolvedDefault !== undefined
-            ? (0, turtledash_1.cloneDeep)(slot.resolvedDefault)
-            : undefined;
-        this.config.reactiveSet(entry, 'value', defaultClone);
-        this.config.reactiveSet(entry, 'etag', setResult.etag);
-        (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_UPDATED, {
-            contractID,
-            contractType: slot.contractType,
-            key,
-            value: defaultClone,
-            previousValue,
-            reason: 'local',
-            etag: setResult.etag
-        });
-        if (entry.status !== 'non-init') {
-            setSlotStatus(this, rootState, contractID, slot.contractType, key, 'non-init');
-        }
-        await safeOnUpdate(slot, defaultClone, {
-            contractID,
-            contractType: slot.contractType,
-            key,
-            reason: 'local',
-            etag: setResult.etag,
-            previousValue
+            finally {
+                decrementPending(this, contractID);
+            }
         });
     },
     // Public. See KV-REVAMPED §4.6. Reports the load state of a slot,
@@ -1884,6 +2020,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     filter.delete(key);
                     queueFilterFlush(this, cID);
                 }
+                if (filter?.size === 0)
+                    this.kvActiveFilters.delete(cID);
                 const perContract = rootState._kv?.[cID];
                 if (perContract && perContract[key]) {
                     this.config.reactiveDel(perContract, key);

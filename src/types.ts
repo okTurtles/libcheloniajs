@@ -173,9 +173,10 @@ export type JournalConfig = {
 
 // Reducer signature for `chelonia/kv/update`. The reducer receives the latest
 // known value (mirror on first attempt; server `currentData` on conflict
-// retry) and returns the next value, or the `KV_NOOP` sentinel to abort the
-// write. See KV-REVAMPED.md §3.3.
-export type KvUpdater<T> = (prev: T) => T | KvNoop;
+// retry), or `undefined` when no mirror value and no `defaultValue` exist, and
+// returns the next value, or the `KV_NOOP` sentinel to abort the write. See
+// KV-REVAMPED.md §3.3.
+export type KvUpdater<T> = (prev: T | undefined) => T | KvNoop;
 
 // Status of a KV slot's mirror entry. See KV-REVAMPED.md §5.
 export type KvLoadStatus = 'non-init' | 'loading' | 'loaded' | 'error';
@@ -404,9 +405,18 @@ export type CheloniaContext = {
   kvActiveFilters: Map<string, Set<string>>;
   // Microtask flush set for setFilter coalescing (see §11.5).
   kvFilterDirty: Set<string>;
-  // Bounded FIFO of locally-generated write nonces for self-echo
-  // suppression. Keyed by `${contractID}::${key}`, max 8 entries each.
-  kvLocalEchoNonces: Map<string, string[]>;
+  // Locally-generated write nonces awaiting self-echo suppression.
+  // Keyed by `${contractID}::${key}`.
+  kvLocalEchoNonces: Map<string, Set<string>>;
+  // Per-contract count of queued/in-flight `chelonia/kv/update` /
+  // `chelonia/kv/clear` operations. Incremented at call time (before the
+  // write body is enqueued, while the slot may still be active) and
+  // decremented when the queued body settles. `chelonia/kv/_waitInFlight`
+  // drains every contract with a non-zero count so a write whose slot
+  // index entry / echo nonce was removed mid-flight (e.g. contract
+  // release, match→false) still settles before `chelonia/reset` tears
+  // down state.
+  kvPendingWrites: Map<string, number>;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;

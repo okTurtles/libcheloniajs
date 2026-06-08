@@ -1,5 +1,5 @@
-// KV slot API tests — 38 cases total: 27 from KV-REVAMPED.md §11.6
-// plus 11 implementation-specific (cases 28-38) covering REVIEW.md
+// KV slot API tests — 48 cases total: 27 from KV-REVAMPED.md §11.6
+// plus 21 implementation-specific (cases 28-48) covering REVIEW.md
 // follow-ups and §11.3 step 3 exceptions.
 //
 // We register simplified infrastructure selectors once (mutable stub
@@ -179,6 +179,7 @@ sbp('sbp/selectors/register', {
     this.kvActiveFilters = new Map()
     this.kvFilterDirty = new Set()
     this.kvLocalEchoNonces = new Map()
+    this.kvPendingWrites = new Map()
     this.defContractKvByManifest = new Map()
   },
 
@@ -202,6 +203,7 @@ sbp('sbp/selectors/register', {
     this.kvActiveFilters.clear()
     this.kvFilterDirty.clear()
     this.kvLocalEchoNonces.clear()
+    this.kvPendingWrites.clear()
     this.subscriptionSet.clear()
   },
 
@@ -243,7 +245,13 @@ sbp('sbp/selectors/register', {
 
   // Test helper: seed an echo nonce for a contract with no slot index.
   'chelonia/test/seedEchoNonce': function (this: CheloniaContext, echoKey: string) {
-    this.kvLocalEchoNonces.set(echoKey, ['nonce'])
+    this.kvLocalEchoNonces.set(echoKey, new Set(['nonce']))
+  },
+
+  // Test helper: inspect active filters without exposing internals publicly.
+  'chelonia/test/activeFilterKeys': function (this: CheloniaContext, contractID: string) {
+    const filter = this.kvActiveFilters.get(contractID)
+    return filter ? [...filter] : undefined
   },
 
   // Test helper: simulate removeImmediately's KV cleanup for a contract.
@@ -1452,5 +1460,514 @@ describe('KV slot API', () => {
     assert.deepStrictEqual(s._kv![persisted]!.strictPersisted.value, { x: -1 })
     assert.strictEqual(s._kv![persisted]!.strictPersisted.status, 'error')
     assert.deepStrictEqual(sbp('chelonia/kv/read', persisted, 'strictPersisted'), { x: 9 })
+  })
+
+  // -----------------------------------------------------------------------
+  // 39: issue 1 – `_waitInFlight` drains a contract whose slot index and
+  // nonce sources were both removed mid-flight, via the pending-writes
+  // counter. The contract is released (dropped from `rootState.contracts`
+  // and `subscriptionSet`) while an `update` body is still queued, so
+  // neither `kvSlotsByContractID` nor `kvLocalEchoNonces` covers it.
+  // -----------------------------------------------------------------------
+  it('39: _waitInFlight drains released-contract writes via the pending counter', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'pend', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-39'
+    await setupContract(c)
+
+    // Serial per-contract lane so the noop enqueued by _waitInFlight
+    // resolves only after the in-flight update body settles.
+    const lanes = new Map<string, Promise<unknown>>()
+    stubQueueInvocation = (cID, fn) => {
+      const prev = lanes.get(cID) ?? Promise.resolve()
+      const next = prev.then(() => runQueued(fn))
+      lanes.set(cID, next.catch(() => {}))
+      return next
+    }
+
+    // Gate the network write so the update body stays in flight.
+    let releaseSet!: () => void
+    const setGate = new Promise<void>((resolve) => { releaseSet = resolve })
+    stubSet = async () => {
+      await setGate
+      return { etag: 'e' }
+    }
+
+    const updateP = sbp('chelonia/kv/update', {
+      contractID: c, key: 'pend', updater: (prev: { x: number }) => ({ x: prev.x + 1 })
+    })
+    // Let the update reach the gated set (nonce now recorded, but we
+    // remove the nonce source below to simulate the worst case).
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+
+    // Simulate contract release: drop from contracts/subSet/index/nonces.
+    // After this the contract is in none of the three documented sources
+    // except the pending-writes counter.
+    const s = rootState()
+    reactiveDel(s.contracts as Record<string, unknown>, c)
+    sbp('chelonia/test/removeSubscription', c)
+    sbp('chelonia/kv/_cleanupContractRuntime', c)
+
+    let drainResolved = false
+    const drainP = sbp('chelonia/kv/_waitInFlight').then(() => { drainResolved = true })
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    assert.strictEqual(drainResolved, false, 'drain must block on the pending write')
+
+    releaseSet()
+    await Promise.all([updateP.catch(() => {}), drainP])
+    assert.strictEqual(drainResolved, true, 'drain resolves once the released write settles')
+    stubQueueInvocation = (_cID, fn) => Promise.resolve(runQueued(fn))
+  })
+
+  // -----------------------------------------------------------------------
+  // 40: issue 1 – pending counter decrements on KV_NOOP and on errors so
+  // it never leaks (which would wedge subsequent resets on a phantom gate).
+  // -----------------------------------------------------------------------
+  it('40: pending counter decrements on KV_NOOP and on reducer errors', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'noop', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-40'
+    await setupContract(c)
+
+    // KV_NOOP path — resolves cleanly, counter must return to zero.
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'noop', updater: () => KV_NOOP
+    })
+    await sbp('chelonia/kv/_waitInFlight')
+
+    // Error path — reducer throws, queued body rejects, counter must
+    // still decrement.
+    stubQueueInvocation = (_cID, fn) => Promise.resolve(runQueued(fn))
+    await assert.rejects(
+      () => sbp('chelonia/kv/update', {
+        contractID: c,
+        key: 'noop',
+        updater: () => { throw new Error('reducer boom') }
+      }),
+      (e: unknown) => e instanceof ChelErrorKvUpdateInvalid
+    )
+    // Remove the slot from the active index and clear nonces so the
+    // ONLY remaining source for _waitInFlight is the pending-writes
+    // counter. If the counter leaked on noop/error, _waitInFlight
+    // would still enqueue a noop for c.
+    sbp('chelonia/test/removeSubscription', c)
+    const queued: string[] = []
+    stubQueueInvocation = (cID, fn) => { queued.push(cID); return Promise.resolve(runQueued(fn)) }
+    await sbp('chelonia/kv/_waitInFlight')
+    assert.strictEqual(queued.length, 0, 'pending counter must not leak on noop or error')
+  })
+
+  // -----------------------------------------------------------------------
+  // 41: issue 2 – schema transforming the default to a reserved sentinel
+  // (undefined) or a non-JSON value (Date) is rejected at registration.
+  // -----------------------------------------------------------------------
+  it('41: schema transforming default to reserved sentinel or non-JSON is rejected', () => {
+    // Transforms any non-null input to undefined — a reserved sentinel.
+    const toUndefined = {
+      parse (v: unknown): unknown {
+        if (v === null || v === undefined) throw new Error('reserved')
+        return undefined
+      }
+    }
+    assert.throws(
+      () => sbp('chelonia/kv/defineSlot', {
+        key: 'badUndef', contractType: CTYPE, defaultValue: { x: 1 }, schema: toUndefined
+      }),
+      (e: unknown) => e instanceof ChelErrorKvSlotInvalid
+    )
+
+    // Transforms any non-null input to a Date instance — non-JSON-shaped.
+    const toDate = {
+      parse (v: unknown): unknown {
+        if (v === null || v === undefined) throw new Error('reserved')
+        return new Date()
+      }
+    }
+    assert.throws(
+      () => sbp('chelonia/kv/defineSlot', {
+        key: 'badDate', contractType: CTYPE, defaultValue: { x: 1 }, schema: toDate
+      }),
+      (e: unknown) => e instanceof ChelErrorKvSlotInvalid
+    )
+
+    // A schema transforming the default into the reserved wrapper shape
+    // is also rejected (issue 2 + issue 4 guards overlap here).
+    const toWrapper = {
+      parse (v: unknown): unknown {
+        if (v === null || v === undefined) throw new Error('reserved')
+        return { __chelKvNonce: 'x', value: (v as { x: number }).x }
+      }
+    }
+    assert.throws(
+      () => sbp('chelonia/kv/defineSlot', {
+        key: 'badWrap', contractType: CTYPE, defaultValue: { x: 1 }, schema: toWrapper
+      }),
+      (e: unknown) => e instanceof ChelErrorKvSlotInvalid
+    )
+  })
+
+  // -----------------------------------------------------------------------
+  // 42: issue 3 – stale `_loadSlot` GET failure does not stamp an error
+  // onto a replacement slot. The success paths already guard; the catch
+  // path now guards too.
+  // -----------------------------------------------------------------------
+  it('42: stale _loadSlot GET failure leaves the replacement slot untouched', async () => {
+    const schemaA = { parse (v: unknown): unknown { if (v == null) throw new Error('r'); return v } }
+    const schemaB = { parse (v: unknown): unknown { if (v == null) throw new Error('r'); return v } }
+    sbp('chelonia/kv/defineSlot', {
+      key: 'staleLoad', contractType: CTYPE, defaultValue: { x: 0 }, schema: schemaA
+    })
+    const c = 'cid-42'
+    await setupContract(c)
+
+    // Hold the GET so we can replace the slot while it is in flight.
+    let releaseGet!: () => void
+    const getGate = new Promise<void>((resolve) => { releaseGet = resolve })
+    stubGet = async () => {
+      await getGate
+      throw new Error('simulated GET failure')
+    }
+
+    // Drive a fresh load via single-slot sync (rejects on failure, so
+    // swallow the rejection — we only care about the mirror side-effect).
+    const syncP = sbp('chelonia/kv/sync', c, 'staleLoad').catch(() => {})
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+
+    // Replace the slot definition while the GET is in flight. The
+    // kvSlotsByContractID entry now points at a fresh slot object whose
+    // status/lastError the stale load must not touch.
+    sbp('chelonia/kv/defineSlot', {
+      key: 'staleLoad', contractType: CTYPE, defaultValue: { x: 9 }, schema: schemaB
+    })
+    const entry = rootState()._kv![c]!.staleLoad as {
+      status: string; lastError?: { name: string; message: string }
+    }
+
+    // Release the failing GET. The old load's catch path must see the
+    // staleness and bail out without stamping 'error' or setting
+    // lastError on the replacement slot.
+    releaseGet()
+    await syncP
+
+    assert.notStrictEqual(entry.status, 'error',
+      'replacement slot must not be marked error by the stale load failure')
+    assert.strictEqual(entry.lastError, undefined,
+      'replacement slot must not inherit lastError from the stale load failure')
+    stubGet = async () => null
+  })
+
+  // -----------------------------------------------------------------------
+  // 43: issue 4 – reducer output / remote value with the reserved
+  // `{ __chelKvNonce, value }` top-level shape is rejected, not silently
+  // stripped on read.
+  // -----------------------------------------------------------------------
+  it('43: reserved wrapper shape rejected on reducer output and remote value', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'rwrap', contractType: CTYPE, defaultValue: { x: 0 }
+    })
+    const c = 'cid-43'
+    await setupContract(c)
+
+    // Reducer output with the reserved shape → ChelErrorKvUpdateInvalid.
+    await assert.rejects(
+      () => sbp('chelonia/kv/update', {
+        contractID: c,
+        key: 'rwrap',
+        updater: () => ({ __chelKvNonce: 'x', value: 1 }) as unknown as JSONType
+      }),
+      (e: unknown) => e instanceof ChelErrorKvUpdateInvalid
+    )
+
+    // Remote value whose unwrapped inner value already matches the
+    // reserved shape → mirror unchanged, status flips to 'error'.
+    const entry = rootState()._kv![c]!.rwrap as { value: unknown; status: string }
+    entry.value = { x: 7 }
+    entry.status = 'loaded'
+    sbp('chelonia/kv/_handleRemote', c, 'rwrap', fakeParsed({
+      __chelKvNonce: 'echo', value: { __chelKvNonce: 'inner', value: 99 }
+    }))
+    assert.deepStrictEqual(entry.value, { x: 7 }, 'remote reserved-shape value must not overwrite the mirror')
+    assert.strictEqual(entry.status, 'error', 'remote reserved-shape value flips status to error')
+  })
+
+  it('44: stale successful update lets replacement slot process the echo', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'staleUpdate', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-44'
+    await setupContract(c)
+
+    let capturedNonce: string | undefined
+    let releaseSet!: () => void
+    const setGate = new Promise<void>((resolve) => { releaseSet = resolve })
+    stubSet = async (_cID, _key, data) => {
+      capturedNonce = (data as { __chelKvNonce?: string }).__chelKvNonce
+      await setGate
+      return { etag: 'old-slot-etag' }
+    }
+
+    const updateP = sbp('chelonia/kv/update', {
+      contractID: c, key: 'staleUpdate', updater: () => ({ x: 1 })
+    })
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    assert.ok(capturedNonce)
+
+    sbp('chelonia/kv/defineSlot', {
+      key: 'staleUpdate', contractType: CTYPE, defaultValue: { x: 9 }, schema: objectSchema
+    })
+    const { log, offs } = collectEvents()
+    releaseSet()
+    assert.strictEqual(await updateP, undefined)
+
+    sbp('chelonia/kv/_handleRemote', c, 'staleUpdate', fakeParsed({
+      __chelKvNonce: capturedNonce, value: { x: 1 }
+    }))
+    assert.deepStrictEqual(rootState()._kv![c]!.staleUpdate.value, { x: 1 })
+    assert.ok(log.some((e) =>
+      e.type === CHELONIA_KV_UPDATED &&
+      (e.payload as { reason: string }).reason === 'remote'
+    ))
+    offs.forEach((off) => off())
+  })
+
+  it('45: stale successful clear lets replacement slot process the echo', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'staleClear', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-45'
+    await setupContract(c)
+    rootState()._kv![c]!.staleClear.value = { x: 5 }
+    rootState()._kv![c]!.staleClear.status = 'loaded'
+
+    let capturedNonce: string | undefined
+    let releaseSet!: () => void
+    const setGate = new Promise<void>((resolve) => { releaseSet = resolve })
+    stubSet = async (_cID, _key, data) => {
+      capturedNonce = (data as { __chelKvNonce?: string }).__chelKvNonce
+      await setGate
+      return { etag: 'clear-etag' }
+    }
+
+    const clearP = sbp('chelonia/kv/clear', c, 'staleClear')
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    assert.ok(capturedNonce)
+
+    sbp('chelonia/kv/defineSlot', {
+      key: 'staleClear', contractType: CTYPE, defaultValue: { x: 9 }, schema: objectSchema
+    })
+    const { log, offs } = collectEvents()
+    releaseSet()
+    await clearP
+
+    sbp('chelonia/kv/_handleRemote', c, 'staleClear', fakeParsed({
+      __chelKvNonce: capturedNonce, value: null
+    }))
+    assert.deepStrictEqual(rootState()._kv![c]!.staleClear.value, { x: 9 })
+    assert.ok(log.some((e) =>
+      e.type === CHELONIA_KV_UPDATED &&
+      (e.payload as { reason: string }).reason === 'remote'
+    ))
+    offs.forEach((off) => off())
+  })
+
+  it('46: local echo nonces are bounded to the eight newest writes', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'burst', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-46'
+    await setupContract(c)
+
+    const writes: JSONType[] = []
+    stubSet = async (_cID, _key, data) => {
+      writes.push(data as JSONType)
+      return { etag: `e-${writes.length}` }
+    }
+
+    for (let i = 0; i < 9; i++) {
+      await sbp('chelonia/kv/update', {
+        contractID: c,
+        key: 'burst',
+        updater: (prev: JSONType | undefined) => ({
+          x: ((prev as { x: number } | undefined)?.x ?? 0) + 1
+        })
+      })
+    }
+    assert.deepStrictEqual(rootState()._kv![c]!.burst.value, { x: 9 })
+
+    const { log, offs } = collectEvents()
+    for (const data of writes) {
+      sbp('chelonia/kv/_handleRemote', c, 'burst', fakeParsed(data))
+    }
+    assert.deepStrictEqual(rootState()._kv![c]!.burst.value, { x: 1 })
+    assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 1)
+    offs.forEach((off) => off())
+  })
+
+  it('47: autoSubscribe false match teardown removes empty filter buckets', async () => {
+    let shouldMatch = true
+    const contractType = 'type-47'
+    sbp('chelonia/kv/defineSlot', {
+      key: 'emptyFilter',
+      contractType,
+      defaultValue: { x: 0 },
+      autoSubscribe: false,
+      match: () => shouldMatch
+    })
+    const c = 'cid-47'
+    await setupContract(c, contractType)
+    assert.deepStrictEqual(sbp('chelonia/test/activeFilterKeys', c), [])
+
+    shouldMatch = false
+    sbp('chelonia/kv/refreshFilters', c)
+    assert.strictEqual(sbp('chelonia/test/activeFilterKeys', c), undefined)
+  })
+
+  it('48: autoSubscribe false manifest cleanup removes empty filter buckets', async () => {
+    const manifest = 'ctr-v48'
+    sbp('chelonia/kv/_registerContractSlots', manifest, {
+      hidden: { defaultValue: { x: 0 }, autoSubscribe: false }
+    })
+    const c = 'cid-48'
+    await setupContract(c, manifest)
+    assert.deepStrictEqual(sbp('chelonia/test/activeFilterKeys', c), [])
+
+    sbp('chelonia/kv/_cleanupContractSlots', manifest, { hidden: {} }, {})
+    assert.strictEqual(sbp('chelonia/test/activeFilterKeys', c), undefined)
+  })
+
+  // -----------------------------------------------------------------------
+  // 49: _loadSlot decode failure sets error status
+  // -----------------------------------------------------------------------
+  it('49: _loadSlot decode failure flips slot to error', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'decLoad', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-49'
+    await setupContract(c)
+
+    const decodeErr = new Error('decrypt failed')
+    stubGet = async () => {
+      return {
+        get data () { throw decodeErr },
+        encryptionKeyId: 'ek',
+        signingKeyId: 'sk',
+        etag: 'etag-49'
+      } as unknown as ChelKvGetResult
+    }
+
+    const { log, offs } = collectEvents()
+    await assert.rejects(
+      () => sbp('chelonia/kv/sync', c, 'decLoad'),
+      (e: unknown) => e instanceof ChelErrorKvValidation
+    )
+    const entry = rootState()._kv![c]!.decLoad as { status: string; lastError?: { name: string; message: string } }
+    assert.strictEqual(entry.status, 'error')
+    assert.strictEqual(entry.lastError?.name, 'Error')
+    assert.strictEqual(entry.lastError?.message, 'decrypt failed')
+    assert.ok(log.some((e) => e.type === CHELONIA_KV_VALIDATION_ERROR))
+    offs.forEach((off) => off())
+  })
+
+  // -----------------------------------------------------------------------
+  // 50: _handleRemote decode failure resolves without throwing
+  // -----------------------------------------------------------------------
+  it('50: _handleRemote decode failure resolves and flips to error', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'decRemote', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-50'
+    await setupContract(c)
+    const entry = rootState()._kv![c]!.decRemote as { value: unknown; status: string; lastError?: { name: string; message: string } }
+    entry.value = { x: 5 }
+    entry.status = 'loaded'
+
+    const decodeErr = new Error('signature failed')
+    const throwingParsed = {
+      get data () { throw decodeErr }
+    } as unknown as ParsedEncryptedOrUnencryptedMessage<JSONType>
+
+    const { log, offs } = collectEvents()
+    // Must resolve (not reject)
+    await sbp('chelonia/kv/_handleRemote', c, 'decRemote', throwingParsed)
+    assert.strictEqual(entry.status, 'error')
+    assert.deepStrictEqual(entry.value, { x: 5 })
+    assert.strictEqual(entry.lastError?.name, 'Error')
+    assert.strictEqual(entry.lastError?.message, 'signature failed')
+    assert.ok(log.some((e) => e.type === CHELONIA_KV_VALIDATION_ERROR))
+    offs.forEach((off) => off())
+  })
+
+  // -----------------------------------------------------------------------
+  // 51: multiple autoSubscribe:false slots keep filter bucket on partial teardown
+  // -----------------------------------------------------------------------
+  it('51: partial autoSubscribe:false teardown preserves filter bucket', async () => {
+    const contractType = 'type-51'
+    let matchA = true
+    let matchB = true
+    sbp('chelonia/kv/defineSlot', {
+      key: 'slotA', contractType, defaultValue: { x: 0 },
+      autoSubscribe: false, match: () => matchA
+    })
+    sbp('chelonia/kv/defineSlot', {
+      key: 'slotB', contractType, defaultValue: { x: 0 },
+      autoSubscribe: false, match: () => matchB
+    })
+    const c = 'cid-51'
+    await setupContract(c, contractType)
+
+    assert.deepStrictEqual(sbp('chelonia/test/activeFilterKeys', c), [])
+    sbp('chelonia/kv/_assertIndexConsistent')
+
+    matchA = false
+    sbp('chelonia/kv/refreshFilters', c)
+    sbp('chelonia/kv/_assertIndexConsistent')
+    assert.deepStrictEqual(sbp('chelonia/test/activeFilterKeys', c), [])
+
+    matchB = false
+    sbp('chelonia/kv/refreshFilters', c)
+    sbp('chelonia/kv/_assertIndexConsistent')
+    assert.strictEqual(sbp('chelonia/test/activeFilterKeys', c), undefined)
+  })
+
+  // -----------------------------------------------------------------------
+  // 52: echo nonce eviction — more than 8 writes evicts oldest nonce
+  // -----------------------------------------------------------------------
+  it('52: nine sequential writes evict the oldest echo nonce', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'evict', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-52'
+    await setupContract(c)
+
+    const writes: JSONType[] = []
+    stubSet = async (_cID, _key, data) => {
+      writes.push(data as JSONType)
+      return { etag: `e-${writes.length}` }
+    }
+
+    for (let i = 0; i < 9; i++) {
+      await sbp('chelonia/kv/update', {
+        contractID: c,
+        key: 'evict',
+        updater: (prev: JSONType | undefined) => ({
+          x: ((prev as { x: number } | undefined)?.x ?? 0) + 1
+        })
+      })
+    }
+    assert.deepStrictEqual(rootState()._kv![c]!.evict.value, { x: 9 })
+
+    // First write's echo should NOT be suppressed (nonce evicted)
+    const { log, offs } = collectEvents()
+    sbp('chelonia/kv/_handleRemote', c, 'evict', fakeParsed(writes[0]))
+    assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 1)
+    assert.deepStrictEqual(rootState()._kv![c]!.evict.value, { x: 1 })
+
+    // Last write's echo IS still suppressed
+    log.length = 0
+    sbp('chelonia/kv/_handleRemote', c, 'evict', fakeParsed(writes[8]))
+    assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 0)
+    offs.forEach((off) => off())
   })
 })

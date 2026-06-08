@@ -125,7 +125,7 @@ export type JournalConfig = {
     diff?: (before: unknown, after: unknown) => JournalPatch[];
     applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };
-export type KvUpdater<T> = (prev: T) => T | KvNoop;
+export type KvUpdater<T> = (prev: T | undefined) => T | KvNoop;
 export type KvLoadStatus = 'non-init' | 'loading' | 'loaded' | 'error';
 export type KvMirrorEntry = {
     value: JSONType | undefined;
@@ -313,7 +313,8 @@ export type CheloniaContext = {
     kvSlotsByContractID: Map<string, Map<string, SlotDefinition>>;
     kvActiveFilters: Map<string, Set<string>>;
     kvFilterDirty: Set<string>;
-    kvLocalEchoNonces: Map<string, string[]>;
+    kvLocalEchoNonces: Map<string, Set<string>>;
+    kvPendingWrites: Map<string, number>;
     defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
 };
 export type ChelContractManifestBody = {
