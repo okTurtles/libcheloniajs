@@ -408,6 +408,7 @@ export type CheloniaContext = {
   // Locally-generated write nonces awaiting self-echo suppression.
   // Keyed by `${contractID}::${key}`.
   kvLocalEchoNonces: Map<string, Set<string>>;
+  kvLocalWriteAwaitingRemote: Set<string>;
   // Per-contract count of queued/in-flight `chelonia/kv/update` /
   // `chelonia/kv/clear` operations. Incremented at call time (before the
   // write body is enqueued, while the slot may still be active) and

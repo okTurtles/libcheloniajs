@@ -199,6 +199,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.kvActiveFilters = new Map();
         this.kvFilterDirty = new Set();
         this.kvLocalEchoNonces = new Map();
+        this.kvLocalWriteAwaitingRemote = new Set();
         this.kvPendingWrites = new Map();
         this.defContractKvByManifest = new Map();
         // pending includes contracts that are scheduled for syncing or in the
@@ -489,6 +490,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.kvActiveFilters.clear();
         this.kvFilterDirty.clear();
         this.kvLocalEchoNonces.clear();
+        this.kvLocalWriteAwaitingRemote.clear();
         this.kvPendingWrites.clear();
         (0, utils_js_1.clearObject)(this.ephemeralReferenceCount);
         this.pending.splice(0);
@@ -2014,12 +2016,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             : this.abortController.signal;
         let response;
         let lastEtag = null;
+        let currentValue;
         // The `resolveData` function is tasked with computing merged data, as in
         // merging the existing stored values (after a conflict or initial fetch)
         // and new data. The return value indicates whether there should be a new
         // attempt at storing updated data (if `true`) or not (if `false`)
-        const resolveData = async () => {
-            let currentValue;
+        const resolveData = async (invokeOnConflict = true) => {
+            currentValue = undefined;
             // Rationale:
             //  * response.ok could be the result of `GET` (no initial data)
             //  * 409 indicates a conflict because the height used is too old
@@ -2077,6 +2080,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 if (headerEtag)
                     lastEtag = headerEtag;
             }
+            if (!invokeOnConflict)
+                return false;
             const result = await onconflict({
                 contractID,
                 key,
@@ -2144,7 +2149,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // Rationale: 409 and 412 indicate conflict resolution is needed
                 if (response.status === 409 || response.status === 412) {
                     if (--maxAttempts <= 0) {
-                        throw new internal_errors_js_1.ChelErrorKvMaxAttempts('kv/set conflict setting KV value');
+                        await resolveData(false);
+                        let currentData;
+                        try {
+                            currentData = currentValue?.data;
+                        }
+                        catch { }
+                        throw new internal_errors_js_1.ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
+                            cause: { currentData, etag: lastEtag ?? null }
+                        });
                     }
                     // Honour caller-side abort at every retry boundary so a
                     // cancellation that lands between requests is respected

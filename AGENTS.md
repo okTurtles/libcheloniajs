@@ -439,6 +439,9 @@ Self-echo suppression uses a bounded FIFO of at most 8 nonces per
 `(contractID, key)` stored in `kvLocalEchoNonces` (`Map<string,
 Set<string>>`). When the FIFO overflows, the oldest nonce is evicted;
 the corresponding pubsub echo will surface as `reason: 'remote'`.
+Conflicted writes additionally store nonce-scoped awaiting markers in
+`kvLocalWriteAwaitingRemote` (`contractID::key::nonce`) so the matching
+self-echo clears only that write's reconciliation state.
 
 Consumer-visible leakage: `rootState._kv` is a separate subtree from
 `rootState.contracts`, but it is projected into external stores by
