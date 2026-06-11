@@ -1,5 +1,5 @@
-// KV slot API tests — 64 cases total: 27 from KV-REVAMPED.md §11.6
-// plus 37 implementation-specific (cases 28-64) covering REVIEW.md
+// KV slot API tests — 66 cases total: 27 from KV-REVAMPED.md §11.6
+// plus 39 implementation-specific (cases 28-66) covering REVIEW.md
 // follow-ups and §11.3 step 3 exceptions.
 //
 // We register simplified infrastructure selectors once (mutable stub
@@ -2382,5 +2382,79 @@ describe('KV slot API', () => {
       __chelKvNonce: successNonces[1], value: { x: 2 }
     }))
     assert.deepStrictEqual(sbp('chelonia/test/awaitingRemoteKeys'), [])
+  })
+
+  it('65: conflict exhaustion unwraps carried server state', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'wrappedConflict', contractType: CTYPE, defaultValue: { x: 1 }, schema: objectSchema
+    })
+    const c = 'cid-65'
+    await setupContract(c)
+
+    stubSet = async () => {
+      throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
+        cause: { currentData: { __chelKvNonce: 'server', value: { x: 99 } }, etag: 'e-final' }
+      })
+    }
+
+    await assert.rejects(
+      () => sbp('chelonia/kv/update', {
+        contractID: c, key: 'wrappedConflict', updater: () => ({ x: 2 })
+      }),
+      (e: unknown) => {
+        assert.ok(e instanceof ChelErrorKvConflict)
+        assert.deepStrictEqual(e.cause, { currentData: { x: 99 }, etag: 'e-final' })
+        return true
+      }
+    )
+  })
+
+  it('66: stale awaiting markers are cleared on teardown and forced sync', async () => {
+    let matches = true
+    sbp('chelonia/kv/defineSlot', {
+      key: 'awaitCleanup',
+      contractType: CTYPE,
+      defaultValue: { x: 0 },
+      schema: objectSchema,
+      match: () => matches
+    })
+    const c = 'cid-66'
+    await setupContract(c)
+
+    const successNonces: string[] = []
+    stubSet = async (_cID, _key, _data, opts) => {
+      const retry = await opts.onconflict!({
+        currentData: { __chelKvNonce: 'remote-old', value: { x: successNonces.length } },
+        etag: `e-old-${successNonces.length}`
+      })
+      assert.notStrictEqual(retry, false)
+      const [retryData] = retry as [JSONType, string]
+      successNonces.push((retryData as { __chelKvNonce: string }).__chelKvNonce)
+      return { etag: `e-local-${successNonces.length}` }
+    }
+
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'awaitCleanup', updater: () => ({ x: 1 })
+    })
+    assert.strictEqual((sbp('chelonia/test/awaitingRemoteKeys') as string[]).length, 1)
+    matches = false
+    sbp('chelonia/kv/refreshFilters', c)
+    assert.deepStrictEqual(sbp('chelonia/test/awaitingRemoteKeys'), [])
+
+    matches = true
+    sbp('chelonia/kv/refreshFilters', c)
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'awaitCleanup', updater: () => ({ x: 2 })
+    })
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'awaitCleanup', updater: () => ({ x: 3 })
+    })
+    assert.strictEqual((sbp('chelonia/test/awaitingRemoteKeys') as string[]).length, 2)
+    stubGet = async () => fakeParsed({ __chelKvNonce: 'latest', value: { x: 4 } })
+    await sbp('chelonia/kv/_handleRemote', c, 'awaitCleanup', fakeParsed({
+      __chelKvNonce: 'remote-new', value: { x: 5 }
+    }))
+    assert.deepStrictEqual(sbp('chelonia/test/awaitingRemoteKeys'), [])
+    assert.deepStrictEqual(rootState()._kv![c]!.awaitCleanup.value, { x: 4 })
   })
 })

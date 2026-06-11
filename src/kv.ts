@@ -590,6 +590,24 @@ function removeEchoNonces (
   if (pending.size === 0) ctx.kvLocalEchoNonces.delete(echoKey)
 }
 
+function removeAwaitingRemoteMarkers (
+  ctx: CheloniaContext,
+  contractID: string,
+  key: string,
+  nonce?: string
+): void {
+  const prefix = `${contractID}::${key}::`
+  if (nonce !== undefined) {
+    ctx.kvLocalWriteAwaitingRemote.delete(`${prefix}${nonce}`)
+    return
+  }
+  ctx.kvLocalWriteAwaitingRemote.forEach((marker) => {
+    if (marker.startsWith(prefix)) {
+      ctx.kvLocalWriteAwaitingRemote.delete(marker)
+    }
+  })
+}
+
 function throwIfSignalAborted (signal?: AbortSignal): void {
   if (!signal?.aborted) return
   throw signal.reason instanceof Error
@@ -598,10 +616,43 @@ function throwIfSignalAborted (signal?: AbortSignal): void {
 }
 
 type KvConflictCause = { currentData?: JSONType; etag?: string | null }
+type NormalizedKvConflictData =
+  | { present: false }
+  | { present: true; currentData: JSONType | undefined }
 
 function kvConflictCause (e: unknown): KvConflictCause | undefined {
   const cause = (e as { cause?: unknown })?.cause
   return cause && typeof cause === 'object' ? cause as KvConflictCause : undefined
+}
+
+function normalizeKvConflictCurrentData (
+  slot: SlotDefinition,
+  contractID: string,
+  key: string,
+  cause: KvConflictCause | undefined
+): NormalizedKvConflictData {
+  if (!cause || !has(cause, 'currentData')) return { present: false }
+  const currentData = cause.currentData
+  if (currentData === undefined) return { present: true, currentData: undefined }
+  const { value } = unwrapData(currentData)
+  if (value === null) {
+    return {
+      present: true,
+      currentData: slot.resolvedDefault !== undefined
+        ? cloneDeep(slot.resolvedDefault)
+        : undefined
+    }
+  }
+  if (slot.schema) {
+    return {
+      present: true,
+      currentData: parseSyncSlotValue(slot, value, `conflict cause ${contractID}::${key}`)
+    }
+  }
+  return {
+    present: true,
+    currentData: assertJsonShape(value, `conflict cause ${contractID}::${key}`)
+  }
 }
 
 // Invoke `onUpdate` with the dispatcher's MUST-NOT-throw contract:
@@ -1090,6 +1141,7 @@ export default (sbp('sbp/selectors/register', {
         }
         if (contractEmptied) this.kvActiveFilters.delete(contractID)
       }
+      removeAwaitingRemoteMarkers(this, contractID, slot.key)
       const perContract = rootState._kv?.[contractID]
       if (perContract && perContract[slot.key]) {
         this.config.reactiveDel(perContract, slot.key)
@@ -1546,7 +1598,7 @@ export default (sbp('sbp/selectors/register', {
       if (pending?.has(nonce)) {
         pending.delete(nonce)
         if (pending.size === 0) this.kvLocalEchoNonces.delete(echoKey)
-        this.kvLocalWriteAwaitingRemote.delete(`${echoKey}::${nonce}`)
+        removeAwaitingRemoteMarkers(this, contractID, key, nonce)
         return Promise.resolve()
       }
     }
@@ -1560,7 +1612,7 @@ export default (sbp('sbp/selectors/register', {
     if (awaitingNonceKey) {
       return sbp('chelonia/kv/_loadSlotNow', { contractID, slot, reason: 'remote' })
         .finally(() => {
-          this.kvLocalWriteAwaitingRemote.delete(awaitingNonceKey)
+          removeAwaitingRemoteMarkers(this, contractID, key)
         })
     }
     const rootState = sbp(this.config.stateSelector) as ChelRootState
@@ -1988,12 +2040,18 @@ export default (sbp('sbp/selectors/register', {
         if (e instanceof ChelErrorKvMaxAttempts) {
           removeEchoNonces(this, contractID, key, attemptNonces)
           const cause = kvConflictCause(e)
+          let carriedCurrentData: NormalizedKvConflictData = { present: false }
+          try {
+            carriedCurrentData = normalizeKvConflictCurrentData(slot, contractID, key, cause)
+          } catch {}
           throw new ChelErrorKvConflict(
             `[chelonia/kv] update: ${contractID}::${key} ran out of attempts ` +
             'resolving conflicts',
             {
               cause: {
-                currentData: cause?.currentData ?? lastCurrentData,
+                currentData: carriedCurrentData.present
+                  ? carriedCurrentData.currentData
+                  : lastCurrentData,
                 etag: cause?.etag ?? lastEtag ?? null
               }
             }
@@ -2420,6 +2478,7 @@ export default (sbp('sbp/selectors/register', {
           this.config.reactiveDel(perContract, key)
         }
         this.kvLocalEchoNonces.delete(`${cID}::${key}`)
+        removeAwaitingRemoteMarkers(this, cID, key)
       }
     }
   },
