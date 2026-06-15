@@ -8,7 +8,7 @@
 
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
-import { cloneDeep, has } from 'turtledash'
+import { cloneDeep, deepEqualJSONType, has } from 'turtledash'
 import {
   ChelErrorKvConflict,
   ChelErrorKvSlotInvalid,
@@ -75,33 +75,6 @@ type KvLoadReason = Exclude<KvUpdateCtx['reason'], typeof KV_UPDATE_REASON.LOCAL
 
 const registryKey = (contractType: string, key: string): string =>
   `${contractType}${KV_KEY_SEPARATOR}${key}`
-
-// Stable structural stringify used for the `defineSlot` idempotence
-// check. Plain `JSON.stringify` is sensitive to object key order, but
-// JSON / spec-equivalence treats `{a:1,b:2}` and `{b:2,a:1}` as the
-// same value — schemas that re-emit keys in a different order (e.g.
-// `z.object({...}).strict()` normalising key order across parse
-// passes) would otherwise falsely fail the round-trip guard at
-// registration. Walks plain objects and arrays only; primitives are
-// emitted verbatim and any non-plain values fall through to
-// `JSON.stringify`'s default handling.
-function canonicalStringify (value: unknown): string {
-  return JSON.stringify(value, (_key, val) => {
-    if (
-      val &&
-      typeof val === 'object' &&
-      !Array.isArray(val) &&
-      Object.getPrototypeOf(val) === Object.prototype
-    ) {
-      const sorted: Record<string, unknown> = {}
-      for (const k of Object.keys(val).sort()) {
-        sorted[k] = (val as Record<string, unknown>)[k]
-      }
-      return sorted
-    }
-    return val
-  })
-}
 
 // Resolve a public `KvSlotDefinition` into its internal `SlotDefinition`
 // form. `contractType` arrays are flattened by the caller; this helper
@@ -246,7 +219,7 @@ function assertSchemaGuards (slot: SlotDefinition): void {
       )
     }
     assertParsedDefaultValue(slot, second, 'second')
-    if (canonicalStringify(first) !== canonicalStringify(second)) {
+    if (!deepEqualJSONType(first, second)) {
       throw new ChelErrorKvSlotInvalid(
         `[chelonia/kv] slot ${slot.contractType}::${slot.key} schema ` +
         'is not idempotent on its own parsed output (defaultValue round-trip failed)'
