@@ -6,7 +6,12 @@ import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.js'
 import type { EncryptedData } from './encryptedData.js'
 import type { PubSubClient } from './pubsub/index.js'
 import type { SignedDataContext } from './signedData.js'
-import type { KvNoop } from './kv.js'
+import type {
+  KV_AUTO_LOAD,
+  KV_LOAD_STATUS,
+  KV_UPDATE_REASON,
+  KvNoop
+} from './kv-constants.js'
 
 export type JSONType = null | string | number | boolean | JSONObject | JSONArray;
 export interface JSONObject {
@@ -179,7 +184,7 @@ export type JournalConfig = {
 export type KvUpdater<T> = (prev: T | undefined) => T | KvNoop;
 
 // Status of a KV slot's mirror entry. See KV-REVAMPED.md §5.
-export type KvLoadStatus = 'non-init' | 'loading' | 'loaded' | 'error';
+export type KvLoadStatus = typeof KV_LOAD_STATUS[keyof typeof KV_LOAD_STATUS];
 
 // Shape of a single KV mirror entry under `rootState._kv[contractID][key]`.
 // See KV-REVAMPED.md §5.
@@ -198,7 +203,7 @@ export type KvUpdateCtx = {
   // (fallback: `rootState[contractID]._vm.type`).
   contractType: string;
   key: string;
-  reason: 'load' | 'remote' | 'local' | 'reconnect';
+  reason: typeof KV_UPDATE_REASON[keyof typeof KV_UPDATE_REASON];
   etag: string | null;
   // Mirror value before this update; `undefined` on first load.
   previousValue: JSONType | undefined;
@@ -235,7 +240,7 @@ export type KvSlotDefinition = {
   // `chelonia/kv/update`. See KV-REVAMPED.md §4.1 / §4.2.
   defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
   autoSubscribe?: boolean;
-  autoLoad?: 'on-sync' | 'on-demand' | 'never';
+  autoLoad?: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
   refreshOnReconnect?: boolean;
   onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
 };
@@ -268,7 +273,7 @@ export type SlotDefinition = {
   signingKeyName: string;
   defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
   autoSubscribe: boolean;
-  autoLoad: 'on-sync' | 'on-demand' | 'never';
+  autoLoad: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
   refreshOnReconnect: boolean;
   onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
   source?: SlotDefinitionSource;

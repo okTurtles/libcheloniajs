@@ -4,7 +4,7 @@ import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.mjs';
 import type { EncryptedData } from './encryptedData.mjs';
 import type { PubSubClient } from './pubsub/index.mjs';
 import type { SignedDataContext } from './signedData.mjs';
-import type { KvNoop } from './kv.mjs';
+import type { KV_AUTO_LOAD, KV_LOAD_STATUS, KV_UPDATE_REASON, KvNoop } from './kv-constants.mjs';
 export type JSONType = null | string | number | boolean | JSONObject | JSONArray;
 export interface JSONObject {
     [x: string]: JSONType;
@@ -126,7 +126,7 @@ export type JournalConfig = {
     applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };
 export type KvUpdater<T> = (prev: T | undefined) => T | KvNoop;
-export type KvLoadStatus = 'non-init' | 'loading' | 'loaded' | 'error';
+export type KvLoadStatus = typeof KV_LOAD_STATUS[keyof typeof KV_LOAD_STATUS];
 export type KvMirrorEntry = {
     value: JSONType | undefined;
     etag: string | null;
@@ -140,7 +140,7 @@ export type KvUpdateCtx = {
     contractID: string;
     contractType: string;
     key: string;
-    reason: 'load' | 'remote' | 'local' | 'reconnect';
+    reason: typeof KV_UPDATE_REASON[keyof typeof KV_UPDATE_REASON];
     etag: string | null;
     previousValue: JSONType | undefined;
 };
@@ -173,7 +173,7 @@ export type KvSlotDefinition = {
     signingKeyName?: string;
     defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
     autoSubscribe?: boolean;
-    autoLoad?: 'on-sync' | 'on-demand' | 'never';
+    autoLoad?: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
     refreshOnReconnect?: boolean;
     onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
 };
@@ -196,7 +196,7 @@ export type SlotDefinition = {
     signingKeyName: string;
     defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
     autoSubscribe: boolean;
-    autoLoad: 'on-sync' | 'on-demand' | 'never';
+    autoLoad: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
     refreshOnReconnect: boolean;
     onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
     source?: SlotDefinitionSource;
