@@ -32,6 +32,7 @@ class KvNoopAbort extends Error {
 // Checked on the catch side instead of `instanceof`.
 ;
 KvNoopAbort.prototype[kv_constants_js_1.KV_NOOP_ABORT_SYMBOL] = true;
+let nowMs = () => Date.now();
 const registryKey = (contractType, key) => `${contractType}${kv_constants_js_1.KV_KEY_SEPARATOR}${key}`;
 // Resolve a public `KvSlotDefinition` into its internal `SlotDefinition`
 // form. `contractType` arrays are flattened by the caller; this helper
@@ -317,22 +318,42 @@ function resolveActiveSlot(ctx, rootState, contractID, key, label) {
     }
     return slot;
 }
+function purgeExpiredEchoCIDs(ctx, echoKey, now = nowMs()) {
+    const cids = ctx.kvLocalEchoCIDs.get(echoKey);
+    if (!cids)
+        return;
+    for (const [cid, expiresAt] of cids) {
+        if (expiresAt <= now)
+            cids.delete(cid);
+    }
+    if (cids.size === 0)
+        ctx.kvLocalEchoCIDs.delete(echoKey);
+}
 // Track a server-issued data CID for self-echo suppression.
 function recordEchoCID(ctx, contractID, key, cid) {
     if (typeof cid !== 'string' || cid.length === 0)
         return;
     const echoKey = `${contractID}${kv_constants_js_1.KV_KEY_SEPARATOR}${key}`;
+    const now = nowMs();
+    purgeExpiredEchoCIDs(ctx, echoKey, now);
     let cids = ctx.kvLocalEchoCIDs.get(echoKey);
     if (!cids) {
-        cids = new Set();
+        cids = new Map();
         ctx.kvLocalEchoCIDs.set(echoKey, cids);
     }
-    cids.add(cid);
+    cids.set(cid, now + kv_constants_js_1.KV_ECHO_TTL_MS);
     while (cids.size > kv_constants_js_1.KV_ECHO_CID_MAX) {
-        const oldest = cids.values().next().value;
-        if (oldest === undefined)
+        let earliestCID;
+        let earliestExpiry = Infinity;
+        for (const [candidateCID, expiresAt] of cids) {
+            if (expiresAt < earliestExpiry) {
+                earliestCID = candidateCID;
+                earliestExpiry = expiresAt;
+            }
+        }
+        if (earliestCID === undefined)
             break;
-        cids.delete(oldest);
+        cids.delete(earliestCID);
     }
 }
 // Per-contract pending-write counter. `chelonia/kv/update` and
@@ -435,6 +456,14 @@ async function flushDirtyFilters(ctx) {
     }
 }
 exports.default = (0, sbp_1.default)('sbp/selectors/register', {
+    ...(process.env.NODE_ENV !== 'production'
+        ? {
+            'chelonia/kv/_testSetNowMs': function (fn) {
+                nowMs = typeof fn === 'function' ? fn : () => Date.now();
+                return { now: nowMs(), ttl: kv_constants_js_1.KV_ECHO_TTL_MS };
+            }
+        }
+        : {}),
     // Dev-time invariant check. See KV-REVAMPED.md §11.2 ("Index
     // invariant"). Walks the five KV maps + `rootState._kv` and verifies:
     //
@@ -820,6 +849,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             if (perContract && perContract[slot.key]) {
                 this.config.reactiveDel(perContract, slot.key);
             }
+            this.kvLocalEchoCIDs.delete(`${contractID}${kv_constants_js_1.KV_KEY_SEPARATOR}${slot.key}`);
         }
     },
     // Private queued wrapper. See KV-REVAMPED §11.3 step 3. Routes
@@ -1159,9 +1189,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     //     immediately on miss — `defineSlot` may not have registered yet
     //     and the legacy raw API still runs through the existing
     //     callback path. No regression.
-    //   - Read the frame CID; if it matches an entry in
+    //   - Read the frame CID; if it matches a non-expired entry in
     //     `kvLocalEchoCIDs[${cID}::${key}]`, drop the frame silently
-    //     (self-echo suppression — §4.9) and remove the CID from the FIFO.
+    //     (self-echo suppression — §4.9) and remove the CID from the bucket.
     //   - Wire `null` is the clear sentinel — write the
     //     deep-cloned `resolvedDefault` without running `schema.parse`.
     //   - On schema validation failure: **keep** the previous mirror
@@ -1173,6 +1203,19 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const slot = perKey?.get(key);
         if (!slot)
             return Promise.resolve();
+        const echoKey = `${contractID}${kv_constants_js_1.KV_KEY_SEPARATOR}${key}`;
+        if (cid) {
+            const now = nowMs();
+            purgeExpiredEchoCIDs(this, echoKey, now);
+            const pending = this.kvLocalEchoCIDs.get(echoKey);
+            const expiresAt = pending?.get(cid);
+            if (expiresAt !== undefined && expiresAt > now) {
+                pending.delete(cid);
+                if (pending.size === 0)
+                    this.kvLocalEchoCIDs.delete(echoKey);
+                return Promise.resolve();
+            }
+        }
         let unwrapped;
         try {
             unwrapped = parsed.data;
@@ -1188,16 +1231,6 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             });
             setSlotStatus(this, rootState, contractID, slot.contractType, key, kv_constants_js_1.KV_LOAD_STATUS.ERROR, normalizeError(e));
             return Promise.resolve();
-        }
-        const echoKey = `${contractID}${kv_constants_js_1.KV_KEY_SEPARATOR}${key}`;
-        if (cid) {
-            const pending = this.kvLocalEchoCIDs.get(echoKey);
-            if (pending?.has(cid)) {
-                pending.delete(cid);
-                if (pending.size === 0)
-                    this.kvLocalEchoCIDs.delete(echoKey);
-                return Promise.resolve();
-            }
         }
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         const perContract = ensureContractKv(this, rootState, contractID);

@@ -17,6 +17,7 @@ export const KV_NOOP_ABORT_SYMBOL = Symbol.for('@chelonia/lib/KV_NOOP_ABORT')
 export const KV_NOOP_ABORT_ERROR_NAME = 'KvNoopAbort'
 
 export const KV_ECHO_CID_MAX = 128
+export const KV_ECHO_TTL_MS = 300000
 export const KV_KEY_SEPARATOR = '::'
 
 export const KV_DEFAULT_ENCRYPTION_KEY_NAME = 'cek'

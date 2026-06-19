@@ -27,6 +27,7 @@ import {
   KV_DEFAULT_ENCRYPTION_KEY_NAME,
   KV_DEFAULT_SIGNING_KEY_NAME,
   KV_ECHO_CID_MAX,
+  KV_ECHO_TTL_MS,
   KV_KEY_SEPARATOR,
   KV_LOAD_STATUS,
   KV_NOOP,
@@ -69,6 +70,8 @@ class KvNoopAbort extends Error {
 // ---------------------------------------------------------------------------
 
 type KvLoadReason = Exclude<KvUpdateCtx['reason'], typeof KV_UPDATE_REASON.LOCAL>
+
+let nowMs = (): number => Date.now()
 
 const registryKey = (contractType: string, key: string): string =>
   `${contractType}${KV_KEY_SEPARATOR}${key}`
@@ -423,6 +426,15 @@ function resolveActiveSlot (
   return slot
 }
 
+function purgeExpiredEchoCIDs (ctx: CheloniaContext, echoKey: string, now = nowMs()): void {
+  const cids = ctx.kvLocalEchoCIDs.get(echoKey)
+  if (!cids) return
+  for (const [cid, expiresAt] of cids) {
+    if (expiresAt <= now) cids.delete(cid)
+  }
+  if (cids.size === 0) ctx.kvLocalEchoCIDs.delete(echoKey)
+}
+
 // Track a server-issued data CID for self-echo suppression.
 function recordEchoCID (
   ctx: CheloniaContext,
@@ -432,16 +444,25 @@ function recordEchoCID (
 ): void {
   if (typeof cid !== 'string' || cid.length === 0) return
   const echoKey = `${contractID}${KV_KEY_SEPARATOR}${key}`
+  const now = nowMs()
+  purgeExpiredEchoCIDs(ctx, echoKey, now)
   let cids = ctx.kvLocalEchoCIDs.get(echoKey)
   if (!cids) {
-    cids = new Set()
+    cids = new Map()
     ctx.kvLocalEchoCIDs.set(echoKey, cids)
   }
-  cids.add(cid)
+  cids.set(cid, now + KV_ECHO_TTL_MS)
   while (cids.size > KV_ECHO_CID_MAX) {
-    const oldest = cids.values().next().value
-    if (oldest === undefined) break
-    cids.delete(oldest)
+    let earliestCID: string | undefined
+    let earliestExpiry = Infinity
+    for (const [candidateCID, expiresAt] of cids) {
+      if (expiresAt < earliestExpiry) {
+        earliestCID = candidateCID
+        earliestExpiry = expiresAt
+      }
+    }
+    if (earliestCID === undefined) break
+    cids.delete(earliestCID)
   }
 }
 
@@ -563,6 +584,15 @@ async function flushDirtyFilters (ctx: CheloniaContext): Promise<void> {
 }
 
 export default (sbp('sbp/selectors/register', {
+  ...(process.env.NODE_ENV !== 'production'
+    ? {
+        'chelonia/kv/_testSetNowMs': function (fn?: (() => number) | null) {
+          nowMs = typeof fn === 'function' ? fn : () => Date.now()
+          return { now: nowMs(), ttl: KV_ECHO_TTL_MS }
+        }
+      }
+    : {}),
+
   // Dev-time invariant check. See KV-REVAMPED.md §11.2 ("Index
   // invariant"). Walks the five KV maps + `rootState._kv` and verifies:
   //
@@ -982,6 +1012,7 @@ export default (sbp('sbp/selectors/register', {
       if (perContract && perContract[slot.key]) {
         this.config.reactiveDel(perContract, slot.key)
       }
+      this.kvLocalEchoCIDs.delete(`${contractID}${KV_KEY_SEPARATOR}${slot.key}`)
     }
   },
 
@@ -1390,9 +1421,9 @@ export default (sbp('sbp/selectors/register', {
   //     immediately on miss — `defineSlot` may not have registered yet
   //     and the legacy raw API still runs through the existing
   //     callback path. No regression.
-  //   - Read the frame CID; if it matches an entry in
+  //   - Read the frame CID; if it matches a non-expired entry in
   //     `kvLocalEchoCIDs[${cID}::${key}]`, drop the frame silently
-  //     (self-echo suppression — §4.9) and remove the CID from the FIFO.
+  //     (self-echo suppression — §4.9) and remove the CID from the bucket.
   //   - Wire `null` is the clear sentinel — write the
   //     deep-cloned `resolvedDefault` without running `schema.parse`.
   //   - On schema validation failure: **keep** the previous mirror
@@ -1409,6 +1440,18 @@ export default (sbp('sbp/selectors/register', {
     const perKey = this.kvSlotsByContractID.get(contractID)
     const slot = perKey?.get(key)
     if (!slot) return Promise.resolve()
+    const echoKey = `${contractID}${KV_KEY_SEPARATOR}${key}`
+    if (cid) {
+      const now = nowMs()
+      purgeExpiredEchoCIDs(this, echoKey, now)
+      const pending = this.kvLocalEchoCIDs.get(echoKey)
+      const expiresAt = pending?.get(cid)
+      if (expiresAt !== undefined && expiresAt > now) {
+        pending!.delete(cid)
+        if (pending!.size === 0) this.kvLocalEchoCIDs.delete(echoKey)
+        return Promise.resolve()
+      }
+    }
     let unwrapped: JSONType
     try {
       unwrapped = parsed.data
@@ -1426,15 +1469,6 @@ export default (sbp('sbp/selectors/register', {
         KV_LOAD_STATUS.ERROR, normalizeError(e)
       )
       return Promise.resolve()
-    }
-    const echoKey = `${contractID}${KV_KEY_SEPARATOR}${key}`
-    if (cid) {
-      const pending = this.kvLocalEchoCIDs.get(echoKey)
-      if (pending?.has(cid)) {
-        pending.delete(cid)
-        if (pending.size === 0) this.kvLocalEchoCIDs.delete(echoKey)
-        return Promise.resolve()
-      }
     }
     const rootState = sbp(this.config.stateSelector) as ChelRootState
     const perContract = ensureContractKv(this, rootState, contractID)

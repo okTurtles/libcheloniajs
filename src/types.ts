@@ -411,8 +411,8 @@ export type CheloniaContext = {
   // Microtask flush set for setFilter coalescing (see §11.5).
   kvFilterDirty: Set<string>;
   // Server-issued data CIDs awaiting self-echo suppression.
-  // Keyed by `${contractID}::${key}`.
-  kvLocalEchoCIDs: Map<string, Set<string>>;
+  // Keyed by `${contractID}::${key}`; inner map value is expiry timestamp.
+  kvLocalEchoCIDs: Map<string, Map<string, number>>;
   // Per-contract count of queued/in-flight `chelonia/kv/update` /
   // `chelonia/kv/clear` operations. Incremented at call time (before the
   // write body is enqueued, while the slot may still be active) and

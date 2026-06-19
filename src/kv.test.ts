@@ -1,5 +1,5 @@
-// KV slot API tests — 66 cases total: 27 from KV-REVAMPED.md §11.6
-// plus 39 implementation-specific (cases 28-66) covering REVIEW.md
+// KV slot API tests — 67 cases total: 27 from KV-REVAMPED.md §11.6
+// plus 40 implementation-specific (cases 28-67) covering REVIEW.md
 // follow-ups and §11.3 step 3 exceptions.
 //
 // We register simplified infrastructure selectors once (mutable stub
@@ -24,6 +24,7 @@ import {
   CHELONIA_KV_UPDATED,
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
+import { KV_ECHO_CID_MAX, KV_ECHO_TTL_MS } from './kv-constants.js'
 import { KV_NOOP } from './kv.js'
 import type {
   ChelKvGetResult,
@@ -245,7 +246,7 @@ sbp('sbp/selectors/register', {
 
   // Test helper: seed an echo CID for a contract with no slot index.
   'chelonia/test/seedEchoCID': function (this: CheloniaContext, echoKey: string) {
-    this.kvLocalEchoCIDs.set(echoKey, new Set(['cid']))
+    this.kvLocalEchoCIDs.set(echoKey, new Map([['cid', Date.now() + KV_ECHO_TTL_MS]]))
   },
 
   // Test helper: inspect active filters without exposing internals publicly.
@@ -256,6 +257,10 @@ sbp('sbp/selectors/register', {
 
   'chelonia/test/hasEchoCID': function (this: CheloniaContext, key: string) {
     return this.kvLocalEchoCIDs.has(key)
+  },
+
+  'chelonia/test/echoCIDExpiry': function (this: CheloniaContext, key: string, cid: string) {
+    return this.kvLocalEchoCIDs.get(key)?.get(cid)
   },
 
   // Test helper: simulate removeImmediately's KV cleanup for a contract.
@@ -277,6 +282,7 @@ describe('KV slot API', () => {
   })
 
   beforeEach(() => {
+    sbp('chelonia/kv/_testSetNowMs')
     stubSetFilterCalls = []
 
     stubGet = async () => null
@@ -750,8 +756,10 @@ describe('KV slot API', () => {
     log.length = 0
     await sbp('chelonia/kv/_handleRemote', c, 'echo', fakeParsed({ x: 1 }), 'e')
     assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 0)
+    assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::echo`), false)
 
-    await sbp('chelonia/kv/_handleRemote', c, 'echo', fakeParsed({ x: 2 }), 'other')
+    await sbp('chelonia/kv/_handleRemote', c, 'echo', fakeParsed({ x: 2 }), 'e')
+    assert.deepStrictEqual(rootState()._kv![c]!.echo.value, { x: 2 })
     assert.strictEqual(
       log.filter((e) =>
         e.type === CHELONIA_KV_UPDATED &&
@@ -759,6 +767,61 @@ describe('KV slot API', () => {
       ).length, 1
     )
 
+    log.length = 0
+    await sbp('chelonia/kv/_handleRemote', c, 'echo', fakeParsed({ x: 3 }), 'other')
+    assert.strictEqual(
+      log.filter((e) =>
+        e.type === CHELONIA_KV_UPDATED &&
+        (e.payload as { reason: string }).reason === 'remote'
+      ).length, 1
+    )
+
+    let clock = 1000
+    sbp('chelonia/kv/_testSetNowMs', () => clock)
+    stubSet = async () => ({ etag: 'late' })
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'echo', updater: () => ({ x: 4 })
+    })
+    log.length = 0
+    clock += KV_ECHO_TTL_MS + 1
+    await sbp('chelonia/kv/_handleRemote', c, 'echo', fakeParsed({ x: 5 }), 'late')
+    assert.deepStrictEqual(rootState()._kv![c]!.echo.value, { x: 5 })
+    assert.strictEqual(
+      log.filter((e) =>
+        e.type === CHELONIA_KV_UPDATED &&
+        (e.payload as { reason: string }).reason === 'remote'
+      ).length, 1
+    )
+    assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::echo`), false)
+    sbp('chelonia/kv/_testSetNowMs')
+
+    offs.forEach((off) => off())
+  })
+
+  it('18b: self-echo suppression skips payload decoding', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'echoDecode', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-18b'
+    await setupContract(c)
+
+    stubSet = async () => ({ etag: 'decode-echo' })
+
+    const { log, offs } = collectEvents()
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'echoDecode', updater: () => ({ x: 1 })
+    })
+    log.length = 0
+
+    const decodeErr = new Error('should not decode')
+    const throwingParsed = {
+      get data () { throw decodeErr }
+    } as unknown as ParsedEncryptedOrUnencryptedMessage<JSONType>
+    await sbp('chelonia/kv/_handleRemote', c, 'echoDecode', throwingParsed, 'decode-echo')
+
+    assert.strictEqual(log.length, 0)
+    assert.strictEqual(rootState()._kv![c]!.echoDecode.status, 'loaded')
+    assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::echoDecode`), false)
     offs.forEach((off) => off())
   })
 
@@ -1708,7 +1771,7 @@ describe('KV slot API', () => {
     offs.forEach((off) => off())
   })
 
-  it('45: local echo CIDs are bounded to the eight newest writes', async () => {
+  it('45: local echo CIDs are bounded to the configured cap', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'burst', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
     })
@@ -1724,7 +1787,7 @@ describe('KV slot API', () => {
       return { etag }
     }
 
-    for (let i = 0; i < 9; i++) {
+    for (let i = 0; i < KV_ECHO_CID_MAX + 1; i++) {
       await sbp('chelonia/kv/update', {
         contractID: c,
         key: 'burst',
@@ -1733,7 +1796,7 @@ describe('KV slot API', () => {
         })
       })
     }
-    assert.deepStrictEqual(rootState()._kv![c]!.burst.value, { x: 9 })
+    assert.deepStrictEqual(rootState()._kv![c]!.burst.value, { x: KV_ECHO_CID_MAX + 1 })
 
     const { log, offs } = collectEvents()
     for (let i = 0; i < writes.length; i++) {
@@ -1741,6 +1804,36 @@ describe('KV slot API', () => {
     }
     assert.deepStrictEqual(rootState()._kv![c]!.burst.value, { x: 1 })
     assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 1)
+    offs.forEach((off) => off())
+  })
+
+  it('45b: expired echo CIDs are purged and handled as remote', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'expiredEcho', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-46b'
+    await setupContract(c)
+
+    let clock = 1000
+    sbp('chelonia/kv/_testSetNowMs', () => clock)
+    stubSet = async () => ({ etag: 'expired-cid' })
+    await sbp('chelonia/kv/update', {
+      contractID: c,
+      key: 'expiredEcho',
+      updater: () => ({ x: 1 })
+    })
+    assert.strictEqual(
+      sbp('chelonia/test/echoCIDExpiry', `${c}::expiredEcho`, 'expired-cid'),
+      clock + KV_ECHO_TTL_MS
+    )
+
+    clock += KV_ECHO_TTL_MS + 1
+    const { log, offs } = collectEvents()
+    await sbp('chelonia/kv/_handleRemote', c, 'expiredEcho', fakeParsed({ x: 2 }), 'expired-cid')
+    assert.deepStrictEqual(rootState()._kv![c]!.expiredEcho.value, { x: 2 })
+    assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 1)
+    assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::expiredEcho`), false)
+    sbp('chelonia/kv/_testSetNowMs')
     offs.forEach((off) => off())
   })
 
@@ -1884,9 +1977,9 @@ describe('KV slot API', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 51: echo CID eviction — more than 8 writes evicts oldest CID
+  // 51: echo CID eviction — more than max writes evicts earliest-expiry CID
   // -----------------------------------------------------------------------
-  it('51: nine sequential writes evict the oldest echo CID', async () => {
+  it('51: writes past the echo CID max evict the earliest-expiry CID', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'evict', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
     })
@@ -1902,7 +1995,7 @@ describe('KV slot API', () => {
       return { etag }
     }
 
-    for (let i = 0; i < 9; i++) {
+    for (let i = 0; i < KV_ECHO_CID_MAX + 1; i++) {
       await sbp('chelonia/kv/update', {
         contractID: c,
         key: 'evict',
@@ -1911,7 +2004,7 @@ describe('KV slot API', () => {
         })
       })
     }
-    assert.deepStrictEqual(rootState()._kv![c]!.evict.value, { x: 9 })
+    assert.deepStrictEqual(rootState()._kv![c]!.evict.value, { x: KV_ECHO_CID_MAX + 1 })
 
     // First write's echo should NOT be suppressed (CID evicted)
     const { log, offs } = collectEvents()
@@ -1921,7 +2014,13 @@ describe('KV slot API', () => {
 
     // Last write's echo IS still suppressed
     log.length = 0
-    await sbp('chelonia/kv/_handleRemote', c, 'evict', fakeParsed(writes[8]), cids[8])
+    await sbp(
+      'chelonia/kv/_handleRemote',
+      c,
+      'evict',
+      fakeParsed(writes[KV_ECHO_CID_MAX]),
+      cids[KV_ECHO_CID_MAX]
+    )
     assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 0)
     offs.forEach((off) => off())
   })
@@ -2264,5 +2363,28 @@ describe('KV slot API', () => {
     assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::awaitCleanup`), true)
     sbp('chelonia/kv/_onReconnect')
     assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::awaitCleanup`), false)
+  })
+
+  it('66: refreshFilters match teardown clears stale echo state', async () => {
+    let shouldMatch = true
+    sbp('chelonia/kv/defineSlot', {
+      key: 'matchEcho',
+      contractType: CTYPE,
+      defaultValue: { x: 0 },
+      schema: objectSchema,
+      match: () => shouldMatch
+    })
+    const c = 'cid-67'
+    await setupContract(c)
+
+    stubSet = async () => ({ etag: 'match-etag' })
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'matchEcho', updater: () => ({ x: 1 })
+    })
+    assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::matchEcho`), true)
+
+    shouldMatch = false
+    sbp('chelonia/kv/refreshFilters', c)
+    assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::matchEcho`), false)
   })
 })
