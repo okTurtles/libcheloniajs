@@ -131,7 +131,7 @@ type MessageHandlers = {
   [NOTIFICATION_TYPE.PUB](this: PubSubClient, msg: { channelID: string; data: JSONType }): void;
   [NOTIFICATION_TYPE.KV](
     this: PubSubClient,
-    msg: { channelID: string; key: string; data: JSONType },
+    msg: { channelID: string; key: string; data: JSONType; cid?: string },
   ): void;
   [NOTIFICATION_TYPE.SUB](
     this: PubSubClient,
@@ -422,8 +422,10 @@ export function createMessage (
   return message
 }
 
-export function createKvMessage (channelID: string, key: string, data: JSONType): string {
-  return JSON.stringify({ type: NOTIFICATION_TYPE.KV, channelID, key, data })
+export function createKvMessage (
+  channelID: string, key: string, data: JSONType, cid?: string
+): string {
+  return JSON.stringify({ type: NOTIFICATION_TYPE.KV, channelID, key, data, cid })
 }
 
 export function createPubMessage (channelID: string, data: JSONType): string {

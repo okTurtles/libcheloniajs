@@ -410,16 +410,15 @@ export type CheloniaContext = {
   kvActiveFilters: Map<string, Set<string>>;
   // Microtask flush set for setFilter coalescing (see §11.5).
   kvFilterDirty: Set<string>;
-  // Locally-generated write nonces awaiting self-echo suppression.
+  // Server-issued data CIDs awaiting self-echo suppression.
   // Keyed by `${contractID}::${key}`.
-  kvLocalEchoNonces: Map<string, Set<string>>;
-  kvLocalWriteAwaitingRemote: Set<string>;
+  kvLocalEchoCIDs: Map<string, Set<string>>;
   // Per-contract count of queued/in-flight `chelonia/kv/update` /
   // `chelonia/kv/clear` operations. Incremented at call time (before the
   // write body is enqueued, while the slot may still be active) and
   // decremented when the queued body settles. `chelonia/kv/_waitInFlight`
   // drains every contract with a non-zero count so a write whose slot
-  // index entry / echo nonce was removed mid-flight (e.g. contract
+  // index entry / echo CID was removed mid-flight (e.g. contract
   // release, match→false) still settles before `chelonia/reset` tears
   // down state.
   kvPendingWrites: Map<string, number>;

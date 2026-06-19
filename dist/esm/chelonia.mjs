@@ -192,8 +192,7 @@ export default sbp('sbp/selectors/register', {
         this.kvSlotsByContractID = new Map();
         this.kvActiveFilters = new Map();
         this.kvFilterDirty = new Set();
-        this.kvLocalEchoNonces = new Map();
-        this.kvLocalWriteAwaitingRemote = new Set();
+        this.kvLocalEchoCIDs = new Map();
         this.kvPendingWrites = new Map();
         this.defContractKvByManifest = new Map();
         // pending includes contracts that are scheduled for syncing or in the
@@ -477,14 +476,13 @@ export default sbp('sbp/selectors/register', {
         // because they are code-level state; the five per-subscription maps
         // are cleared in lock-step with `subscriptionSet` below. In-flight
         // KV writes were already drained via `chelonia/kv/_waitInFlight`
-        // above, so clearing `kvLocalEchoNonces` / `kvPendingWrites` here
+        // above, so clearing `kvLocalEchoCIDs` / `kvPendingWrites` here
         // cannot strand a continuation mid-write.
         this.config.reactiveSet(rootState, '_kv', Object.create(null));
         this.kvSlotsByContractID.clear();
         this.kvActiveFilters.clear();
         this.kvFilterDirty.clear();
-        this.kvLocalEchoNonces.clear();
-        this.kvLocalWriteAwaitingRemote.clear();
+        this.kvLocalEchoCIDs.clear();
         this.kvPendingWrites.clear();
         clearObject(this.ephemeralReferenceCount);
         this.pending.splice(0);
@@ -838,7 +836,7 @@ export default sbp('sbp/selectors/register', {
                         }
                         if (sbp('sbp/selectors/fn', 'chelonia/kv/_handleRemote')) {
                             try {
-                                await sbp('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed);
+                                await sbp('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed, msg.cid);
                             }
                             catch (e) {
                                 console.error(`[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`, e);
@@ -865,7 +863,7 @@ export default sbp('sbp/selectors/register', {
         }
         if (!this.kvReconnectListener) {
             // KV-REVAMPED §11.4 bullet 3: on websocket reconnect-open, clear
-            // echo nonces and re-fetch every slot with `refreshOnReconnect: true`.
+            // echo CIDs and re-fetch every slot with `refreshOnReconnect: true`.
             // `client.isNew` is `true` on the initial connection and `false`
             // on reconnects, so we skip the initial connection to avoid
             // duplicating the load that `_reconcileForSlot` already scheduled.

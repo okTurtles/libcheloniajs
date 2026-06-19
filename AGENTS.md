@@ -435,13 +435,16 @@ lazily without forcing the `data` accessor), and `chelonia/kv/queuedSet`
 (forwards `signal`, returns `{ etag }`). `chelonia/kv/setFilter` is
 unchanged. These additions are backward-compatible.
 
-Self-echo suppression uses a bounded FIFO of at most 8 nonces per
-`(contractID, key)` stored in `kvLocalEchoNonces` (`Map<string,
-Set<string>>`). When the FIFO overflows, the oldest nonce is evicted;
-the corresponding pubsub echo will surface as `reason: 'remote'`.
-Conflicted writes additionally store nonce-scoped awaiting markers in
-`kvLocalWriteAwaitingRemote` (`contractID::key::nonce`) so the matching
-self-echo clears only that write's reconciliation state.
+Self-echo suppression uses a time-decaying map of server-issued data
+CIDs per `(contractID, key)` stored in `kvLocalEchoCIDs` (`Map<string,
+Map<string, number>>`, where the inner value is an expiry timestamp).
+The CID is returned from `chelonia/kv/set` as `etag` and
+also appears on pubsub KV frames as `cid`; matching, non-expired frames
+are dropped and the entry is deleted on first match. Entries auto-expire
+after `KV_ECHO_TTL_MS` (≈ 5 minutes) and are purged lazily; a per-bucket
+cap of `KV_ECHO_MAX` (≈ 1024, evict earliest-expiry first) is a hard
+backstop only. An echo whose CID has expired or was evicted surfaces as
+`reason: 'remote'`.
 
 Consumer-visible leakage: `rootState._kv` is a separate subtree from
 `rootState.contracts`, but it is projected into external stores by
