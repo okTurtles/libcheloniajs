@@ -26,21 +26,32 @@ const EXTERNAL_STATE_SELECTOR = 'test/external/state'
 
 let externalState: Record<string, unknown>
 let fullStateCalls: number
+let kvStates: Record<string, Record<string, unknown>>
 
 // Register stub selectors once. Mutable behaviour swaps via the
 // closures above.
 sbp('sbp/selectors/register', {
   [EXTERNAL_STATE_SELECTOR]: () => externalState,
-  'chelonia/contract/fullState': (contractID: string | string[]) => {
+  'chelonia/contract/fullState': (contractID: string | string[], key?: string) => {
     fullStateCalls++
     if (Array.isArray(contractID)) {
       const out: Record<string, unknown> = {}
       for (const cID of contractID) {
-        out[cID] = { contractState: { id: cID }, cheloniaState: { id: cID }, kvState: {} }
+        out[cID] = {
+          contractState: { id: cID },
+          cheloniaState: { id: cID },
+          kvState: kvStates[cID] ?? {}
+        }
       }
       return out
     }
-    return { contractState: { id: contractID }, cheloniaState: { id: contractID }, kvState: {} }
+    const kvState = kvStates[contractID]
+    return {
+      contractState: { id: contractID },
+      cheloniaState: { id: contractID },
+      kvState,
+      kvEntry: key === undefined ? undefined : kvState?.[key]
+    }
   }
 })
 
@@ -56,6 +67,7 @@ describe('chelonia/externalStateSetup teardown', () => {
   beforeEach(() => {
     externalState = Object.create(null)
     fullStateCalls = 0
+    kvStates = Object.create(null)
   })
 
   afterEach(() => {
@@ -115,6 +127,108 @@ describe('chelonia/externalStateSetup teardown', () => {
       fullStateCalls, 1,
       'after 5 setup/teardown cycles + 1 active setup, exactly one handler should fire'
     )
+
+    teardown()
+  })
+
+  it('projects only the changed KV entry into external state', async () => {
+    const unchangedEntry = { value: { keep: true }, status: 'loaded', etag: 'old' }
+    externalState._kv = {
+      'cid-KV': {
+        unchanged: unchangedEntry
+      }
+    }
+    kvStates['cid-KV'] = {
+      changed: { value: { next: 1 }, status: 'loaded', etag: 'new' },
+      unchanged: { value: { keep: true }, status: 'loaded', etag: 'old' }
+    }
+
+    const teardown = sbp('chelonia/externalStateSetup', {
+      stateSelector: EXTERNAL_STATE_SELECTOR
+    })
+
+    sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
+      contractID: 'cid-KV',
+      key: 'changed'
+    })
+    await waitMicrotasks()
+
+    const externalKv = externalState._kv as Record<string, Record<string, unknown>>
+    assert.deepStrictEqual(externalKv['cid-KV'].changed, {
+      value: { next: 1 }, status: 'loaded', etag: 'new'
+    })
+    assert.strictEqual(externalKv['cid-KV'].unchanged, unchangedEntry)
+
+    teardown()
+  })
+
+  it('projects KV status changes for one key and deletes missing entries', async () => {
+    externalState._kv = {
+      'cid-KV': {
+        statusOnly: { value: { prev: true }, status: 'loaded', etag: 'old' },
+        removed: { value: { stale: true }, status: 'loaded', etag: 'old' }
+      }
+    }
+    kvStates['cid-KV'] = {
+      statusOnly: {
+        value: { prev: true },
+        status: 'error',
+        etag: 'old',
+        lastError: { name: 'Error', message: 'bad' }
+      }
+    }
+
+    const teardown = sbp('chelonia/externalStateSetup', {
+      stateSelector: EXTERNAL_STATE_SELECTOR
+    })
+
+    sbp('okTurtles.events/emit', CHELONIA_KV_STATUS_CHANGED, {
+      contractID: 'cid-KV',
+      key: 'statusOnly'
+    })
+    sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
+      contractID: 'cid-KV',
+      key: 'removed'
+    })
+    await waitMicrotasks()
+
+    const externalKv = externalState._kv as Record<string, Record<string, unknown>>
+    assert.deepStrictEqual(externalKv['cid-KV'].statusOnly, {
+      value: { prev: true },
+      status: 'error',
+      etag: 'old',
+      lastError: { name: 'Error', message: 'bad' }
+    })
+    assert.strictEqual('removed' in externalKv['cid-KV'], false)
+
+    teardown()
+  })
+
+  it('projects seeded KV mirror entries when contracts are added', async () => {
+    kvStates['cid-added'] = {
+      profile: { value: undefined, status: 'non-init', etag: null }
+    }
+
+    const teardown = sbp('chelonia/externalStateSetup', {
+      stateSelector: EXTERNAL_STATE_SELECTOR
+    })
+
+    sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, new Set(), {
+      added: ['cid-added'], removed: [], permanent: false
+    })
+    await waitMicrotasks()
+
+    const externalKv = externalState._kv as Record<string, Record<string, unknown>>
+    assert.deepStrictEqual(externalKv['cid-added'].profile, {
+      value: undefined, status: 'non-init', etag: null
+    })
+
+    sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, new Set(), {
+      added: [], removed: ['cid-added'], permanent: false
+    })
+    await waitMicrotasks()
+
+    assert.strictEqual('cid-added' in externalKv, false)
 
     teardown()
   })

@@ -680,8 +680,9 @@ export default sbp('sbp/selectors/register', {
     }
 
     // Drop per-contract KV runtime state on every removal; the
-    // `CONTRACTS_MODIFIED` listener also performs this cleanup, so the
-    // direct call is an idempotent fast path when the selector is present.
+    // `CONTRACTS_MODIFIED` listener also performs this cleanup via
+    // `_onContractsModified`, so the direct call is an idempotent fast
+    // path when the selector is present.
     if (sbp('sbp/selectors/fn', 'chelonia/kv/_cleanupContractRuntime')) {
       try {
         sbp('chelonia/kv/_cleanupContractRuntime', contractID)

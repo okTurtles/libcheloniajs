@@ -71,7 +71,8 @@ class KvNoopAbort extends Error {
 
 type KvLoadReason = Exclude<KvUpdateCtx['reason'], typeof KV_UPDATE_REASON.LOCAL>
 
-let nowMs = (): number => performance.now()
+const defaultNowMs = (): number => performance.now()
+let nowMs = defaultNowMs
 
 const registryKey = (contractType: string, key: string): string =>
   `${contractType}${KV_KEY_SEPARATOR}${key}`
@@ -96,7 +97,9 @@ function resolveSlotDefinition (
     resolvedDefault,
     schema: def.schema,
     match: def.match,
-    encryptionKeyName: def.encryptionKeyName ?? KV_DEFAULT_ENCRYPTION_KEY_NAME,
+    encryptionKeyName: def.encryptionKeyName === null
+      ? null
+      : def.encryptionKeyName ?? KV_DEFAULT_ENCRYPTION_KEY_NAME,
     signingKeyName: def.signingKeyName ?? KV_DEFAULT_SIGNING_KEY_NAME,
     defaultUpdater: def.defaultUpdater,
     autoSubscribe: def.autoSubscribe ?? true,
@@ -105,6 +108,31 @@ function resolveSlotDefinition (
     onUpdate: def.onUpdate,
     source
   }
+}
+
+function resolveSlotKeyIds (
+  contractID: string,
+  key: string,
+  slot: SlotDefinition,
+  operation: 'update' | 'clear'
+): { encryptionKeyId: string | null; signingKeyId: string } {
+  const encryptionKeyId = slot.encryptionKeyName === null
+    ? null
+    : sbp('chelonia/contract/currentKeyIdByName', contractID, slot.encryptionKeyName)
+  const signingKeyId = sbp('chelonia/contract/currentKeyIdByName', contractID, slot.signingKeyName)
+  if (slot.encryptionKeyName !== null && !encryptionKeyId) {
+    throw new ChelErrorKvUpdateInvalid(
+      `[chelonia/kv] ${operation}: ${contractID}::${key} — encryption key ` +
+      `'${slot.encryptionKeyName}' not found on contract; refusing to write plaintext`
+    )
+  }
+  if (!signingKeyId) {
+    throw new ChelErrorKvUpdateInvalid(
+      `[chelonia/kv] ${operation}: ${contractID}::${key} — signing key ` +
+      `'${slot.signingKeyName}' not found on contract`
+    )
+  }
+  return { encryptionKeyId, signingKeyId }
 }
 
 function assertParsedDefaultValue (
@@ -332,7 +360,15 @@ function setSlotStatus (
 ): void {
   const perContract = ensureContractKv(ctx, rootState, contractID)
   const entry = perContract[key]
-  if (!entry) return
+  if (!entry) {
+    if (process.env.NODE_ENV !== 'production') {
+      throw new Error(
+        `[chelonia/kv] setSlotStatus called for ${contractID}::${key} before ` +
+        'the mirror entry was seeded'
+      )
+    }
+    return
+  }
   const previousStatus = entry.status
   const statusUnchanged = previousStatus === status
   // `lastErrorChanged` detects a structural difference (name or message)
@@ -547,6 +583,14 @@ async function safeOnUpdate (
   }
 }
 
+function slotIsCurrent (
+  ctx: CheloniaContext,
+  contractID: string,
+  slot: SlotDefinition
+): boolean {
+  return ctx.kvSlotsByContractID.get(contractID)?.get(slot.key) === slot
+}
+
 // ---------------------------------------------------------------------------
 // Filter-flush coalescing (KV-REVAMPED §11.5)
 // ---------------------------------------------------------------------------
@@ -582,7 +626,7 @@ export default (sbp('sbp/selectors/register', {
   ...(process.env.NODE_ENV !== 'production'
     ? {
         'chelonia/kv/_testSetNowMs': function (fn?: (() => number) | null) {
-          nowMs = typeof fn === 'function' ? fn : () => Date.now()
+          nowMs = typeof fn === 'function' ? fn : defaultNowMs
           return { now: nowMs(), ttl: KV_ECHO_TTL_MS }
         }
       }
@@ -840,29 +884,11 @@ export default (sbp('sbp/selectors/register', {
     }
     const resolvedDefault: JSONType | undefined =
       rawDefault === undefined ? undefined : cloneDeep(rawDefault)
-    // Run the schema guards once on a probe slot regardless of how many
-    // contract types are listed. The guards parse `resolvedDefault` up
-    // to four times (two sentinel probes + a two-step idempotence
-    // round-trip), so the per-type loop below would otherwise multiply
-    // that work by N and produce N sibling slots sharing the same
-    // post-parse `resolvedDefault` object identity — a fragile invariant
-    // if anything ever mutates `resolvedDefault` in place. Cloning
-    // per-type keeps each slot independent.
-    let postParseDefault: JSONType | undefined = resolvedDefault
-    if (def.schema && resolvedDefault !== undefined) {
-      const probe = resolveSlotDefinition(def, types[0], resolvedDefault, source)
-      assertSchemaGuards(probe)
-      postParseDefault = probe.resolvedDefault
-    } else {
-      // No schema (or no resolved default) → guards are pure checks on
-      // the schema itself; run once with the first type.
-      const probe = resolveSlotDefinition(def, types[0], resolvedDefault, source)
-      assertSchemaGuards(probe)
-    }
     for (const contractType of types) {
       const perTypeDefault: JSONType | undefined =
-        postParseDefault === undefined ? undefined : cloneDeep(postParseDefault)
+        resolvedDefault === undefined ? undefined : cloneDeep(resolvedDefault)
       const slot = resolveSlotDefinition(def, contractType, perTypeDefault, source)
+      assertSchemaGuards(slot)
       const rKey = registryKey(contractType, def.key)
       const previous = this.kvSlots.get(rKey)
       this.kvSlots.set(rKey, slot)
@@ -896,11 +922,12 @@ export default (sbp('sbp/selectors/register', {
       }
       // Also re-validate persisted mirror entries for contracts not
       // currently in subscriptionSet (e.g. not yet re-synced after a
-      // reload). §4.1 requires re-validating *every* persisted entry,
-      // not just those for currently-synced contracts. Skip entries
-      // whose contract type cannot be confirmed to match — re-validating
-      // against the wrong slot type would spuriously flip foreign
-      // entries to 'error'.
+      // reload). §4.1 requires re-validating every persisted entry whose
+      // contract type can be resolved, not just currently-synced
+      // contracts. Skip entries whose contract type cannot be confirmed
+      // to match — re-validating against the wrong slot type would
+      // spuriously flip foreign entries to 'error'. Released contracts
+      // are validated by `_loadSlotNow` the next time they sync.
       if (rootState._kv) {
         for (const cID of Object.keys(rootState._kv)) {
           if (this.subscriptionSet.has(cID)) continue
@@ -963,6 +990,8 @@ export default (sbp('sbp/selectors/register', {
           filter.delete(slot.key)
           queueFilterFlush(this, contractID)
         } else if (createdFilterBucket) {
+          // Claim filter ownership for this contract even when the first
+          // attached slot is local-only; test 52 locks in the empty flush.
           queueFilterFlush(this, contractID)
         }
       }
@@ -1266,14 +1295,16 @@ export default (sbp('sbp/selectors/register', {
         this, rootState, contractID, slot.contractType, slot.key,
         wasClear ? KV_LOAD_STATUS.NON_INIT : KV_LOAD_STATUS.LOADED
       )
-      await safeOnUpdate(slot, nextValue, {
-        contractID,
-        contractType: slot.contractType,
-        key: slot.key,
-        reason,
-        etag: getEtag,
-        previousValue
-      })
+      if (slotIsCurrent(this, contractID, slot)) {
+        await safeOnUpdate(slot, nextValue, {
+          contractID,
+          contractType: slot.contractType,
+          key: slot.key,
+          reason,
+          etag: getEtag,
+          previousValue
+        })
+      }
     })()
   },
 
@@ -1281,7 +1312,9 @@ export default (sbp('sbp/selectors/register', {
   // `chelonia/connect` (see chelonia.ts) so that newly-synced
   // contracts automatically wire up every matching slot, and
   // removed contracts have their per-contract KV runtime state
-  // cleaned up (KV-REVAMPED §11.4).
+  // cleaned up (KV-REVAMPED §11.4). Removal cleanup is also called
+  // directly from `chelonia/private/removeImmediately`; both paths are
+  // intentionally idempotent.
   'chelonia/kv/_onContractsModified': function (
     this: CheloniaContext,
     { added, removed }: { added: string[]; removed: string[] }
@@ -1301,19 +1334,25 @@ export default (sbp('sbp/selectors/register', {
     }
     if (removed && removed.length > 0) {
       for (const cID of removed) {
+        // Also invoked directly from `chelonia/private/removeImmediately`
+        // as an idempotent fast path; calling twice is safe.
         sbp('chelonia/kv/_cleanupContractRuntime', cID)
       }
     }
   },
 
   // Private. See KV-REVAMPED §11.4 (contract-release / unsubscribe path).
+  // Called from both `chelonia/private/removeImmediately` and the
+  // `CONTRACTS_MODIFIED` listener; all operations below are idempotent.
   // Clears per-contract KV runtime state for `contractID`: removes
   // `rootState._kv[contractID]`, `kvSlotsByContractID[contractID]`,
   // `kvActiveFilters[contractID]`, and schedules an empty-filter
   // `setFilter` flush. The `kvFilterDirty` mark is intentionally
   // retained until the microtask fires so the flush sees this
   // contract in the dirty set. Keeps long-lived sessions from
-  // accumulating stale mirror entries after refcount goes to zero.
+  // accumulating stale mirror entries after refcount goes to zero. This
+  // selector may run outside any per-contract queue lane, so it must
+  // remain synchronous and idempotent.
   'chelonia/kv/_cleanupContractRuntime': function (
     this: CheloniaContext,
     contractID: string
@@ -1328,8 +1367,9 @@ export default (sbp('sbp/selectors/register', {
     queueFilterFlush(this, contractID)
     this.kvSlotsByContractID.delete(contractID)
     this.kvActiveFilters.delete(contractID)
+    const prefix = `${contractID}${KV_KEY_SEPARATOR}`
     this.kvLocalEchoCIDs.forEach((_cids, key) => {
-      if (key.startsWith(`${contractID}::`)) {
+      if (key.startsWith(prefix)) {
         this.kvLocalEchoCIDs.delete(key)
       }
     })
@@ -1337,6 +1377,12 @@ export default (sbp('sbp/selectors/register', {
     if (rootState._kv && rootState._kv[contractID]) {
       this.config.reactiveDel(rootState._kv, contractID)
     }
+  },
+
+  'chelonia/kv/_flushDirtyFilters': function (
+    this: CheloniaContext
+  ): Promise<void> {
+    return flushDirtyFilters(this)
   },
 
   // Private. Drain (not cancel) in-flight `chelonia/kv/update` /
@@ -1456,10 +1502,23 @@ export default (sbp('sbp/selectors/register', {
           }
         }
         if (hasPendingConflict) {
+          const conflictCIDs = new Set<string>()
+          for (const [pendingCID, pendingConflict] of bucket) {
+            if (pendingConflict.fromConflict) conflictCIDs.add(pendingCID)
+          }
           return sbp('chelonia/kv/_loadSlotNow', {
             contractID,
             slot,
             reason: KV_UPDATE_REASON.REMOTE
+          }).then((result: void) => {
+            const currentBucket = this.kvLocalEchoCIDs.get(echoKey)
+            if (currentBucket) {
+              for (const pendingCID of conflictCIDs) {
+                currentBucket.delete(pendingCID)
+              }
+              if (currentBucket.size === 0) this.kvLocalEchoCIDs.delete(echoKey)
+            }
+            return result
           })
         }
       }
@@ -1538,7 +1597,13 @@ export default (sbp('sbp/selectors/register', {
         return Promise.resolve()
       }
     }
-    const remoteEtag = cid ?? null
+    const remoteEtag = typeof cid === 'string' ? cid : (entry.etag ?? null)
+    if (typeof cid !== 'string') {
+      console.warn(
+        `[chelonia/kv] remote frame for ${contractID}::${key} carried no cid; ` +
+        'preserving existing etag'
+      )
+    }
     this.config.reactiveSet(entry, 'value', nextValue)
     this.config.reactiveSet(entry, 'etag', remoteEtag)
     sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
@@ -1547,7 +1612,7 @@ export default (sbp('sbp/selectors/register', {
       key,
       value: nextValue,
       previousValue,
-      reason: 'remote',
+      reason: KV_UPDATE_REASON.REMOTE,
       etag: remoteEtag
     })
     // A remote clear (unwrapped === null) transitions to 'non-init',
@@ -1564,11 +1629,14 @@ export default (sbp('sbp/selectors/register', {
         this, rootState, contractID, slot.contractType, key, KV_LOAD_STATUS.LOADED
       )
     }
+    if (!slotIsCurrent(this, contractID, slot)) {
+      return Promise.resolve()
+    }
     return safeOnUpdate(slot, nextValue, {
       contractID,
       contractType: slot.contractType,
       key,
-      reason: 'remote',
+      reason: KV_UPDATE_REASON.REMOTE,
       etag: remoteEtag,
       previousValue
     })
@@ -1705,6 +1773,9 @@ export default (sbp('sbp/selectors/register', {
       // ----- Step 2: read current mirror value. -----
       const perContract = ensureContractKv(this, liveState, contractID)
       const mirrorEntry = perContract[key]
+      // On 'error' status the mirror still holds the last valid value,
+      // but `update` deliberately mirrors `read`'s error semantics by
+      // feeding the reducer the default instead of that retained value.
       const seedValue: JSONType | undefined =
         mirrorEntry &&
         mirrorEntry.status !== KV_LOAD_STATUS.ERROR &&
@@ -1874,12 +1945,13 @@ export default (sbp('sbp/selectors/register', {
         // already inside the per-contract serial queue. Resolving key IDs
         // here (not at call-site) ensures key rotation that landed before
         // this write is seen; the IDs are fixed for kv/set's retries.
+        const keyIds = resolveSlotKeyIds(contractID, key, slot, 'update')
         setResult = await sbp('chelonia/kv/set', contractID, key,
           nextValue,
           {
             ifMatch: ifMatch ?? mirrorEtag,
-            encryptionKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, slot.encryptionKeyName),
-            signingKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, slot.signingKeyName),
+            encryptionKeyId: keyIds.encryptionKeyId,
+            signingKeyId: keyIds.signingKeyId,
             onconflict,
             maxAttempts,
             signal
@@ -1931,6 +2003,12 @@ export default (sbp('sbp/selectors/register', {
         // rather than misleading the caller with an unstored value.
         return undefined
       }
+      if (setResult.etag == null) {
+        console.warn(
+          `[chelonia/kv] update: ${contractID}::${key} successful write returned no ` +
+          'etag/x-cid header; self-echo suppression is inactive for this write'
+        )
+      }
       recordEchoCID(this, contractID, key, setResult.etag, sawConflict)
       this.config.reactiveSet(entryAfter, 'value', nextValue)
       this.config.reactiveSet(entryAfter, 'etag', setResult.etag)
@@ -1949,14 +2027,16 @@ export default (sbp('sbp/selectors/register', {
           KV_LOAD_STATUS.LOADED
         )
       }
-      await safeOnUpdate(slot, nextValue, {
-        contractID,
-        contractType: slot.contractType,
-        key,
-        reason: KV_UPDATE_REASON.LOCAL,
-        etag: setResult.etag,
-        previousValue
-      })
+      if (slotIsCurrent(this, contractID, slot)) {
+        await safeOnUpdate(slot, nextValue, {
+          contractID,
+          contractType: slot.contractType,
+          key,
+          reason: KV_UPDATE_REASON.LOCAL,
+          etag: setResult.etag,
+          previousValue
+        })
+      }
       return nextValue
     }) as Promise<JSONType | undefined>
     return queued.finally(() => {
@@ -2105,12 +2185,13 @@ export default (sbp('sbp/selectors/register', {
       try {
         // Resolve key IDs inside the queue so rotations that landed
         // before this clear are seen; they stay fixed for kv/set's retries.
+        const keyIds = resolveSlotKeyIds(contractID, key, slot, 'clear')
         setResult = await sbp('chelonia/kv/set', contractID, key,
           null,
           {
             ifMatch: mirrorEtag,
-            encryptionKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, slot.encryptionKeyName),
-            signingKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, slot.signingKeyName),
+            encryptionKeyId: keyIds.encryptionKeyId,
+            signingKeyId: keyIds.signingKeyId,
             onconflict,
             maxAttempts,
             signal
@@ -2140,6 +2221,12 @@ export default (sbp('sbp/selectors/register', {
       const defaultClone = slot.resolvedDefault !== undefined
         ? cloneDeep(slot.resolvedDefault)
         : undefined
+      if (setResult.etag == null) {
+        console.warn(
+          `[chelonia/kv] clear: ${contractID}::${key} successful write returned no ` +
+          'etag/x-cid header; self-echo suppression is inactive for this write'
+        )
+      }
       recordEchoCID(this, contractID, key, setResult.etag, sawConflict)
       this.config.reactiveSet(entry, 'value', defaultClone)
       this.config.reactiveSet(entry, 'etag', setResult.etag)
@@ -2158,14 +2245,16 @@ export default (sbp('sbp/selectors/register', {
           KV_LOAD_STATUS.NON_INIT
         )
       }
-      await safeOnUpdate(slot, defaultClone, {
-        contractID,
-        contractType: slot.contractType,
-        key,
-        reason: KV_UPDATE_REASON.LOCAL,
-        etag: setResult.etag,
-        previousValue
-      })
+      if (slotIsCurrent(this, contractID, slot)) {
+        await safeOnUpdate(slot, defaultClone, {
+          contractID,
+          contractType: slot.contractType,
+          key,
+          reason: KV_UPDATE_REASON.LOCAL,
+          etag: setResult.etag,
+          previousValue
+        })
+      }
     }) as Promise<void>
     return queued.finally(() => {
       decrementPending(this, contractID)

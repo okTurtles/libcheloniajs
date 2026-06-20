@@ -37,6 +37,7 @@ import './journal.test.js'
 // `chelonia` SBP domain). Everything after this point cannot register
 // `chelonia/*` selectors.
 import './journal-integration.test.js'
+import './chelonia-kv-set.test.js'
 
 import './persistent-actions.test.js'
 import './pubsub/index.test.js'

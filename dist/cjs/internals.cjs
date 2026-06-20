@@ -493,11 +493,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             }
             this.config.reactiveDel(state, contractID);
         }
-        // Drop per-contract KV runtime state (only on real removal, not resync).
-        // Delegated to `chelonia/kv/_cleanupContractRuntime` so the spec-compliant
-        // teardown path (queued empty-filter flush per §11.5, reactive deletion of
-        // `_kv[contractID]`, dirty-mark retention) lives in a single place.
-        if (!params?.resync && (0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_cleanupContractRuntime')) {
+        // Drop per-contract KV runtime state on every removal; the
+        // `CONTRACTS_MODIFIED` listener also performs this cleanup via
+        // `_onContractsModified`, so the direct call is an idempotent fast
+        // path when the selector is present.
+        if ((0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_cleanupContractRuntime')) {
             try {
                 (0, sbp_1.default)('chelonia/kv/_cleanupContractRuntime', contractID);
             }

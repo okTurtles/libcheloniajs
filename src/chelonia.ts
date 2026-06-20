@@ -744,6 +744,13 @@ export default sbp('sbp/selectors/register', {
     this.config.reactiveSet(rootState, '_kv', Object.create(null))
     this.kvSlotsByContractID.clear()
     this.kvActiveFilters.clear()
+    if (sbp('sbp/selectors/fn', 'chelonia/kv/_flushDirtyFilters')) {
+      try {
+        await sbp('chelonia/kv/_flushDirtyFilters')
+      } catch (e) {
+        console.warn('[chelonia/reset] KV filter flush failed during reset', e)
+      }
+    }
     this.kvFilterDirty.clear()
     this.kvLocalEchoCIDs.clear()
     this.kvPendingWrites.clear()
@@ -1171,6 +1178,11 @@ export default sbp('sbp/selectors/register', {
             return
           }
           sbp('chelonia/queueInvocation', msg.channelID, async () => {
+            // Share one lazy parsed wrapper between the legacy callback and the
+            // slot layer. If either consumer forces `.data`, the decoded value
+            // or thrown error is cached; both consumers can therefore observe
+            // and log the same decode failure, and the legacy callback may
+            // decode frames the slot layer would skip as self-echoes.
             const parsed = parseEncryptedOrUnencryptedMessage<object>(this, {
               contractID: msg.channelID,
               meta: msg.key,
@@ -1232,7 +1244,9 @@ export default sbp('sbp/selectors/register', {
       // duplicating the load that `_reconcileForSlot` already scheduled.
       this.kvReconnectListener = (client: PubSubClient) => {
         if (client.isNew) return
-        sbp('chelonia/kv/_onReconnect')
+        if (sbp('sbp/selectors/fn', 'chelonia/kv/_onReconnect')) {
+          sbp('chelonia/kv/_onReconnect')
+        }
       }
       sbp('okTurtles.events/on', PUBSUB_RECONNECTION_SUCCEEDED, this.kvReconnectListener)
     }
@@ -1244,6 +1258,7 @@ export default sbp('sbp/selectors/register', {
         _contracts: Set<string>,
         payload: { added: string[]; removed: string[] }
       ) => {
+        if (!sbp('sbp/selectors/fn', 'chelonia/kv/_onContractsModified')) return
         try {
           sbp('chelonia/kv/_onContractsModified', payload)
         } catch (e) {
@@ -1388,7 +1403,6 @@ export default sbp('sbp/selectors/register', {
         })
       )
     }
-    sbp('okTurtles.events/emit', CONTRACT_REGISTERED, contract)
     // Diff KV blocks and (re)register manifest-scoped slots.
     // - Cleanup runs first so removed keys are unregistered before
     //   the new ones are registered (keys present in both are handled
@@ -1396,16 +1410,24 @@ export default sbp('sbp/selectors/register', {
     //   mirror values and re-validates them against the new schema).
     // - Bookkeeping update keeps the next `defineContract` call able
     //   to diff against the current key set.
-    if (prevKv || contract.kv) {
+    const kvSlotsAvailable = sbp('sbp/selectors/fn', 'chelonia/kv/_registerContractSlots')
+    if (contract.kv && !kvSlotsAvailable) {
+      throw new Error(
+        `[chelonia] contract '${contract.name}' declares a 'kv' block but the KV ` +
+        'module is not loaded. Import the package root or register kv.ts before defineContract.'
+      )
+    }
+    if (kvSlotsAvailable && (prevKv || contract.kv)) {
       sbp('chelonia/kv/_cleanupContractSlots',
         contract.manifest, prevKv, contract.kv ?? {})
     }
-    if (contract.kv) {
+    if (kvSlotsAvailable && contract.kv) {
       sbp('chelonia/kv/_registerContractSlots', contract.manifest, contract.kv)
       this.defContractKvByManifest.set(contract.manifest, contract.kv)
     } else if (prevKv) {
       this.defContractKvByManifest.delete(contract.manifest)
     }
+    sbp('okTurtles.events/emit', CONTRACT_REGISTERED, contract)
   },
   'chelonia/queueInvocation': (contractID: string, sbpInvocation: Parameters<typeof sbp>) => {
     // We maintain two queues, contractID, used for internal events (i.e.,
@@ -2027,7 +2049,7 @@ export default sbp('sbp/selectors/register', {
     }
     return stateCopy
   },
-  'chelonia/contract/fullState': function (this: CheloniaContext, contractID: string | string[]) {
+  'chelonia/contract/fullState': function (this: CheloniaContext, contractID: string | string[], key?: string) {
     const rootState = sbp(this.config.stateSelector)
     if (Array.isArray(contractID)) {
       return Object.fromEntries(
@@ -2046,7 +2068,8 @@ export default sbp('sbp/selectors/register', {
     return {
       contractState: rootState[contractID],
       cheloniaState: rootState.contracts[contractID],
-      kvState: rootState._kv?.[contractID]
+      kvState: rootState._kv?.[contractID],
+      kvEntry: key === undefined ? undefined : rootState._kv?.[contractID]?.[key]
     }
   },
   // 'chelonia/out' - selectors that send data out to the server
@@ -2718,13 +2741,19 @@ export default sbp('sbp/selectors/register', {
     // controller (KV-REVAMPED.md §4.2). When `callerSignal` is omitted,
     // we fall back to the global signal unchanged for full backwards
     // compatibility with existing call sites.
+    let cleanupFetchSignal: (() => void) | undefined
     const fetchSignal: AbortSignal = callerSignal
-      ? AbortSignal.any([this.abortController.signal, callerSignal])
+      ? (() => {
+          const composed = composeSignals([this.abortController.signal, callerSignal])
+          cleanupFetchSignal = composed._cleanup
+          return composed
+        })()
       : this.abortController.signal
 
     let response: Response
     let lastEtag: string | null = null
     let currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined
+    let recoveryGetAttempted = false
     // The `resolveData` function is tasked with computing merged data, as in
     // merging the existing stored values (after a conflict or initial fetch)
     // and new data. The return value indicates whether there should be a new
@@ -2764,10 +2793,16 @@ export default sbp('sbp/selectors/register', {
       if (headerEtag) lastEtag = headerEtag
       // When a 409/412 response provides neither an etag header nor a
       // body, the retry loop cannot recover — it would re-send
-      // if-match: '""' and loop until maxAttempts. Do a GET to recover
-      // the current etag and value so onconflict can produce a valid
-      // retry.
-      if (!headerEtag && !currentValue && (response.status === 409 || response.status === 412)) {
+      // if-match: '""' and loop until maxAttempts. Do at most one GET
+      // per set call to recover the current etag and value so
+      // onconflict can produce a valid retry.
+      if (
+        !recoveryGetAttempted &&
+        !headerEtag &&
+        !currentValue &&
+        (response.status === 409 || response.status === 412)
+      ) {
+        recoveryGetAttempted = true
         const getResp = await this.config.fetch(url, {
           headers: new Headers([
             ['authorization', buildShelterAuthorizationHeader.call(this, contractID)]
@@ -2784,6 +2819,11 @@ export default sbp('sbp/selectors/register', {
             })
           }
           headerEtag = getResp.headers.get('x-cid') || getResp.headers.get('etag')
+        } else {
+          console.warn(
+            `[kv/set] recovery GET for ${contractID}/${key} returned ` +
+            `${getResp.status}; proceeding without recovered etag/value`
+          )
         }
         if (headerEtag) lastEtag = headerEtag
       }
@@ -2810,93 +2850,97 @@ export default sbp('sbp/selectors/register', {
       return true
     }
 
-    for (;;) {
-      if (data !== undefined) {
-        const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
-          contractID,
-          innerSigningKeyId,
-          encryptionKeyId,
-          signingKeyId,
-          data: data!,
-          meta: key
-        })
-        response = await this.config.fetch(url, {
-          headers: new Headers([
-            ['authorization', buildShelterAuthorizationHeader.call(this, contractID)],
-            ['if-match', ifMatch || '""']
-          ]),
-          method: 'POST',
-          body: JSON.stringify(serializedData),
-          signal: fetchSignal
-        })
-      } else {
-        if (!hasOnconflict) {
-          throw TypeError('onconflict required with empty data')
-        }
-        // If no initial data provided, perform a GET `fetch` to get the current
-        // data and CID. Then, `onconflict` will be used to merge the current
-        // and new data.
-        response = await this.config.fetch(url, {
-          headers: new Headers([
-            ['authorization', buildShelterAuthorizationHeader.call(this, contractID)]
-          ]),
-          signal: fetchSignal
-        })
-
-        // This is only for the initial case; the logic is replicated below
-        // for subsequent iterations that require conflic resolution.
-        if (await resolveData()) {
-          continue
+    try {
+      for (;;) {
+        if (data !== undefined) {
+          const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
+            contractID,
+            innerSigningKeyId,
+            encryptionKeyId,
+            signingKeyId,
+            data: data!,
+            meta: key
+          })
+          response = await this.config.fetch(url, {
+            headers: new Headers([
+              ['authorization', buildShelterAuthorizationHeader.call(this, contractID)],
+              ['if-match', ifMatch || '""']
+            ]),
+            method: 'POST',
+            body: JSON.stringify(serializedData),
+            signal: fetchSignal
+          })
         } else {
-          break
-        }
-      }
-      if (!response.ok) {
-        // Rationale: 409 and 412 indicate conflict resolution is needed
-        if (response.status === 409 || response.status === 412) {
-          if (--maxAttempts <= 0) {
-            await resolveData(false)
-            let currentData: JSONType | undefined
-            try {
-              currentData = currentValue?.data
-            } catch {}
-            throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
-              cause: { currentData, etag: lastEtag ?? null }
-            })
-          }
-          // Honour caller-side abort at every retry boundary so a
-          // cancellation that lands between requests is respected
-          // without waiting for the next fetch.
-          if (callerSignal?.aborted) {
-            throw callerSignal.reason instanceof Error
-              ? callerSignal.reason
-              : new DOMException('Aborted', 'AbortError')
-          }
           if (!hasOnconflict) {
-            // Can't resolve automatically if there's no conflict handler
-            throw new Error(
-              `kv/set failed with status ${response.status} and no onconflict handler was provided`
-            )
+            throw TypeError('onconflict required with empty data')
           }
-          await delay(randomIntFromRange(0, 1500))
+          // If no initial data provided, perform a GET `fetch` to get the current
+          // data and CID. Then, `onconflict` will be used to merge the current
+          // and new data.
+          response = await this.config.fetch(url, {
+            headers: new Headers([
+              ['authorization', buildShelterAuthorizationHeader.call(this, contractID)]
+            ]),
+            signal: fetchSignal
+          })
+
+          // This is only for the initial case; the logic is replicated below
+          // for subsequent iterations that require conflic resolution.
           if (await resolveData()) {
             continue
           } else {
             break
           }
         }
-        throw new ChelErrorUnexpectedHttpResponseCode(
-          'kv/set invalid response status: ' + response.status
-        )
+        if (!response.ok) {
+          // Rationale: 409 and 412 indicate conflict resolution is needed
+          if (response.status === 409 || response.status === 412) {
+            if (--maxAttempts <= 0) {
+              await resolveData(false)
+              let currentData: JSONType | undefined
+              try {
+                currentData = currentValue?.data
+              } catch {}
+              throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
+                cause: { currentData, etag: lastEtag ?? null }
+              })
+            }
+            // Honour caller-side abort at every retry boundary so a
+            // cancellation that lands between requests is respected
+            // without waiting for the next fetch.
+            if (callerSignal?.aborted) {
+              throw callerSignal.reason instanceof Error
+                ? callerSignal.reason
+                : new DOMException('Aborted', 'AbortError')
+            }
+            if (!hasOnconflict) {
+              // Can't resolve automatically if there's no conflict handler
+              throw new Error(
+                `kv/set failed with status ${response.status} and no onconflict handler was provided`
+              )
+            }
+            await delay(randomIntFromRange(0, 1500))
+            if (await resolveData()) {
+              continue
+            } else {
+              break
+            }
+          }
+          throw new ChelErrorUnexpectedHttpResponseCode(
+            'kv/set invalid response status: ' + response.status
+          )
+        }
+        // Successful write: capture the server-issued etag (x-cid /
+        // etag header) so the resolved value reflects the freshest
+        // version. See KV-REVAMPED.md §4.2 step 6.
+        const successEtag = response.headers.get('x-cid') || response.headers.get('etag')
+        if (successEtag) lastEtag = successEtag
+        break
       }
-      // Successful write: capture the server-issued etag (x-cid /
-      // etag header) so the resolved value reflects the freshest
-      // version. See KV-REVAMPED.md §4.2 step 6.
-      const successEtag = response.headers.get('x-cid') || response.headers.get('etag')
-      if (successEtag) lastEtag = successEtag
-      break
+      return { etag: lastEtag }
+    } finally {
+      cleanupFetchSignal?.()
     }
-    return { etag: lastEtag }
   },
   'chelonia/kv/get': async function (this: CheloniaContext, contractID: string, key: string): Promise<ChelKvGetResult | null> {
     const response = await this.config.fetch(
@@ -2966,6 +3010,31 @@ export default sbp('sbp/selectors/register', {
     })
   }
 }) as string[]
+
+type ComposedAbortSignal = AbortSignal & { _cleanup?: () => void }
+
+function composeSignals (signals: AbortSignal[]): ComposedAbortSignal {
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any(signals) as ComposedAbortSignal
+  const controller = new AbortController()
+  const cleanupFns: Array<() => void> = []
+  const abort = (signal: AbortSignal): void => {
+    if (!controller.signal.aborted) controller.abort(signal.reason)
+  }
+  for (const signal of signals) {
+    if (signal.aborted) {
+      abort(signal)
+      break
+    }
+    const handler = () => abort(signal)
+    signal.addEventListener('abort', handler, { once: true })
+    cleanupFns.push(() => signal.removeEventListener('abort', handler))
+  }
+  const composed = controller.signal as ComposedAbortSignal
+  composed._cleanup = () => {
+    for (const cleanup of cleanupFns.splice(0)) cleanup()
+  }
+  return composed
+}
 
 function contractNameFromAction (action: string): string {
   const regexResult = ACTION_REGEX.exec(action)

@@ -234,7 +234,7 @@ export type KvSlotDefinition = {
    */
   schema?: { parse: (value: unknown) => JSONType };
   match?: (contractID: string, contractState: object, rootState: object) => boolean;
-  encryptionKeyName?: string;
+  encryptionKeyName?: string | null;
   signingKeyName?: string;
   // Optional default reducer factory; enables the `value`-form of
   // `chelonia/kv/update`. See KV-REVAMPED.md §4.1 / §4.2.
@@ -269,7 +269,7 @@ export type SlotDefinition = {
   resolvedDefault: JSONType | undefined;
   schema?: { parse: (value: unknown) => JSONType };
   match?: (contractID: string, contractState: object, rootState: object) => boolean;
-  encryptionKeyName: string;
+  encryptionKeyName: string | null;
   signingKeyName: string;
   defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
   autoSubscribe: boolean;

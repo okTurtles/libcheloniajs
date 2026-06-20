@@ -4,6 +4,16 @@
 import sbp from '@sbp/sbp';
 import { cloneDeep } from 'turtledash';
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED, CONTRACTS_MODIFIED, CONTRACTS_MODIFIED_READY, EVENT_HANDLED, EVENT_HANDLED_READY } from '../events.mjs';
+const cloneKvEntry = (entry) => {
+    // `value` is the only user-controlled JSON payload in a mirror entry. Copy
+    // the bookkeeping fields shallowly so a seeded slot's explicit
+    // `value: undefined` survives; cloneDeep drops undefined-valued properties
+    // and throws when called directly on undefined.
+    return { ...entry, value: entry.value === undefined ? undefined : cloneDeep(entry.value) };
+};
+const cloneKvEntries = (entries) => {
+    return Object.fromEntries(Object.entries(entries).map(([key, entry]) => [key, cloneKvEntry(entry)]));
+};
 export default sbp('sbp/selectors/register', {
     // This selector sets up event listeners on EVENT_HANDLED and CONTRACTS_MODIFIED
     // to keep Chelonia state in sync with some external state (e.g., Vuex).
@@ -28,6 +38,31 @@ export default sbp('sbp/selectors/register', {
     'chelonia/externalStateSetup': function ({ stateSelector, reactiveSet = Reflect.set.bind(Reflect), reactiveDel = Reflect.deleteProperty.bind(Reflect) }) {
         this.stateSelector = stateSelector;
         const handles = [];
+        const projectKvUpdate = async (contractID, key) => {
+            const state = await sbp('chelonia/contract/fullState', contractID, key);
+            const externalState = sbp(stateSelector);
+            if (state.kvState) {
+                if (!externalState._kv) {
+                    reactiveSet(externalState, '_kv', Object.create(null));
+                }
+                if (key === undefined) {
+                    reactiveSet(externalState._kv, contractID, cloneKvEntries(state.kvState));
+                    return;
+                }
+                if (!externalState._kv[contractID]) {
+                    reactiveSet(externalState._kv, contractID, Object.create(null));
+                }
+                if (state.kvEntry) {
+                    reactiveSet(externalState._kv[contractID], key, cloneKvEntry(state.kvEntry));
+                }
+                else {
+                    reactiveDel(externalState._kv[contractID], key);
+                }
+            }
+            else if (externalState._kv) {
+                reactiveDel(externalState._kv, contractID);
+            }
+        };
         handles.push(sbp('okTurtles.events/on', EVENT_HANDLED, (contractID, message) => {
             // The purpose of putting things immediately into a queue is to have
             // state mutations happen in a well-defined order. This is done for two
@@ -84,12 +119,18 @@ export default sbp('sbp/selectors/register', {
                     }
                 });
                 for (const contractID of added) {
-                    const { contractState, cheloniaState } = states[contractID];
+                    const { contractState, cheloniaState, kvState } = states[contractID];
                     if (cheloniaState) {
                         reactiveSet(externalState.contracts, contractID, cloneDeep(cheloniaState));
                     }
                     if (contractState) {
                         reactiveSet(externalState, contractID, cloneDeep(contractState));
+                    }
+                    if (kvState) {
+                        if (!externalState._kv) {
+                            reactiveSet(externalState, '_kv', Object.create(null));
+                        }
+                        reactiveSet(externalState._kv, contractID, cloneKvEntries(kvState));
                     }
                 }
                 sbp('okTurtles.events/emit', CONTRACTS_MODIFIED_READY, subscriptionSet, {
@@ -98,40 +139,19 @@ export default sbp('sbp/selectors/register', {
                 });
             });
         }));
-        // Mirror `rootState._kv[contractID]` into the external store on every
-        // KV value change. KV updates don't fire EVENT_HANDLED (on-chain only).
-        // `fullState` now returns a `kvState` field sourced from `rootState._kv[contractID]`.
-        handles.push(sbp('okTurtles.events/on', CHELONIA_KV_UPDATED, ({ contractID }) => {
+        // Mirror changed KV entries into the external store. KV updates don't fire
+        // EVENT_HANDLED (on-chain only), and the event payload carries the changed
+        // key so we can project one mirror entry instead of cloning the full subtree.
+        handles.push(sbp('okTurtles.events/on', CHELONIA_KV_UPDATED, ({ contractID, key }) => {
             sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
-                const { kvState } = await sbp('chelonia/contract/fullState', contractID);
-                const externalState = sbp(stateSelector);
-                if (kvState) {
-                    if (!externalState._kv) {
-                        reactiveSet(externalState, '_kv', Object.create(null));
-                    }
-                    reactiveSet(externalState._kv, contractID, cloneDeep(kvState));
-                }
-                else if (externalState._kv) {
-                    reactiveDel(externalState._kv, contractID);
-                }
+                await projectKvUpdate(contractID, key);
             });
         }));
         // Re-project on status changes (e.g. 'loaded' → 'error') where the value
         // is unchanged but status / lastError need to be visible in the store.
-        // Uses the same `kvState` field from `fullState`.
-        handles.push(sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, ({ contractID }) => {
+        handles.push(sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, ({ contractID, key }) => {
             sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
-                const { kvState } = await sbp('chelonia/contract/fullState', contractID);
-                const externalState = sbp(stateSelector);
-                if (kvState) {
-                    if (!externalState._kv) {
-                        reactiveSet(externalState, '_kv', Object.create(null));
-                    }
-                    reactiveSet(externalState._kv, contractID, cloneDeep(kvState));
-                }
-                else if (externalState._kv) {
-                    reactiveDel(externalState._kv, contractID);
-                }
+                await projectKvUpdate(contractID, key);
             });
         }));
         return () => {

@@ -399,9 +399,11 @@ Config keys (all on `KvSlotDefinition`):
 |---|---|---|
 | `contractType` | (required) | Contract manifest string or array of strings. |
 | `key` | (required) | KV key name. |
-| `defaultValue` | `undefined` | Value returned by `read` before the slot is loaded. |
-| `schema` | none | Object with a synchronous `.parse(value)` method (e.g. Zod schema). |
+| `defaultValue` | `undefined` | Value returned by `read` before the slot is loaded or while the slot is in `'error'`. |
+| `schema` | none | Object with a synchronous `.parse(value)` method (e.g. Zod schema). `null` / `undefined` are rejected anywhere in the value for schema-backed and schemaless slots; model optional fields by omission or tagged unions rather than `T \| null`. |
 | `match` | `() => true` | Predicate `(cID, contractState, rootState) => boolean`. |
+| `encryptionKeyName` | `'cek'` | Contract key name used for encryption. Missing named keys reject slot writes; set `null` explicitly to write plaintext. |
+| `signingKeyName` | `'csk'` | Contract key name used for signing. Missing named keys reject slot writes. |
 | `autoSubscribe` | `true` | Whether to subscribe to pubsub for this slot automatically. |
 | `autoLoad` | `'on-sync'` | `'on-sync'` fetches on contract sync; `'on-demand'` waits for `read`/`sync`; `'never'` skips. |
 | `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect. |
@@ -413,7 +415,7 @@ Public selectors:
 ```
 chelonia/kv/defineSlot        — Register or replace a slot definition
 chelonia/kv/update            — Write via updater or value; retries on conflict
-chelonia/kv/read              — Synchronous mirror read (returns default if unloaded)
+chelonia/kv/read              — Synchronous mirror read (returns default if unloaded/error)
 chelonia/kv/sync              — Force-fetch slot(s) from the server
 chelonia/kv/clear             — Reset slot to defaultValue (writes null to server)
 chelonia/kv/status            — KvLoadStatus of a slot or aggregate for a contract
@@ -445,16 +447,18 @@ is deleted on first match. Entries auto-expire after `KV_ECHO_TTL_MS`
 (128, evict earliest-expiry first) is a hard backstop only. A non-self
 frame that arrives while a conflict-resolved write's echo is still
 pending forces an authoritative `chelonia/kv/get` instead of applying the
-frame last-write-wins. An echo whose CID has expired or was evicted
-surfaces as `reason: 'remote'`.
+frame last-write-wins. Pubsub frames without `cid` preserve the current
+mirror etag and surface as `reason: 'remote'`. An echo whose CID has
+expired or was evicted surfaces as `reason: 'remote'`.
 
 Consumer-visible leakage: `rootState._kv` is a separate subtree from
 `rootState.contracts`, but it is projected into external stores by
 `chelonia/externalStateSetup` (alongside `rootState.contracts`).
 Listeners on `CHELONIA_KV_UPDATED` / `CHELONIA_KV_STATUS_CHANGED` and
-the Vuex-style mirror receive the full `_kv` subtree. Treat it as
-in-band with the rest of the bookkeeping data: redact accordingly in
-consumer code if needed.
+the Vuex-style mirror receive the changed `_kv[contractID][key]` entry
+for slot updates, while contract removal drops the full per-contract KV
+subtree. Treat it as in-band with the rest of the bookkeeping data:
+redact accordingly in consumer code if needed.
 
 ### Contract State Structure
 

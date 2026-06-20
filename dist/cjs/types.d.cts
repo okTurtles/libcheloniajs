@@ -169,7 +169,7 @@ export type KvSlotDefinition = {
         parse: (value: unknown) => JSONType;
     };
     match?: (contractID: string, contractState: object, rootState: object) => boolean;
-    encryptionKeyName?: string;
+    encryptionKeyName?: string | null;
     signingKeyName?: string;
     defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
     autoSubscribe?: boolean;
@@ -192,7 +192,7 @@ export type SlotDefinition = {
         parse: (value: unknown) => JSONType;
     };
     match?: (contractID: string, contractState: object, rootState: object) => boolean;
-    encryptionKeyName: string;
+    encryptionKeyName: string | null;
     signingKeyName: string;
     defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
     autoSubscribe: boolean;

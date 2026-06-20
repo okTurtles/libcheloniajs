@@ -33,6 +33,7 @@ import './journal.test.mjs';
 // `chelonia` SBP domain). Everything after this point cannot register
 // `chelonia/*` selectors.
 import './journal-integration.test.mjs';
+import './chelonia-kv-set.test.mjs';
 import './persistent-actions.test.mjs';
 import './pubsub/index.test.mjs';
 import './reingestTracker.test.mjs';
