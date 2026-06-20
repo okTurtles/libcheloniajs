@@ -315,7 +315,7 @@ in `src/events.ts`; the most commonly observed:
 | `PERSISTENT_ACTION_SUCCESS` | `src/events.ts` | A persistent action resolved. |
 | `PERSISTENT_ACTION_TOTAL_FAILURE` | `src/events.ts` | A persistent action gave up after `maxAttempts`. |
 | `CHELONIA_KV_UPDATED` | `src/events.ts` | After a slot's mirror value changes (load, remote push, local write, reconnect). Payload is a flat object with the same fields as `KvUpdateCtx` plus `value`: `{ contractID, contractType, key, value, previousValue, reason, etag }`. |
-| `CHELONIA_KV_STATUS_CHANGED` | `src/events.ts` | A slot's `KvLoadStatus` transitioned. Payload: `{ contractID, contractType, key, status, previousStatus, lastError? }`. |
+| `CHELONIA_KV_STATUS_CHANGED` | `src/events.ts` | A slot's `KvLoadStatus` transitioned. Payload: `{ contractID, contractType, key, status, previousStatus, lastError }`; `lastError` is `{ name, message }` when entering or remaining in error and `null` when cleared. Conflict-recovery frames can trigger an authoritative re-fetch, so consumers may observe a transient `loading` transition even when no user-initiated fetch occurred. |
 | `CHELONIA_KV_VALIDATION_ERROR` | `src/events.ts` | A load/reconnect/remote/re-validation value failed `schema.parse`; local reducer-output validation rejects `chelonia/kv/update` with `ChelErrorKvValidation` instead of emitting this event. Payload: `{ contractID, contractType, key, error, reason }` where `reason ∈ { 'load', 'remote', 'reconnect', 're-validate' }`. |
 
 Subscribe with:

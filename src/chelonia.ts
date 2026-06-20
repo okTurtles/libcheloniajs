@@ -737,10 +737,10 @@ export default sbp('sbp/selectors/register', {
     // along with everything else. Slot definitions (`kvSlots`) and the
     // per-manifest cache (`defContractKvByManifest`) survive reset
     // because they are code-level state; the five per-subscription maps
-    // are cleared in lock-step with `subscriptionSet` below. In-flight
-    // KV writes were already drained via `chelonia/kv/_waitInFlight`
-    // above, so clearing `kvLocalEchoCIDs` / `kvPendingWrites` here
-    // cannot strand a continuation mid-write.
+    // are cleared alongside `subscriptionSet` below. In-flight KV writes
+    // were already drained via `chelonia/kv/_waitInFlight` above, so
+    // clearing `kvLocalEchoCIDs` / `kvPendingWrites` here cannot strand a
+    // continuation mid-write.
     this.config.reactiveSet(rootState, '_kv', Object.create(null))
     this.kvSlotsByContractID.clear()
     this.kvActiveFilters.clear()

@@ -363,7 +363,7 @@ function setSlotStatus (
     key,
     status,
     previousStatus,
-    ...(lastError ? { lastError } : {})
+    ...(lastError ? { lastError } : { lastError: null })
   })
 }
 
@@ -453,17 +453,11 @@ function recordEchoCID (
     ctx.kvLocalEchoCIDs.set(echoKey, cids)
   }
   cids.set(cid, { expiry: now + KV_ECHO_TTL_MS, fromConflict })
-  while (cids.size > KV_ECHO_CID_MAX) {
-    let earliestCID: string | undefined
-    let earliestExpiry = Infinity
-    for (const [candidateCID, entry] of cids) {
-      if (entry.expiry < earliestExpiry) {
-        earliestCID = candidateCID
-        earliestExpiry = entry.expiry
-      }
-    }
-    if (earliestCID === undefined) break
-    cids.delete(earliestCID)
+  if (cids.size > KV_ECHO_CID_MAX) {
+    const targets = Array.from(cids.entries())
+      .sort((a, b) => a[1].expiry - b[1].expiry)
+      .slice(0, cids.size - KV_ECHO_CID_MAX)
+    for (const [tCID] of targets) cids.delete(tCID)
   }
 }
 
@@ -1334,7 +1328,7 @@ export default (sbp('sbp/selectors/register', {
     queueFilterFlush(this, contractID)
     this.kvSlotsByContractID.delete(contractID)
     this.kvActiveFilters.delete(contractID)
-    this.kvLocalEchoCIDs.forEach((_fifo, key) => {
+    this.kvLocalEchoCIDs.forEach((_cids, key) => {
       if (key.startsWith(`${contractID}::`)) {
         this.kvLocalEchoCIDs.delete(key)
       }
@@ -1370,7 +1364,7 @@ export default (sbp('sbp/selectors/register', {
     this: CheloniaContext
   ): Promise<unknown> {
     const ids = new Set<string>(this.kvSlotsByContractID.keys())
-    this.kvLocalEchoCIDs.forEach((_fifo, echoKey) => {
+    this.kvLocalEchoCIDs.forEach((_cids, echoKey) => {
       const idx = echoKey.indexOf(KV_KEY_SEPARATOR)
       if (idx > 0) ids.add(echoKey.slice(0, idx))
     })

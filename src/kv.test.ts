@@ -921,12 +921,19 @@ describe('KV slot API', () => {
   // -----------------------------------------------------------------------
   // 22
   // -----------------------------------------------------------------------
-  it('22: aggregate sync loads all slots', async () => {
+  it('22: aggregate sync loads all matching slots through the contract queue', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'sa', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
     })
     sbp('chelonia/kv/defineSlot', {
       key: 'sb', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    sbp('chelonia/kv/defineSlot', {
+      key: 'sx',
+      contractType: CTYPE,
+      defaultValue: { x: 0 },
+      schema: objectSchema,
+      match: () => false
     })
     const c = 'cid-22'
     await setupContract(c)
@@ -936,6 +943,43 @@ describe('KV slot API', () => {
     await sbp('chelonia/kv/sync', c)
     assert.ok(keys.includes('sa'))
     assert.ok(keys.includes('sb'))
+    assert.ok(!keys.includes('sx'))
+
+    const lanes = new Map<string, Promise<unknown>>()
+    stubQueueInvocation = (cID, fn) => {
+      const prev = lanes.get(cID) ?? Promise.resolve()
+      const next = prev.then(() => runQueued(fn))
+      lanes.set(cID, next.catch(() => {}))
+      return next
+    }
+
+    let releaseSet!: () => void
+    const setGate = new Promise<void>((resolve) => { releaseSet = resolve })
+    stubSet = async () => {
+      await setGate
+      return { etag: 'post-write' }
+    }
+    const observedEtags: Array<{ key: string; etag: unknown }> = []
+    stubGet = async (_c, key) => {
+      observedEtags.push({ key, etag: rootState()._kv![c]![key]!.etag })
+      return fakeParsed({ x: 2 })
+    }
+
+    const updateP = sbp('chelonia/kv/update', {
+      contractID: c,
+      key: 'sa',
+      updater: (prev: JSONType | undefined) => ({
+        x: ((prev as { x: number } | undefined)?.x ?? 0) + 1
+      })
+    })
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    const syncP = sbp('chelonia/kv/sync', c)
+    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    assert.strictEqual(observedEtags.length, 0)
+
+    releaseSet()
+    await Promise.all([updateP, syncP])
+    assert.ok(observedEtags.some((entry) => entry.key === 'sa' && entry.etag === 'post-write'))
   })
 
   // -----------------------------------------------------------------------
@@ -1904,6 +1948,16 @@ describe('KV slot API', () => {
     assert.strictEqual(entry.lastError?.name, 'Error')
     assert.strictEqual(entry.lastError?.message, 'decrypt failed')
     assert.ok(log.some((e) => e.type === CHELONIA_KV_VALIDATION_ERROR))
+
+    log.length = 0
+    stubGet = async () => fakeParsed({ x: 3 })
+    await sbp('chelonia/kv/sync', c, 'decLoad')
+    const statusEvents = log.filter((e) =>
+      e.type === CHELONIA_KV_STATUS_CHANGED &&
+      (e.payload as { key: string }).key === 'decLoad'
+    )
+    const lastStatus = statusEvents[statusEvents.length - 1].payload as { lastError: unknown }
+    assert.strictEqual(lastStatus.lastError, null)
     offs.forEach((off) => off())
   })
 
