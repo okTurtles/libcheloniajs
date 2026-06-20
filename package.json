@@ -260,7 +260,6 @@
     "@apeleghq/multipart-parser": "1.0.18",
     "@apeleghq/rfc8188": "1.0.8",
     "@chelonia/crypto": "1.0.1",
-    "@chelonia/lib": "file:chelonia-lib-1.4.4.tgz",
     "@chelonia/serdes": "1.0.1",
     "@sbp/okturtles.data": "0.1.7",
     "@sbp/okturtles.eventqueue": "1.2.1",
