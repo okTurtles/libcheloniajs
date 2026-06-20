@@ -313,7 +313,10 @@ export type CheloniaContext = {
     kvSlotsByContractID: Map<string, Map<string, SlotDefinition>>;
     kvActiveFilters: Map<string, Set<string>>;
     kvFilterDirty: Set<string>;
-    kvLocalEchoCIDs: Map<string, Map<string, number>>;
+    kvLocalEchoCIDs: Map<string, Map<string, {
+        expiry: number;
+        fromConflict: boolean;
+    }>>;
     kvPendingWrites: Map<string, number>;
     defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
 };

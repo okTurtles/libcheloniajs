@@ -437,14 +437,16 @@ unchanged. These additions are backward-compatible.
 
 Self-echo suppression uses a time-decaying map of server-issued data
 CIDs per `(contractID, key)` stored in `kvLocalEchoCIDs` (`Map<string,
-Map<string, number>>`, where the inner value is an expiry timestamp).
-The CID is returned from `chelonia/kv/set` as `etag` and also appears on
-pubsub KV frames as `cid`; matching, non-expired frames are dropped and
-the entry is deleted on first match. Entries auto-expire after
-`KV_ECHO_TTL_MS` (300 s) and are purged lazily; a per-bucket cap of
-`KV_ECHO_CID_MAX` (128, evict earliest-expiry first) is a hard backstop
-only. An echo whose CID has expired or was evicted surfaces as
-`reason: 'remote'`.
+Map<string, { expiry: number; fromConflict: boolean }>>`). The CID is
+returned from `chelonia/kv/set` as `etag` and also appears on pubsub KV
+frames as `cid`; matching, non-expired frames are dropped and the entry
+is deleted on first match. Entries auto-expire after `KV_ECHO_TTL_MS`
+(300 s) and are purged lazily; a per-bucket cap of `KV_ECHO_CID_MAX`
+(128, evict earliest-expiry first) is a hard backstop only. A non-self
+frame that arrives while a conflict-resolved write's echo is still
+pending forces an authoritative `chelonia/kv/get` instead of applying the
+frame last-write-wins. An echo whose CID has expired or was evicted
+surfaces as `reason: 'remote'`.
 
 Consumer-visible leakage: `rootState._kv` is a separate subtree from
 `rootState.contracts`, but it is projected into external stores by

@@ -26,7 +26,7 @@ class KvNoopAbort extends Error {
 // Checked on the catch side instead of `instanceof`.
 ;
 KvNoopAbort.prototype[KV_NOOP_ABORT_SYMBOL] = true;
-let nowMs = () => Date.now();
+let nowMs = () => performance.now();
 const registryKey = (contractType, key) => `${contractType}${KV_KEY_SEPARATOR}${key}`;
 // Resolve a public `KvSlotDefinition` into its internal `SlotDefinition`
 // form. `contractType` arrays are flattened by the caller; this helper
@@ -316,15 +316,15 @@ function purgeExpiredEchoCIDs(ctx, echoKey, now = nowMs()) {
     const cids = ctx.kvLocalEchoCIDs.get(echoKey);
     if (!cids)
         return;
-    for (const [cid, expiresAt] of cids) {
-        if (expiresAt <= now)
+    for (const [cid, entry] of cids) {
+        if (entry.expiry <= now)
             cids.delete(cid);
     }
     if (cids.size === 0)
         ctx.kvLocalEchoCIDs.delete(echoKey);
 }
 // Track a server-issued data CID for self-echo suppression.
-function recordEchoCID(ctx, contractID, key, cid) {
+function recordEchoCID(ctx, contractID, key, cid, fromConflict) {
     if (typeof cid !== 'string' || cid.length === 0)
         return;
     const echoKey = `${contractID}${KV_KEY_SEPARATOR}${key}`;
@@ -335,14 +335,14 @@ function recordEchoCID(ctx, contractID, key, cid) {
         cids = new Map();
         ctx.kvLocalEchoCIDs.set(echoKey, cids);
     }
-    cids.set(cid, now + KV_ECHO_TTL_MS);
+    cids.set(cid, { expiry: now + KV_ECHO_TTL_MS, fromConflict });
     while (cids.size > KV_ECHO_CID_MAX) {
         let earliestCID;
         let earliestExpiry = Infinity;
-        for (const [candidateCID, expiresAt] of cids) {
-            if (expiresAt < earliestExpiry) {
+        for (const [candidateCID, entry] of cids) {
+            if (entry.expiry < earliestExpiry) {
                 earliestCID = candidateCID;
-                earliestExpiry = expiresAt;
+                earliestExpiry = entry.expiry;
             }
         }
         if (earliestCID === undefined)
@@ -1202,12 +1202,29 @@ export default sbp('sbp/selectors/register', {
             const now = nowMs();
             purgeExpiredEchoCIDs(this, echoKey, now);
             const pending = this.kvLocalEchoCIDs.get(echoKey);
-            const expiresAt = pending?.get(cid);
-            if (expiresAt !== undefined && expiresAt > now) {
+            const pendingEntry = pending?.get(cid);
+            if (pendingEntry && pendingEntry.expiry > now) {
                 pending.delete(cid);
                 if (pending.size === 0)
                     this.kvLocalEchoCIDs.delete(echoKey);
                 return Promise.resolve();
+            }
+            const bucket = this.kvLocalEchoCIDs.get(echoKey);
+            if (bucket) {
+                let hasPendingConflict = false;
+                for (const entry of bucket.values()) {
+                    if (entry.fromConflict) {
+                        hasPendingConflict = true;
+                        break;
+                    }
+                }
+                if (hasPendingConflict) {
+                    return sbp('chelonia/kv/_loadSlotNow', {
+                        contractID,
+                        slot,
+                        reason: KV_UPDATE_REASON.REMOTE
+                    });
+                }
             }
         }
         let unwrapped;
@@ -1471,9 +1488,11 @@ export default sbp('sbp/selectors/register', {
             throwIfSignalAborted(signal);
             let lastCurrentData;
             let lastEtag;
+            let sawConflict = false;
             const onconflict = async (conflictArgs) => {
                 const { etag } = conflictArgs;
                 lastEtag = etag;
+                sawConflict = true;
                 throwIfSignalAborted(signal);
                 let currentData;
                 try {
@@ -1615,7 +1634,7 @@ export default sbp('sbp/selectors/register', {
                 // rather than misleading the caller with an unstored value.
                 return undefined;
             }
-            recordEchoCID(this, contractID, key, setResult.etag);
+            recordEchoCID(this, contractID, key, setResult.etag, sawConflict);
             this.config.reactiveSet(entryAfter, 'value', nextValue);
             this.config.reactiveSet(entryAfter, 'etag', setResult.etag);
             sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
@@ -1741,8 +1760,10 @@ export default sbp('sbp/selectors/register', {
         // Track on the pending-writes counter (see `update` / `_waitInFlight`).
         incrementPending(this, contractID);
         let lastEtag;
+        let sawConflict = false;
         const onconflict = async ({ etag }) => {
             lastEtag = etag;
+            sawConflict = true;
             throwIfSignalAborted(signal);
             return [null, typeof etag === 'string' ? etag : undefined];
         };
@@ -1787,7 +1808,7 @@ export default sbp('sbp/selectors/register', {
             const defaultClone = slot.resolvedDefault !== undefined
                 ? cloneDeep(slot.resolvedDefault)
                 : undefined;
-            recordEchoCID(this, contractID, key, setResult.etag);
+            recordEchoCID(this, contractID, key, setResult.etag, sawConflict);
             this.config.reactiveSet(entry, 'value', defaultClone);
             this.config.reactiveSet(entry, 'etag', setResult.etag);
             sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {

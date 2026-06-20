@@ -246,7 +246,9 @@ sbp('sbp/selectors/register', {
 
   // Test helper: seed an echo CID for a contract with no slot index.
   'chelonia/test/seedEchoCID': function (this: CheloniaContext, echoKey: string) {
-    this.kvLocalEchoCIDs.set(echoKey, new Map([['cid', Date.now() + KV_ECHO_TTL_MS]]))
+    this.kvLocalEchoCIDs.set(echoKey, new Map([
+      ['cid', { expiry: Date.now() + KV_ECHO_TTL_MS, fromConflict: false }]
+    ]))
   },
 
   // Test helper: inspect active filters without exposing internals publicly.
@@ -260,7 +262,7 @@ sbp('sbp/selectors/register', {
   },
 
   'chelonia/test/echoCIDExpiry': function (this: CheloniaContext, key: string, cid: string) {
-    return this.kvLocalEchoCIDs.get(key)?.get(cid)
+    return this.kvLocalEchoCIDs.get(key)?.get(cid)?.expiry
   },
 
   // Test helper: simulate removeImmediately's KV cleanup for a contract.
@@ -2322,6 +2324,154 @@ describe('KV slot API', () => {
     await sbp('chelonia/kv/_handleRemote', c, 'awaitMany', fakeParsed({ x: 2 }), 'e-local-2')
     assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 0)
     offs.forEach((off) => off())
+  })
+
+  it('63b: conflicted update forces sync for non-self remote frames', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'forceSync', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-64b'
+    await setupContract(c)
+
+    stubSet = async (_cID, _key, _data, opts) => {
+      await opts.onconflict!({ currentData: { x: 1 }, etag: 'e-remote' })
+      return { etag: 'e-local' }
+    }
+    let getCalls = 0
+    stubGet = async () => {
+      getCalls++
+      return { ...fakeParsed({ x: 2 }), etag: 'e-local' }
+    }
+    await sbp('chelonia/kv/update', {
+      contractID: c,
+      key: 'forceSync',
+      updater: (prev: JSONType | undefined) => ({
+        x: ((prev as { x: number } | undefined)?.x ?? 0) + 1
+      })
+    })
+
+    const { log, offs } = collectEvents()
+    await sbp('chelonia/kv/_handleRemote', c, 'forceSync', fakeParsed({ x: 1 }), 'e-remote')
+    assert.strictEqual(getCalls, 1)
+    assert.deepStrictEqual(rootState()._kv![c]!.forceSync.value, { x: 2 })
+    assert.strictEqual(
+      log.filter((e) =>
+        e.type === CHELONIA_KV_UPDATED &&
+        (e.payload as { reason: string }).reason === 'remote'
+      ).length,
+      1
+    )
+    offs.forEach((off) => off())
+  })
+
+  it('63c: clean update applies non-self remote frames without sync', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'cleanRemote', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-64c'
+    await setupContract(c)
+
+    let getCalls = 0
+    stubGet = async () => {
+      getCalls++
+      return { ...fakeParsed({ x: 99 }), etag: 'unused' }
+    }
+    stubSet = async () => ({ etag: 'e-local' })
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'cleanRemote', updater: () => ({ x: 1 })
+    })
+
+    await sbp('chelonia/kv/_handleRemote', c, 'cleanRemote', fakeParsed({ x: 3 }), 'e-remote')
+    assert.strictEqual(getCalls, 0)
+    assert.deepStrictEqual(rootState()._kv![c]!.cleanRemote.value, { x: 3 })
+  })
+
+  it('63d: conflicted update self-echo clears force-sync marker', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'clearMarker', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-64d'
+    await setupContract(c)
+
+    stubSet = async (_cID, _key, _data, opts) => {
+      await opts.onconflict!({ currentData: { x: 1 }, etag: 'e-remote' })
+      return { etag: 'e-local' }
+    }
+    let getCalls = 0
+    stubGet = async () => {
+      getCalls++
+      return { ...fakeParsed({ x: 99 }), etag: 'unused' }
+    }
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'clearMarker', updater: () => ({ x: 2 })
+    })
+
+    const { log, offs } = collectEvents()
+    await sbp('chelonia/kv/_handleRemote', c, 'clearMarker', fakeParsed({ x: 2 }), 'e-local')
+    assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 0)
+    assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::clearMarker`), false)
+
+    await sbp('chelonia/kv/_handleRemote', c, 'clearMarker', fakeParsed({ x: 4 }), 'e-remote')
+    assert.strictEqual(getCalls, 0)
+    assert.deepStrictEqual(rootState()._kv![c]!.clearMarker.value, { x: 4 })
+    offs.forEach((off) => off())
+  })
+
+  it('63e: conflicted clear forces sync for non-self remote frames', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'clearForce', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-64e'
+    await setupContract(c)
+
+    stubSet = async () => ({ etag: 'e-seed' })
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'clearForce', updater: () => ({ x: 9 })
+    })
+    stubSet = async (_cID, _key, _data, opts) => {
+      await opts.onconflict!({ currentData: { x: 8 }, etag: 'e-remote' })
+      return { etag: 'e-clear' }
+    }
+    let getCalls = 0
+    stubGet = async () => {
+      getCalls++
+      return { ...fakeParsed(null), etag: 'e-clear' }
+    }
+    await sbp('chelonia/kv/clear', c, 'clearForce')
+
+    await sbp('chelonia/kv/_handleRemote', c, 'clearForce', fakeParsed({ x: 8 }), 'e-remote')
+    assert.strictEqual(getCalls, 1)
+    assert.deepStrictEqual(rootState()._kv![c]!.clearForce.value, { x: 0 })
+  })
+
+  it('63f: expired conflicted echo marker does not force sync', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'expiredConflict', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-64f'
+    await setupContract(c)
+
+    let clock = 1000
+    sbp('chelonia/kv/_testSetNowMs', () => clock)
+    stubSet = async (_cID, _key, _data, opts) => {
+      await opts.onconflict!({ currentData: { x: 1 }, etag: 'e-remote' })
+      return { etag: 'e-local' }
+    }
+    let getCalls = 0
+    stubGet = async () => {
+      getCalls++
+      return { ...fakeParsed({ x: 99 }), etag: 'unused' }
+    }
+    await sbp('chelonia/kv/update', {
+      contractID: c, key: 'expiredConflict', updater: () => ({ x: 2 })
+    })
+
+    clock += KV_ECHO_TTL_MS + 1
+    await sbp('chelonia/kv/_handleRemote', c, 'expiredConflict', fakeParsed({ x: 5 }), 'e-remote')
+    assert.strictEqual(getCalls, 0)
+    assert.deepStrictEqual(rootState()._kv![c]!.expiredConflict.value, { x: 5 })
+    assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::expiredConflict`), false)
+    sbp('chelonia/kv/_testSetNowMs')
   })
 
   it('64: conflict exhaustion preserves carried server state', async () => {

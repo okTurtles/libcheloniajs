@@ -71,7 +71,7 @@ class KvNoopAbort extends Error {
 
 type KvLoadReason = Exclude<KvUpdateCtx['reason'], typeof KV_UPDATE_REASON.LOCAL>
 
-let nowMs = (): number => Date.now()
+let nowMs = (): number => performance.now()
 
 const registryKey = (contractType: string, key: string): string =>
   `${contractType}${KV_KEY_SEPARATOR}${key}`
@@ -429,8 +429,8 @@ function resolveActiveSlot (
 function purgeExpiredEchoCIDs (ctx: CheloniaContext, echoKey: string, now = nowMs()): void {
   const cids = ctx.kvLocalEchoCIDs.get(echoKey)
   if (!cids) return
-  for (const [cid, expiresAt] of cids) {
-    if (expiresAt <= now) cids.delete(cid)
+  for (const [cid, entry] of cids) {
+    if (entry.expiry <= now) cids.delete(cid)
   }
   if (cids.size === 0) ctx.kvLocalEchoCIDs.delete(echoKey)
 }
@@ -440,7 +440,8 @@ function recordEchoCID (
   ctx: CheloniaContext,
   contractID: string,
   key: string,
-  cid: string | null | undefined
+  cid: string | null | undefined,
+  fromConflict: boolean
 ): void {
   if (typeof cid !== 'string' || cid.length === 0) return
   const echoKey = `${contractID}${KV_KEY_SEPARATOR}${key}`
@@ -451,14 +452,14 @@ function recordEchoCID (
     cids = new Map()
     ctx.kvLocalEchoCIDs.set(echoKey, cids)
   }
-  cids.set(cid, now + KV_ECHO_TTL_MS)
+  cids.set(cid, { expiry: now + KV_ECHO_TTL_MS, fromConflict })
   while (cids.size > KV_ECHO_CID_MAX) {
     let earliestCID: string | undefined
     let earliestExpiry = Infinity
-    for (const [candidateCID, expiresAt] of cids) {
-      if (expiresAt < earliestExpiry) {
+    for (const [candidateCID, entry] of cids) {
+      if (entry.expiry < earliestExpiry) {
         earliestCID = candidateCID
-        earliestExpiry = expiresAt
+        earliestExpiry = entry.expiry
       }
     }
     if (earliestCID === undefined) break
@@ -1445,11 +1446,28 @@ export default (sbp('sbp/selectors/register', {
       const now = nowMs()
       purgeExpiredEchoCIDs(this, echoKey, now)
       const pending = this.kvLocalEchoCIDs.get(echoKey)
-      const expiresAt = pending?.get(cid)
-      if (expiresAt !== undefined && expiresAt > now) {
+      const pendingEntry = pending?.get(cid)
+      if (pendingEntry && pendingEntry.expiry > now) {
         pending!.delete(cid)
         if (pending!.size === 0) this.kvLocalEchoCIDs.delete(echoKey)
         return Promise.resolve()
+      }
+      const bucket = this.kvLocalEchoCIDs.get(echoKey)
+      if (bucket) {
+        let hasPendingConflict = false
+        for (const entry of bucket.values()) {
+          if (entry.fromConflict) {
+            hasPendingConflict = true
+            break
+          }
+        }
+        if (hasPendingConflict) {
+          return sbp('chelonia/kv/_loadSlotNow', {
+            contractID,
+            slot,
+            reason: KV_UPDATE_REASON.REMOTE
+          })
+        }
       }
     }
     let unwrapped: JSONType
@@ -1754,12 +1772,14 @@ export default (sbp('sbp/selectors/register', {
       throwIfSignalAborted(signal)
       let lastCurrentData: JSONType | undefined
       let lastEtag: string | null | undefined
+      let sawConflict = false
       const onconflict = async (conflictArgs: {
         currentData: JSONType | undefined;
         etag: string | null | undefined;
       }): Promise<[JSONType, string | undefined]> => {
         const { etag } = conflictArgs
         lastEtag = etag
+        sawConflict = true
         throwIfSignalAborted(signal)
         let currentData: JSONType | undefined
         try {
@@ -1917,7 +1937,7 @@ export default (sbp('sbp/selectors/register', {
         // rather than misleading the caller with an unstored value.
         return undefined
       }
-      recordEchoCID(this, contractID, key, setResult.etag)
+      recordEchoCID(this, contractID, key, setResult.etag, sawConflict)
       this.config.reactiveSet(entryAfter, 'value', nextValue)
       this.config.reactiveSet(entryAfter, 'etag', setResult.etag)
       sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
@@ -2066,6 +2086,7 @@ export default (sbp('sbp/selectors/register', {
     // Track on the pending-writes counter (see `update` / `_waitInFlight`).
     incrementPending(this, contractID)
     let lastEtag: string | null | undefined
+    let sawConflict = false
     const onconflict = async ({
       etag
     }: {
@@ -2073,6 +2094,7 @@ export default (sbp('sbp/selectors/register', {
       etag?: string | null;
     }): Promise<[JSONType, string | undefined]> => {
       lastEtag = etag
+      sawConflict = true
       throwIfSignalAborted(signal)
       return [null, typeof etag === 'string' ? etag : undefined] as [JSONType, string | undefined]
     }
@@ -2124,7 +2146,7 @@ export default (sbp('sbp/selectors/register', {
       const defaultClone = slot.resolvedDefault !== undefined
         ? cloneDeep(slot.resolvedDefault)
         : undefined
-      recordEchoCID(this, contractID, key, setResult.etag)
+      recordEchoCID(this, contractID, key, setResult.etag, sawConflict)
       this.config.reactiveSet(entry, 'value', defaultClone)
       this.config.reactiveSet(entry, 'etag', setResult.etag)
       sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
