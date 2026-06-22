@@ -188,4 +188,44 @@ describe('chelonia/kv/set', () => {
 
     assert.strictEqual(removed, 1)
   })
+
+  it('returns null etag when a retry succeeds without etag headers', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    let calls = 0
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async (_url: string, opts?: { method?: string }) => {
+        calls++
+        if (opts?.method === 'POST' && calls === 1) {
+          return new Response('', { status: 412, headers: { etag: 'stale-etag' } })
+        }
+        return new Response('', { status: 200 })
+      }
+    } as Partial<CheloniaConfig>)
+
+    const result = await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+      signingKeyId,
+      onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, 'stale-etag']
+    }) as { etag: string | null }
+
+    assert.deepStrictEqual(result, { etag: null })
+  })
+
+  it('throws max-attempts when diagnostic conflict parsing fails', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async () => new Response('not json', { status: 412, headers: { etag: 'etag-1' } })
+    } as Partial<CheloniaConfig>)
+
+    await assert.rejects(
+      () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+        signingKeyId,
+        maxAttempts: 1,
+        onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, 'etag-1']
+      }),
+      (e: unknown) => e instanceof ChelErrorKvMaxAttempts &&
+        (e as { cause?: { etag?: string | null } }).cause?.etag === 'etag-1'
+    )
+  })
 })

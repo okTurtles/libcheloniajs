@@ -744,13 +744,6 @@ export default sbp('sbp/selectors/register', {
     this.config.reactiveSet(rootState, '_kv', Object.create(null))
     this.kvSlotsByContractID.clear()
     this.kvActiveFilters.clear()
-    if (sbp('sbp/selectors/fn', 'chelonia/kv/_flushDirtyFilters')) {
-      try {
-        await sbp('chelonia/kv/_flushDirtyFilters')
-      } catch (e) {
-        console.warn('[chelonia/reset] KV filter flush failed during reset', e)
-      }
-    }
     this.kvFilterDirty.clear()
     this.kvLocalEchoCIDs.clear()
     this.kvPendingWrites.clear()
@@ -1177,6 +1170,8 @@ export default sbp('sbp/selectors/register', {
             )
             return
           }
+          const kvSlotHandler = sbp('sbp/selectors/fn', 'chelonia/kv/_handleRemote')
+          if (!legacyKvHandler && !kvSlotHandler) return
           sbp('chelonia/queueInvocation', msg.channelID, async () => {
             // Share one lazy parsed wrapper between the legacy callback and the
             // slot layer. If either consumer forces `.data`, the decoded value
@@ -1203,7 +1198,7 @@ export default sbp('sbp/selectors/register', {
                 )
               }
             }
-            if (sbp('sbp/selectors/fn', 'chelonia/kv/_handleRemote')) {
+            if (kvSlotHandler) {
               try {
                 await sbp('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed, msg.cid)
               } catch (e) {
@@ -2059,7 +2054,8 @@ export default sbp('sbp/selectors/register', {
             {
               contractState: rootState[contractID],
               cheloniaState: rootState.contracts[contractID],
-              kvState: rootState._kv?.[contractID]
+              kvState: rootState._kv?.[contractID],
+              kvEntry: key === undefined ? undefined : rootState._kv?.[contractID]?.[key]
             }
           ]
         })
@@ -2751,7 +2747,8 @@ export default sbp('sbp/selectors/register', {
       : this.abortController.signal
 
     let response: Response
-    let lastEtag: string | null = null
+    let conflictEtag: string | null = null
+    let successEtag: string | null = null
     let currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined
     let recoveryGetAttempted = false
     // The `resolveData` function is tasked with computing merged data, as in
@@ -2760,6 +2757,8 @@ export default sbp('sbp/selectors/register', {
     // attempt at storing updated data (if `true`) or not (if `false`)
     const resolveData = async (invokeOnConflict = true) => {
       currentValue = undefined
+      let headerEtag = response.headers.get('x-cid') || response.headers.get('etag')
+      if (headerEtag) conflictEtag = headerEtag
       // Rationale:
       //  * response.ok could be the result of `GET` (no initial data)
       //  * 409 indicates a conflict because the height used is too old
@@ -2789,8 +2788,6 @@ export default sbp('sbp/selectors/register', {
           '[kv/set] Invalid response code: ' + response.status
         )
       }
-      let headerEtag = response.headers.get('x-cid') || response.headers.get('etag')
-      if (headerEtag) lastEtag = headerEtag
       // When a 409/412 response provides neither an etag header nor a
       // body, the retry loop cannot recover — it would re-send
       // if-match: '""' and loop until maxAttempts. Do at most one GET
@@ -2825,7 +2822,7 @@ export default sbp('sbp/selectors/register', {
             `${getResp.status}; proceeding without recovered etag/value`
           )
         }
-        if (headerEtag) lastEtag = headerEtag
+        if (headerEtag) conflictEtag = headerEtag
       }
       if (!invokeOnConflict) return false
       const result = await onconflict!({
@@ -2896,13 +2893,15 @@ export default sbp('sbp/selectors/register', {
           // Rationale: 409 and 412 indicate conflict resolution is needed
           if (response.status === 409 || response.status === 412) {
             if (--maxAttempts <= 0) {
-              await resolveData(false)
+              try {
+                await resolveData(false)
+              } catch {}
               let currentData: JSONType | undefined
               try {
                 currentData = currentValue?.data
               } catch {}
               throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
-                cause: { currentData, etag: lastEtag ?? null }
+                cause: { currentData, etag: conflictEtag ?? null }
               })
             }
             // Honour caller-side abort at every retry boundary so a
@@ -2933,11 +2932,10 @@ export default sbp('sbp/selectors/register', {
         // Successful write: capture the server-issued etag (x-cid /
         // etag header) so the resolved value reflects the freshest
         // version. See KV-REVAMPED.md §4.2 step 6.
-        const successEtag = response.headers.get('x-cid') || response.headers.get('etag')
-        if (successEtag) lastEtag = successEtag
+        successEtag = response.headers.get('x-cid') || response.headers.get('etag')
         break
       }
-      return { etag: lastEtag }
+      return { etag: successEtag }
     } finally {
       cleanupFetchSignal?.()
     }

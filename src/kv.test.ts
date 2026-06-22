@@ -103,7 +103,7 @@ const setupContract = async (contractID: string, contractType = CTYPE): Promise<
   // Add to subscriptionSet (normally done by chelonia.ts sync path).
   sbp('chelonia/test/addSubscription', contractID)
   sbp('chelonia/kv/_onContractsModified', { added: [contractID], removed: [] })
-  await new Promise((_resolve) => setTimeout(_resolve, 0))
+  await new Promise((resolve) => setTimeout(resolve, 0))
 }
 
 const reactiveSet = <T>(obj: T, key: keyof T, value: T[keyof T]) => {
@@ -203,7 +203,6 @@ sbp('sbp/selectors/register', {
     reactiveSet(s, '_kv', Object.create(null))
     this.kvSlotsByContractID.clear()
     this.kvActiveFilters.clear()
-    await sbp('chelonia/kv/_flushDirtyFilters')
     this.kvFilterDirty.clear()
     this.kvLocalEchoCIDs.clear()
     this.kvPendingWrites.clear()
@@ -271,6 +270,10 @@ sbp('sbp/selectors/register', {
   'chelonia/test/activeFilterKeys': function (this: CheloniaContext, contractID: string) {
     const filter = this.kvActiveFilters.get(contractID)
     return filter ? [...filter] : undefined
+  },
+
+  'chelonia/test/dirtyFilter': function (this: CheloniaContext, contractID: string) {
+    this.kvFilterDirty.add(contractID)
   },
 
   'chelonia/test/hasEchoCID': function (this: CheloniaContext, key: string) {
@@ -363,7 +366,7 @@ describe('KV slot API', () => {
     shouldMatch = false
     stubSetFilterCalls.length = 0
     sbp('chelonia/kv/refreshFilters', c)
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     assert.ok(
       stubSetFilterCalls.some((f) => f.contractID === c && !f.keys.includes('cond'))
@@ -487,7 +490,7 @@ describe('KV slot API', () => {
     })
 
     assert.strictEqual(stubSetFilterCalls.length, 0)
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     const calls = stubSetFilterCalls.filter((f) => f.contractID === c)
     assert.strictEqual(calls.length, 1)
@@ -565,18 +568,12 @@ describe('KV slot API', () => {
     assert.ok(rootState()._kv?.[c]?.pers)
   })
 
-  it('9b: reset flushes dirty empty filters before clearing runtime state', async () => {
-    sbp('chelonia/kv/defineSlot', {
-      key: 'flushReset', contractType: CTYPE, defaultValue: { x: 1 }, schema: objectSchema
-    })
+  it('9b: reset clears dirty filters without flushing', async () => {
     const c = 'cid-9b'
-    await setupContract(c)
-    stubSetFilterCalls = []
-
-    sbp('chelonia/kv/_cleanupContractRuntime', c)
+    sbp('chelonia/test/dirtyFilter', c)
     await sbp('chelonia/reset')
 
-    assert.deepStrictEqual(stubSetFilterCalls, [{ contractID: c, keys: [] }])
+    assert.deepStrictEqual(stubSetFilterCalls, [])
   })
 
   // -----------------------------------------------------------------------
@@ -986,7 +983,7 @@ describe('KV slot API', () => {
 
     shouldMatch = false
     sbp('chelonia/kv/refreshFilters', c)
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
     sbp('chelonia/kv/_assertIndexConsistent')
   })
 
@@ -1068,9 +1065,9 @@ describe('KV slot API', () => {
         x: ((prev as { x: number } | undefined)?.x ?? 0) + 1
       })
     })
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
     const syncP = sbp('chelonia/kv/sync', c)
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
     assert.strictEqual(observedEtags.length, 0)
 
     releaseSet()
@@ -1134,7 +1131,7 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     sbp('chelonia/kv/_handleRemote', c, 'bc', fakeParsed({ x: 5 }))
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     assert.deepStrictEqual(
       (rootState()._kv![c]!.bc as { value: unknown }).value, { x: 5 }
@@ -1490,11 +1487,11 @@ describe('KV slot API', () => {
       contractID: c, key: 'drain', updater: (prev: { x: number }) => ({ x: prev.x + 1 })
     })
     // Let the update reach the gated set.
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     let drainResolved = false
     const drainP = sbp('chelonia/kv/_waitInFlight').then(() => { drainResolved = true })
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
     assert.strictEqual(drainResolved, false, 'drain must not resolve while set is gated')
     assert.strictEqual(setResolved, false)
 
@@ -1557,10 +1554,10 @@ describe('KV slot API', () => {
     const p = sbp('chelonia/kv/update', {
       contractID: c, key: 'stale-up', updater: () => ({ x: 1 })
     })
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
     shouldMatch = false
     sbp('chelonia/kv/refreshFilters', c)
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     queuedRun()
     await assert.rejects(
@@ -1598,10 +1595,10 @@ describe('KV slot API', () => {
     stubSet = async () => { networkCalled = true; return { etag: 'e' } }
 
     const p = sbp('chelonia/kv/clear', c, 'stale-clear')
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
     shouldMatch = false
     sbp('chelonia/kv/refreshFilters', c)
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     queuedRun()
     await assert.rejects(
@@ -1694,7 +1691,7 @@ describe('KV slot API', () => {
     })
     // Let the update reach the gated set (nonce now recorded, but we
     // remove the nonce source below to simulate the worst case).
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     // Simulate contract release: drop from contracts/subSet/index/nonces.
     // After this the contract is in none of the three documented sources
@@ -1706,7 +1703,7 @@ describe('KV slot API', () => {
 
     let drainResolved = false
     const drainP = sbp('chelonia/kv/_waitInFlight').then(() => { drainResolved = true })
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
     assert.strictEqual(drainResolved, false, 'drain must block on the pending write')
 
     releaseSet()
@@ -1813,7 +1810,7 @@ describe('KV slot API', () => {
     // Drive a fresh load via single-slot sync (rejects on failure, so
     // swallow the rejection — we only care about the mirror side-effect).
     const syncP = sbp('chelonia/kv/sync', c, 'staleLoad').catch(() => {})
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     // Replace the slot definition while the GET is in flight. The
     // kvSlotsByContractID entry now points at a fresh slot object whose
@@ -1859,7 +1856,7 @@ describe('KV slot API', () => {
     const updateP = sbp('chelonia/kv/update', {
       contractID: c, key: 'staleUpdate', updater: () => ({ x: 1 })
     })
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     sbp('chelonia/kv/defineSlot', {
       key: 'staleUpdate', contractType: CTYPE, defaultValue: { x: 9 }, schema: objectSchema
@@ -1895,7 +1892,7 @@ describe('KV slot API', () => {
     }
 
     const clearP = sbp('chelonia/kv/clear', c, 'staleClear')
-    await new Promise((_resolve) => setTimeout(_resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     sbp('chelonia/kv/defineSlot', {
       key: 'staleClear', contractType: CTYPE, defaultValue: { x: 9 }, schema: objectSchema
