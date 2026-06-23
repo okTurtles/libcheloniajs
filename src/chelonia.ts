@@ -433,14 +433,13 @@ export default sbp('sbp/selectors/register', {
     this.subscriptionSet = new Set()
     // KV slot registry — see KV-REVAMPED.md §11.2.
     // `kvSlots` and `defContractKvByManifest` survive `chelonia/reset`
-    // because slot definitions are application code. The other four
-    // are per-subscription runtime state and are reset alongside
-    // `subscriptionSet` / `rootState._kv`.
+    // because slot definitions are application code.
     this.kvSlots = new Map()
     this.kvSlotsByContractID = new Map()
     this.kvActiveFilters = new Map()
     this.kvFilterDirty = new Set()
     this.kvLocalEchoCIDs = new Map()
+    this.kvReconnectRefresh = new Set()
     this.kvPendingWrites = new Map()
     this.defContractKvByManifest = new Map()
     // pending includes contracts that are scheduled for syncing or in the
@@ -709,26 +708,22 @@ export default sbp('sbp/selectors/register', {
     })
     await sbp('chelonia/contract/waitPublish')
     await sbp('chelonia/contract/wait')
-    const result = await postCleanupFn?.()
-    // Drain (not cancel) in-flight KV writes before tearing down state.
-    // `chelonia/kv/update` / `chelonia/kv/clear` run inside the
-    // per-contract `chelonia/queueInvocation` lane, so this resolves
-    // only once they settle — symmetric with the message-queue
-    // `wait`/`waitPublish` barrier above. The trailing `wait` drains any
-    // follow-up work a KV continuation itself enqueued. `abortController`
-    // below remains the backstop for genuinely stuck/offline writes.
-    // Guarded because `kv.ts` is an optional module that may not be
-    // registered (e.g. consumers that only import `./chelonia.js`).
+    // Abort then drain in-flight KV writes before the persistence hook and
+    // state teardown. `chelonia/kv/update` / `chelonia/kv/clear` run inside
+    // the per-contract `chelonia/queueInvocation` lane, so `_waitInFlight`
+    // resolves only once they settle. The trailing `wait` drains follow-up
+    // work a KV continuation enqueued. Guarded because `kv.ts` is optional.
+    this.abortController.abort()
+    this.abortController = new AbortController()
     if (sbp('sbp/selectors/fn', 'chelonia/kv/_waitInFlight')) {
       await sbp('chelonia/kv/_waitInFlight')
       await sbp('chelonia/contract/wait')
     }
+    const result = await postCleanupFn?.()
     // The following are all synchronous operations
     const rootState = sbp(this.config.stateSelector)
     // Cancel all outgoing messages by replacing this._instance
     this._instance = Object.create(null)
-    this.abortController.abort()
-    this.abortController = new AbortController()
     // Remove all contracts, including all contracts from pending
     reactiveClearObject(rootState, this.config.reactiveDel)
     this.config.reactiveSet(rootState, 'contracts', Object.create(null))
@@ -746,6 +741,7 @@ export default sbp('sbp/selectors/register', {
     this.kvActiveFilters.clear()
     this.kvFilterDirty.clear()
     this.kvLocalEchoCIDs.clear()
+    this.kvReconnectRefresh.clear()
     this.kvPendingWrites.clear()
     clearObject(this.ephemeralReferenceCount)
     this.pending.splice(0)
@@ -1090,7 +1086,11 @@ export default sbp('sbp/selectors/register', {
             // between the time the subscription was requested and it was
             // actually set up. In these cases, force sync contracts to get them
             // updated.
-            sbp('chelonia/private/in/sync', channelID, { force: true }).catch((err: Error) => {
+            sbp('chelonia/private/in/sync', channelID, { force: true }).then(() => {
+              if (sbp('sbp/selectors/fn', 'chelonia/kv/_onContractResynced')) {
+                sbp('chelonia/kv/_onContractResynced', channelID)
+              }
+            }).catch((err: Error) => {
               console.warn(`[chelonia] Syncing contract ${channelID} failed: ${err.message}`)
             })
           }
@@ -1226,6 +1226,11 @@ export default sbp('sbp/selectors/register', {
         }
       }
     })
+    if (this.kvActiveFilters.size > 0) {
+      for (const [contractID, keys] of this.kvActiveFilters) {
+        this.pubsub.kvFilter.set(contractID, [...keys])
+      }
+    }
     if (!this.contractsModifiedListener) {
       // Keep pubsub in sync (logged into the right "rooms") with 'state.contracts'
       this.contractsModifiedListener = () => sbp('chelonia/pubsub/update')
@@ -1238,7 +1243,7 @@ export default sbp('sbp/selectors/register', {
       // on reconnects, so we skip the initial connection to avoid
       // duplicating the load that `_reconcileForSlot` already scheduled.
       this.kvReconnectListener = (client: PubSubClient) => {
-        if (client.isNew) return
+        if (client !== this.pubsub || client.isNew) return
         if (sbp('sbp/selectors/fn', 'chelonia/kv/_onReconnect')) {
           sbp('chelonia/kv/_onReconnect')
         }
@@ -1262,6 +1267,19 @@ export default sbp('sbp/selectors/register', {
       }
       sbp('okTurtles.events/on', CONTRACTS_MODIFIED, this.kvContractsModifiedListener)
     }
+    if (
+      this.subscriptionSet.size > 0 &&
+      sbp('sbp/selectors/fn', 'chelonia/kv/_onContractsModified')
+    ) {
+      try {
+        sbp('chelonia/kv/_onContractsModified', {
+          added: Array.from(this.subscriptionSet),
+          removed: []
+        })
+      } catch (e) {
+        console.error('[chelonia/kv] initial contract reconciliation threw', e)
+      }
+    }
     return this.pubsub
   },
   // This selector is defined primarily for ingesting web push notifications,
@@ -1279,6 +1297,13 @@ export default sbp('sbp/selectors/register', {
     contract.state = (contractID) => sbp(this.config.stateSelector)[contractID]
     contract.manifest = this.defContractManifest
     contract.sbp = this.defContractSBP
+    const kvSlotsAvailable = sbp('sbp/selectors/fn', 'chelonia/kv/_registerContractSlots')
+    if (contract.kv && !kvSlotsAvailable) {
+      throw new Error(
+        `[chelonia] contract '${contract.name}' declares a 'kv' block but the KV ` +
+        'module is not loaded. Import the package root or register kv.ts before defineContract.'
+      )
+    }
     // KV co-location bookkeeping (KV-REVAMPED §4.8 / §11.3 steps 7–8).
     // Capture the previous `kv` block for this manifest *before*
     // rebuilding selectors so the cleanup pass can diff old vs new
@@ -1405,19 +1430,12 @@ export default sbp('sbp/selectors/register', {
     //   mirror values and re-validates them against the new schema).
     // - Bookkeeping update keeps the next `defineContract` call able
     //   to diff against the current key set.
-    const kvSlotsAvailable = sbp('sbp/selectors/fn', 'chelonia/kv/_registerContractSlots')
-    if (contract.kv && !kvSlotsAvailable) {
-      throw new Error(
-        `[chelonia] contract '${contract.name}' declares a 'kv' block but the KV ` +
-        'module is not loaded. Import the package root or register kv.ts before defineContract.'
-      )
-    }
     if (kvSlotsAvailable && (prevKv || contract.kv)) {
       sbp('chelonia/kv/_cleanupContractSlots',
-        contract.manifest, prevKv, contract.kv ?? {})
+        contract.name, contract.manifest, prevKv, contract.kv ?? {})
     }
     if (kvSlotsAvailable && contract.kv) {
-      sbp('chelonia/kv/_registerContractSlots', contract.manifest, contract.kv)
+      sbp('chelonia/kv/_registerContractSlots', contract.name, contract.manifest, contract.kv)
       this.defContractKvByManifest.set(contract.manifest, contract.kv)
     } else if (prevKv) {
       this.defContractKvByManifest.delete(contract.manifest)
@@ -2750,6 +2768,7 @@ export default sbp('sbp/selectors/register', {
     let conflictEtag: string | null = null
     let successEtag: string | null = null
     let currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined
+    let lastRecoveredValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined
     let recoveryGetAttempted = false
     // The `resolveData` function is tasked with computing merged data, as in
     // merging the existing stored values (after a conflict or initial fetch)
@@ -2781,6 +2800,7 @@ export default sbp('sbp/selectors/register', {
             meta: key
           })
           : undefined
+        if (currentValue) lastRecoveredValue = currentValue
         // Rationale: 404 and 410 both indicate that the store key doesn't exist.
         // These are not treated as errors since we could still set the value.
       } else if (response.status !== 404 && response.status !== 410) {
@@ -2814,6 +2834,7 @@ export default sbp('sbp/selectors/register', {
               serializedData: JSON.parse(getText),
               meta: key
             })
+            lastRecoveredValue = currentValue
           }
           headerEtag = getResp.headers.get('x-cid') || getResp.headers.get('etag')
         } else {
@@ -2898,7 +2919,7 @@ export default sbp('sbp/selectors/register', {
               } catch {}
               let currentData: JSONType | undefined
               try {
-                currentData = currentValue?.data
+                currentData = (currentValue ?? lastRecoveredValue)?.data
               } catch {}
               throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
                 cause: { currentData, etag: conflictEtag ?? null }

@@ -181,6 +181,7 @@ sbp('sbp/selectors/register', {
     this.kvActiveFilters = new Map()
     this.kvFilterDirty = new Set()
     this.kvLocalEchoCIDs = new Map()
+    this.kvReconnectRefresh = new Set()
     this.kvPendingWrites = new Map()
     this.defContractKvByManifest = new Map()
   },
@@ -189,11 +190,18 @@ sbp('sbp/selectors/register', {
     if (!this.state) sbp('chelonia/_init')
   },
 
-  'chelonia/reset': async function (this: CheloniaContext) {
+  'chelonia/reset': async function (
+    this: CheloniaContext,
+    _newState?: unknown,
+    postCleanupFn?: () => Promise<void> | void
+  ) {
     if (!this.state) return
-    // Mirror production ordering: drain in-flight KV writes before
-    // clearing the runtime maps.
+    // Mirror production ordering: abort stuck KV writes, then drain them
+    // before the post-cleanup hook observes state and runtime maps clear.
+    this.abortController.abort()
+    this.abortController = new AbortController()
     await sbp('chelonia/kv/_waitInFlight')
+    await postCleanupFn?.()
     const s = this.state as Record<string, unknown>
     reactiveDel(s, 'contracts')
     reactiveSet(s, 'contracts', Object.create(null))
@@ -205,6 +213,7 @@ sbp('sbp/selectors/register', {
     this.kvActiveFilters.clear()
     this.kvFilterDirty.clear()
     this.kvLocalEchoCIDs.clear()
+    this.kvReconnectRefresh.clear()
     this.kvPendingWrites.clear()
     this.subscriptionSet.clear()
   },
@@ -284,12 +293,17 @@ sbp('sbp/selectors/register', {
     return this.kvLocalEchoCIDs.get(key)?.get(cid)?.expiry
   },
 
+  'chelonia/test/abortSignal': function (this: CheloniaContext) {
+    return this.abortController.signal
+  },
+
   // Test helper: simulate removeImmediately's KV cleanup for a contract.
   'chelonia/test/removeSubscription': function (this: CheloniaContext, contractID: string) {
     this.subscriptionSet.delete(contractID)
     this.kvSlotsByContractID.delete(contractID)
     this.kvActiveFilters.delete(contractID)
     this.kvFilterDirty.delete(contractID)
+    this.kvReconnectRefresh.delete(contractID)
   }
 })
 
@@ -501,7 +515,7 @@ describe('KV slot API', () => {
   // -----------------------------------------------------------------------
   // 7
   // -----------------------------------------------------------------------
-  it('7: refreshOnReconnect re-fetches', async () => {
+  it('7: refreshOnReconnect re-fetches after contract resync', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'rc',
       contractType: CTYPE,
@@ -513,10 +527,35 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     let getCount = 0
+    stubGet = async (_cID, key) => {
+      if (key === 'rc') getCount++
+      return fakeParsed({ x: 42 })
+    }
+
+    sbp('chelonia/kv/_onReconnect')
+    assert.strictEqual(getCount, 0)
+    await sbp('chelonia/kv/_onContractResynced', c)
+    assert.strictEqual(getCount, 1)
+  })
+
+  it('7b: reconnect refresh is skipped if contract is released before resync', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'rc-skip',
+      contractType: CTYPE,
+      defaultValue: { x: 0 },
+      schema: objectSchema,
+      refreshOnReconnect: true
+    })
+    const c = 'cid-7b'
+    await setupContract(c)
+
+    let getCount = 0
     stubGet = async () => { getCount++; return fakeParsed({ x: 42 }) }
 
-    await sbp('chelonia/kv/sync', c, 'rc')
-    assert.strictEqual(getCount, 1)
+    sbp('chelonia/kv/_onReconnect')
+    sbp('chelonia/test/removeSubscription', c)
+    await sbp('chelonia/kv/_onContractResynced', c)
+    assert.strictEqual(getCount, 0)
   })
 
   // -----------------------------------------------------------------------
@@ -576,16 +615,74 @@ describe('KV slot API', () => {
     assert.deepStrictEqual(stubSetFilterCalls, [])
   })
 
+  it('9c: cleanup without active filter does not restore a stale empty filter', async () => {
+    const c = 'cid-9c'
+    sbp('chelonia/kv/_cleanupContractRuntime', c)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    assert.deepStrictEqual(stubSetFilterCalls, [])
+  })
+
+  it('9d: reset aborts stuck writes before waiting for the KV drain', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'abort-reset', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-9d'
+    await setupContract(c)
+
+    const abortSignal = sbp('chelonia/test/abortSignal') as AbortSignal
+    stubSet = async () => new Promise<{ etag: string }>((resolve) => {
+      abortSignal.addEventListener('abort', () => resolve({ etag: 'aborted-etag' }), { once: true })
+    })
+
+    const updateP = sbp('chelonia/kv/update', {
+      contractID: c, key: 'abort-reset', updater: () => ({ x: 1 })
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    await sbp('chelonia/reset')
+    await updateP
+  })
+
+  it('9e: reset post-cleanup hook observes drained KV writes', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'save-reset', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-9e'
+    await setupContract(c)
+
+    let releaseSet!: () => void
+    const setGate = new Promise<void>((resolve) => { releaseSet = resolve })
+    stubSet = async () => {
+      await setGate
+      return { etag: 'saved-etag' }
+    }
+
+    const updateP = sbp('chelonia/kv/update', {
+      contractID: c, key: 'save-reset', updater: () => ({ x: 7 })
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    releaseSet()
+
+    let observed: unknown
+    await sbp('chelonia/reset', undefined, () => {
+      observed = rootState()._kv?.[c]?.['save-reset']?.value
+    })
+    await updateP
+    assert.deepStrictEqual(observed, { x: 7 })
+  })
+
   // -----------------------------------------------------------------------
   // 10
   // -----------------------------------------------------------------------
   it('10: defineContract kv block registers slots', async () => {
-    const manifest = 'ctr-v10'
-    sbp('chelonia/kv/_registerContractSlots', manifest, {
+    const contractType = 'type-v10'
+    const manifest = 'manifest-v10'
+    sbp('chelonia/kv/_registerContractSlots', contractType, manifest, {
       profile: { defaultValue: { name: '' }, schema: anySchema }
     })
     const c = 'cid-10'
-    await setupContract(c, manifest)
+    await setupContract(c, contractType)
     assert.ok(rootState()._kv?.[c]?.profile)
   })
 
@@ -720,12 +817,13 @@ describe('KV slot API', () => {
   // 16
   // -----------------------------------------------------------------------
   it('16: defineContract replacement unregisters removed keys', async () => {
-    const m = 'ctr-v16'
-    sbp('chelonia/kv/_registerContractSlots', m, {
+    const contractType = 'type-v16'
+    const manifest = 'manifest-v16'
+    sbp('chelonia/kv/_registerContractSlots', contractType, manifest, {
       alpha: { defaultValue: 1 }, beta: { defaultValue: 2 }
     })
     const c = 'cid-16'
-    await setupContract(c, m)
+    await setupContract(c, contractType)
 
     const s = rootState()
     assert.ok(s._kv?.[c]?.alpha)
@@ -733,8 +831,8 @@ describe('KV slot API', () => {
 
     const prev = { alpha: { defaultValue: 1 }, beta: { defaultValue: 2 } }
     const next = { alpha: { defaultValue: 10 } }
-    sbp('chelonia/kv/_cleanupContractSlots', m, prev, next)
-    sbp('chelonia/kv/_registerContractSlots', m, next)
+    sbp('chelonia/kv/_cleanupContractSlots', contractType, manifest, prev, next)
+    sbp('chelonia/kv/_registerContractSlots', contractType, manifest, next)
 
     assert.strictEqual(s._kv?.[c]?.beta, undefined)
     assert.ok(s._kv?.[c]?.alpha)
@@ -2179,15 +2277,16 @@ describe('KV slot API', () => {
   })
 
   it('47: autoSubscribe false manifest cleanup removes empty filter buckets', async () => {
-    const manifest = 'ctr-v48'
-    sbp('chelonia/kv/_registerContractSlots', manifest, {
+    const contractType = 'type-v48'
+    const manifest = 'manifest-v48'
+    sbp('chelonia/kv/_registerContractSlots', contractType, manifest, {
       hidden: { defaultValue: { x: 0 }, autoSubscribe: false }
     })
     const c = 'cid-48'
-    await setupContract(c, manifest)
+    await setupContract(c, contractType)
     assert.deepStrictEqual(sbp('chelonia/test/activeFilterKeys', c), [])
 
-    sbp('chelonia/kv/_cleanupContractSlots', manifest, { hidden: {} }, {})
+    sbp('chelonia/kv/_cleanupContractSlots', contractType, manifest, { hidden: {} }, {})
     assert.strictEqual(sbp('chelonia/test/activeFilterKeys', c), undefined)
   })
 
@@ -2377,38 +2476,54 @@ describe('KV slot API', () => {
   })
 
   it('53: manifest cleanup preserves filter bucket for standalone local-only slots', async () => {
-    const manifest = 'type-54'
+    const contractType = 'type-54'
+    const manifest = 'manifest-54'
     sbp('chelonia/kv/defineSlot', {
       key: 'localOnly',
-      contractType: manifest,
+      contractType,
       defaultValue: { x: 0 },
       autoSubscribe: false
     })
-    sbp('chelonia/kv/_registerContractSlots', manifest, {
+    sbp('chelonia/kv/_registerContractSlots', contractType, manifest, {
       alpha: { defaultValue: { x: 1 }, autoSubscribe: true }
     })
     const c = 'cid-54'
-    await setupContract(c, manifest)
+    await setupContract(c, contractType)
     assert.deepStrictEqual(sbp('chelonia/test/activeFilterKeys', c), ['alpha'])
 
-    sbp('chelonia/kv/_cleanupContractSlots', manifest, { alpha: {} }, {})
+    sbp('chelonia/kv/_cleanupContractSlots', contractType, manifest, { alpha: {} }, {})
     sbp('chelonia/kv/_assertIndexConsistent')
     assert.deepStrictEqual(sbp('chelonia/test/activeFilterKeys', c), [])
   })
 
   it('54: manifest cleanup removes stale echo nonces only for removed slots', async () => {
-    const manifest = 'type-55'
-    sbp('chelonia/kv/_registerContractSlots', manifest, {
+    const contractType = 'type-55'
+    const manifest = 'manifest-55'
+    sbp('chelonia/kv/_registerContractSlots', contractType, manifest, {
       removed: { defaultValue: { x: 0 } }
     })
     const c = 'cid-55'
-    await setupContract(c, manifest)
+    await setupContract(c, contractType)
     sbp('chelonia/test/seedEchoCID', `${c}::removed`)
     sbp('chelonia/test/seedEchoCID', 'other::removed')
 
-    sbp('chelonia/kv/_cleanupContractSlots', manifest, { removed: {} }, {})
+    sbp('chelonia/kv/_cleanupContractSlots', contractType, manifest, { removed: {} }, {})
     assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::removed`), false)
     assert.strictEqual(sbp('chelonia/test/hasEchoCID', 'other::removed'), true)
+  })
+
+  it('54b: manifest ownership mismatch does not remove inline slots', async () => {
+    const contractType = 'type-55b'
+    const manifest = 'manifest-55b'
+    sbp('chelonia/kv/_registerContractSlots', contractType, manifest, {
+      keep: { defaultValue: { x: 0 } }
+    })
+    const c = 'cid-55b'
+    await setupContract(c, contractType)
+
+    sbp('chelonia/kv/_cleanupContractSlots', contractType, 'other-manifest-55b', { keep: {} }, {})
+    assert.ok(rootState()._kv?.[c]?.keep)
+    assert.deepStrictEqual(sbp('chelonia/test/activeFilterKeys', c), ['keep'])
   })
 
   it('55: update seeds error-status mirror entries from the default', async () => {

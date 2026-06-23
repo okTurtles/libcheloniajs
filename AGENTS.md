@@ -373,19 +373,20 @@ Mirror state lives at `rootState._kv[contractID][key]` and contains
 `chelonia/kv/defineSlot` / `_loadSlot` / `_handleRemote` and cleaned up
 on contract release.
 
-`chelonia/reset` **drains** (does not cancel) in-flight
-`chelonia/kv/update` / `chelonia/kv/clear` writes via
-`chelonia/kv/_waitInFlight` before clearing the KV runtime maps —
-matching `chelonia/contract/wait` — so a continuation never runs against
-a torn-down mirror; `abortController.abort()` is the backstop for stuck
-writes.
+`chelonia/reset` aborts stuck/offline network work, then **drains**
+in-flight `chelonia/kv/update` / `chelonia/kv/clear` writes via
+`chelonia/kv/_waitInFlight` before `postCleanupFn` and before clearing the
+KV runtime maps. This matches `chelonia/contract/wait`: persistence hooks
+observe a quiescent mirror, and continuations never run against torn-down
+state.
 
 Slot definitions (`KvSlotDefinition`) declare a `contractType`, `key`,
 `defaultValue`, optional `schema` (sync `.parse`), `match` predicate,
 `onUpdate` callback, and a handful of boolean flags (`autoSubscribe`,
 `autoLoad`, `refreshOnReconnect`). Slots can also be declared inline on
-a `chelonia/defineContract` call via the `kv` key. `defaultUpdater`
-enables a shorthand `value`-form on `chelonia/kv/update`.
+a `chelonia/defineContract` call via the `kv` key; inline slots are
+registered under the contract name stored in `state.contracts[cID].type`.
+`defaultUpdater` enables a shorthand `value`-form on `chelonia/kv/update`.
 
 `KvUpdater<T>` receives `T | undefined`: `undefined` is passed when a
 slot has neither a mirror value nor a `defaultValue`.
@@ -397,7 +398,7 @@ Config keys (all on `KvSlotDefinition`):
 
 | Key | Default | Purpose |
 |---|---|---|
-| `contractType` | (required) | Contract manifest string or array of strings. |
+| `contractType` | (required) | Contract type/name string or array of strings. |
 | `key` | (required) | KV key name. |
 | `defaultValue` | `undefined` | Value returned by `read` before the slot is loaded or while the slot is in `'error'`. |
 | `schema` | none | Object with a synchronous `.parse(value)` method (e.g. Zod schema). `null` / `undefined` are rejected anywhere in the value for schema-backed and schemaless slots; model optional fields by omission or tagged unions rather than `T \| null`. |

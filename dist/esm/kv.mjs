@@ -1109,6 +1109,7 @@ export default sbp('sbp/selectors/register', {
     // selector may run outside any per-contract queue lane, so it must
     // remain synchronous and idempotent.
     'chelonia/kv/_cleanupContractRuntime': function (contractID) {
+        const hadFilter = this.kvActiveFilters.has(contractID);
         // Queue a filter flush for this contract *before* dropping state so
         // the server receives the empty-filter frame (§11.5 empty
         // transitions). The flush reads kvActiveFilters at microtask time;
@@ -1116,7 +1117,8 @@ export default sbp('sbp/selectors/register', {
         // We intentionally do NOT delete from kvFilterDirty here — the
         // microtask must see this contract in the dirty set to send the
         // empty-filter frame.
-        queueFilterFlush(this, contractID);
+        if (hadFilter)
+            queueFilterFlush(this, contractID);
         this.kvSlotsByContractID.delete(contractID);
         this.kvActiveFilters.delete(contractID);
         const prefix = `${contractID}${KV_KEY_SEPARATOR}`;
@@ -1943,14 +1945,16 @@ export default sbp('sbp/selectors/register', {
     },
     // Private convenience used by `chelonia/defineContract`. Accepts the
     // `kv: { ... }` block declared inline on a contract definition and
-    // registers each entry as a `defineSlot` call scoped to the
-    // manifest. See KV-REVAMPED.md §4.8 / §11.3 step 7.
-    'chelonia/kv/_registerContractSlots': function (manifest, kv) {
+    // registers each entry as a `defineSlot` call scoped to the contract
+    // type (the contract name stored in `state.contracts[cID].type`).
+    // The manifest is retained as the ownership marker used by cleanup.
+    // See KV-REVAMPED.md §4.8 / §11.3 step 7.
+    'chelonia/kv/_registerContractSlots': function (contractType, manifest, kv) {
         for (const key of Object.keys(kv)) {
             const entry = kv[key];
             sbp('chelonia/kv/_defineSlotInternal', {
                 ...entry,
-                contractType: manifest,
+                contractType,
                 key
             }, { kind: 'defineContract', manifest });
         }
@@ -1964,7 +1968,7 @@ export default sbp('sbp/selectors/register', {
     // blocks are left to the normal `defineSlot` re-registration path
     // (which re-validates persisted mirror values against the new
     // schema — §4.1).
-    'chelonia/kv/_cleanupContractSlots': function (manifest, prevKv, nextKv) {
+    'chelonia/kv/_cleanupContractSlots': function (contractType, manifest, prevKv, nextKv) {
         if (!prevKv)
             return;
         const rootState = sbp(this.config.stateSelector);
@@ -1972,7 +1976,7 @@ export default sbp('sbp/selectors/register', {
         for (const key of Object.keys(prevKv)) {
             if (nextKeys.has(key))
                 continue;
-            const rKey = registryKey(manifest, key);
+            const rKey = registryKey(contractType, key);
             const slot = this.kvSlots.get(rKey);
             if (!slot)
                 continue;

@@ -286,7 +286,8 @@ the slot out of `'error'`.
 
 Slots can also be declared inline on a contract definition under the
 `kv` key. `chelonia/defineContract` registers each entry automatically
-and diffs added/removed keys on re-registration.
+under the contract name (the type stored for synced contracts) and diffs
+added/removed keys on re-registration.
 
 ```ts
 sbp('chelonia/defineContract', {

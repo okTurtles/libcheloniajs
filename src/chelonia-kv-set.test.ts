@@ -228,4 +228,40 @@ describe('chelonia/kv/set', () => {
         (e as { cause?: { etag?: string | null } }).cause?.etag === 'etag-1'
     )
   })
+
+  it('preserves recovered currentData when final conflict is body-less', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    let capturedBody = ''
+    let calls = 0
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
+        calls++
+        if (opts?.method === 'POST') {
+          capturedBody ||= opts.body ?? ''
+          return new Response('', { status: 412 })
+        }
+        return new Response(capturedBody, { status: 200, headers: { etag: 'etag-current' } })
+      }
+    } as Partial<CheloniaConfig>)
+
+    await assert.rejects(
+      () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+        signingKeyId,
+        maxAttempts: 2,
+        onconflict: async (
+          args: { currentData: JSONType | undefined; etag: string | null | undefined }
+        ): Promise<[JSONType, string | undefined]> => [
+          { x: (args.currentData as { x: number }).x + 1 },
+          args.etag ?? undefined
+        ]
+      }),
+      (e: unknown) => e instanceof ChelErrorKvMaxAttempts &&
+        assert.deepStrictEqual(
+          (e as { cause?: { currentData?: JSONType; etag?: string | null } }).cause,
+          { currentData: { x: 1 }, etag: 'etag-current' }
+        ) === undefined
+    )
+    assert.deepStrictEqual(calls, 3)
+  })
 })

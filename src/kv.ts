@@ -1357,6 +1357,7 @@ export default (sbp('sbp/selectors/register', {
     this: CheloniaContext,
     contractID: string
   ): void {
+    const hadFilter = this.kvActiveFilters.has(contractID)
     // Queue a filter flush for this contract *before* dropping state so
     // the server receives the empty-filter frame (§11.5 empty
     // transitions). The flush reads kvActiveFilters at microtask time;
@@ -1364,7 +1365,7 @@ export default (sbp('sbp/selectors/register', {
     // We intentionally do NOT delete from kvFilterDirty here — the
     // microtask must see this contract in the dirty set to send the
     // empty-filter frame.
-    queueFilterFlush(this, contractID)
+    if (hadFilter) queueFilterFlush(this, contractID)
     this.kvSlotsByContractID.delete(contractID)
     this.kvActiveFilters.delete(contractID)
     const prefix = `${contractID}${KV_KEY_SEPARATOR}`
@@ -1424,27 +1425,38 @@ export default (sbp('sbp/selectors/register', {
 
   // Private. See KV-REVAMPED §11.4 bullet 3 (reconnect hook).
   // Called from the pubsub reconnect-open path. Clears pending local
-  // echo CIDs (any echo from a pre-disconnect write has either been
-  // delivered or is lost) and re-fetches every active slot with
-  // `refreshOnReconnect === true` through the per-contract
-  // queueInvocation lane so reconnect fetches are serialized with
-  // in-flight writes.
+  // echo CIDs immediately; slot reloads with `refreshOnReconnect === true`
+  // are marked here and run after the per-subscription forced resync.
   'chelonia/kv/_onReconnect': function (this: CheloniaContext): void {
     this.kvLocalEchoCIDs.clear()
     for (const [cID, perKey] of this.kvSlotsByContractID) {
       for (const [, slot] of perKey) {
         if (slot.refreshOnReconnect) {
-          sbp('chelonia/kv/_loadSlot', {
-            contractID: cID,
-            slot,
-            reason: KV_UPDATE_REASON.RECONNECT
-          })
-            .catch((e: unknown) => {
-              console.error(
-                `[chelonia/kv] _loadSlot (reconnect) rejected for ${cID}::${slot.key}`, e
-              )
-            })
+          this.kvReconnectRefresh.add(cID)
+          break
         }
+      }
+    }
+  },
+
+  'chelonia/kv/_onContractResynced': function (this: CheloniaContext, contractID: string): void {
+    if (!this.kvReconnectRefresh.has(contractID)) return
+    this.kvReconnectRefresh.delete(contractID)
+    if (!this.subscriptionSet.has(contractID)) return
+    const perKey = this.kvSlotsByContractID.get(contractID)
+    if (!perKey) return
+    for (const [, slot] of perKey) {
+      if (slot.refreshOnReconnect) {
+        sbp('chelonia/kv/_loadSlot', {
+          contractID,
+          slot,
+          reason: KV_UPDATE_REASON.RECONNECT
+        })
+          .catch((e: unknown) => {
+            console.error(
+              `[chelonia/kv] _loadSlot (reconnect) rejected for ${contractID}::${slot.key}`, e
+            )
+          })
       }
     }
   },
@@ -2309,10 +2321,13 @@ export default (sbp('sbp/selectors/register', {
 
   // Private convenience used by `chelonia/defineContract`. Accepts the
   // `kv: { ... }` block declared inline on a contract definition and
-  // registers each entry as a `defineSlot` call scoped to the
-  // manifest. See KV-REVAMPED.md §4.8 / §11.3 step 7.
+  // registers each entry as a `defineSlot` call scoped to the contract
+  // type (the contract name stored in `state.contracts[cID].type`).
+  // The manifest is retained as the ownership marker used by cleanup.
+  // See KV-REVAMPED.md §4.8 / §11.3 step 7.
   'chelonia/kv/_registerContractSlots': function (
     this: CheloniaContext,
+    contractType: string,
     manifest: string,
     kv: Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>
   ): void {
@@ -2320,7 +2335,7 @@ export default (sbp('sbp/selectors/register', {
       const entry = kv[key]
       sbp('chelonia/kv/_defineSlotInternal', {
         ...entry,
-        contractType: manifest,
+        contractType,
         key
       }, { kind: 'defineContract' as const, manifest })
     }
@@ -2337,6 +2352,7 @@ export default (sbp('sbp/selectors/register', {
   // schema — §4.1).
   'chelonia/kv/_cleanupContractSlots': function (
     this: CheloniaContext,
+    contractType: string,
     manifest: string,
     prevKv: Record<string, unknown> | undefined,
     nextKv: Record<string, unknown> | undefined
@@ -2346,7 +2362,7 @@ export default (sbp('sbp/selectors/register', {
     const nextKeys = nextKv ? new Set(Object.keys(nextKv)) : new Set<string>()
     for (const key of Object.keys(prevKv)) {
       if (nextKeys.has(key)) continue
-      const rKey = registryKey(manifest, key)
+      const rKey = registryKey(contractType, key)
       const slot = this.kvSlots.get(rKey)
       if (!slot) continue
       // Only unregister the current registry entry if it was registered by

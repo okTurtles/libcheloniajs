@@ -481,14 +481,6 @@ export default sbp('sbp/selectors/register', {
         this.config.reactiveSet(rootState, '_kv', Object.create(null));
         this.kvSlotsByContractID.clear();
         this.kvActiveFilters.clear();
-        if (sbp('sbp/selectors/fn', 'chelonia/kv/_flushDirtyFilters')) {
-            try {
-                await sbp('chelonia/kv/_flushDirtyFilters');
-            }
-            catch (e) {
-                console.warn('[chelonia/reset] KV filter flush failed during reset', e);
-            }
-        }
         this.kvFilterDirty.clear();
         this.kvLocalEchoCIDs.clear();
         this.kvPendingWrites.clear();
@@ -827,6 +819,9 @@ export default sbp('sbp/selectors/register', {
                         console.info(`[chelonia] Discarding kv event for ${msg.channelID} because it's not in the current subscriptionSet`);
                         return;
                     }
+                    const kvSlotHandler = sbp('sbp/selectors/fn', 'chelonia/kv/_handleRemote');
+                    if (!legacyKvHandler && !kvSlotHandler)
+                        return;
                     sbp('chelonia/queueInvocation', msg.channelID, async () => {
                         // Share one lazy parsed wrapper between the legacy callback and the
                         // slot layer. If either consumer forces `.data`, the decoded value
@@ -847,7 +842,7 @@ export default sbp('sbp/selectors/register', {
                                 console.error(`[chelonia] legacy kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
                             }
                         }
-                        if (sbp('sbp/selectors/fn', 'chelonia/kv/_handleRemote')) {
+                        if (kvSlotHandler) {
                             try {
                                 await sbp('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed, msg.cid);
                             }
@@ -869,6 +864,11 @@ export default sbp('sbp/selectors/register', {
                 }
             }
         });
+        if (this.kvActiveFilters.size > 0) {
+            for (const [contractID, keys] of this.kvActiveFilters) {
+                this.pubsub.kvFilter.set(contractID, [...keys]);
+            }
+        }
         if (!this.contractsModifiedListener) {
             // Keep pubsub in sync (logged into the right "rooms") with 'state.contracts'
             this.contractsModifiedListener = () => sbp('chelonia/pubsub/update');
@@ -881,7 +881,7 @@ export default sbp('sbp/selectors/register', {
             // on reconnects, so we skip the initial connection to avoid
             // duplicating the load that `_reconcileForSlot` already scheduled.
             this.kvReconnectListener = (client) => {
-                if (client.isNew)
+                if (client !== this.pubsub || client.isNew)
                     return;
                 if (sbp('sbp/selectors/fn', 'chelonia/kv/_onReconnect')) {
                     sbp('chelonia/kv/_onReconnect');
@@ -905,6 +905,18 @@ export default sbp('sbp/selectors/register', {
             };
             sbp('okTurtles.events/on', CONTRACTS_MODIFIED, this.kvContractsModifiedListener);
         }
+        if (this.subscriptionSet.size > 0 &&
+            sbp('sbp/selectors/fn', 'chelonia/kv/_onContractsModified')) {
+            try {
+                sbp('chelonia/kv/_onContractsModified', {
+                    added: Array.from(this.subscriptionSet),
+                    removed: []
+                });
+            }
+            catch (e) {
+                console.error('[chelonia/kv] initial contract reconciliation threw', e);
+            }
+        }
         return this.pubsub;
     },
     // This selector is defined primarily for ingesting web push notifications,
@@ -925,6 +937,11 @@ export default sbp('sbp/selectors/register', {
         contract.state = (contractID) => sbp(this.config.stateSelector)[contractID];
         contract.manifest = this.defContractManifest;
         contract.sbp = this.defContractSBP;
+        const kvSlotsAvailable = sbp('sbp/selectors/fn', 'chelonia/kv/_registerContractSlots');
+        if (contract.kv && !kvSlotsAvailable) {
+            throw new Error(`[chelonia] contract '${contract.name}' declares a 'kv' block but the KV ` +
+                'module is not loaded. Import the package root or register kv.ts before defineContract.');
+        }
         // KV co-location bookkeeping (KV-REVAMPED §4.8 / §11.3 steps 7–8).
         // Capture the previous `kv` block for this manifest *before*
         // rebuilding selectors so the cleanup pass can diff old vs new
@@ -1031,16 +1048,11 @@ export default sbp('sbp/selectors/register', {
         //   mirror values and re-validates them against the new schema).
         // - Bookkeeping update keeps the next `defineContract` call able
         //   to diff against the current key set.
-        const kvSlotsAvailable = sbp('sbp/selectors/fn', 'chelonia/kv/_registerContractSlots');
-        if (contract.kv && !kvSlotsAvailable) {
-            throw new Error(`[chelonia] contract '${contract.name}' declares a 'kv' block but the KV ` +
-                'module is not loaded. Import the package root or register kv.ts before defineContract.');
-        }
         if (kvSlotsAvailable && (prevKv || contract.kv)) {
-            sbp('chelonia/kv/_cleanupContractSlots', contract.manifest, prevKv, contract.kv ?? {});
+            sbp('chelonia/kv/_cleanupContractSlots', contract.name, contract.manifest, prevKv, contract.kv ?? {});
         }
         if (kvSlotsAvailable && contract.kv) {
-            sbp('chelonia/kv/_registerContractSlots', contract.manifest, contract.kv);
+            sbp('chelonia/kv/_registerContractSlots', contract.name, contract.manifest, contract.kv);
             this.defContractKvByManifest.set(contract.manifest, contract.kv);
         }
         else if (prevKv) {
@@ -1550,7 +1562,8 @@ export default sbp('sbp/selectors/register', {
                     {
                         contractState: rootState[contractID],
                         cheloniaState: rootState.contracts[contractID],
-                        kvState: rootState._kv?.[contractID]
+                        kvState: rootState._kv?.[contractID],
+                        kvEntry: key === undefined ? undefined : rootState._kv?.[contractID]?.[key]
                     }
                 ];
             }));
@@ -2035,8 +2048,10 @@ export default sbp('sbp/selectors/register', {
             })()
             : this.abortController.signal;
         let response;
-        let lastEtag = null;
+        let conflictEtag = null;
+        let successEtag = null;
         let currentValue;
+        let lastRecoveredValue;
         let recoveryGetAttempted = false;
         // The `resolveData` function is tasked with computing merged data, as in
         // merging the existing stored values (after a conflict or initial fetch)
@@ -2044,6 +2059,9 @@ export default sbp('sbp/selectors/register', {
         // attempt at storing updated data (if `true`) or not (if `false`)
         const resolveData = async (invokeOnConflict = true) => {
             currentValue = undefined;
+            let headerEtag = response.headers.get('x-cid') || response.headers.get('etag');
+            if (headerEtag)
+                conflictEtag = headerEtag;
             // Rationale:
             //  * response.ok could be the result of `GET` (no initial data)
             //  * 409 indicates a conflict because the height used is too old
@@ -2066,15 +2084,14 @@ export default sbp('sbp/selectors/register', {
                         meta: key
                     })
                     : undefined;
+                if (currentValue)
+                    lastRecoveredValue = currentValue;
                 // Rationale: 404 and 410 both indicate that the store key doesn't exist.
                 // These are not treated as errors since we could still set the value.
             }
             else if (response.status !== 404 && response.status !== 410) {
                 throw new ChelErrorUnexpectedHttpResponseCode('[kv/set] Invalid response code: ' + response.status);
             }
-            let headerEtag = response.headers.get('x-cid') || response.headers.get('etag');
-            if (headerEtag)
-                lastEtag = headerEtag;
             // When a 409/412 response provides neither an etag header nor a
             // body, the retry loop cannot recover — it would re-send
             // if-match: '""' and loop until maxAttempts. Do at most one GET
@@ -2099,6 +2116,7 @@ export default sbp('sbp/selectors/register', {
                             serializedData: JSON.parse(getText),
                             meta: key
                         });
+                        lastRecoveredValue = currentValue;
                     }
                     headerEtag = getResp.headers.get('x-cid') || getResp.headers.get('etag');
                 }
@@ -2107,7 +2125,7 @@ export default sbp('sbp/selectors/register', {
                         `${getResp.status}; proceeding without recovered etag/value`);
                 }
                 if (headerEtag)
-                    lastEtag = headerEtag;
+                    conflictEtag = headerEtag;
             }
             if (!invokeOnConflict)
                 return false;
@@ -2179,14 +2197,17 @@ export default sbp('sbp/selectors/register', {
                     // Rationale: 409 and 412 indicate conflict resolution is needed
                     if (response.status === 409 || response.status === 412) {
                         if (--maxAttempts <= 0) {
-                            await resolveData(false);
+                            try {
+                                await resolveData(false);
+                            }
+                            catch { }
                             let currentData;
                             try {
-                                currentData = currentValue?.data;
+                                currentData = (currentValue ?? lastRecoveredValue)?.data;
                             }
                             catch { }
                             throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
-                                cause: { currentData, etag: lastEtag ?? null }
+                                cause: { currentData, etag: conflictEtag ?? null }
                             });
                         }
                         // Honour caller-side abort at every retry boundary so a
@@ -2214,12 +2235,10 @@ export default sbp('sbp/selectors/register', {
                 // Successful write: capture the server-issued etag (x-cid /
                 // etag header) so the resolved value reflects the freshest
                 // version. See KV-REVAMPED.md §4.2 step 6.
-                const successEtag = response.headers.get('x-cid') || response.headers.get('etag');
-                if (successEtag)
-                    lastEtag = successEtag;
+                successEtag = response.headers.get('x-cid') || response.headers.get('etag');
                 break;
             }
-            return { etag: lastEtag };
+            return { etag: successEtag };
         }
         finally {
             cleanupFetchSignal?.();

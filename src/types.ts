@@ -361,7 +361,7 @@ export type CheloniaContractCtx = {
   // Optional declarative KV slot block — sugar over
   // `chelonia/kv/defineSlot`. See KV-REVAMPED.md §4.8. Each entry is
   // registered as if the consumer had called `defineSlot` with
-  // `contractType: manifest` and `key` set from the entry name.
+  // `contractType` set to the contract name and `key` set from the entry name.
   kv?: Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>;
 };
 export type CheloniaContext = {
@@ -413,6 +413,7 @@ export type CheloniaContext = {
   // Server-issued data CIDs awaiting self-echo suppression.
   // Keyed by `${contractID}::${key}`; inner map value carries expiry + source.
   kvLocalEchoCIDs: Map<string, Map<string, { expiry: number; fromConflict: boolean }>>;
+  kvReconnectRefresh: Set<string>;
   // Per-contract count of queued/in-flight `chelonia/kv/update` /
   // `chelonia/kv/clear` operations. Incremented at call time (before the
   // write body is enqueued, while the slot may still be active) and
