@@ -275,6 +275,22 @@ In addition to the cases listed in KV-REVAMPED.md §4.6,
 Both rules apply identically on the first attempt and on every
 conflict-retry pass.
 
+`chelonia/kv/update`, `chelonia/kv/clear`, and `chelonia/kv/sync` also
+reject with `ChelErrorKvReentrant` when called for the **same
+contract** from within the *synchronous* portion of that contract's own
+`onUpdate` callback. `onUpdate` holds the per-contract
+`chelonia/queueInvocation` lane, so a same-contract write issued during
+the callback would enqueue behind the lane that is blocked awaiting the
+callback — a deadlock. The guard is narrow (synchronous portion only)
+so it never rejects an *independent* concurrent write that interleaves
+with a slow async `onUpdate` (those queue safely and succeed).
+`chelonia/kv/read` / `chelonia/kv/status` (synchronous, unqueued) and
+writes to *other* contracts are always unaffected. To re-enter a
+same-contract write, schedule it off the synchronous stack and do not
+await it inside the callback:
+`queueMicrotask(() => sbp('chelonia/kv/update', …))` — it queues
+behind the lane and runs once it releases.
+
 When a slot is in `'error'` status, `update` seeds the reducer the same
 way `read` does: from the declared default, not from the retained mirror
 value. The mirror may still hold the last valid value and etag after a

@@ -373,6 +373,30 @@ Mirror state lives at `rootState._kv[contractID][key]` and contains
 `chelonia/kv/defineSlot` / `_loadSlot` / `_handleRemote` and cleaned up
 on contract release.
 
+Mirror `value` is canonical: it is **always** either a
+server-confirmed payload or `undefined`. Every `'non-init'` transition
+— a first-load 404, a local `clear`, and a remote (wire-`null`) clear
+— leaves `value === undefined`; the declared default is surfaced only
+through `chelonia/kv/read` and the `onUpdate` callback, never written
+into the raw mirror. Direct `rootState._kv` readers MUST treat
+`status` (not `value`) as the source of truth and substitute the
+default via `value ?? read(contractID, key)`. A first load of a
+never-written key emits only `CHELONIA_KV_STATUS_CHANGED`
+(`non-init → loading → non-init`); `CHELONIA_KV_UPDATED` is **not**
+emitted because the value did not change, so consumers that need a
+"settled" signal must watch `CHELONIA_KV_STATUS_CHANGED` reaching a
+terminal status.
+
+`chelonia/kv/update` resolves with the value it persisted. If the slot
+is replaced (`defineSlot`/HMR) or dropped (reconcile) *after* the
+server write commits, `update` still resolves with that committed
+value rather than `undefined` — `undefined` is reserved for
+`KV_NOOP`/abort, i.e. "no write happened" — so callers can distinguish
+a persisted write from a genuine no-op. The committed write is
+echo-suppressed regardless of slot replacement, so its own pubsub echo
+never re-validates through (and spuriously errors) the replacement
+slot.
+
 `chelonia/reset` aborts stuck/offline network work, then **drains**
 in-flight `chelonia/kv/update` / `chelonia/kv/clear` writes via
 `chelonia/kv/_waitInFlight` before `postCleanupFn` and before clearing the
@@ -409,7 +433,7 @@ Config keys (all on `KvSlotDefinition`):
 | `autoLoad` | `'on-sync'` | `'on-sync'` fetches on contract sync; `'on-demand'` waits for `read`/`sync`; `'never'` skips. |
 | `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect. |
 | `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the `value` form of `update`. |
-| `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw. |
+| `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw. Must not synchronously call a same-contract KV write selector (rejected with `ChelErrorKvReentrant` — see the re-entrancy caveat below). |
 
 Public selectors:
 
@@ -418,7 +442,7 @@ chelonia/kv/defineSlot        — Register or replace a slot definition
 chelonia/kv/update            — Write via updater or value; retries on conflict
 chelonia/kv/read              — Synchronous mirror read (returns default if unloaded/error)
 chelonia/kv/sync              — Force-fetch slot(s) from the server
-chelonia/kv/clear             — Reset slot to defaultValue (writes null to server)
+chelonia/kv/clear             — Reset slot (mirror value→undefined, default via read; writes null to server)
 chelonia/kv/status            — KvLoadStatus of a slot or aggregate for a contract
 chelonia/kv/refreshFilters    — Re-evaluate match predicates after state transitions
 ```
@@ -431,6 +455,113 @@ CHELONIA_KV_STATUS_CHANGED   — Slot status transitioned
 CHELONIA_KV_VALIDATION_ERROR — Mirror value failed schema.parse
 ```
 
+Unloaded-write caveat: `chelonia/kv/update` derives its `if-match`
+precondition from the mirror etag. A never-loaded (`'non-init'`) slot
+has `etag: null`, so its first `update` is sent with no precondition
+and overwrites whatever the server already holds — even a value this
+client never read — rather than producing a `412`. This is harmless
+for the default `autoLoad: 'on-sync'` (the slot loads on sync before
+any write), but for `autoLoad: 'on-demand'` / `'never'` slots, call
+`chelonia/kv/sync` before `update` to avoid clobbering an unread
+server value.
+
+`onUpdate` re-entrancy caveat: `onUpdate` runs *inside* the contract's
+`chelonia/queueInvocation` lane, which is held until the callback
+settles. Calling a KV **write** selector (`chelonia/kv/update`,
+`clear`, or `sync`) for the **same contract** from within `onUpdate`
+would enqueue behind the very lane that is blocked awaiting the
+callback — a permanent deadlock. To turn the most common form of this
+hang (a write issued during the callback's *synchronous* execution,
+e.g. `onUpdate: () => sbp('chelonia/kv/update', …)`) into a clear
+error, those selectors detect synchronous re-entrancy and reject with
+`ChelErrorKvReentrant`. The guard is held only for the callback's
+synchronous portion, so it never rejects an *independent* concurrent
+write that merely interleaves with a slow async `onUpdate` (those
+queue safely and succeed). Safe from `onUpdate` at any time:
+`chelonia/kv/read` and `chelonia/kv/status` (synchronous, unqueued),
+and writes to *other* contracts. To re-enter a write on the same
+contract, schedule it off the synchronous stack and do not await it
+inside the callback, e.g.
+`queueMicrotask(() => sbp('chelonia/kv/update', …))` — it queues
+behind the lane and runs once the lane releases. (A re-entrant write
+issued *after* an `await` inside `onUpdate` is not detected and still
+deadlocks; treat it as unsupported and schedule it off the stack as
+above.)
+
+No-`cid` remote frame handling: a pubsub KV frame without a `cid`
+carries no server identifier to pair with the mirror etag. If such a
+frame arrives for a slot that already holds an etag, applying it inline
+would write the new value while keeping the *old* etag, breaking the
+"value and etag move together" invariant and guaranteeing a `412` on
+the next local write. Chelonia therefore forces an authoritative
+`chelonia/kv/get` for value-bearing no-`cid` frames on etag-bearing
+slots (re-pairing value+etag from the server, mirroring the
+conflict-reconciliation path). A no-`cid` frame on a never-loaded slot
+(etag `null`) still applies inline — there is no stale etag to clobber.
+
+Ordering note: `CHELONIA_KV_UPDATED` is emitted *before* the slot
+status transitions (the mirror `value`/`etag` are written, the event
+fires, then `setSlotStatus` runs). Because `okTurtles.events/emit` is
+synchronous, a `CHELONIA_KV_UPDATED` handler that reads
+`chelonia/kv/status` observes the **pre-transition** status (e.g.
+`'loading'` on a first successful load, not `'loaded'`). Consumers
+that need a settled status signal must watch
+`CHELONIA_KV_STATUS_CHANGED` reaching a terminal status rather than
+inferring status from inside a `CHELONIA_KV_UPDATED` handler.
+
+Ordering caveat (re-validate path): the load / remote / local paths
+emit `CHELONIA_KV_UPDATED` *before* the status transition (above), but
+the `defineSlot`-replacement re-validation path (`revalidateMirrorEntry`)
+flips status to `'loaded'` *before* emitting `CHELONIA_KV_UPDATED` for
+the error-recovery and coercion cases. A `CHELONIA_KV_UPDATED` handler
+that reads `chelonia/kv/status` therefore observes the **already-
+transitioned** (`'loaded'`) status on the re-validate path, the opposite
+of the load path. This inconsistency is accepted rather than reordered:
+the re-validate path must clear `'error'` promptly so `chelonia/kv/read`
+(which returns the default while `status === 'error'`) stops hiding the
+recovered value, and a handler that reads back a freshly-recovered value
+should see `'loaded'`, not the stale `'error'`. The general guidance
+stands — derive a settled signal from `CHELONIA_KV_STATUS_CHANGED`, not
+from the status observed inside a `CHELONIA_KV_UPDATED` handler.
+
+Payload-mutation safety: the `value` and `previousValue` fields on
+`CHELONIA_KV_UPDATED`, and the `value` argument to `onUpdate`, are
+**detached deep clones** of the mirror, not live references into
+`rootState._kv`. Mutating them in a listener/callback is safe — it
+cannot corrupt the mirror or other observers — but the mutation is also
+not reflected back into the mirror (use `chelonia/kv/update` to persist
+a change). Primitive values pass through unwrapped.
+
+Change-detection caveat: `CHELONIA_KV_UPDATED` does **not** guarantee
+the value actually changed. `chelonia/kv/clear` always emits (per
+§4.5), whereas a no-op first load suppresses the event, so the event is
+fired on a superset of real changes. Consumers needing strict change
+detection must compare `previousValue` against `value` themselves.
+
+`onUpdate` replacement caveat: because the slot-identity guard before
+`await safeOnUpdate` is synchronous, a slot replaced via `defineSlot`
+(or HMR) *during* an in-flight async load/write may still see its
+previous definition's `onUpdate` fire once after the replacement's own
+revalidation. Callbacks must therefore be idempotent and must not
+assume they are still the active slot for the contract/key.
+
+Slot-replacement refetch (no stale `'loaded'`): when `defineSlot`
+replaces an already-active `autoLoad: 'on-sync'` slot, Chelonia decides
+between re-validating the persisted mirror value and scheduling a fresh
+server fetch. A fetch is forced not only when the entry looks unloaded
+(`non-init` / `loading` / no value) or a write is in flight, but also
+when a *load* is pending for the contract (`kvPendingLoads` > 0). A load
+can be pending because it is queued behind busy lane work but not yet
+started (its status is still `'loaded'`, so the unloaded check misses
+it) or because it is the authoritative GET `_handleRemote` runs to
+reconcile a conflict / no-`cid` frame. In both cases that in-flight load
+will discard its result at its own staleness guard once it sees the
+replacement, so re-validating the soon-to-be-stale value would strand
+the mirror at the old value with a `'loaded'` status and no signal to
+the consumer. Forcing a fresh load for the replacement re-fetches the
+live server value instead. (Idempotent re-`defineSlot` with no pending
+work still re-validates in place and issues no network request.)
+
 Low-level selector extensions: the slot layer extends (does not
 replace) `chelonia/kv/set` (returns `{ etag }`, accepts `signal`,
 `onconflict`, `maxAttempts`), `chelonia/kv/get` (attaches `etag`
@@ -438,19 +569,67 @@ lazily without forcing the `data` accessor), and `chelonia/kv/queuedSet`
 (forwards `signal`, returns `{ etag }`). `chelonia/kv/setFilter` is
 unchanged. These additions are backward-compatible.
 
+Data-loss-guard reload (status quiet): `chelonia/kv/update` on a slot
+that is in `'error'` but still holds a retained value+etag first issues
+one *silent* authoritative reload (so the reducer seeds from, and the
+write's `if-match` guards against, live server state instead of the
+default). That reload's internal status churn is hidden: it emits no
+`CHELONIA_KV_UPDATED` / `onUpdate`, **and** no `CHELONIA_KV_STATUS_CHANGED`
+— the observable status stays at its pre-reload value so a single
+`update` does not surface a spurious `error → loading → loaded` flicker.
+The one status transition consumers observe is the terminal
+`error → loaded` the write itself emits after the commit. Internally the
+mirror `value`/`etag` are still refreshed by the reload; `update` derives
+its reducer seed from whether the reload ran/succeeded, not from the
+(deliberately frozen) status field.
+
+Filter-flush retry: a transient `chelonia/kv/setFilter` failure (e.g. a
+server error while the websocket stays up) is retried after a short
+backoff (`KV_FILTER_RETRY_MS`). The contract is held in a separate
+`kvFilterRetry` set (not re-added to `kvFilterDirty` inline, which would
+hot-spin the drain loop); a single deferred timer moves the pending
+contracts back into `kvFilterDirty` and re-flushes, re-sending the filter
+cached in `kvActiveFilters`. Retries repeat (rate-limited) until the
+server accepts the filter or the slot set changes. A reconnect
+re-establishes filters independently from `kvActiveFilters`, so this
+retry only matters for failures that leave the socket up.
+
 Self-echo suppression uses a time-decaying map of server-issued data
 CIDs per `(contractID, key)` stored in `kvLocalEchoCIDs` (`Map<string,
 Map<string, { expiry: number; fromConflict: boolean }>>`). The CID is
 returned from `chelonia/kv/set` as `etag` and also appears on pubsub KV
 frames as `cid`; matching, non-expired frames are dropped and the entry
-is deleted on first match. Entries auto-expire after `KV_ECHO_TTL_MS`
+is deleted on first match (except conflict markers — see "Conflict-marker
+arrival ordering" below). Entries auto-expire after `KV_ECHO_TTL_MS`
 (300 s) and are purged lazily; a per-bucket cap of `KV_ECHO_CID_MAX`
-(128, evict earliest-expiry first) is a hard backstop only. A non-self
+(128, evict earliest-expiry first, but never the just-recorded CID)
+is a hard backstop only. A non-self
 frame that arrives while a conflict-resolved write's echo is still
 pending forces an authoritative `chelonia/kv/get` instead of applying the
-frame last-write-wins. Pubsub frames without `cid` preserve the current
-mirror etag and surface as `reason: 'remote'`. An echo whose CID has
+frame last-write-wins. A value-bearing frame without `cid` on an
+etag-bearing slot also forces an authoritative `chelonia/kv/get` (so
+value and etag stay paired); a no-`cid` frame on a never-loaded slot
+(etag `null`) applies inline with a `null` etag. Either way it surfaces
+as `reason: 'remote'`. An echo whose CID has
 expired or was evicted surfaces as `reason: 'remote'`.
+
+Conflict-marker arrival ordering: because KV pubsub frames are not
+ordered, a conflict-resolved write's own echo can arrive either before
+or after a competing non-self frame. Both orderings preserve the
+`fromConflict` marker so the competing frame always forces the
+authoritative GET. (1) Non-self-first: the GET runs, then the marker is
+demoted (`fromConflict → false`) on both success and failure so it
+cannot loop. (2) Echo-first: the matching echo is suppressed but the
+marker is **kept** (not deleted) and stays `fromConflict`, so the
+later competing frame still triggers a GET rather than regressing the
+mirror via last-write-wins; the GET demotes the marker afterwards.
+A demoted or expired marker no longer forces a GET.
+
+Echo-CID clock: the TTL uses `performance.now()` (monotonic), not
+`Date.now()`. This is immune to wall-clock/NTP steps — a backwards
+clock jump can never prematurely expire a pending echo — at the cost
+of background-tab throttling possibly *extending* the effective TTL,
+which only makes suppression more conservative.
 
 Consumer-visible leakage: `rootState._kv` is a separate subtree from
 `rootState.contracts`, but it is projected into external stores by

@@ -438,9 +438,13 @@ export default sbp('sbp/selectors/register', {
     this.kvSlotsByContractID = new Map()
     this.kvActiveFilters = new Map()
     this.kvFilterDirty = new Set()
+    this.kvFilterRetry = new Set()
+    this.kvFlushInFlight = false
     this.kvLocalEchoCIDs = new Map()
     this.kvReconnectRefresh = new Set()
     this.kvPendingWrites = new Map()
+    this.kvPendingLoads = new Map()
+    this.kvOnUpdateActive = new Map()
     this.defContractKvByManifest = new Map()
     // pending includes contracts that are scheduled for syncing or in the
     // process of syncing for the first time. After sync completes for the
@@ -740,9 +744,13 @@ export default sbp('sbp/selectors/register', {
     this.kvSlotsByContractID.clear()
     this.kvActiveFilters.clear()
     this.kvFilterDirty.clear()
+    this.kvFilterRetry.clear()
+    this.kvFlushInFlight = false
     this.kvLocalEchoCIDs.clear()
     this.kvReconnectRefresh.clear()
     this.kvPendingWrites.clear()
+    this.kvPendingLoads.clear()
+    this.kvOnUpdateActive.clear()
     clearObject(this.ephemeralReferenceCount)
     this.pending.splice(0)
     clearObject(this.currentSyncs)

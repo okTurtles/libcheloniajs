@@ -410,6 +410,16 @@ export type CheloniaContext = {
   kvActiveFilters: Map<string, Set<string>>;
   // Microtask flush set for setFilter coalescing (see §11.5).
   kvFilterDirty: Set<string>;
+  // Re-entrancy guard for the setFilter flush loop — ensures a single
+  // draining loop instead of concurrent racing flushes (see §11.5).
+  kvFlushInFlight: boolean;
+  // Contracts whose last `setFilter` flush failed transiently and are
+  // awaiting a backoff retry. Held separately from `kvFilterDirty` so the
+  // drain loop does not hot-spin re-sending a failing filter within the
+  // same pass; a single deferred timer moves these back into
+  // `kvFilterDirty` and re-flushes so the server's filter set converges
+  // without waiting for the next slot change to re-dirty the contract.
+  kvFilterRetry: Set<string>;
   // Server-issued data CIDs awaiting self-echo suppression.
   // Keyed by `${contractID}::${key}`; inner map value carries expiry + source.
   kvLocalEchoCIDs: Map<string, Map<string, { expiry: number; fromConflict: boolean }>>;
@@ -423,6 +433,26 @@ export type CheloniaContext = {
   // release, match→false) still settles before `chelonia/reset` tears
   // down state.
   kvPendingWrites: Map<string, number>;
+  // Per-contract count of queued/in-flight `chelonia/kv/_loadSlotNow`
+  // fetches (autoload, explicit sync, reconnect refresh, and the
+  // authoritative GETs `_handleRemote` issues for conflict resolution /
+  // no-cid frames). Incremented inside the load body and decremented
+  // when it settles. `defineSlot`'s post-reconcile gate consults this so
+  // replacing a slot whose load is merely queued (not yet running, so
+  // its status is still `loaded`) schedules a fresh load for the
+  // replacement instead of revalidating a value the superseded load is
+  // about to discard at its staleness guard — which would otherwise
+  // leave the mirror silently stale.
+  kvPendingLoads: Map<string, number>;
+  // Per-contract count of `onUpdate` callbacks currently executing
+  // inside the contract's `chelonia/queueInvocation` lane. A KV write
+  // selector (`update`/`clear`/`sync`) invoked while this is non-zero
+  // for the same contract would enqueue behind the lane that is blocked
+  // awaiting the callback → permanent deadlock, so those selectors
+  // reject with `ChelErrorKvReentrant` instead. Keyed by `contractID`
+  // to match the lane granularity exactly (cross-contract writes from
+  // `onUpdate` are safe and not rejected).
+  kvOnUpdateActive: Map<string, number>;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
