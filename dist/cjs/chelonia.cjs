@@ -196,10 +196,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.kvSlotsByContractID = new Map();
         this.kvActiveFilters = new Map();
         this.kvFilterDirty = new Set();
+        this.kvFilterRetry = new Set();
         this.kvFlushInFlight = false;
         this.kvLocalEchoCIDs = new Map();
         this.kvReconnectRefresh = new Set();
         this.kvPendingWrites = new Map();
+        this.kvPendingLoads = new Map();
         this.kvOnUpdateActive = new Map();
         this.defContractKvByManifest = new Map();
         // pending includes contracts that are scheduled for syncing or in the
@@ -485,10 +487,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.kvSlotsByContractID.clear();
         this.kvActiveFilters.clear();
         this.kvFilterDirty.clear();
+        this.kvFilterRetry.clear();
         this.kvFlushInFlight = false;
         this.kvLocalEchoCIDs.clear();
         this.kvReconnectRefresh.clear();
         this.kvPendingWrites.clear();
+        this.kvPendingLoads.clear();
         this.kvOnUpdateActive.clear();
         (0, utils_js_1.clearObject)(this.ephemeralReferenceCount);
         this.pending.splice(0);
@@ -757,7 +761,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             (0, sbp_1.default)('chelonia/private/stopClockSync');
         }
         (0, sbp_1.default)('chelonia/private/startClockSync');
-        const legacyKvHandler = options.messageHandlers?.[index_js_1.NOTIFICATION_TYPE.KV];
+        const rawKvHandler = options.messageHandlers?.[index_js_1.NOTIFICATION_TYPE.KV];
         this.pubsub = (0, index_js_1.createClient)(pubsubURL, {
             ...this.config.connectionOptions,
             handlers: {
@@ -830,26 +834,26 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         return;
                     }
                     const kvSlotHandler = (0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_handleRemote');
-                    if (!legacyKvHandler && !kvSlotHandler)
+                    if (!rawKvHandler && !kvSlotHandler)
                         return;
                     (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, async () => {
-                        // Share one lazy parsed wrapper between the legacy callback and the
+                        // Share one lazy parsed wrapper between the raw KV callback and the
                         // slot layer. If either consumer forces `.data`, the decoded value
                         // or thrown error is cached; both consumers can therefore observe
-                        // and log the same decode failure, and the legacy callback may
+                        // and log the same decode failure, and the raw KV callback may
                         // decode frames the slot layer would skip as self-echoes.
                         const parsed = parseEncryptedOrUnencryptedMessage(this, {
                             contractID: msg.channelID,
                             meta: msg.key,
                             serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
                         });
-                        if (legacyKvHandler) {
+                        if (rawKvHandler) {
                             try {
                                 ;
-                                legacyKvHandler.call(this.pubsub, [msg.key, parsed]);
+                                rawKvHandler.call(this.pubsub, [msg.key, parsed]);
                             }
                             catch (e) {
-                                console.error(`[chelonia] legacy kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
+                                console.error(`[chelonia] raw kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
                             }
                         }
                         if (kvSlotHandler) {
@@ -2366,7 +2370,7 @@ function parseEncryptedOrUnencryptedMessage(ctx, { contractID, serializedData, m
     const rootState = (0, sbp_1.default)(ctx.config.stateSelector);
     const currentHeight = rootState.contracts[contractID].height;
     if (!(numericHeight >= 0) || !(numericHeight <= currentHeight)) {
-        throw new Error(`[chelonia] parseEncryptedOrUnencryptedMessage: Invalid height ${serializedData.height}; it must be between 0 and ${currentHeight}`);
+        throw new errors_js_1.ChelErrorInvalidMessageHeight(`[chelonia] parseEncryptedOrUnencryptedMessage: Invalid height ${serializedData.height}; it must be between 0 and ${currentHeight}`);
     }
     // Additional data used for verification
     const aad = (meta ?? '') + serializedData.height;

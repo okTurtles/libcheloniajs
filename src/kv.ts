@@ -1905,7 +1905,7 @@ export default (sbp('sbp/selectors/register', {
   // Behaviour:
   //   - O(1) slot lookup via `kvSlotsByContractID[cID][key]`. Returns
   //     immediately on miss — `defineSlot` may not have registered yet
-  //     and the legacy raw API still runs through the existing
+  //     and the raw KV API still runs through the existing
   //     callback path. No regression.
   //   - Read the frame CID; if it matches a non-expired entry in
   //     `kvLocalEchoCIDs[${cID}::${key}]`, drop the frame silently

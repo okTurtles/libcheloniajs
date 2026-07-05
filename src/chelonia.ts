@@ -37,6 +37,7 @@ import {
   serializeKey
 } from '@chelonia/crypto'
 import {
+  ChelErrorInvalidMessageHeight,
   ChelErrorResourceGone,
   ChelErrorUnexpected,
   ChelErrorUnexpectedHttpResponseCode,
@@ -1077,7 +1078,7 @@ export default sbp('sbp/selectors/register', {
       sbp('chelonia/private/stopClockSync')
     }
     sbp('chelonia/private/startClockSync')
-    const legacyKvHandler = options.messageHandlers?.[NOTIFICATION_TYPE.KV]
+    const rawKvHandler = options.messageHandlers?.[NOTIFICATION_TYPE.KV]
     this.pubsub = createClient(pubsubURL, {
       ...this.config.connectionOptions,
       handlers: {
@@ -1179,29 +1180,29 @@ export default sbp('sbp/selectors/register', {
             return
           }
           const kvSlotHandler = sbp('sbp/selectors/fn', 'chelonia/kv/_handleRemote')
-          if (!legacyKvHandler && !kvSlotHandler) return
+          if (!rawKvHandler && !kvSlotHandler) return
           sbp('chelonia/queueInvocation', msg.channelID, async () => {
-            // Share one lazy parsed wrapper between the legacy callback and the
+            // Share one lazy parsed wrapper between the raw KV callback and the
             // slot layer. If either consumer forces `.data`, the decoded value
             // or thrown error is cached; both consumers can therefore observe
-            // and log the same decode failure, and the legacy callback may
+            // and log the same decode failure, and the raw KV callback may
             // decode frames the slot layer would skip as self-echoes.
             const parsed = parseEncryptedOrUnencryptedMessage<object>(this, {
               contractID: msg.channelID,
               meta: msg.key,
               serializedData: JSON.parse(Buffer.from(msg.data).toString())
             })
-            if (legacyKvHandler) {
+            if (rawKvHandler) {
               try {
                 ;(
-                  legacyKvHandler as unknown as (
+                  rawKvHandler as unknown as (
                     this: PubSubClient,
                     msg: [string, ParsedEncryptedOrUnencryptedMessage<object>],
                   ) => void
                 ).call(this.pubsub, [msg.key, parsed])
               } catch (e) {
                 console.error(
-                  `[chelonia] legacy kv pubsub callback threw for ${msg.channelID}::${msg.key}`,
+                  `[chelonia] raw kv pubsub callback threw for ${msg.channelID}::${msg.key}`,
                   e
                 )
               }
@@ -3127,7 +3128,7 @@ function parseEncryptedOrUnencryptedMessage<T> (
   const rootState = sbp(ctx.config.stateSelector)
   const currentHeight = rootState.contracts[contractID].height
   if (!(numericHeight >= 0) || !(numericHeight <= currentHeight)) {
-    throw new Error(
+    throw new ChelErrorInvalidMessageHeight(
       `[chelonia] parseEncryptedOrUnencryptedMessage: Invalid height ${serializedData.height}; it must be between 0 and ${currentHeight}`
     )
   }

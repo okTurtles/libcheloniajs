@@ -73,6 +73,14 @@ export declare const ChelErrorForkedChain: {
         cause?: unknown;
     };
 };
+export declare const ChelErrorInvalidMessageHeight: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
 export declare const ChelErrorDecryptionError: {
     new (message?: string | undefined, options?: ErrorOptions | undefined): {
         name: string;

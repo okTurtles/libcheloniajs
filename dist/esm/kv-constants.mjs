@@ -16,6 +16,13 @@ export const KV_NOOP_ABORT_ERROR_NAME = 'KvNoopAbort';
 export const KV_ECHO_CID_MAX = 128;
 export const KV_ECHO_TTL_MS = 300000;
 export const KV_KEY_SEPARATOR = '::';
+// Backoff before retrying a `setFilter` flush that failed transiently
+// (e.g. a server error while the socket stayed up). The dirty mark is
+// re-added and a single deferred retry is scheduled so the server's
+// filter set converges without waiting for the next slot change to
+// re-dirty the contract. Reconnect re-establishes filters independently,
+// so this only matters for failures that do not drop the socket.
+export const KV_FILTER_RETRY_MS = 2000;
 export const KV_DEFAULT_ENCRYPTION_KEY_NAME = 'cek';
 export const KV_DEFAULT_SIGNING_KEY_NAME = 'csk';
 export const KV_LOAD_STATUS = {

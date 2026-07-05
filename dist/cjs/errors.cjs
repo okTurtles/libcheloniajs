@@ -2,7 +2,7 @@
 // ugly boilerplate because JavaScript is stupid
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ChelErrorKvReentrant = exports.ChelErrorKvConflict = exports.ChelErrorKvValidation = exports.ChelErrorKvUpdateInvalid = exports.ChelErrorKvSlotInvalid = exports.ChelErrorKvSlotUnknown = exports.ChelErrorJournalCorrupt = exports.ChelErrorResourceGone = exports.ChelErrorUnexpectedHttpResponseCode = exports.ChelErrorFetchServerTimeFailed = exports.ChelErrorSignatureKeyNotFound = exports.ChelErrorSignatureKeyUnauthorized = exports.ChelErrorSignatureError = exports.ChelErrorDecryptionKeyNotFound = exports.ChelErrorDecryptionError = exports.ChelErrorForkedChain = exports.ChelErrorUnrecoverable = exports.ChelErrorKeyAlreadyExists = exports.ChelErrorUnexpected = exports.ChelErrorDBConnection = exports.ChelErrorDBBadPreviousHEAD = exports.ChelErrorAlreadyProcessed = exports.ChelErrorWarning = exports.ChelErrorGenerator = void 0;
+exports.ChelErrorKvReentrant = exports.ChelErrorKvConflict = exports.ChelErrorKvValidation = exports.ChelErrorKvUpdateInvalid = exports.ChelErrorKvSlotInvalid = exports.ChelErrorKvSlotUnknown = exports.ChelErrorJournalCorrupt = exports.ChelErrorResourceGone = exports.ChelErrorUnexpectedHttpResponseCode = exports.ChelErrorFetchServerTimeFailed = exports.ChelErrorSignatureKeyNotFound = exports.ChelErrorSignatureKeyUnauthorized = exports.ChelErrorSignatureError = exports.ChelErrorDecryptionKeyNotFound = exports.ChelErrorDecryptionError = exports.ChelErrorInvalidMessageHeight = exports.ChelErrorForkedChain = exports.ChelErrorUnrecoverable = exports.ChelErrorKeyAlreadyExists = exports.ChelErrorUnexpected = exports.ChelErrorDBConnection = exports.ChelErrorDBBadPreviousHEAD = exports.ChelErrorAlreadyProcessed = exports.ChelErrorWarning = exports.ChelErrorGenerator = void 0;
 const ChelErrorGenerator = (name, base = Error) => class extends base {
     constructor(...params) {
         super(...params);
@@ -29,6 +29,7 @@ exports.ChelErrorUnexpected = (0, exports.ChelErrorGenerator)('ChelErrorUnexpect
 exports.ChelErrorKeyAlreadyExists = (0, exports.ChelErrorGenerator)('ChelErrorKeyAlreadyExists');
 exports.ChelErrorUnrecoverable = (0, exports.ChelErrorGenerator)('ChelErrorUnrecoverable');
 exports.ChelErrorForkedChain = (0, exports.ChelErrorGenerator)('ChelErrorForkedChain');
+exports.ChelErrorInvalidMessageHeight = (0, exports.ChelErrorGenerator)('ChelErrorInvalidMessageHeight');
 exports.ChelErrorDecryptionError = (0, exports.ChelErrorGenerator)('ChelErrorDecryptionError');
 exports.ChelErrorDecryptionKeyNotFound = (0, exports.ChelErrorGenerator)('ChelErrorDecryptionKeyNotFound', exports.ChelErrorDecryptionError);
 exports.ChelErrorSignatureError = (0, exports.ChelErrorGenerator)('ChelErrorSignatureError');

@@ -30,6 +30,7 @@ export const ChelErrorUnexpected = ChelErrorGenerator('ChelErrorUnexpected')
 export const ChelErrorKeyAlreadyExists = ChelErrorGenerator('ChelErrorKeyAlreadyExists')
 export const ChelErrorUnrecoverable = ChelErrorGenerator('ChelErrorUnrecoverable')
 export const ChelErrorForkedChain = ChelErrorGenerator('ChelErrorForkedChain')
+export const ChelErrorInvalidMessageHeight = ChelErrorGenerator('ChelErrorInvalidMessageHeight')
 export const ChelErrorDecryptionError = ChelErrorGenerator('ChelErrorDecryptionError')
 export const ChelErrorDecryptionKeyNotFound = ChelErrorGenerator(
   'ChelErrorDecryptionKeyNotFound',

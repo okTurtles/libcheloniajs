@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.KV_AUTO_LOAD = exports.KV_VALIDATION_REASON_REVALIDATE = exports.KV_UPDATE_REASON = exports.KV_LOAD_STATUS = exports.KV_DEFAULT_SIGNING_KEY_NAME = exports.KV_DEFAULT_ENCRYPTION_KEY_NAME = exports.KV_KEY_SEPARATOR = exports.KV_ECHO_TTL_MS = exports.KV_ECHO_CID_MAX = exports.KV_NOOP_ABORT_ERROR_NAME = exports.KV_NOOP_ABORT_SYMBOL = exports.KV_NOOP = void 0;
+exports.KV_AUTO_LOAD = exports.KV_VALIDATION_REASON_REVALIDATE = exports.KV_UPDATE_REASON = exports.KV_LOAD_STATUS = exports.KV_DEFAULT_SIGNING_KEY_NAME = exports.KV_DEFAULT_ENCRYPTION_KEY_NAME = exports.KV_FILTER_RETRY_MS = exports.KV_KEY_SEPARATOR = exports.KV_ECHO_TTL_MS = exports.KV_ECHO_CID_MAX = exports.KV_NOOP_ABORT_ERROR_NAME = exports.KV_NOOP_ABORT_SYMBOL = exports.KV_NOOP = void 0;
 // Reserved sentinel returned by a `KvUpdater` to abort a write without
 // touching the server (replaces the legacy `return null` idiom from
 // `chelonia/kv/set`'s `onconflict`).
@@ -19,6 +19,13 @@ exports.KV_NOOP_ABORT_ERROR_NAME = 'KvNoopAbort';
 exports.KV_ECHO_CID_MAX = 128;
 exports.KV_ECHO_TTL_MS = 300000;
 exports.KV_KEY_SEPARATOR = '::';
+// Backoff before retrying a `setFilter` flush that failed transiently
+// (e.g. a server error while the socket stayed up). The dirty mark is
+// re-added and a single deferred retry is scheduled so the server's
+// filter set converges without waiting for the next slot change to
+// re-dirty the contract. Reconnect re-establishes filters independently,
+// so this only matters for failures that do not drop the socket.
+exports.KV_FILTER_RETRY_MS = 2000;
 exports.KV_DEFAULT_ENCRYPTION_KEY_NAME = 'cek';
 exports.KV_DEFAULT_SIGNING_KEY_NAME = 'csk';
 exports.KV_LOAD_STATUS = {

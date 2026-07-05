@@ -7,7 +7,7 @@ import { Buffer } from 'buffer';
 import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, createClient } from './pubsub/index.mjs';
 import { clearReingestTrackerAll } from './reingestTracker.mjs';
 import { EDWARDS25519SHA512BATCH, deserializeKey, keyId, keygen, serializeKey } from '@chelonia/crypto';
-import { ChelErrorResourceGone, ChelErrorUnexpected, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable } from './errors.mjs';
+import { ChelErrorInvalidMessageHeight, ChelErrorResourceGone, ChelErrorUnexpected, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable } from './errors.mjs';
 import { ChelErrorKvMaxAttempts } from './internal-errors.mjs';
 import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './events.mjs';
 import { SPMessage } from './SPMessage.mjs';
@@ -190,10 +190,12 @@ export default sbp('sbp/selectors/register', {
         this.kvSlotsByContractID = new Map();
         this.kvActiveFilters = new Map();
         this.kvFilterDirty = new Set();
+        this.kvFilterRetry = new Set();
         this.kvFlushInFlight = false;
         this.kvLocalEchoCIDs = new Map();
         this.kvReconnectRefresh = new Set();
         this.kvPendingWrites = new Map();
+        this.kvPendingLoads = new Map();
         this.kvOnUpdateActive = new Map();
         this.defContractKvByManifest = new Map();
         // pending includes contracts that are scheduled for syncing or in the
@@ -479,10 +481,12 @@ export default sbp('sbp/selectors/register', {
         this.kvSlotsByContractID.clear();
         this.kvActiveFilters.clear();
         this.kvFilterDirty.clear();
+        this.kvFilterRetry.clear();
         this.kvFlushInFlight = false;
         this.kvLocalEchoCIDs.clear();
         this.kvReconnectRefresh.clear();
         this.kvPendingWrites.clear();
+        this.kvPendingLoads.clear();
         this.kvOnUpdateActive.clear();
         clearObject(this.ephemeralReferenceCount);
         this.pending.splice(0);
@@ -751,7 +755,7 @@ export default sbp('sbp/selectors/register', {
             sbp('chelonia/private/stopClockSync');
         }
         sbp('chelonia/private/startClockSync');
-        const legacyKvHandler = options.messageHandlers?.[NOTIFICATION_TYPE.KV];
+        const rawKvHandler = options.messageHandlers?.[NOTIFICATION_TYPE.KV];
         this.pubsub = createClient(pubsubURL, {
             ...this.config.connectionOptions,
             handlers: {
@@ -824,26 +828,26 @@ export default sbp('sbp/selectors/register', {
                         return;
                     }
                     const kvSlotHandler = sbp('sbp/selectors/fn', 'chelonia/kv/_handleRemote');
-                    if (!legacyKvHandler && !kvSlotHandler)
+                    if (!rawKvHandler && !kvSlotHandler)
                         return;
                     sbp('chelonia/queueInvocation', msg.channelID, async () => {
-                        // Share one lazy parsed wrapper between the legacy callback and the
+                        // Share one lazy parsed wrapper between the raw KV callback and the
                         // slot layer. If either consumer forces `.data`, the decoded value
                         // or thrown error is cached; both consumers can therefore observe
-                        // and log the same decode failure, and the legacy callback may
+                        // and log the same decode failure, and the raw KV callback may
                         // decode frames the slot layer would skip as self-echoes.
                         const parsed = parseEncryptedOrUnencryptedMessage(this, {
                             contractID: msg.channelID,
                             meta: msg.key,
                             serializedData: JSON.parse(Buffer.from(msg.data).toString())
                         });
-                        if (legacyKvHandler) {
+                        if (rawKvHandler) {
                             try {
                                 ;
-                                legacyKvHandler.call(this.pubsub, [msg.key, parsed]);
+                                rawKvHandler.call(this.pubsub, [msg.key, parsed]);
                             }
                             catch (e) {
-                                console.error(`[chelonia] legacy kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
+                                console.error(`[chelonia] raw kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
                             }
                         }
                         if (kvSlotHandler) {
@@ -2360,7 +2364,7 @@ function parseEncryptedOrUnencryptedMessage(ctx, { contractID, serializedData, m
     const rootState = sbp(ctx.config.stateSelector);
     const currentHeight = rootState.contracts[contractID].height;
     if (!(numericHeight >= 0) || !(numericHeight <= currentHeight)) {
-        throw new Error(`[chelonia] parseEncryptedOrUnencryptedMessage: Invalid height ${serializedData.height}; it must be between 0 and ${currentHeight}`);
+        throw new ChelErrorInvalidMessageHeight(`[chelonia] parseEncryptedOrUnencryptedMessage: Invalid height ${serializedData.height}; it must be between 0 and ${currentHeight}`);
     }
     // Additional data used for verification
     const aad = (meta ?? '') + serializedData.height;

@@ -4339,7 +4339,7 @@ describe('KV slot API', () => {
     await sbp('chelonia/kv/_handleRemote', c, 'shared', parsed, 'cid-remote-76')
     assert.deepStrictEqual(rootState()._kv![c]!.shared.value, { x: 7 })
 
-    // Simulate the shared legacy-handler retaining and mutating parsed.data.
+    // Simulate the shared raw-handler retaining and mutating parsed.data.
     shared.x = 999
     assert.deepStrictEqual(
       rootState()._kv![c]!.shared.value, { x: 7 },

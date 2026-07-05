@@ -5,6 +5,7 @@ export declare const KV_NOOP_ABORT_ERROR_NAME = "KvNoopAbort";
 export declare const KV_ECHO_CID_MAX = 128;
 export declare const KV_ECHO_TTL_MS = 300000;
 export declare const KV_KEY_SEPARATOR = "::";
+export declare const KV_FILTER_RETRY_MS = 2000;
 export declare const KV_DEFAULT_ENCRYPTION_KEY_NAME = "cek";
 export declare const KV_DEFAULT_SIGNING_KEY_NAME = "csk";
 export declare const KV_LOAD_STATUS: {
