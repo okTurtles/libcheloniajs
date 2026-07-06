@@ -488,6 +488,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.kvActiveFilters.clear();
         this.kvFilterDirty.clear();
         this.kvFilterRetry.clear();
+        if (this.kvFilterRetryTimer != null) {
+            clearTimeout(this.kvFilterRetryTimer);
+            this.kvFilterRetryTimer = undefined;
+        }
         this.kvFlushInFlight = false;
         this.kvLocalEchoCIDs.clear();
         this.kvReconnectRefresh.clear();

@@ -1,5 +1,5 @@
 // KV slot API tests — 82 cases total: 27 from KV-REVAMPED.md §11.6
-// plus 55 implementation-specific cases covering REVIEW.md follow-ups
+// plus 55 implementation-specific cases covering KV hardening follow-ups
 // and §11.3 step 3 exceptions.
 //
 // We register simplified infrastructure selectors once (mutable stub
@@ -25,7 +25,7 @@ import {
   CHELONIA_KV_UPDATED,
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
-import { KV_ECHO_CID_MAX, KV_ECHO_TTL_MS } from './kv-constants.js'
+import { KV_ECHO_CID_MAX, KV_ECHO_TTL_MS, KV_KEY_SEPARATOR } from './kv-constants.js'
 import { KV_NOOP } from './kv.js'
 import type {
   ChelKvGetResult,
@@ -217,6 +217,10 @@ sbp('sbp/selectors/register', {
     this.kvActiveFilters.clear()
     this.kvFilterDirty.clear()
     this.kvFilterRetry.clear()
+    if (this.kvFilterRetryTimer != null) {
+      clearTimeout(this.kvFilterRetryTimer)
+      this.kvFilterRetryTimer = undefined
+    }
     this.kvLocalEchoCIDs.clear()
     this.kvReconnectRefresh.clear()
     this.kvPendingWrites.clear()
@@ -303,6 +307,10 @@ sbp('sbp/selectors/register', {
       : (this.kvFilterRetry.has(contractID) ? 1 : 0)
   },
 
+  'chelonia/test/filterRetryTimerPending': function (this: CheloniaContext) {
+    return this.kvFilterRetryTimer != null
+  },
+
   'chelonia/test/hasEchoCID': function (this: CheloniaContext, key: string) {
     return this.kvLocalEchoCIDs.has(key)
   },
@@ -376,6 +384,15 @@ sbp('sbp/selectors/register', {
     this: CheloniaContext, contractID: string, key: string
   ) {
     return this.kvSlotsByContractID.get(contractID)?.get(key)
+  },
+
+  // Test helper: return the SlotDefinition registered in `kvSlots` for a
+  // given (contractType, key) registryKey, or undefined. Used to verify
+  // `defineSlot` registration counts and dedup behaviour.
+  'chelonia/test/registrySlot': function (
+    this: CheloniaContext, contractType: string, key: string
+  ) {
+    return this.kvSlots.get(`${contractType}${KV_KEY_SEPARATOR}${key}`)
   }
 })
 
@@ -427,6 +444,63 @@ describe('KV slot API', () => {
     sbp('chelonia/kv/defineSlot', {
       key: 's1', contractType: CTYPE, defaultValue: { x: 1 }, schema: objectSchema
     })
+  })
+
+  // -----------------------------------------------------------------------
+  // 1b: defineSlot deduplicates contractType array entries
+  // -----------------------------------------------------------------------
+  it('1b: defineSlot deduplicates duplicate contractType array entries', () => {
+    // Duplicate entries collapse to a single registration under the same
+    // registryKey, so reconcile/schema-guard work runs once, not N times.
+    const CT_DEDUP = 'test-dedup'
+    sbp('chelonia/kv/defineSlot', {
+      key: 'dd',
+      contractType: [CT_DEDUP, CT_DEDUP, CT_DEDUP],
+      defaultValue: { x: 1 },
+      schema: objectSchema
+    })
+    const slot = sbp('chelonia/test/registrySlot', CT_DEDUP, 'dd')
+    assert.ok(slot, 'deduped contractType should register exactly one slot')
+    assert.strictEqual(slot.contractType, CT_DEDUP)
+
+    // A multi-type array with distinct entries still registers one slot
+    // per distinct type.
+    const CT_A = 'test-multi-a'
+    const CT_B = 'test-multi-b'
+    sbp('chelonia/kv/defineSlot', {
+      key: 'mm',
+      contractType: [CT_A, CT_B],
+      defaultValue: { x: 2 },
+      schema: objectSchema
+    })
+    assert.ok(sbp('chelonia/test/registrySlot', CT_A, 'mm'))
+    assert.ok(sbp('chelonia/test/registrySlot', CT_B, 'mm'))
+  })
+
+  // -----------------------------------------------------------------------
+  // 1c: assertJsonShape rejects circular references with a depth cap
+  // -----------------------------------------------------------------------
+  it('1c: defineSlot rejects a schema whose parse output is circular', () => {
+    // A buggy or malicious schema could produce a cyclic structure from a
+    // valid input. `assertJsonShape` must reject it via the depth guard
+    // rather than infinite-looping the walker and hanging the realm.
+    const cyclicSchema = {
+      parse (v: unknown): unknown {
+        if (v === null || v === undefined) throw new Error('rejected')
+        const obj: Record<string, unknown> = { x: 1 }
+        obj.self = obj // create a cycle
+        return obj
+      }
+    }
+    assert.throws(
+      () => sbp('chelonia/kv/defineSlot', {
+        key: 'cyc',
+        contractType: CTYPE,
+        defaultValue: { x: 1 },
+        schema: cyclicSchema
+      }),
+      (e: unknown) => e instanceof ChelErrorKvSlotInvalid
+    )
   })
 
   // -----------------------------------------------------------------------
@@ -2229,6 +2303,63 @@ describe('KV slot API', () => {
     offs.forEach((off) => off())
   })
 
+  it('43a: post-success abort still echo-suppresses the committed write (update)', async () => {
+    // An abort that lands between `kv/set` resolving (write committed)
+    // and the post-success `throwIfSignalAborted` check must
+    // NOT leave the committed write's pubsub echo unsuppressed. The
+    // documented AbortError contract (§4.2: "Mirror is unchanged; no
+    // event fires") requires the echo-suppression recording to run
+    // before the abort check; otherwise the unsuppressed echo would
+    // later re-validate as a 'remote' frame, mutating the mirror and
+    // firing CHELONIA_KV_UPDATED against an AbortError the contract
+    // promises leaves the mirror untouched.
+    sbp('chelonia/kv/defineSlot', {
+      key: 'abortUpdate', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-43a'
+    await setupContract(c)
+
+    const echoCID = 'post-success-abort-update'
+    const ac = new AbortController()
+    stubSet = async () => {
+      // The POST just committed (we're about to return the etag); the
+      // caller aborts inside this window before update's step-6 runs.
+      ac.abort()
+      return { etag: echoCID }
+    }
+
+    const { log, offs } = collectEvents()
+    await assert.rejects(
+      () => sbp('chelonia/kv/update', {
+        contractID: c, key: 'abortUpdate', signal: ac.signal, updater: () => ({ x: 1 })
+      }),
+      (e: unknown) => e instanceof DOMException && e.name === 'AbortError'
+    )
+
+    // (a) AbortError contract holds: no events fired, mirror untouched.
+    assert.strictEqual(log.length, 0, 'no events should fire on abort')
+    assert.strictEqual(rootState()._kv![c]!.abortUpdate.value, undefined)
+    assert.strictEqual(rootState()._kv![c]!.abortUpdate.status, 'non-init')
+
+    // (b) Echo CID was recorded DESPITE the abort — the write committed,
+    // so its echo must be suppressed. Pre-fix this entry was missing
+    // because the abort check ran before recordEchoCID.
+    assert.ok(
+      sbp('chelonia/test/echoCIDPresent', `${c}${KV_KEY_SEPARATOR}abortUpdate`, echoCID),
+      'echo CID must be recorded before the abort check'
+    )
+
+    // (c) The committed write's pubsub echo arrives: it must be
+    // suppressed, not re-validated as 'remote' (which would breach the
+    // abort contract by mutating the mirror after the AbortError).
+    await sbp('chelonia/kv/_handleRemote', c, 'abortUpdate', fakeParsed({ x: 1 }), echoCID)
+    assert.ok(!log.some((e) =>
+      e.type === CHELONIA_KV_UPDATED
+    ), 'echo of aborted-but-committed write should be suppressed')
+    assert.strictEqual(rootState()._kv![c]!.abortUpdate.value, undefined)
+    offs.forEach((off) => off())
+  })
+
   it('44: stale successful clear still echo-suppresses the committed write', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'staleClear', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
@@ -2523,6 +2654,58 @@ describe('KV slot API', () => {
     assert.strictEqual(warnings.length, 2)
     assert.ok(String(warnings[0][0]).includes('update:'))
     assert.ok(String(warnings[1][0]).includes('clear:'))
+  })
+
+  it('44h: post-success abort still echo-suppresses the committed write (clear)', async () => {
+    // Clear analog of 43a: an abort that lands between
+    // `kv/set` resolving (clear committed) and the post-success
+    // `throwIfSignalAborted` check must NOT leave the committed clear's
+    // pubsub echo unsuppressed. The AbortError contract (§4.2) requires
+    // "Mirror is unchanged; no event fires" — `recordEchoCID` must run
+    // before the abort check, otherwise the unsuppressed echo would
+    // re-validate as a 'remote' frame and mutate the mirror after the
+    // AbortError was already thrown.
+    sbp('chelonia/kv/defineSlot', {
+      key: 'abortClear', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-44h'
+    await setupContract(c)
+    rootState()._kv![c]!.abortClear.value = { x: 5 }
+    rootState()._kv![c]!.abortClear.status = 'loaded'
+
+    const echoCID = 'post-success-abort-clear'
+    const ac = new AbortController()
+    stubSet = async () => {
+      ac.abort()
+      return { etag: echoCID }
+    }
+
+    const { log, offs } = collectEvents()
+    await assert.rejects(
+      () => sbp('chelonia/kv/clear', c, 'abortClear', { signal: ac.signal }),
+      (e: unknown) => e instanceof DOMException && e.name === 'AbortError'
+    )
+
+    // (a) AbortError contract holds: no events fired, mirror untouched
+    //     (the pre-existing { x: 5 } value remains).
+    assert.strictEqual(log.length, 0, 'no events should fire on abort')
+    assert.deepStrictEqual(rootState()._kv![c]!.abortClear.value, { x: 5 })
+
+    // (b) Echo CID was recorded DESPITE the abort. Pre-fix this entry
+    //     was missing because the abort check ran before recordEchoCID.
+    assert.ok(
+      sbp('chelonia/test/echoCIDPresent', `${c}${KV_KEY_SEPARATOR}abortClear`, echoCID),
+      'echo CID must be recorded before the abort check'
+    )
+
+    // (c) The committed clear's pubsub echo arrives: it must be
+    //     suppressed, not re-validated as 'remote'.
+    await sbp('chelonia/kv/_handleRemote', c, 'abortClear', fakeParsed(null), echoCID)
+    assert.ok(!log.some((e) =>
+      e.type === CHELONIA_KV_UPDATED
+    ), 'echo of aborted-but-committed clear should be suppressed')
+    assert.deepStrictEqual(rootState()._kv![c]!.abortClear.value, { x: 5 })
+    offs.forEach((off) => off())
   })
 
   it('45: local echo CIDs are bounded to the configured cap', async () => {
@@ -4009,6 +4192,44 @@ describe('KV slot API', () => {
       'the cached active filter includes this slot key')
     assert.strictEqual(sbp('chelonia/test/filterRetrySize', c), 0,
       'the retry set is drained after a successful re-flush')
+    sbp('chelonia/kv/_testSetFilterRetryMs')
+  })
+
+  // -----------------------------------------------------------------------
+  // 71c: chelonia/reset cancels the pending filter-retry timer so the
+  // closure pinning ctx is released immediately rather than waiting for
+  // the timer to fire (harmlessly) against the now-empty retry set.
+  // -----------------------------------------------------------------------
+  it('71c: reset cancels the pending filter-retry timer', async () => {
+    const c = 'cid-71c'
+    sbp('chelonia/kv/defineSlot', {
+      key: 'fk', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    await setupContract(c)
+
+    // Use a large backoff so the timer stays pending across the reset.
+    sbp('chelonia/kv/_testSetFilterRetryMs', 60000)
+
+    stubSetFilter = () => {
+      throw new Error('transient setFilter failure')
+    }
+
+    sbp('chelonia/test/dirtyFilter', c)
+    await sbp('chelonia/kv/_flushDirtyFilters')
+    assert.ok(sbp('chelonia/test/filterRetryTimerPending'),
+      'a retry timer should be pending after a transient setFilter failure')
+
+    await sbp('chelonia/reset')
+    assert.ok(!sbp('chelonia/test/filterRetryTimerPending'),
+      'reset must cancel the pending filter-retry timer')
+    assert.strictEqual(sbp('chelonia/test/filterRetrySize'), 0,
+      'reset must clear the retry set')
+
+    // After reset, no deferred flush should fire (the timer was canceled).
+    stubSetFilterCalls.length = 0
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    assert.deepStrictEqual(stubSetFilterCalls, [],
+      'no setFilter call should occur after reset canceled the timer')
     sbp('chelonia/kv/_testSetFilterRetryMs')
   })
 

@@ -420,6 +420,11 @@ export type CheloniaContext = {
   // `kvFilterDirty` and re-flushes so the server's filter set converges
   // without waiting for the next slot change to re-dirty the contract.
   kvFilterRetry: Set<string>;
+  // Handle for the deferred timer scheduled by `scheduleFilterRetry`.
+  // Tracked so `chelonia/reset` can `clearTimeout` it and release the
+  // closure pinning `ctx` immediately, rather than waiting for the timer
+  // to fire (harmlessly) against the now-empty `kvFilterRetry` set.
+  kvFilterRetryTimer?: ReturnType<typeof setTimeout>;
   // Server-issued data CIDs awaiting self-echo suppression.
   // Keyed by `${contractID}::${key}`; inner map value carries expiry + source.
   kvLocalEchoCIDs: Map<string, Map<string, { expiry: number; fromConflict: boolean }>>;
@@ -437,12 +442,18 @@ export type CheloniaContext = {
   // fetches (autoload, explicit sync, reconnect refresh, and the
   // authoritative GETs `_handleRemote` issues for conflict resolution /
   // no-cid frames). Incremented inside the load body and decremented
-  // when it settles. `defineSlot`'s post-reconcile gate consults this so
-  // replacing a slot whose load is merely queued (not yet running, so
-  // its status is still `loaded`) schedules a fresh load for the
-  // replacement instead of revalidating a value the superseded load is
-  // about to discard at its staleness guard — which would otherwise
-  // leave the mirror silently stale.
+  // when it settles. NOTE: a load initiated via the public queued
+  // wrapper `_loadSlot` is counted twice — once on schedule (in
+  // `_loadSlot`) and again on entry (in `_loadSlotNow`) — because both
+  // the wrapper and the inner function serve direct callers that need
+  // the counter. The only consumer is `defineSlot`'s `> 0` gate, so the
+  // inflation is harmless; do NOT rely on the exact count for telemetry
+  // or "exactly one load in flight" assertions. `defineSlot`'s
+  // post-reconcile gate consults this so replacing a slot whose load is
+  // merely queued (not yet running, so its status is still `loaded`)
+  // schedules a fresh load for the replacement instead of revalidating a
+  // value the superseded load is about to discard at its staleness guard
+  // — which would otherwise leave the mirror silently stale.
   kvPendingLoads: Map<string, number>;
   // Per-contract count of `onUpdate` callbacks currently executing
   // inside the contract's `chelonia/queueInvocation` lane. A KV write

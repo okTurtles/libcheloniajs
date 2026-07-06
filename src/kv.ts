@@ -90,6 +90,13 @@ let nowMs = defaultNowMs
 // the retry deterministically without a real 2 s wait.
 let filterRetryMs = KV_FILTER_RETRY_MS
 
+// Maximum nesting depth accepted by `assertJsonShape`. Guards against
+// pathological (e.g. circular) values that a buggy or malicious schema
+// could produce from `schema.parse`, which would otherwise infinite-loop
+// the recursive walker and hang the realm. 1000 is well above any
+// legitimate JSON value while keeping the recursion stack bounded.
+const MAX_JSON_DEPTH = 1000
+
 const registryKey = (contractType: string, key: string): string =>
   `${contractType}${KV_KEY_SEPARATOR}${key}`
 
@@ -301,7 +308,12 @@ function parseSyncSlotValue (
 }
 
 function assertJsonShape (input: unknown, where: string): JSONType {
-  const visit = (value: unknown, path: string): void => {
+  const visit = (value: unknown, path: string, depth: number): void => {
+    if (depth > MAX_JSON_DEPTH) {
+      throw new ChelErrorKvValidation(
+        `[chelonia/kv] ${where}: ${path} exceeded max depth (possible circular reference)`
+      )
+    }
     if (value === null || value === undefined) {
       throw new ChelErrorKvValidation(
         `[chelonia/kv] ${where}: ${path} is the reserved sentinel ${String(value)}`
@@ -321,7 +333,7 @@ function assertJsonShape (input: unknown, where: string): JSONType {
       )
     }
     if (Array.isArray(value)) {
-      for (let i = 0; i < value.length; i++) visit(value[i], `${path}[${i}]`)
+      for (let i = 0; i < value.length; i++) visit(value[i], `${path}[${i}]`, depth + 1)
       return
     }
     if (value && typeof value === 'object') {
@@ -332,13 +344,13 @@ function assertJsonShape (input: unknown, where: string): JSONType {
         )
       }
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        visit(v, `${path}.${k}`)
+        visit(v, `${path}.${k}`, depth + 1)
       }
       return
     }
     throw new ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} is not JSON-shaped`)
   }
-  visit(input, 'value')
+  visit(input, 'value', 0)
   return input as JSONType
 }
 
@@ -589,13 +601,19 @@ function decrementPending (ctx: CheloniaContext, contractID: string): void {
   else ctx.kvPendingWrites.set(contractID, n)
 }
 
-// Per-contract pending-load counter. `chelonia/kv/_loadSlotNow`
-// increments this for the duration of its async body and decrements it
-// in a `finally`. `defineSlot`'s post-reconcile gate consults it so a
-// slot replaced while a load is queued-but-not-started (status still
-// `loaded`, so the `unloaded` check misses it) schedules a fresh load
-// for the replacement rather than revalidating a value the superseded
-// load is about to discard at its staleness guard.
+// Per-contract pending-load counter. Incremented by both `_loadSlot`
+// (on schedule, to cover the queued-but-not-started window) and
+// `_loadSlotNow` (on entry, to cover direct callers like `_handleRemote`
+// and `update`'s silent reload). A load that flows `_loadSlot` →
+// `_loadSlotNow` therefore increments twice for one logical operation;
+// this is intentional — the only consumer is `defineSlot`'s `> 0` gate,
+// so the inflation is harmless. Do NOT rely on the exact count for
+// "exactly one load in flight" assertions or telemetry.
+// `defineSlot`'s post-reconcile gate consults it so a slot replaced
+// while a load is queued-but-not-started (status still `loaded`, so the
+// `unloaded` check misses it) schedules a fresh load for the replacement
+// rather than revalidating a value the superseded load is about to
+// discard at its staleness guard.
 function incrementPendingLoad (ctx: CheloniaContext, contractID: string): void {
   ctx.kvPendingLoads.set(contractID, (ctx.kvPendingLoads.get(contractID) ?? 0) + 1)
 }
@@ -840,7 +858,9 @@ function scheduleFilterRetry (ctx: CheloniaContext, contractID: string): void {
   const wasEmpty = ctx.kvFilterRetry.size === 0
   ctx.kvFilterRetry.add(contractID)
   if (!wasEmpty) return
-  setTimeout(() => {
+  if (ctx.kvFilterRetryTimer != null) return
+  ctx.kvFilterRetryTimer = setTimeout(() => {
+    ctx.kvFilterRetryTimer = undefined
     if (ctx.kvFilterRetry.size === 0) return
     for (const cID of ctx.kvFilterRetry) ctx.kvFilterDirty.add(cID)
     ctx.kvFilterRetry.clear()
@@ -1062,7 +1082,9 @@ export default (sbp('sbp/selectors/register', {
     if (typeof def.key !== 'string' || def.key.length === 0) {
       throw new ChelErrorKvSlotInvalid('[chelonia/kv] defineSlot: invalid key')
     }
-    const types = Array.isArray(def.contractType) ? def.contractType : [def.contractType]
+    const types = Array.from(new Set(
+      Array.isArray(def.contractType) ? def.contractType : [def.contractType]
+    ))
     if (types.length === 0) {
       throw new ChelErrorKvSlotInvalid('[chelonia/kv] defineSlot: contractType required')
     }
@@ -1433,6 +1455,14 @@ export default (sbp('sbp/selectors/register', {
       // commits — a single `update` call producing both a `'load'` and
       // a `'local'` event is surprising and can double-trigger
       // non-idempotent `onUpdate` handlers.
+      // NOTE: `silent` does NOT suppress the `reactiveSet` calls that
+      // write the refreshed value/etag into the mirror. A reactive
+      // system (Vue, etc.) watching `rootState._kv[cID][key].value` will
+      // see the reload's intermediate value flash before the `update`'s
+      // own write commits, producing an extra reactive notification
+      // within a single logical `update` call. This is a deliberate
+      // tradeoff — the reload must refresh the mirror internally so the
+      // reducer seeds correctly.
       silent?: boolean;
     }
   ): Promise<void> {
@@ -1472,6 +1502,13 @@ export default (sbp('sbp/selectors/register', {
       // transition itself after the write commits. `update` derives its
       // seed precedence from whether the reload ran/failed, not from the
       // (now-frozen) status field. Non-silent loads transition normally.
+      // NOTE: under `silent`, status transitions AND `lastError` updates
+      // are intentionally swallowed (the no-op stub below discards both
+      // args). The slot was already in `'error'` (that's what triggered
+      // the reload), and the enclosing `update` will overwrite both on
+      // write success or stamp a fresh error on write failure. A failed
+      // silent reload therefore leaves the prior `lastError` in place —
+      // acceptable because the write's own outcome reconciles it.
       const setStatus = silent
         ? () => {}
         : (
@@ -2059,6 +2096,16 @@ export default (sbp('sbp/selectors/register', {
       // a now-reconciled slot take the (harmless) inline path. Conflict
       // markers are only ever set alongside a cid, so a no-cid frame
       // seeing one is rare, but demoting keeps the two paths consistent.
+      //
+      // Scope note: this demotion clears `fromConflict` on EVERY marker
+      // in the bucket, not just a single write's marker. Under burst
+      // contention with two independent conflict-resolved writes for the
+      // same (contractID, key), a later competing frame for the second
+      // write would fall through to last-write-wins instead of forcing
+      // its own GET. This is self-healing — the server is authoritative
+      // and the next local write's `if-match` reconciles — so the
+      // broader demotion is accepted to keep the common (single-write)
+      // case loop-free.
       const demoteConflictMarkers = () => {
         const bucket = this.kvLocalEchoCIDs.get(echoKey)
         if (bucket) {
@@ -2490,8 +2537,8 @@ export default (sbp('sbp/selectors/register', {
         } catch (e) {
           // §4.2 rejection taxonomy: a reducer-output shape failure is a
           // validation failure, regardless of whether the slot is
-          // schema-backed. Mirrors the `currentData` shape check below
-          // (line ~2393) which routes the same failure to
+          // schema-backed. Mirrors the `currentData` shape check in the
+          // `onconflict` callback below, which routes the same failure to
           // ChelErrorKvValidation. Formerly ChelErrorKvUpdateInvalid.
           throw new ChelErrorKvValidation(
             `[chelonia/kv] update: ${contractID}::${key} reducer output ` +
@@ -2606,8 +2653,9 @@ export default (sbp('sbp/selectors/register', {
           try {
             validated = assertJsonShape(validated, `update onconflict retry ${contractID}::${key}`)
           } catch (e) {
-            // See the first-attempt path above (line ~2325) for why this is
-            // ChelErrorKvValidation, not ChelErrorKvUpdateInvalid.
+            // See the first-attempt reducer-output validation in
+            // `chelonia/kv/update` (the `assertJsonShape` rejection) for why
+            // this is ChelErrorKvValidation, not ChelErrorKvUpdateInvalid.
             throw new ChelErrorKvValidation(
               `[chelonia/kv] update: ${contractID}::${key} reducer output ` +
               'is not JSON-shaped on conflict retry',
@@ -2678,16 +2726,21 @@ export default (sbp('sbp/selectors/register', {
         throw e
       }
       // ----- Step 6: write mirror + emit events. -----
-      throwIfSignalAborted(signal)
-      // Echo-suppress unconditionally, BEFORE the staleness/liveness
-      // guards below. The write already committed to the server, so its
-      // pubsub echo must be dropped regardless of whether the slot was
+      // Echo-suppress unconditionally, BEFORE the abort check and the
+      // staleness/liveness guards below. The write already committed to
+      // the server, so its pubsub echo must be dropped regardless of
+      // whether the caller's `signal` aborted mid-write or the slot was
       // replaced (defineSlot/HMR) or dropped (reconcile) mid-write.
       // `kvLocalEchoCIDs` is keyed by (contractID, key), not slot
       // identity, so the suppression entry stays valid across slot
-      // replacement; recording after an early `return` would let the
-      // committed write's echo arrive unsuppressed and be re-validated
-      // through the replacement slot (spuriously flipping it to 'error').
+      // replacement; recording after an early `return`/throw would let
+      // the committed write's echo arrive unsuppressed and be
+      // re-validated as a 'remote' frame (spuriously flipping the
+      // replacement slot to 'error' — staleness case — or mutating the
+      // mirror and firing CHELONIA_KV_UPDATED against an AbortError the
+      // contract at §4.2 promises leaves the mirror untouched — abort
+      // case). The abort check therefore runs AFTER `recordEchoCID`,
+      // never between `kv/set` resolving and the suppression recording.
       if (setResult.etag == null) {
         console.warn(
           `[chelonia/kv] update: ${contractID}::${key} successful write returned no ` +
@@ -2695,6 +2748,7 @@ export default (sbp('sbp/selectors/register', {
         )
       }
       recordEchoCID(this, contractID, key, setResult.etag, sawConflict)
+      throwIfSignalAborted(signal)
       if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
         // Slot replaced mid-write. The value DID commit to the server,
         // so resolve with it (not `undefined`) — `undefined` is reserved
@@ -2977,11 +3031,14 @@ export default (sbp('sbp/selectors/register', {
         }
         throw e
       }
-      throwIfSignalAborted(signal)
-      // Echo-suppress unconditionally, BEFORE the staleness/liveness
-      // guards: the clear already committed to the server, so its pubsub
-      // echo must be dropped regardless of slot replacement/drop. See the
-      // matching note in `chelonia/kv/update`.
+      // Echo-suppress unconditionally, BEFORE the abort check and the
+      // staleness/liveness guards: the clear already committed to the
+      // server, so its pubsub echo must be dropped regardless of slot
+      // replacement/drop or an aborting `signal`. See the matching note
+      // in `chelonia/kv/update` for the full rationale (the abort check
+      // must run AFTER `recordEchoCID`, never between `kv/set` resolving
+      // and the suppression recording, or the committed write's echo
+      // would re-validate against the §4.2 abort contract).
       if (setResult.etag == null) {
         console.warn(
           `[chelonia/kv] clear: ${contractID}::${key} successful write returned no ` +
@@ -2989,6 +3046,7 @@ export default (sbp('sbp/selectors/register', {
         )
       }
       recordEchoCID(this, contractID, key, setResult.etag, sawConflict)
+      throwIfSignalAborted(signal)
       if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
         return
       }
@@ -3404,8 +3462,9 @@ function revalidateMirrorEntry (
       error: e,
       reason: KV_VALIDATION_REASON_REVALIDATE
     })
-    // Symmetric with the success path's `hasInflight` deferral above
-    // (line ~3119): when a write holds the lane, a synchronous ERROR flip
+    // Symmetric with the success path's `hasInflight` deferral in
+    // `revalidateMirrorEntry` (the `!hasInflight && !deferStatusFlip`
+    // branch): when a write holds the lane, a synchronous ERROR flip
     // would interleave with the in-flight op's own status transitions.
     // Defer through the lane so the ERROR stamp serialises behind that
     // write, matching how the success path defers its LOADED flip. The

@@ -315,6 +315,7 @@ export type CheloniaContext = {
     kvFilterDirty: Set<string>;
     kvFlushInFlight: boolean;
     kvFilterRetry: Set<string>;
+    kvFilterRetryTimer?: ReturnType<typeof setTimeout>;
     kvLocalEchoCIDs: Map<string, Map<string, {
         expiry: number;
         fromConflict: boolean;
