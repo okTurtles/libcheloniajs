@@ -17,6 +17,8 @@ jobs:
     concurrency:
       group: pr-review-crush-${{ github.event.issue.number }}
       cancel-in-progress: true
+    # If this timeout changes, update TIMEOUT_SECONDS in the
+    # 'Report timeout on trigger comment' step to match.
     timeout-minutes: 30
     permissions:
       contents: read
@@ -39,6 +41,7 @@ jobs:
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
+          echo "JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
           gh api "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
             -f content='eyes'
           gh api "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}" \
@@ -612,3 +615,31 @@ jobs:
           - Model: ${REVIEW_MODEL}
 
           The review workflow failed. Check the [workflow run](${RUN_URL}) for details. Comment \`${REVIEW_COMMAND}\` to re-run."
+
+      # Runs when the job is cancelled. The elapsed-time check distinguishes
+      # the job timeout (timeout-minutes above) from a concurrency
+      # cancel-in-progress cancellation, which must NOT add the note.
+      - name: Report timeout on trigger comment
+        if: cancelled()
+        env:
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          # Keep in sync with the job-level `timeout-minutes` setting.
+          TIMEOUT_SECONDS=$((30 * 60))
+          if [ -z "$JOB_STARTED_AT" ]; then
+            echo "Job start time unknown — skipping timeout report"
+            exit 0
+          fi
+          ELAPSED=$(( $(date +%s) - JOB_STARTED_AT ))
+          if [ "$ELAPSED" -lt $(( TIMEOUT_SECONDS - 60 )) ]; then
+            echo "Cancelled after ${ELAPSED}s (< timeout) — likely concurrency cancellation; skipping"
+            exit 0
+          fi
+          BODY=$(gh api "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" --jq '.body')
+          gh api "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" \
+            -X PATCH \
+            -f body="${BODY}
+
+          **The review job timed out.**"
+          gh api "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" \
+            -f content='confused'
