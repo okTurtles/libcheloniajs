@@ -129,7 +129,6 @@ jobs:
           case "$REVIEW_PROVIDER" in
             openrouter) echo "SMALL_MODEL=openrouter/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
             zai-coding-plan) echo "SMALL_MODEL=zai/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
-            *) echo "SMALL_MODEL=zai/glm-5.1" >> "$GITHUB_ENV" ;;
           esac
 
       - name: Get PR number
@@ -244,7 +243,7 @@ jobs:
               fi
 
               # Fetch the issue; on failure, note it and move to the next one
-              if ! gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" > issue_data.json 2>/dev/null; then
+              if ! gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" > /tmp/issue_data.json 2>/dev/null; then
                 echo "::warning::Could not fetch issue #$ISSUE_NUMBER"
                 printf '<issue_summary issue="#%s">\nIssue context unavailable.\n</issue_summary>\n' "$ISSUE_NUMBER" >> /tmp/helpful_context.txt
                 continue
@@ -252,24 +251,24 @@ jobs:
 
               # Build issue conversation text (title + body + all comments)
               {
-                echo "## Issue #$ISSUE_NUMBER: $(jq -r '.title // ""' issue_data.json)"
+                echo "## Issue #$ISSUE_NUMBER: $(jq -r '.title // ""' /tmp/issue_data.json)"
                 echo ""
-                jq -r '.body // ""' issue_data.json
+                jq -r '.body // ""' /tmp/issue_data.json
                 echo ""
               } > /tmp/issue_conversation.txt
 
               # Fetch all comments on the issue
               gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" --paginate \
-                | jq -s 'add // []' > issue_comments.json 2>/dev/null || echo "[]" > issue_comments.json
+                | jq -s 'add // []' > /tmp/issue_comments.json 2>/dev/null || echo "[]" > /tmp/issue_comments.json
 
-              COMMENT_COUNT=$(jq 'length' issue_comments.json 2>/dev/null || echo "0")
+              COMMENT_COUNT=$(jq 'length' /tmp/issue_comments.json 2>/dev/null || echo "0")
               if [ "$COMMENT_COUNT" -gt 0 ]; then
                 {
                   echo "---"
                   echo ""
                   echo "### Comments"
                   echo ""
-                  jq -r '.[] | "**\(.user.login)** (\(.created_at)):\n\(.body)\n\n---\n"' issue_comments.json
+                  jq -r '.[] | "**\(.user.login)** (\(.created_at)):\n\(.body)\n\n---\n"' /tmp/issue_comments.json
                 } >> /tmp/issue_conversation.txt
               fi
 
@@ -663,7 +662,10 @@ jobs:
             echo "Cancelled after ${ELAPSED}s (< timeout) — likely concurrency cancellation; skipping"
             exit 0
           fi
-          BODY=$(gh api "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" --jq '.body')
+          BODY=$(gh api "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" --jq '.body') || {
+            echo "::warning::Could not fetch comment body for timeout report"
+            exit 0
+          }
           gh api "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" \
             -X PATCH \
             -f body="${BODY}
