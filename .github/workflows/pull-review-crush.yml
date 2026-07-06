@@ -456,6 +456,18 @@ jobs:
           cat /tmp/raw_review.txt
           echo "::endgroup::"
 
+      # Tool access: `crush run` (non-interactive) auto-approves all permission
+      # requests for its session, so `permissions.allowed_tools` alone can neither
+      # grant nor restrict anything reliably. Enforcement is done via
+      # `options.disabled_tools`, which removes tools from the agent entirely:
+      # mutation tools (edit/multiedit/write) are disabled to keep the review
+      # read-only, LSP/MCP tools are disabled because no LSPs or MCP servers
+      # are configured here, and crush introspection tools (crush_info,
+      # crush_logs) are disabled as irrelevant to reviewing. Everything else
+      # (bash, download, sourcegraph, etc.) stays available to improve review
+      # quality. The allowlist mirrors the enabled set as a belt-and-braces
+      # measure in case a future crush release stops auto-approving in
+      # non-interactive mode.
       - name: Install crush
         if: steps.size-check.outputs.too_large == 'false'
         run: |
@@ -466,10 +478,11 @@ jobs:
             "$schema": "https://charm.land/crush.json",
             "options": {
               "context_paths": ["AGENTS.md", "CRUSH.md", "CLAUDE.md", "README.md"],
-              "disable_metrics": true
+              "disable_metrics": true,
+              "disabled_tools": ["edit", "multiedit", "write", "lsp_diagnostics", "lsp_references", "lsp_restart", "list_mcp_resources", "read_mcp_resource", "crush_info", "crush_logs"]
             },
             "permissions": {
-              "allowed_tools": ["view", "read", "ls", "glob", "grep", "fetch", "agentic_fetch", "agent", "todos"]
+              "allowed_tools": ["agent", "agentic_fetch", "bash", "download", "fetch", "glob", "grep", "job_kill", "job_output", "ls", "sourcegraph", "todos", "view"]
             }
           }
           EOF
