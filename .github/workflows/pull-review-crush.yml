@@ -9,7 +9,7 @@ jobs:
     name: Automated PR Review
     if: >-
       github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/crush') &&
+      startsWith(github.event.comment.body, '/review') &&
       (github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'COLLABORATOR')
@@ -53,28 +53,22 @@ jobs:
 
           _AI review [started](${RUN_URL})._"
 
-      - name: Detect fast mode
+      - name: Extract review command
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           REVIEW_COMMAND=$(echo "$COMMENT_BODY" | grep -m1 -oP '^\s*\K/\S+(\s+\{\{[^}]*\}\})?')
           echo "REVIEW_COMMAND=$REVIEW_COMMAND" >> "$GITHUB_ENV"
-          if echo "$COMMENT_BODY" | grep -qP '^\s*/crush_fast'; then
-            echo "FAST_MODE=true" >> "$GITHUB_ENV"
-            echo "Fast mode enabled — skipping raw review and combine step"
-          else
-            echo "FAST_MODE=false" >> "$GITHUB_ENV"
-          fi
 
       - name: Parse provider/model override
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          # Check for {{provider, model}} or {{provider, model, small_model}} override syntax after /crush or /crush_fast command
-          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/crush(_fast)?[[:space:]]+\{\{[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^,}]+)[[:space:]]*(,[[:space:]]*([^}]+)[[:space:]]*)?\}\} ]]; then
-            PROVIDER=$(echo "${BASH_REMATCH[2]}" | xargs)
-            MODEL=$(echo "${BASH_REMATCH[3]}" | xargs)
-            SMALL_MODEL=$(echo "${BASH_REMATCH[5]}" | xargs)
+          # Check for {{provider, model}} or {{provider, model, small_model}} override syntax after the /review command
+          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/review[[:space:]]+\{\{[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^,}]+)[[:space:]]*(,[[:space:]]*([^}]+)[[:space:]]*)?\}\} ]]; then
+            PROVIDER=$(echo "${BASH_REMATCH[1]}" | xargs)
+            MODEL=$(echo "${BASH_REMATCH[2]}" | xargs)
+            SMALL_MODEL=$(echo "${BASH_REMATCH[4]}" | xargs)
             # Validate provider and models contain only safe characters
             if [[ "$PROVIDER" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "$MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]] && { [[ -z "$SMALL_MODEL" ]] || [[ "$SMALL_MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; }; then
               echo "Overriding provider to: $PROVIDER"
@@ -308,51 +302,11 @@ jobs:
           cat /tmp/helpful_context.txt
           echo "::endgroup::"
 
-      - name: Build review prompts
+      - name: Build review prompt
         env:
           PROJECT_CTX: ${{ vars.PROJECT_CTX }}
         run: |
           PROJECT_CTX="${PROJECT_CTX:-Attached are a set of changes to a software project.}"
-
-          printf '%s\n\n' "$PROJECT_CTX" > /tmp/raw_prompt.txt
-          cat >> /tmp/raw_prompt.txt << 'PROMPT_END'
-          Please have a look at these changes and thoroughly check it for:
-          
-          - Highest priority: any bugs, security issues, DRY violations, and improvements that can be made through code simplification
-          - spelling or grammar mistakes in user-facing strings or log messages
-          - poorly named identifiers like variables, selectors, functions/methods, types or classes
-          
-          When providing feedback, be specific and quote the concrete lines that are problematic, and then give your code improvement suggestions complete with actual code. When replying, always use Markdown and Markdown code fences to quote any lines. Avoid commenting on code that has no issues (no "you did a good job here!" fluff).
-
-          When referencing sections of code, always mention the specific lines being referenced in the following manner to make it easy for developers to know where to look:
-
-          - `file.js:841`
-          - `file.vue:50-70`
-
-          For each issue you identify, give it a rating of 🔴 for high importance & high confidence, 🟡 for medium importance & high confidence, and ⚪️ for issues of either lower confidence or lower importance. Prioritize finding 🔴 and 🟡 issues. Give your feedback in order of importance from most to least.
-
-          Also, for each issue, immediately after the issue heading please add these two checkboxes:
-
-          - [ ] Addressed
-          - [ ] Dismissed
-
-          If no problems are found, state that and do nothing else.
-
-          ### Helpful Context
-
-          PROMPT_END
-
-          {
-            cat /tmp/helpful_context.txt
-            cat << 'SECTION_END'
-
-          ### Changes to Review
-
-          ```diff
-          SECTION_END
-            cat /tmp/pr_diff.txt
-            printf '\n```\n'
-          } >> /tmp/raw_prompt.txt
 
           printf '%s\n\n' "$PROJECT_CTX" > /tmp/agentic_prompt.txt
           cat >> /tmp/agentic_prompt.txt << 'PROMPT_END'
@@ -400,7 +354,7 @@ jobs:
         id: size-check
         run: |
           MAX_TOKEN_CHARS=260000
-          PROMPT_SIZE=$(wc -c < /tmp/raw_prompt.txt)
+          PROMPT_SIZE=$(wc -c < /tmp/agentic_prompt.txt)
           echo "Prompt size: $PROMPT_SIZE chars (~$((PROMPT_SIZE / 4)) tokens)"
           if [ "$PROMPT_SIZE" -gt "$MAX_TOKEN_CHARS" ]; then
             echo "too_large=true" >> "$GITHUB_OUTPUT"
@@ -411,7 +365,7 @@ jobs:
       - name: Post size limit comment
         if: steps.size-check.outputs.too_large == 'true'
         run: |
-          PROMPT_SIZE=$(wc -c < /tmp/raw_prompt.txt)
+          PROMPT_SIZE=$(wc -c < /tmp/agentic_prompt.txt)
           TOKEN_EST=$((PROMPT_SIZE / 4))
           gh pr comment "${{ steps.pr-info.outputs.number }}" \
             --repo "${{ github.repository }}" \
@@ -422,43 +376,6 @@ jobs:
           Please break the PR into smaller pieces, or request a manual review.
 
           _[🔧 Workflow Run](${RUN_URL})_"
-
-      - name: Run raw review
-        if: steps.size-check.outputs.too_large == 'false' && env.FAST_MODE != 'true'
-        run: |
-          jq -n \
-            --arg model "$REVIEW_MODEL" \
-            --rawfile prompt /tmp/raw_prompt.txt \
-            '{
-              model: $model,
-              messages: [{role: "user", content: $prompt}]
-            }' > /tmp/raw_payload.json
-
-          HTTP_CODE=$(curl -s -w '%{http_code}' \
-            "$PROVIDER_API_URL" \
-            -H "Authorization: Bearer $PROVIDER_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d @/tmp/raw_payload.json \
-            -o /tmp/raw_response.json)
-
-          RAW_REVIEW_OK=false
-          if [ "$HTTP_CODE" -ne 200 ]; then
-            echo "::warning::Raw review API call failed with HTTP $HTTP_CODE"
-            echo "Raw review unavailable (API returned HTTP $HTTP_CODE)." > /tmp/raw_review.txt
-          elif jq -e '.choices[0].message.content' /tmp/raw_response.json > /dev/null 2>&1; then
-            jq -r '.choices[0].message.content' /tmp/raw_response.json > /tmp/raw_review.txt
-            RAW_REVIEW_OK=true
-          else
-            echo "::warning::Raw review returned unexpected response"
-            echo "Raw review unavailable (unexpected API response)." > /tmp/raw_review.txt
-          fi
-
-          echo "Raw review complete ($(wc -c < /tmp/raw_review.txt) bytes)"
-          echo "RAW_REVIEW_OK=${RAW_REVIEW_OK:-false}" >> "$GITHUB_ENV"
-
-          echo "::group::Raw LLM review"
-          cat /tmp/raw_review.txt
-          echo "::endgroup::"
 
       # Tool access: `crush run` (non-interactive) auto-approves all permission
       # requests for its session, so `permissions.allowed_tools` alone can neither
@@ -536,81 +453,10 @@ jobs:
           cat /tmp/agentic_review.txt
           echo "::endgroup::"
 
-      - name: Combine reviews
-        if: steps.size-check.outputs.too_large == 'false' && env.FAST_MODE != 'true'
-        run: |
-          cat > /tmp/combine_prompt.txt << 'COMBINE_HEADER'
-          You are given two code reviews of the same PR. Combine them into a single comprehensive review:
-
-          1. De-duplicate issues that appear in both reviews (keep the better description)
-          2. Sort all issues by priority: 🔴 (high importance & high confidence) first, then 🟡 (medium), then ⚪️ (low)
-          3. Make sure the issue headings are all numbered sequentially, starting from 1, and preserve the priority indicator in the heading
-          4. The Addressed/Dismissed checkboxes in the issues should immediately follow the heading for each issue
-          5. Preserve specific code references (file:line) and code suggestions
-          6. Do not place a header like `# Combined Code Review` at the top of the combined review, just immediately output the issues (if there are any)
-          7. If there are no issues, state that and do nothing else.
-
-          Output ONLY the combined review in Markdown. No preamble about the combining process.
-
-          ---
-
-          ## Raw Review
-
-          COMBINE_HEADER
-
-          {
-            cat /tmp/raw_review.txt
-            cat << 'COMBINE_SEPARATOR'
-
-          ---
-
-          ## Agentic Review
-
-          COMBINE_SEPARATOR
-            cat /tmp/agentic_review.txt
-          } >> /tmp/combine_prompt.txt
-
-          jq -n \
-            --arg model "$REVIEW_MODEL" \
-            --rawfile prompt /tmp/combine_prompt.txt \
-            '{
-              model: $model,
-              messages: [{role: "user", content: $prompt}]
-            }' > /tmp/combine_payload.json
-
-          HTTP_CODE=$(curl -s -w '%{http_code}' \
-            "$PROVIDER_API_URL" \
-            -H "Authorization: Bearer $PROVIDER_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d @/tmp/combine_payload.json \
-            -o /tmp/combine_response.json)
-
-          if [ "$HTTP_CODE" -ne 200 ]; then
-            echo "::warning::Combine step failed with HTTP $HTTP_CODE, falling back to raw review"
-            cp /tmp/raw_review.txt /tmp/final_review.txt
-            if [ "$RAW_REVIEW_OK" = "true" ]; then
-              echo "REVIEW_TYPE=Raw" >> "$GITHUB_ENV"
-            else
-              echo "REVIEW_TYPE=Error" >> "$GITHUB_ENV"
-            fi
-          elif jq -e '.choices[0].message.content' /tmp/combine_response.json > /dev/null 2>&1; then
-            jq -r '.choices[0].message.content' /tmp/combine_response.json > /tmp/final_review.txt
-            echo "REVIEW_TYPE=Combined" >> "$GITHUB_ENV"
-          else
-            echo "::warning::Combine step returned unexpected response, falling back to raw review"
-            cp /tmp/raw_review.txt /tmp/final_review.txt
-            if [ "$RAW_REVIEW_OK" = "true" ]; then
-              echo "REVIEW_TYPE=Raw" >> "$GITHUB_ENV"
-            else
-              echo "REVIEW_TYPE=Error" >> "$GITHUB_ENV"
-            fi
-          fi
-
-      - name: Use agentic review as final (fast mode)
-        if: steps.size-check.outputs.too_large == 'false' && env.FAST_MODE == 'true'
+      - name: Use agentic review as final
+        if: steps.size-check.outputs.too_large == 'false'
         run: |
           cp /tmp/agentic_review.txt /tmp/final_review.txt
-          echo "REVIEW_TYPE=Agentic" >> "$GITHUB_ENV"
 
       - name: Post review comment
         if: steps.size-check.outputs.too_large == 'false'
@@ -618,7 +464,7 @@ jobs:
           {
             echo "## Advanced AI Review"
             echo ""
-            echo "- Type: ${REVIEW_TYPE} (crush)"
+            echo "- Type: Agentic (crush)"
             echo "- Model: ${REVIEW_MODEL}"
             echo ""
             echo "<details>"
