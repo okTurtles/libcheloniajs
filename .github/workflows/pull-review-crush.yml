@@ -17,9 +17,10 @@ jobs:
     concurrency:
       group: pr-review-crush-${{ github.event.issue.number }}
       cancel-in-progress: true
-    # If this timeout changes, update TIMEOUT_SECONDS in the
-    # 'Report timeout on trigger comment' step to match.
-    timeout-minutes: 30
+    # Configurable via the REVIEW_TIMEOUT_MINUTES repo variable (default: 30).
+    # The 'Report timeout on trigger comment' step derives its TIMEOUT_SECONDS
+    # from the same variable, so the two stay in sync automatically.
+    timeout-minutes: ${{ fromJSON(vars.REVIEW_TIMEOUT_MINUTES || '30') }}
     permissions:
       contents: read
       pull-requests: write
@@ -153,6 +154,10 @@ jobs:
         run: |
           # Collect all referenced issue numbers, de-duplicated preserving
           # PR-body order, as a space-separated list.
+          # Matches closing/reference keywords followed by '#<number>' in the
+          # PR body, e.g. "Closes #123, closes #456", "Fixes #12", "See #7".
+          # "Closes #123, #456" only picks up #123 (each number needs its own
+          # keyword).
           ISSUE_NUMS=$(grep -oiP '\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?|ref(?:erences?)?|see)\s*#(\d+)' /tmp/pr_body.txt | grep -oP '\d+' | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/ *$//' || true)
 
           if [ -z "$ISSUE_NUMS" ]; then
@@ -650,9 +655,10 @@ jobs:
         if: cancelled()
         env:
           COMMENT_ID: ${{ github.event.comment.id }}
+          TIMEOUT_MINUTES: ${{ fromJSON(vars.REVIEW_TIMEOUT_MINUTES || '30') }}
         run: |
-          # Keep in sync with the job-level `timeout-minutes` setting.
-          TIMEOUT_SECONDS=$((30 * 60))
+          # Derived from the same variable as the job-level `timeout-minutes`.
+          TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
           if [ -z "$JOB_STARTED_AT" ]; then
             echo "Job start time unknown — skipping timeout report"
             exit 0
