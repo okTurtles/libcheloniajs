@@ -117,7 +117,7 @@ jobs:
           if [ -n "$REVIEW_SMALL_MODEL" ]; then
             SMALL_MODEL="$REVIEW_SMALL_MODEL"
           elif [ "$REVIEW_PROVIDER" = "zai-coding-plan" ]; then
-            SMALL_MODEL="glm-4.7"
+            SMALL_MODEL="glm-5.1"
           else
             SMALL_MODEL="google/gemini-3-flash-preview"
           fi
@@ -126,7 +126,7 @@ jobs:
           case "$REVIEW_PROVIDER" in
             openrouter) echo "SMALL_MODEL=openrouter/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
             zai-coding-plan) echo "SMALL_MODEL=zai/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
-            *) echo "SMALL_MODEL=zai/glm-4.7" >> "$GITHUB_ENV" ;;
+            *) echo "SMALL_MODEL=zai/glm-5.1" >> "$GITHUB_ENV" ;;
           esac
 
       - name: Get PR number
@@ -287,11 +287,20 @@ jobs:
           echo "::endgroup::"
 
       - name: Build review prompts
+        env:
+          PROJECT_CTX: ${{ vars.PROJECT_CTX }}
         run: |
-          cat > /tmp/raw_prompt.txt << 'PROMPT_END'
-          Attached are a set of changes to a JavaScript project that uses StandardJS formatting with TypeScript.
+          PROJECT_CTX="${PROJECT_CTX:-Attached are a set of changes to a software project.}"
 
-          Please have a look at these changes and thoroughly check it for any bugs or security issues. Also check if anything could be improved through simplification. When providing feedback, be specific and quote the concrete lines that are problematic, and then give your code improvement suggestions complete with actual code. When replying, always use Markdown and Markdown code fences to quote any lines. Avoid commenting on code that has no issues (no "you did a good job here!" fluff).
+          printf '%s\n\n' "$PROJECT_CTX" > /tmp/raw_prompt.txt
+          cat >> /tmp/raw_prompt.txt << 'PROMPT_END'
+          Please have a look at these changes and thoroughly check it for:
+          
+          - Highest priority: any bugs, security issues, DRY violations, and improvements that can be made through code simplification
+          - spelling or grammar mistakes in user-facing strings or log messages
+          - poorly named identifiers like variables, selectors, functions/methods, types or classes
+          
+          When providing feedback, be specific and quote the concrete lines that are problematic, and then give your code improvement suggestions complete with actual code. When replying, always use Markdown and Markdown code fences to quote any lines. Avoid commenting on code that has no issues (no "you did a good job here!" fluff).
 
           When referencing sections of code, always mention the specific lines being referenced in the following manner to make it easy for developers to know where to look:
 
@@ -323,10 +332,15 @@ jobs:
             printf '\n```\n'
           } >> /tmp/raw_prompt.txt
 
-          cat > /tmp/agentic_prompt.txt << 'PROMPT_END'
-          Attached are a set of changes to a JavaScript project that uses StandardJS formatting with TypeScript.
-
-          Please have a look at these changes and thoroughly check it for any bugs or security issues. Also check if anything could be improved through simplification. When providing feedback, be specific and quote the concrete lines that are problematic, and then give your code improvement suggestions complete with actual code. When replying, always use Markdown and Markdown code fences to quote any lines. Avoid commenting on code that has no issues (no "you did a good job here!" fluff).
+          printf '%s\n\n' "$PROJECT_CTX" > /tmp/agentic_prompt.txt
+          cat >> /tmp/agentic_prompt.txt << 'PROMPT_END'
+          Please have a look at these changes and thoroughly check it for:
+          
+          - Highest priority: any bugs, security issues, DRY violations, and improvements that can be made through code simplification
+          - spelling or grammar mistakes in user-facing strings or log messages
+          - poorly named identifiers like variables, selectors, functions/methods, types or classes
+          
+          When providing feedback, be specific and quote the concrete lines that are problematic, and then give your code improvement suggestions complete with actual code. When replying, always use Markdown and Markdown code fences to quote any lines. Avoid commenting on code that has no issues (no "you did a good job here!" fluff).
 
           When referencing sections of code, always mention the specific lines being referenced in the following manner to make it easy for developers to know where to look:
 
