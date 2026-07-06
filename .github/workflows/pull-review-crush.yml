@@ -149,16 +149,18 @@ jobs:
           jq -r '.body // ""' pr_data.json > /tmp/pr_body.txt
           jq -r '.title // ""' pr_data.json > /tmp/pr_title.txt
 
-      - name: Check for linked issue
-        id: check-issue
+      - name: Check for linked issues
+        id: check-issues
         run: |
-          ISSUE_NUM=$(grep -oiP '\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?|ref(?:erences?)?|see)\s*#(\d+)' /tmp/pr_body.txt | grep -oP '\d+' | head -1 || true)
+          # Collect all referenced issue numbers, de-duplicated preserving
+          # PR-body order, as a space-separated list.
+          ISSUE_NUMS=$(grep -oiP '\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?|ref(?:erences?)?|see)\s*#(\d+)' /tmp/pr_body.txt | grep -oP '\d+' | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/ *$//' || true)
 
-          if [ -z "$ISSUE_NUM" ]; then
+          if [ -z "$ISSUE_NUMS" ]; then
             echo "has_issue=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_issue=true" >> "$GITHUB_OUTPUT"
-            echo "issue_number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+            echo "issue_numbers=$ISSUE_NUMS" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Checkout repository
@@ -221,68 +223,81 @@ jobs:
 
       - name: Generate helpful context
         env:
-          HAS_ISSUE: ${{ steps.check-issue.outputs.has_issue }}
-          ISSUE_NUMBER: ${{ steps.check-issue.outputs.issue_number }}
+          HAS_ISSUE: ${{ steps.check-issues.outputs.has_issue }}
+          ISSUE_NUMBERS: ${{ steps.check-issues.outputs.issue_numbers }}
         run: |
           # Start with PR title, then always include PR description
           printf '<pr_title>\n%s\n</pr_title>\n' "$(cat /tmp/pr_title.txt)" > /tmp/helpful_context.txt
           printf '<pr_description>\n%s\n</pr_description>\n' "$(cat /tmp/pr_body.txt)" >> /tmp/helpful_context.txt
 
           if [ "$HAS_ISSUE" = "true" ]; then
-            # Fetch the issue
-            if ! gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" > issue_data.json 2>/dev/null; then
-              echo "::warning::Could not fetch issue #$ISSUE_NUMBER"
-              echo "<issue_summary>Issue context unavailable.</issue_summary>" >> /tmp/helpful_context.txt
-              exit 0
-            fi
+            # Summarize at most this many linked issues to bound API calls
+            # and prompt size; extras are noted but not summarized.
+            MAX_ISSUES=5
+            ISSUE_COUNT=0
+            for ISSUE_NUMBER in $ISSUE_NUMBERS; do
+              ISSUE_COUNT=$((ISSUE_COUNT + 1))
+              if [ "$ISSUE_COUNT" -gt "$MAX_ISSUES" ]; then
+                echo "::warning::More than $MAX_ISSUES linked issues; skipping the rest"
+                printf '<issue_summary>\nAdditional linked issues were not summarized (limit of %s reached).\n</issue_summary>\n' "$MAX_ISSUES" >> /tmp/helpful_context.txt
+                break
+              fi
 
-            # Build issue conversation text (title + body + all comments)
-            {
-              echo "## Issue #$ISSUE_NUMBER: $(jq -r '.title // ""' issue_data.json)"
-              echo ""
-              jq -r '.body // ""' issue_data.json
-              echo ""
-            } > /tmp/issue_conversation.txt
+              # Fetch the issue; on failure, note it and move to the next one
+              if ! gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" > issue_data.json 2>/dev/null; then
+                echo "::warning::Could not fetch issue #$ISSUE_NUMBER"
+                printf '<issue_summary issue="#%s">\nIssue context unavailable.\n</issue_summary>\n' "$ISSUE_NUMBER" >> /tmp/helpful_context.txt
+                continue
+              fi
 
-            # Fetch all comments on the issue
-            gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" --paginate \
-              | jq -s 'add // []' > issue_comments.json 2>/dev/null || echo "[]" > issue_comments.json
-
-            COMMENT_COUNT=$(jq 'length' issue_comments.json 2>/dev/null || echo "0")
-            if [ "$COMMENT_COUNT" -gt 0 ]; then
+              # Build issue conversation text (title + body + all comments)
               {
-                echo "---"
+                echo "## Issue #$ISSUE_NUMBER: $(jq -r '.title // ""' issue_data.json)"
                 echo ""
-                echo "### Comments"
+                jq -r '.body // ""' issue_data.json
                 echo ""
-                jq -r '.[] | "**\(.user.login)** (\(.created_at)):\n\(.body)\n\n---\n"' issue_comments.json
-              } >> /tmp/issue_conversation.txt
-            fi
+              } > /tmp/issue_conversation.txt
 
-            # Summarize the issue conversation via LLM
-            jq -n \
-              --arg model "$REVIEW_MODEL" \
-              --rawfile conversation /tmp/issue_conversation.txt \
-              '{
-                model: $model,
-                messages: [{role: "user", content: ("Summarize the following GitHub issue conversation. Focus on: 1) What the issue is about, 2) Key discussion points, 3) Any final decision or conclusion reached about what to do (if one exists). Be concise but thorough.\n\n" + $conversation)}]
-              }' > /tmp/context_payload.json
+              # Fetch all comments on the issue
+              gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" --paginate \
+                | jq -s 'add // []' > issue_comments.json 2>/dev/null || echo "[]" > issue_comments.json
 
-            HTTP_CODE=$(curl -s -w '%{http_code}' \
-              "$PROVIDER_API_URL" \
-              -H "Authorization: Bearer $PROVIDER_API_KEY" \
-              -H "Content-Type: application/json" \
-              -d @/tmp/context_payload.json \
-              -o /tmp/context_response.json)
+              COMMENT_COUNT=$(jq 'length' issue_comments.json 2>/dev/null || echo "0")
+              if [ "$COMMENT_COUNT" -gt 0 ]; then
+                {
+                  echo "---"
+                  echo ""
+                  echo "### Comments"
+                  echo ""
+                  jq -r '.[] | "**\(.user.login)** (\(.created_at)):\n\(.body)\n\n---\n"' issue_comments.json
+                } >> /tmp/issue_conversation.txt
+              fi
 
-            if [ "$HTTP_CODE" -eq 200 ] && jq -e '.choices[0].message.content' /tmp/context_response.json > /dev/null 2>&1; then
-              SUMMARY=$(jq -r '.choices[0].message.content' /tmp/context_response.json)
-            else
-              echo "::warning::Issue summarization failed (HTTP $HTTP_CODE), using raw issue text"
-              SUMMARY=$(cat /tmp/issue_conversation.txt)
-            fi
+              # Summarize the issue conversation via LLM
+              jq -n \
+                --arg model "$REVIEW_MODEL" \
+                --rawfile conversation /tmp/issue_conversation.txt \
+                '{
+                  model: $model,
+                  messages: [{role: "user", content: ("Summarize the following GitHub issue conversation. Focus on: 1) What the issue is about, 2) Key discussion points, 3) Any final decision or conclusion reached about what to do (if one exists). Be concise but thorough.\n\n" + $conversation)}]
+                }' > /tmp/context_payload.json
 
-            printf '<issue_summary>\n%s\n</issue_summary>\n' "$SUMMARY" >> /tmp/helpful_context.txt
+              HTTP_CODE=$(curl -s -w '%{http_code}' \
+                "$PROVIDER_API_URL" \
+                -H "Authorization: Bearer $PROVIDER_API_KEY" \
+                -H "Content-Type: application/json" \
+                -d @/tmp/context_payload.json \
+                -o /tmp/context_response.json)
+
+              if [ "$HTTP_CODE" -eq 200 ] && jq -e '.choices[0].message.content' /tmp/context_response.json > /dev/null 2>&1; then
+                SUMMARY=$(jq -r '.choices[0].message.content' /tmp/context_response.json)
+              else
+                echo "::warning::Issue #$ISSUE_NUMBER summarization failed (HTTP $HTTP_CODE), using raw issue text"
+                SUMMARY=$(cat /tmp/issue_conversation.txt)
+              fi
+
+              printf '<issue_summary issue="#%s">\n%s\n</issue_summary>\n' "$ISSUE_NUMBER" "$SUMMARY" >> /tmp/helpful_context.txt
+            done
           fi
 
           echo "::group::Helpful context"
