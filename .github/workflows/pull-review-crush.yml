@@ -93,7 +93,6 @@ jobs:
                 echo "PROVIDER_API_KEY=$OPENROUTER_API_KEY"
                 echo "CRUSH_MODEL=openrouter/$REVIEW_MODEL"
                 echo "PROVIDER_DISPLAY=OpenRouter"
-                echo "PROVIDER_API_KEY_REF={env:OPENROUTER_API_KEY}"
               } >> "$GITHUB_ENV"
               ;;
             zai-coding-plan)
@@ -102,7 +101,6 @@ jobs:
                 echo "PROVIDER_API_KEY=$ZAI_API_KEY"
                 echo "CRUSH_MODEL=zai/$REVIEW_MODEL"
                 echo "PROVIDER_DISPLAY=Z.AI"
-                echo "PROVIDER_API_KEY_REF={env:ZAI_API_KEY}"
               } >> "$GITHUB_ENV"
               ;;
             *)
