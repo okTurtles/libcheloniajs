@@ -132,14 +132,14 @@ jobs:
       - name: Get PR details
         id: pr-details
         run: |
-          gh api "/repos/${{ github.repository }}/pulls/${{ steps.pr-info.outputs.number }}" > pr_data.json
+          gh api "/repos/${{ github.repository }}/pulls/${{ steps.pr-info.outputs.number }}" > /tmp/pr_data.json
           {
-            echo "head_ref=$(jq -r '.head.ref' pr_data.json)"
-            echo "head_sha=$(jq -r '.head.sha' pr_data.json)"
-            echo "base_ref=$(jq -r '.base.ref' pr_data.json)"
+            echo "head_ref=$(jq -r '.head.ref' /tmp/pr_data.json)"
+            echo "head_sha=$(jq -r '.head.sha' /tmp/pr_data.json)"
+            echo "base_ref=$(jq -r '.base.ref' /tmp/pr_data.json)"
           } >> "$GITHUB_OUTPUT"
-          jq -r '.body // ""' pr_data.json > /tmp/pr_body.txt
-          jq -r '.title // ""' pr_data.json > /tmp/pr_title.txt
+          jq -r '.body // ""' /tmp/pr_data.json > /tmp/pr_body.txt
+          jq -r '.title // ""' /tmp/pr_data.json > /tmp/pr_title.txt
 
       - name: Check for linked issues
         id: check-issues
@@ -164,6 +164,16 @@ jobs:
         with:
           ref: ${{ steps.pr-details.outputs.head_sha }}
           fetch-depth: 0
+          # Don't persist GH_TOKEN into .git/config (as the
+          # http.https://github.com/.extraheader) — the workspace is
+          # readable inside the review sandbox below, so persisted
+          # credentials would leak the token to the review agent. The
+          # repo is public, so the anonymous `git fetch origin` in
+          # "Merge master into PR branch" still works; if this repo
+          # ever becomes private, that fetch will need an explicitly
+          # scoped token supplied some other way (NOT re-enabling
+          # persist-credentials).
+          persist-credentials: false
 
       - name: Merge master into PR branch
         env:
@@ -387,9 +397,30 @@ jobs:
       # quality. The allowlist mirrors the enabled set as a belt-and-braces
       # measure in case a future crush release stops auto-approving in
       # non-interactive mode.
-      - name: Install crush
+      - name: Install crush and bubblewrap
         if: steps.size-check.outputs.too_large == 'false'
         run: |
+          # bubblewrap (bwrap) sandboxes the crush invocation in "Run
+          # agentic review" so a prompt-injected agent cannot read
+          # GH_TOKEN. ripgrep speeds up crush's code search (its grep
+          # tool prefers rg when present). Neither is preinstalled on
+          # ubuntu-latest.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap ripgrep
+
+          # Ubuntu 24.04 restricts unprivileged user namespace creation
+          # via AppArmor (kernel.apparmor_restrict_unprivileged_userns=1
+          # on GitHub runners; see actions/runner-images#10015), and the
+          # 24.04 bubblewrap deb ships no AppArmor profile for bwrap, so
+          # bwrap fails with a permissions error out of the box. Lift the
+          # restriction if (and only if) bwrap doesn't work as-is, so
+          # this keeps working unchanged if a future image allows bwrap.
+          if ! bwrap --unshare-all --die-with-parent --ro-bind / / --dev /dev --proc /proc -- true; then
+            echo "bwrap blocked by AppArmor userns restriction; lifting kernel.apparmor_restrict_unprivileged_userns"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            bwrap --unshare-all --die-with-parent --ro-bind / / --dev /dev --proc /proc -- true
+          fi
+
           npm install -g @charmland/crush
           mkdir -p ~/.config/crush
           cat > ~/.config/crush/crush.json << 'EOF'
@@ -409,7 +440,58 @@ jobs:
       - name: Run agentic review
         if: steps.size-check.outputs.too_large == 'false'
         run: |
-          crush run -q -m "$CRUSH_MODEL" --small-model "$SMALL_MODEL" < /tmp/agentic_prompt.txt > /tmp/agentic_review.txt 2>/tmp/crush_stderr.txt || {
+          # crush runs with the `bash` tool enabled, so a malicious PR
+          # could prompt-inject it into exfiltrating secrets. bwrap gives
+          # crush (and every tool subprocess it spawns):
+          #   - an environment containing ONLY the allowlisted variables
+          #     below: GH_TOKEN and the rest of the runner env never
+          #     enter the sandbox (--clearenv);
+          #   - a read-only view of the filesystem, except the crush data
+          #     dir, a `.crush` dir in the workspace, and a private /tmp;
+          #   - a tmpfs over the runner temp dir, hiding step scripts and
+          #     runner-internal files such as GITHUB_ENV;
+          #   - network access (required for the inference API).
+          # OPENROUTER_API_KEY / ZAI_API_KEY are deliberately passed in:
+          # crush reads whichever one its active provider needs directly
+          # from the environment, so exfiltration of those keys remains
+          # possible in principle — reviewers should still eyeball PR
+          # contents.
+          # CRUSH_MODEL / SMALL_MODEL are expanded by the outer shell and
+          # arrive as plain command arguments, and the stdio redirections
+          # are also performed outside the sandbox, so neither requires
+          # env vars inside it.
+          mkdir -p "$HOME/.local/share/crush" .crush
+          BWRAP=(
+            bwrap
+            --unshare-all --share-net
+            --die-with-parent
+            --ro-bind / /
+            --dev /dev --proc /proc
+            --tmpfs /tmp
+            --tmpfs "$RUNNER_TEMP"
+            --bind "$HOME/.local/share/crush" "$HOME/.local/share/crush"
+            --bind "$PWD/.crush" "$PWD/.crush"
+            --clearenv
+            --setenv PATH "$PATH"
+            --setenv HOME "$HOME"
+            --setenv TERM dumb
+            --setenv OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
+            --setenv ZAI_API_KEY "$ZAI_API_KEY"
+            --
+          )
+
+          # Pre-flight: fail loudly if the sandbox does not actually hide
+          # the token — better no review than an unsandboxed one.
+          "${BWRAP[@]}" sh -c '
+            fail=0
+            [ -z "$GH_TOKEN" ] || { echo "GH_TOKEN visible inside sandbox"; fail=1; }
+            if git config --get http.https://github.com/.extraheader >/dev/null 2>&1; then
+              echo "persisted git credentials visible inside sandbox"; fail=1
+            fi
+            exit "$fail"
+          ' || { echo "::error::Sandbox pre-flight failed — refusing to run the review unsandboxed"; exit 1; }
+
+          "${BWRAP[@]}" crush run -q -m "$CRUSH_MODEL" --small-model "$SMALL_MODEL" < /tmp/agentic_prompt.txt > /tmp/agentic_review.txt 2>/tmp/crush_stderr.txt || {
             echo "::warning::Agentic review via crush failed"
             cat /tmp/crush_stderr.txt >&2
             echo "Agentic review unavailable (crush encountered an error)." > /tmp/agentic_review.txt
