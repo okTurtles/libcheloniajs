@@ -450,6 +450,10 @@ jobs:
           #     dir, a `.crush` dir in the workspace, and a private /tmp;
           #   - a tmpfs over the runner temp dir, hiding step scripts and
           #     runner-internal files such as GITHUB_ENV;
+          #   - a tmpfs over the runner agent install dir, hiding the
+          #     runner's registration credentials (.credentials /
+          #     .credentials_rsaparams), which could otherwise be used
+          #     to impersonate the runner and escalate;
           #   - network access (required for the inference API).
           # OPENROUTER_API_KEY / ZAI_API_KEY are deliberately passed in:
           # crush reads whichever one its active provider needs directly
@@ -461,6 +465,23 @@ jobs:
           # are also performed outside the sandbox, so neither requires
           # env vars inside it.
           mkdir -p "$HOME/.local/share/crush" .crush
+
+          # Locate the runner agent install dir(s) by their credentials
+          # files instead of hardcoding one path, since the layout has
+          # differed across runner images (actions-runner vs. runners/<ver>).
+          # Failing when none is found is deliberate: a silently unmasked
+          # credentials file is worse than no review.
+          RUNNER_AGENT_DIRS=()
+          for dir in /home/runner/actions-runner /home/runner/runners/*; do
+            if [ -e "$dir/.credentials" ] || [ -e "$dir/.credentials_rsaparams" ]; then
+              RUNNER_AGENT_DIRS+=("$dir")
+            fi
+          done
+          if [ "${#RUNNER_AGENT_DIRS[@]}" -eq 0 ]; then
+            echo "::error::Could not locate the runner agent install dir to mask its credentials — refusing to run the review"
+            exit 1
+          fi
+
           BWRAP=(
             bwrap
             --unshare-all --share-net
@@ -469,6 +490,11 @@ jobs:
             --dev /dev --proc /proc
             --tmpfs /tmp
             --tmpfs "$RUNNER_TEMP"
+          )
+          for dir in "${RUNNER_AGENT_DIRS[@]}"; do
+            BWRAP+=(--tmpfs "$dir")
+          done
+          BWRAP+=(
             --bind "$HOME/.local/share/crush" "$HOME/.local/share/crush"
             --bind "$PWD/.crush" "$PWD/.crush"
             --clearenv
@@ -481,15 +507,22 @@ jobs:
           )
 
           # Pre-flight: fail loudly if the sandbox does not actually hide
-          # the token — better no review than an unsandboxed one.
+          # the token or the runner credentials — better no review than an
+          # unsandboxed one. The runner agent dirs are passed as positional
+          # arguments so the check probes the exact paths that were masked.
           "${BWRAP[@]}" sh -c '
             fail=0
             [ -z "$GH_TOKEN" ] || { echo "GH_TOKEN visible inside sandbox"; fail=1; }
             if git config --get http.https://github.com/.extraheader >/dev/null 2>&1; then
               echo "persisted git credentials visible inside sandbox"; fail=1
             fi
+            for dir in "$@"; do
+              if [ -e "$dir/.credentials" ] || [ -e "$dir/.credentials_rsaparams" ]; then
+                echo "runner credentials visible inside sandbox at $dir"; fail=1
+              fi
+            done
             exit "$fail"
-          ' || { echo "::error::Sandbox pre-flight failed — refusing to run the review unsandboxed"; exit 1; }
+          ' sh "${RUNNER_AGENT_DIRS[@]}" || { echo "::error::Sandbox pre-flight failed — refusing to run the review unsandboxed"; exit 1; }
 
           "${BWRAP[@]}" crush run -q -m "$CRUSH_MODEL" --small-model "$SMALL_MODEL" < /tmp/agentic_prompt.txt > /tmp/agentic_review.txt 2>/tmp/crush_stderr.txt || {
             echo "::warning::Agentic review via crush failed"
