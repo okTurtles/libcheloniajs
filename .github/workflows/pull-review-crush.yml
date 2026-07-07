@@ -450,10 +450,12 @@ jobs:
           #     dir, a `.crush` dir in the workspace, and a private /tmp;
           #   - a tmpfs over the runner temp dir, hiding step scripts and
           #     runner-internal files such as GITHUB_ENV;
-          #   - a tmpfs over the runner agent install dir, hiding the
-          #     runner's registration credentials (.credentials /
-          #     .credentials_rsaparams), which could otherwise be used
-          #     to impersonate the runner and escalate;
+          #   - a tmpfs over the runner agent install dir (best-effort),
+          #     hiding registration credentials (.credentials /
+          #     .credentials_rsaparams) and diagnostic logs. GitHub-hosted
+          #     runners use JIT config and keep credentials in memory, so
+          #     no such files may exist on disk — the mask mainly protects
+          #     self-hosted or differently provisioned runners;
           #   - network access (required for the inference API).
           # OPENROUTER_API_KEY / ZAI_API_KEY are deliberately passed in:
           # crush reads whichever one its active provider needs directly
@@ -466,20 +468,20 @@ jobs:
           # env vars inside it.
           mkdir -p "$HOME/.local/share/crush" .crush
 
-          # Locate the runner agent install dir(s) by their credentials
-          # files instead of hardcoding one path, since the layout has
-          # differed across runner images (actions-runner vs. runners/<ver>).
-          # Failing when none is found is deliberate: a silently unmasked
-          # credentials file is worse than no review.
+          # Mask any runner agent install dirs that exist, probing known
+          # locations instead of hardcoding one path (the layout differs
+          # across runner images: actions-runner vs. runners/<ver>). This
+          # is best-effort: JIT-configured hosted runners keep credentials
+          # in memory rather than on disk, so finding nothing is normal
+          # and must not block the review.
           RUNNER_AGENT_DIRS=()
           for dir in /home/runner/actions-runner /home/runner/runners/*; do
-            if [ -e "$dir/.credentials" ] || [ -e "$dir/.credentials_rsaparams" ]; then
+            if [ -d "$dir" ]; then
               RUNNER_AGENT_DIRS+=("$dir")
             fi
           done
           if [ "${#RUNNER_AGENT_DIRS[@]}" -eq 0 ]; then
-            echo "::error::Could not locate the runner agent install dir to mask its credentials — refusing to run the review"
-            exit 1
+            echo "No runner agent install dir found to mask (expected on JIT-configured runners)"
           fi
 
           BWRAP=(
