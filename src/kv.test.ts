@@ -1880,7 +1880,7 @@ describe('KV slot API', () => {
       // ChelErrorKvValidation per §4.2 (consistent with the schema-backed
       // path and the onconflict currentData shape check).
       (e: unknown) => e instanceof ChelErrorKvValidation &&
-        /is not JSON-shaped/.test((e as Error).message)
+        /reducer output failed validation$/.test((e as Error).message)
     )
 
     const entry = rootState()._kv![c]!.json as { value: unknown; status: string }
@@ -1940,7 +1940,7 @@ describe('KV slot API', () => {
           : ({ x: 2 } as JSONType)
       }),
       (e: unknown) => e instanceof ChelErrorKvValidation &&
-        /is not JSON-shaped on conflict retry/.test((e as Error).message)
+        /reducer output failed validation on retry/.test((e as Error).message)
     )
   })
 

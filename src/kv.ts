@@ -320,14 +320,14 @@ function assertJsonShape (input: unknown, where: string): JSONType {
       )
     }
     const t = typeof value
-    if (t === 'string' || t === 'boolean') return
+    if (t === 'string' || t === 'boolean' || t === 'undefined') return
     if (t === 'number') {
       if (Number.isFinite(value)) return
       throw new ChelErrorKvValidation(
         `[chelonia/kv] ${where}: ${path} has non-finite number ${String(value)}`
       )
     }
-    if (t === 'bigint' || t === 'function' || t === 'symbol') {
+    if (t !== 'object') {
       throw new ChelErrorKvValidation(
         `[chelonia/kv] ${where}: ${path} has non-JSON type ${t}`
       )
@@ -352,6 +352,91 @@ function assertJsonShape (input: unknown, where: string): JSONType {
   }
   visit(input, 'value', 0)
   return input as JSONType
+}
+
+// Compute the reducer seed for `chelonia/kv/update`:
+//  - `reloadRan`: after `update`'s silent data-loss-guard reload, the
+//    mirror holds the live server value (success) or the retained
+//    value (failure), both paired with the etag the write will send —
+//    so seed from it, falling back to the default only when `undefined`.
+//  - otherwise: the normal happy path — seed from a non-error live
+//    value, else the default (mirrors `read`'s error semantics for a
+//    genuinely empty / errored slot).
+function computeSeedValue (
+  slot: SlotDefinition,
+  mirrorEntry: KvMirrorEntry | undefined,
+  reloadRan: boolean
+): JSONType | undefined {
+  const useMirror = reloadRan || (
+    mirrorEntry != null &&
+    mirrorEntry.status !== KV_LOAD_STATUS.ERROR &&
+    mirrorEntry.value !== undefined
+  )
+  if (useMirror && mirrorEntry?.value !== undefined) {
+    return cloneDeep(mirrorEntry.value as JSONType)
+  }
+  return slot.resolvedDefault !== undefined
+    ? cloneDeep(slot.resolvedDefault)
+    : undefined
+}
+
+// Validate the output of a reducer in `chelonia/kv/update`. Shared by
+// the first-attempt path and the `onconflict` retry path so the symbol,
+// null/undefined, and schema/shape checks cannot drift apart. `context`
+// (e.g. `''` or `'on retry'`) is interpolated into the error messages.
+//
+// Returns `{ noop: true }` for `KV_NOOP` so each call site can apply its
+// own semantics (the first attempt resolves with `undefined`; a retry
+// throws `KvNoopAbort` to unwind the `kv/set` loop). All other invalid
+// outputs reject with `ChelErrorKvUpdateInvalid` (reducer-contract
+// violations) or `ChelErrorKvValidation` (schema/shape failures).
+//
+// Note on wrapping: `assertJsonShape` and `parseSyncSlotValue` throw
+// `ChelErrorKvValidation` for their own structural checks, but a custom
+// schema's `.parse` may throw an arbitrary error. The `try/catch` below
+// normalizes both into `ChelErrorKvValidation` so a reducer-output
+// validation failure is always the same error class regardless of
+// whether the slot is schema-backed (§4.2 taxonomy).
+function validateReducerOutput (
+  slot: SlotDefinition,
+  output: unknown,
+  contractID: string,
+  key: string,
+  context: string
+): { noop: true } | { noop: false, value: JSONType } {
+  const ctx = context ? ` ${context}` : ''
+  const where = `update${ctx} ${contractID}::${key}`
+  if (typeof output === 'symbol') {
+    if (output === KV_NOOP) return { noop: true }
+    throw new ChelErrorKvUpdateInvalid(
+      `[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
+      `an unexpected symbol${ctx}; use KV_NOOP to abort`
+    )
+  }
+  if (output === null || output === undefined) {
+    throw new ChelErrorKvUpdateInvalid(
+      `[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
+      `${String(output)}${ctx}; use chelonia/kv/clear or KV_NOOP instead`
+    )
+  }
+  try {
+    const value = slot.schema
+      ? parseSyncSlotValue(slot, output, where)
+      : assertJsonShape(output, where)
+    return { noop: false, value }
+  } catch (e) {
+    // `assertJsonShape` / `parseSyncSlotValue` throw `ChelErrorKvValidation`
+    // for their own structural checks, and a custom schema's `.parse` may
+    // throw an arbitrary error. Normalize both into one message so a
+    // reducer-output validation failure is always the same class and text
+    // regardless of whether the slot is schema-backed (§4.2 taxonomy); the
+    // structural detail is preserved on `cause`.
+    throw new ChelErrorKvValidation(
+      `[chelonia/kv] update: ${contractID}::${key} reducer output ` +
+      `failed validation${ctx}`,
+      { cause: e }
+    )
+  }
 }
 
 // Ensure `rootState._kv[contractID]` exists as a reactive object. Returns
@@ -1706,7 +1791,7 @@ export default (sbp('sbp/selectors/register', {
       // (released without re-sync, or reconcile dropped it).
       const entry = rootState._kv?.[contractID]?.[slot.key]
       if (!entry) return
-      const previousValue = entry?.value
+      const previousValue = entry.value
       // Wire `null` is the clear sentinel — skip schema.parse and
       // restore the deep-cloned default.
       const wasClear = unwrapped === null
@@ -2467,32 +2552,7 @@ export default (sbp('sbp/selectors/register', {
       //  - no reload: the normal happy path — seed from a non-error live
       //    value, else the default (mirrors `read`'s error semantics for a
       //    genuinely empty / errored slot).
-      const seedValue: JSONType | undefined = (() => {
-        // When the silent reload ran, the mirror value is now either the
-        // live server value (success) or the retained value (failure) —
-        // both paired with the etag the write will send — so seed from it,
-        // falling back to the default only when it is `undefined`.
-        if (reloadRan) {
-          if (mirrorEntry?.value !== undefined) {
-            return cloneDeep(mirrorEntry.value as JSONType)
-          }
-          return slot.resolvedDefault !== undefined
-            ? cloneDeep(slot.resolvedDefault)
-            : undefined
-        }
-        // No reload: normal happy path — seed from a non-error live value,
-        // else the default (mirrors `read`'s error semantics).
-        if (
-          mirrorEntry &&
-          mirrorEntry.status !== KV_LOAD_STATUS.ERROR &&
-          mirrorEntry.value !== undefined
-        ) {
-          return cloneDeep(mirrorEntry.value as JSONType)
-        }
-        return slot.resolvedDefault !== undefined
-          ? cloneDeep(slot.resolvedDefault)
-          : undefined
-      })()
+      const seedValue = computeSeedValue(slot, mirrorEntry, reloadRan)
       // ----- Step 3: run reducer and validate. -----
       let reducerOut: unknown
       try {
@@ -2503,50 +2563,9 @@ export default (sbp('sbp/selectors/register', {
           { cause: e }
         )
       }
-      if (typeof reducerOut === 'symbol') {
-        if (reducerOut === KV_NOOP) return undefined
-        throw new ChelErrorKvUpdateInvalid(
-          `[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
-          'an unexpected symbol; use KV_NOOP to abort'
-        )
-      }
-      if (reducerOut === null || reducerOut === undefined) {
-        // Reducer may not produce the reserved wire sentinels; clear
-        // is its own selector (§4.5). This is a caller-contract
-        // violation (reducer shape), not a schema failure, so the
-        // taxonomy bucket is ChelErrorKvUpdateInvalid (§4.6).
-        throw new ChelErrorKvUpdateInvalid(
-          `[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
-          `${String(reducerOut)}; use chelonia/kv/clear or KV_NOOP instead`
-        )
-      }
-      let nextValue: JSONType = reducerOut as JSONType
-      if (slot.schema) {
-        try {
-          nextValue = parseSyncSlotValue(slot, nextValue, `update ${contractID}::${key}`)
-        } catch (e) {
-          throw new ChelErrorKvValidation(
-            `[chelonia/kv] update: ${contractID}::${key} reducer output ` +
-            'failed schema.parse',
-            { cause: e }
-          )
-        }
-      } else {
-        try {
-          nextValue = assertJsonShape(nextValue, `update ${contractID}::${key}`)
-        } catch (e) {
-          // §4.2 rejection taxonomy: a reducer-output shape failure is a
-          // validation failure, regardless of whether the slot is
-          // schema-backed. Mirrors the `currentData` shape check in the
-          // `onconflict` callback below, which routes the same failure to
-          // ChelErrorKvValidation. Formerly ChelErrorKvUpdateInvalid.
-          throw new ChelErrorKvValidation(
-            `[chelonia/kv] update: ${contractID}::${key} reducer output ` +
-            'is not JSON-shaped',
-            { cause: e }
-          )
-        }
-      }
+      const firstResult = validateReducerOutput(slot, reducerOut, contractID, key, '')
+      if (firstResult.noop) return undefined
+      let nextValue: JSONType = firstResult.value
       // ----- Step 5: kv/set with onconflict. -----
       throwIfSignalAborted(signal)
       let lastCurrentData: JSONType | undefined
@@ -2623,46 +2642,9 @@ export default (sbp('sbp/selectors/register', {
             { cause: e }
           )
         }
-        if (typeof retried === 'symbol') {
-          if (retried === KV_NOOP) {
-            throw new KvNoopAbort()
-          }
-          throw new ChelErrorKvUpdateInvalid(
-            `[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
-            'an unexpected symbol on retry; use KV_NOOP to abort'
-          )
-        }
-        if (retried === null || retried === undefined) {
-          throw new ChelErrorKvUpdateInvalid(
-            `[chelonia/kv] update: ${contractID}::${key} reducer returned ` +
-            `${String(retried)} on retry; use KV_NOOP instead`
-          )
-        }
-        let validated: JSONType = retried as JSONType
-        if (slot.schema) {
-          try {
-            validated = parseSyncSlotValue(slot, retried, `update onconflict retry ${contractID}::${key}`)
-          } catch (e) {
-            throw new ChelErrorKvValidation(
-              `[chelonia/kv] update: ${contractID}::${key} reducer output ` +
-              'failed schema.parse on conflict retry',
-              { cause: e }
-            )
-          }
-        } else {
-          try {
-            validated = assertJsonShape(validated, `update onconflict retry ${contractID}::${key}`)
-          } catch (e) {
-            // See the first-attempt reducer-output validation in
-            // `chelonia/kv/update` (the `assertJsonShape` rejection) for why
-            // this is ChelErrorKvValidation, not ChelErrorKvUpdateInvalid.
-            throw new ChelErrorKvValidation(
-              `[chelonia/kv] update: ${contractID}::${key} reducer output ` +
-              'is not JSON-shaped on conflict retry',
-              { cause: e }
-            )
-          }
-        }
+        const retryResult = validateReducerOutput(slot, retried, contractID, key, 'on retry')
+        if (retryResult.noop) throw new KvNoopAbort()
+        const validated: JSONType = retryResult.value
         nextValue = validated
         return [validated, typeof etag === 'string' ? etag : undefined] as [JSONType, string | undefined]
       }

@@ -2796,8 +2796,8 @@ export default sbp('sbp/selectors/register', {
       //  * 409 indicates a conflict because the height used is too old
       //  * 412 indicates a conflict (precondition failed) because the data
       //    on the KV store have been updated / is not what we expected
-      // All of these situations should trigger parsing the respinse and
-      // conlict resolution
+      // All of these situations should trigger parsing the response and
+      // conflict resolution
       if (response.ok || response.status === 409 || response.status === 412) {
         const serializedDataText = await response.text()
         // We can get 409 even if there's no data on the server. We still need
@@ -2916,7 +2916,7 @@ export default sbp('sbp/selectors/register', {
           })
 
           // This is only for the initial case; the logic is replicated below
-          // for subsequent iterations that require conflic resolution.
+          // for subsequent iterations that require conflict resolution.
           if (await resolveData()) {
             continue
           } else {
