@@ -2582,9 +2582,9 @@ export default (sbp('sbp/selectors/register', {
             )
           } catch (e) {
             throw new ChelErrorKvValidation(
-                `[chelonia/kv] update: ${contractID}::${key} server ` +
-                'currentData failed schema.parse on conflict retry',
-                { cause: e }
+              `[chelonia/kv] update: ${contractID}::${key} server ` +
+              'currentData failed schema.parse on conflict retry',
+              { cause: e }
             )
           }
         } else {
