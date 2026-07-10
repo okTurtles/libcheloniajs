@@ -296,12 +296,12 @@ export type CheloniaContext = {
         contractID: string;
     }[];
     pubsub: import('./pubsub/index.mjs').PubSubClient;
-    contractsModifiedListener: (contracts: Set<string>, { added, removed }: {
+    contractsModifiedListener: (contracts: string[], { added, removed }: {
         added: string[];
         removed: string[];
     }) => void;
     kvReconnectListener?: (client: import('./pubsub/index.mjs').PubSubClient) => void;
-    kvContractsModifiedListener?: (contracts: Set<string>, { added, removed }: {
+    kvContractsModifiedListener?: (contracts: string[], { added, removed }: {
         added: string[];
         removed: string[];
     }) => void;
