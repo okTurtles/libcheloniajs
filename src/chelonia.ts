@@ -1268,7 +1268,7 @@ export default sbp('sbp/selectors/register', {
       // matching slot for newly-synced contracts. Registered per-instance
       // so multi-instance deployments dispatch against the correct context.
       this.kvContractsModifiedListener = (
-        _contracts: Set<string>,
+        _contracts: string[],
         payload: { added: string[]; removed: string[] }
       ) => {
         if (!sbp('sbp/selectors/fn', 'chelonia/kv/_onContractsModified')) return

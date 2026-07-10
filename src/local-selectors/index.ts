@@ -136,7 +136,7 @@ export default sbp('sbp/selectors/register', {
       'okTurtles.events/on',
       CONTRACTS_MODIFIED,
       (
-        subscriptionSet: never,
+        subscriptionSet: string[],
         {
           added,
           removed,

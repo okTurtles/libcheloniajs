@@ -2941,8 +2941,8 @@ export default (sbp('sbp/selectors/register', {
     let lastCurrentData: NormalizedKvConflictData = { present: false }
     let sawConflict = false
     const onconflict = async (conflictArgs: {
-      currentData?: JSONType;
-      etag?: string | null;
+      currentData: JSONType;
+      etag: string | null;
     }): Promise<[JSONType, string | undefined]> => {
       // Read `etag` (a plain value) eagerly, but NEVER destructure
       // `currentData` in the parameter list: the real `chelonia/kv/set`

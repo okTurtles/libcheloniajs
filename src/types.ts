@@ -389,12 +389,12 @@ export type CheloniaContext = {
   pending: { contractID: string }[];
   pubsub: import('./pubsub/index.js').PubSubClient;
   contractsModifiedListener: (
-    contracts: Set<string>,
+    contracts: string[],
     { added, removed }: { added: string[]; removed: string[] },
   ) => void;
   kvReconnectListener?: (client: import('./pubsub/index.js').PubSubClient) => void;
   kvContractsModifiedListener?: (
-    contracts: Set<string>,
+    contracts: string[],
     { added, removed }: { added: string[]; removed: string[] },
   ) => void;
   defContractSelectors: string[];

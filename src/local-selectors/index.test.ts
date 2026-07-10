@@ -87,7 +87,7 @@ describe('chelonia/externalStateSetup teardown', () => {
     fullStateCalls = 0
 
     sbp('okTurtles.events/emit', EVENT_HANDLED, 'cid-A', { x: 1 })
-    sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, new Set(), {
+    sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, [], {
       added: ['cid-B'], removed: [], permanent: false
     })
     sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, { contractID: 'cid-C' })
@@ -213,7 +213,7 @@ describe('chelonia/externalStateSetup teardown', () => {
       stateSelector: EXTERNAL_STATE_SELECTOR
     })
 
-    sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, new Set(), {
+    sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, [], {
       added: ['cid-added'], removed: [], permanent: false
     })
     await waitMicrotasks()
@@ -223,7 +223,7 @@ describe('chelonia/externalStateSetup teardown', () => {
       value: undefined, status: 'non-init', etag: null
     })
 
-    sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, new Set(), {
+    sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, [], {
       added: [], removed: ['cid-added'], permanent: false
     })
     await waitMicrotasks()
