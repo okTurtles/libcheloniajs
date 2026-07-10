@@ -1,6 +1,4 @@
-// KV slot API tests — 82 cases total: 27 from KV-REVAMPED.md §11.6
-// plus 55 implementation-specific cases covering KV hardening follow-ups
-// and §11.3 step 3 exceptions.
+// KV slot API tests
 //
 // We register simplified infrastructure selectors once (mutable stub
 // closures) and swap the stub targets per-test in beforeEach. No

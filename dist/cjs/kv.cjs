@@ -223,7 +223,7 @@ function assertJsonShape(input, where) {
             throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} is the reserved sentinel ${String(value)}`);
         }
         const t = typeof value;
-        if (t === 'string' || t === 'boolean' || t === 'undefined')
+        if (t === 'string' || t === 'boolean')
             return;
         if (t === 'number') {
             if (Number.isFinite(value))
@@ -238,17 +238,13 @@ function assertJsonShape(input, where) {
                 visit(value[i], `${path}[${i}]`, depth + 1);
             return;
         }
-        if (value && typeof value === 'object') {
-            const proto = Object.getPrototypeOf(value);
-            if (proto !== Object.prototype && proto !== null) {
-                throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} has non-plain object prototype`);
-            }
-            for (const [k, v] of Object.entries(value)) {
-                visit(v, `${path}.${k}`, depth + 1);
-            }
-            return;
+        const proto = Object.getPrototypeOf(value);
+        if (proto !== Object.prototype && proto !== null) {
+            throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} has non-plain object prototype`);
         }
-        throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] ${where}: ${path} is not JSON-shaped`);
+        for (const [k, v] of Object.entries(value)) {
+            visit(v, `${path}.${k}`, depth + 1);
+        }
     };
     visit(input, 'value', 0);
     return input;
@@ -806,7 +802,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         : {}),
     // Dev-time invariant check. See KV-REVAMPED.md §11.2 ("Index
-    // invariant"). Walks the five KV maps + `rootState._kv` and verifies:
+    // invariant"). Walks the various `kv*` objects + `rootState._kv` and verifies:
     //
     //   kvSlotsByContractID[cID].has(key) ⇔
     //     (a) kvSlots has a registration for `${contractType}::${key}` whose
@@ -1912,11 +1908,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 console.error(`[chelonia/kv] no-cid authoritative GET failed for ${contractID}::${key}`, e);
             });
         }
-        let unwrapped;
-        try {
-            unwrapped = parsed.data;
-        }
-        catch (e) {
+        const failRemoteValidation = (e) => {
             (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_VALIDATION_ERROR, {
                 contractID,
                 contractType: slot.contractType,
@@ -1926,6 +1918,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             });
             setSlotStatus(this, rootState, contractID, slot.contractType, key, kv_constants_js_1.KV_LOAD_STATUS.ERROR, normalizeError(e));
             return Promise.resolve();
+        };
+        let unwrapped;
+        try {
+            unwrapped = parsed.data;
+        }
+        catch (e) {
+            return failRemoteValidation(e);
         }
         const previousValue = entry.value;
         // Wire `null` is the clear sentinel — skip schema.parse and
@@ -1949,21 +1948,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     : validated;
             }
             catch (e) {
-                (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_VALIDATION_ERROR, {
-                    contractID,
-                    contractType: slot.contractType,
-                    key,
-                    error: e,
-                    reason: kv_constants_js_1.KV_UPDATE_REASON.REMOTE
-                });
-                setSlotStatus(this, rootState, contractID, slot.contractType, key, kv_constants_js_1.KV_LOAD_STATUS.ERROR, normalizeError(e));
                 // Deliberately leave `entry.etag` alone: validation failed, so
                 // the mirror `value` is unchanged from the last successful
                 // load/write — the etag still describes that value. Nulling
                 // it here would diverge from the "value and etag move
                 // together" invariant on the success path below (and on
                 // §4.9's pubsub-success branch).
-                return Promise.resolve();
+                return failRemoteValidation(e);
             }
         }
         else {
@@ -1976,15 +1967,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     : validated;
             }
             catch (e) {
-                (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_VALIDATION_ERROR, {
-                    contractID,
-                    contractType: slot.contractType,
-                    key,
-                    error: e,
-                    reason: kv_constants_js_1.KV_UPDATE_REASON.REMOTE
-                });
-                setSlotStatus(this, rootState, contractID, slot.contractType, key, kv_constants_js_1.KV_LOAD_STATUS.ERROR, normalizeError(e));
-                return Promise.resolve();
+                return failRemoteValidation(e);
             }
         }
         const remoteEtag = hasCid ? cid : (entry.etag ?? null);
@@ -2236,41 +2219,34 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         'currentData failed to decode on conflict retry', { cause: e });
                 }
                 let basis;
-                if (currentData === undefined) {
+                if (currentData == null) {
                     basis = slot.resolvedDefault !== undefined
                         ? (0, turtledash_1.cloneDeep)(slot.resolvedDefault)
                         : undefined;
                 }
+                else if (slot.schema) {
+                    try {
+                        // Clone the parsed result before it reaches the reducer: a
+                        // mutating reducer must not corrupt the server's cached
+                        // decode (currentValue.data in kv/set), which is re-read for
+                        // lastRecoveredValue and the conflict-exhaustion error cause.
+                        // Mirrors the first-attempt seed clone (step 2).
+                        basis = (0, turtledash_1.cloneDeep)(parseSyncSlotValue(slot, currentData, `update onconflict currentData ${contractID}::${key}`));
+                    }
+                    catch (e) {
+                        throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} server ` +
+                            'currentData failed schema.parse on conflict retry', { cause: e });
+                    }
+                }
                 else {
-                    if (currentData === null) {
-                        basis = slot.resolvedDefault !== undefined
-                            ? (0, turtledash_1.cloneDeep)(slot.resolvedDefault)
-                            : undefined;
+                    try {
+                        // assertJsonShape returns its input unchanged, so clone to
+                        // detach the reducer's basis from the cached server decode.
+                        basis = (0, turtledash_1.cloneDeep)(assertJsonShape(currentData, `update onconflict currentData ${contractID}::${key}`));
                     }
-                    else if (slot.schema) {
-                        try {
-                            // Clone the parsed result before it reaches the reducer: a
-                            // mutating reducer must not corrupt the server's cached
-                            // decode (currentValue.data in kv/set), which is re-read for
-                            // lastRecoveredValue and the conflict-exhaustion error cause.
-                            // Mirrors the first-attempt seed clone (step 2).
-                            basis = (0, turtledash_1.cloneDeep)(parseSyncSlotValue(slot, currentData, `update onconflict currentData ${contractID}::${key}`));
-                        }
-                        catch (e) {
-                            throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} server ` +
-                                'currentData failed schema.parse on conflict retry', { cause: e });
-                        }
-                    }
-                    else {
-                        try {
-                            // assertJsonShape returns its input unchanged, so clone to
-                            // detach the reducer's basis from the cached server decode.
-                            basis = (0, turtledash_1.cloneDeep)(assertJsonShape(currentData, `update onconflict currentData ${contractID}::${key}`));
-                        }
-                        catch (e) {
-                            throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} server ` +
-                                'currentData is not JSON-shaped on conflict retry', { cause: e });
-                        }
+                    catch (e) {
+                        throw new errors_js_1.ChelErrorKvValidation(`[chelonia/kv] update: ${contractID}::${key} server ` +
+                            'currentData is not JSON-shaped on conflict retry', { cause: e });
                     }
                 }
                 lastCurrentData = basis;
