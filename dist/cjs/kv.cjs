@@ -729,7 +729,11 @@ async function flushDirtyFilters(ctx) {
             ctx.kvFilterDirty.delete(cID);
             const active = ctx.kvActiveFilters.get(cID);
             try {
-                await (0, sbp_1.default)('chelonia/kv/setFilter', cID, active ? [...active] : []);
+                // `undefined` (not `[]`) when the contract has no active filter:
+                // `setKvFilter` treats `undefined` as filter-removal (delete from
+                // client.kvFilter → "all keys" on re-SUB), whereas `[]` would
+                // persist and silence KV frames for raw-API consumers after re-sync.
+                await (0, sbp_1.default)('chelonia/kv/setFilter', cID, active ? [...active] : undefined);
             }
             catch (e) {
                 console.warn(`[chelonia/kv] setFilter flush failed for ${cID}`, e);
@@ -762,7 +766,7 @@ function scheduleFilterRetry(ctx, contractID) {
         return;
     if (ctx.kvFilterRetryTimer != null)
         return;
-    ctx.kvFilterRetryTimer = setTimeout(() => {
+    const timer = setTimeout(() => {
         ctx.kvFilterRetryTimer = undefined;
         if (ctx.kvFilterRetry.size === 0)
             return;
@@ -773,6 +777,8 @@ function scheduleFilterRetry(ctx, contractID) {
             console.error('[chelonia/kv] setFilter retry flush failed', e);
         });
     }, filterRetryMs);
+    timer.unref?.();
+    ctx.kvFilterRetryTimer = timer;
 }
 exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     ...(process.env.NODE_ENV !== 'production'
@@ -1617,16 +1623,22 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     'chelonia/kv/_cleanupContractRuntime': function (contractID) {
         const hadFilter = this.kvActiveFilters.has(contractID);
         // Queue a filter flush for this contract *before* dropping state so
-        // the server receives the empty-filter frame (§11.5 empty
+        // the server receives the filter-removal frame (§11.5 empty
         // transitions). The flush reads kvActiveFilters at microtask time;
-        // deleting the entry below is what makes the emitted filter empty.
+        // deleting the entry below is what makes the emitted filter
+        // `undefined` (filter-removal), not `[]` (silence-all). Deferring
+        // to a microtask also ensures the frame is sent after
+        // `subscriptionSet.delete` in `removeImmediately`, so the pubsub
+        // subscription gate suppresses the wire frame (the UNSUB that
+        // follows makes it redundant).
         // We intentionally do NOT delete from kvFilterDirty here — the
         // microtask must see this contract in the dirty set to send the
-        // empty-filter frame.
+        // filter-removal frame.
         if (hadFilter)
             queueFilterFlush(this, contractID);
         this.kvSlotsByContractID.delete(contractID);
         this.kvActiveFilters.delete(contractID);
+        this.kvFilterRetry.delete(contractID);
         this.kvReconnectRefresh.delete(contractID);
         const prefix = `${contractID}${kv_constants_js_1.KV_KEY_SEPARATOR}`;
         this.kvLocalEchoCIDs.forEach((_cids, key) => {

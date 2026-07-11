@@ -2306,6 +2306,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // set to `['foo', 'bar']` and then with `['baz']` means that KV updates will
     // be received for `baz` only, not for `foo`, `bar` or any other keys.
     'chelonia/kv/setFilter': function (contractID, filter) {
+        if (!this.pubsub)
+            return;
         this.pubsub.setKvFilter(contractID, filter);
     },
     'chelonia/parseEncryptedOrUnencryptedDetachedMessage': function ({ contractID, serializedData, meta }) {

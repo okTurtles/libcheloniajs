@@ -655,11 +655,12 @@ export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<
  *     (`chelonia/kv/update`) relies on this to honour `KV_NOOP` and
  *     to short-circuit empty-data GETs.
  *
- * NOTE: this is a behaviour change vs. pre-KV-revamp consumers, who
- * could only return a tuple. Any consumer that previously returned a
- * non-tuple falsy value (rare — historically this threw downstream)
- * will now silently no-op. Direct callers of `chelonia/kv/set` should
- * audit their implementations accordingly; the high-level
+ * NOTE: the type now advertises `false` as a valid return value where
+ * previously the type only permitted a tuple. The runtime `if (!result)
+ * return false` guard already existed pre-revamp, so a falsy return
+ * always silently aborted at runtime — this is a type-level change, not
+ * a runtime behaviour change. Direct callers of `chelonia/kv/set` need
+ * not audit for a runtime regression; the high-level
  * `chelonia/kv/update` API is unaffected.
  */
 export type ChelKvOnConflictCallback = (args: {

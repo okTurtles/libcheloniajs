@@ -244,10 +244,11 @@ direct callers (the high-level slot API hides them):
   (typical for 404 / 410 fall-throughs); the primitive substitutes
   `''` at the wire so the POST still goes through.
 - **Any falsy `onconflict` return aborts the write** (including `false`,
-  `null`, `undefined`, `0`, `''`). Pre-revamp consumers that accidentally
-  returned a non-tuple falsy value would have crashed downstream; they
-  now silently no-op. Audit existing `onconflict` implementations for
-  this change.
+  `null`, `undefined`, `0`, `''`). The runtime `if (!result) return false`
+  guard already existed pre-revamp, so a falsy return always silently
+  aborted; the type now *advertises* `false` as a valid return value
+  where previously it was only representable at the type level as a
+  tuple. No runtime behaviour change for existing callers.
 
 #### Schema-driven default normalization
 
@@ -291,12 +292,21 @@ await it inside the callback:
 `queueMicrotask(() => sbp('chelonia/kv/update', …))` — it queues
 behind the lane and runs once it releases.
 
-When a slot is in `'error'` status, `update` seeds the reducer the same
-way `read` does: from the declared default, not from the retained mirror
-value. The mirror may still hold the last valid value and etag after a
-validation failure, but the reducer does not observe that retained value
-until a successful load, sync, remote update, or local write transitions
-the slot out of `'error'`.
+When a slot is in `'error'` status but still holds a retained value,
+`update` first performs one silent authoritative reload and seeds the
+reducer from the refreshed (or retained, if the reload fails) mirror
+value — not from the declared default. Only an `'error'` slot with no
+retained value seeds from the declared default. This prevents the
+silent data loss that would occur if a default-seeded write carrying
+the retained etag matched and overwrote the live server value.
+
+**Abort after commit:** when the caller's `signal` aborts in the window
+after `chelonia/kv/set` resolves, the write has already committed
+server-side and its pubsub echo is deliberately suppressed. The mirror
+(value and etag) stays stale until the next remote frame, local write,
+or explicit `chelonia/kv/sync`. Other clients see the new value
+immediately. Call `chelonia/kv/sync` after aborting if you need the
+mirror reconciled.
 
 ### Inline definition via `chelonia/defineContract`
 

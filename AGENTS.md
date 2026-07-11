@@ -404,6 +404,14 @@ KV runtime maps. This matches `chelonia/contract/wait`: persistence hooks
 observe a quiescent mirror, and continuations never run against torn-down
 state.
 
+**Abort after commit:** when the caller's `signal` aborts in the window
+after `chelonia/kv/set` resolves, the write has already committed
+server-side and its pubsub echo is deliberately suppressed. The mirror
+(value and etag) stays stale until the next remote frame, local write,
+or explicit `chelonia/kv/sync`. Other clients see the new value
+immediately. Call `chelonia/kv/sync` after aborting if you need the
+mirror reconciled.
+
 Slot definitions (`KvSlotDefinition`) declare a `contractType`, `key`,
 `defaultValue`, optional `schema` (sync `.parse`), `match` predicate,
 `onUpdate` callback, and a handful of boolean flags (`autoSubscribe`,
@@ -430,7 +438,7 @@ Config keys (all on `KvSlotDefinition`):
 | `encryptionKeyName` | `'cek'` | Contract key name used for encryption. Missing named keys reject slot writes; set `null` explicitly to write plaintext. |
 | `signingKeyName` | `'csk'` | Contract key name used for signing. Missing named keys reject slot writes. |
 | `autoSubscribe` | `true` | Whether to subscribe to pubsub for this slot automatically. |
-| `autoLoad` | `'on-sync'` | `'on-sync'` fetches on contract sync; `'on-demand'` waits for `read`/`sync`; `'never'` skips. |
+| `autoLoad` | `'on-sync'` | `'on-sync'` fetches on contract sync; `'on-demand'` waits for `sync` (or a successful `update`); `'never'` skips. |
 | `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect. |
 | `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the `value` form of `update`. |
 | `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw. Must not synchronously call a same-contract KV write selector (rejected with `ChelErrorKvReentrant` — see the re-entrancy caveat below). |
