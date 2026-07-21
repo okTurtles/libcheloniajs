@@ -202,6 +202,26 @@ All slot selectors live in `src/kv.ts`.
 | `chelonia/kv/status` | Report the `KvLoadStatus` of a single slot (`'non-init' | 'loading' | 'loaded' | 'error'`) or the aggregate status of all slots for a contract. |
 | `chelonia/kv/refreshFilters` | Re-evaluate every slot's `match` predicate against the current root state. Call after login / logout transitions. |
 
+#### `KvSlotDefinition` reference
+
+| Field | Default | Purpose |
+|---|---|---|
+| `contractType` | (required) | Contract type/name string, or an array of strings. |
+| `key` | (required) | KV key name. |
+| `defaultValue` | `undefined` | Value returned by `chelonia/kv/read` before the slot is loaded or while it is in `'error'`. Never written into the raw mirror. |
+| `schema` | none | Object with a synchronous `.parse(value)` method (e.g. a Zod schema). `null` / `undefined` are rejected anywhere in the value; model optional fields by omission or tagged unions, not `T \| null`. |
+| `match` | `() => true` | Predicate `(cID, contractState, rootState) => boolean` deciding which contracts the slot attaches to. |
+| `encryptionKeyName` | `'cek'` | Contract key name used for encryption. A missing named key rejects the write; set `null` explicitly to store plaintext. |
+| `signingKeyName` | `'csk'` | Contract key name used for signing. A missing named key rejects the write. |
+| `autoSubscribe` | `true` | Subscribe to pubsub for this slot automatically. |
+| `autoLoad` | `'on-sync'` | `'on-sync'` loads on contract sync; `'on-demand'` waits for `chelonia/kv/sync` (or a successful `update`); `'never'` skips. |
+| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect. |
+| `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the plain-`value` form of `chelonia/kv/update`. |
+| `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw; must not synchronously call a same-contract KV write (rejected with `ChelErrorKvReentrant`; see the rejection taxonomy below). |
+
+`KvUpdater<T>` receives `T | undefined`: `undefined` is passed when a slot
+has neither a mirror value nor a `defaultValue`.
+
 `chelonia/kv/set` now resolves to `{ etag: string | null }` instead of `void`; the return value is forwarded through `chelonia/kv/queuedSet` as well.
 
 Slot values must reject `null` / `undefined` anywhere in the parsed value, not just at the root. This invariant is enforced for schema-backed and schemaless slots alike: `null` is reserved for wire-clear semantics and `undefined` for unloaded mirror state, so model optional fields as explicit tagged unions or by omitting the field rather than using `T | null`.
@@ -345,6 +365,69 @@ sbp('chelonia/kv/update', {
 })
 ```
 
+### Consumer caveats
+
+Semantics that bite consumers who don't expect them. Internal
+implementation detail (echo suppression, conflict-marker ordering,
+filter-flush retries, the mirror's internal layout) is intentionally
+omitted here; the source is authoritative.
+
+- **Mirror `value` is canonical.** `rootState._kv[contractID][key].value`
+  is always either a server-confirmed payload or `undefined`. A first-load
+  404, a local `clear`, and a remote wire-`null` clear all leave
+  `value === undefined`; the declared default is surfaced only through
+  `chelonia/kv/read` and `onUpdate`, never written into the raw mirror.
+  Direct `rootState._kv` readers must treat `status`, not `value`, as the
+  source of truth and substitute the default via `value ?? read(cID, key)`.
+
+- **Unloaded writes can clobber.** `chelonia/kv/update` derives its
+  `if-match` precondition from the mirror etag. A never-loaded
+  (`'non-init'`) slot has `etag: null`, so its first `update` is sent with
+  no precondition and overwrites whatever the server holds, even a value
+  this client never read, instead of producing a `412`. Harmless for the
+  default `autoLoad: 'on-sync'`; for `'on-demand'` / `'never'` slots, call
+  `chelonia/kv/sync` before `update`.
+
+- **`update` resolves with the committed value.** If the slot is replaced
+  (`defineSlot`/HMR) or dropped after the server write commits, `update`
+  still resolves with that committed value. `undefined` is reserved for
+  `KV_NOOP` / abort ("no write happened"), so callers can distinguish a
+  persisted write from a genuine no-op.
+
+- **Event ordering.** `CHELONIA_KV_UPDATED` fires *before* the slot status
+  transitions, so an updated-handler that reads `chelonia/kv/status` sees
+  the pre-transition status (e.g. `'loading'` on a first successful load).
+  The `defineSlot`-replacement re-validate path is the exception: it flips
+  status to `'loaded'` first. Either way, derive a "settled" signal from
+  `CHELONIA_KV_STATUS_CHANGED` reaching a terminal status, not from inside
+  a `CHELONIA_KV_UPDATED` handler. A first load of a never-written key
+  emits only `CHELONIA_KV_STATUS_CHANGED` (`non-init -> loading ->
+  non-init`), not `CHELONIA_KV_UPDATED`, because the value did not change.
+
+- **`CHELONIA_KV_UPDATED` does not guarantee a change.**
+  `chelonia/kv/clear` always emits, whereas a no-op first load suppresses
+  the event, so the event fires on a superset of real changes. Compare
+  `previousValue` against `value` if you need strict change detection.
+
+- **Payloads are detached clones.** The `value` / `previousValue` fields
+  on `CHELONIA_KV_UPDATED` and the `value` argument to `onUpdate` are deep
+  clones of the mirror, not live references. Mutating them is safe (it
+  cannot corrupt the mirror or other observers) but is not reflected back
+  into the mirror; use `chelonia/kv/update` to persist a change.
+
+- **`onUpdate` must be idempotent.** A slot replaced via `defineSlot` (or
+  HMR) during an in-flight async load/write may still see its previous
+  definition's `onUpdate` fire once after the replacement's own
+  revalidation. Callbacks must not assume they are still the active slot
+  for the contract/key.
+
+- **`chelonia/reset` drains in-flight KV writes.** `reset` aborts
+  stuck/offline network work, then waits for in-flight
+  `chelonia/kv/update` / `chelonia/kv/clear` writes to settle before
+  `postCleanupFn` and before clearing the KV runtime maps (matching
+  `chelonia/contract/wait`), so persistence hooks observe a quiescent
+  mirror and continuations never run against torn-down state.
+
 ## External state sync
 
 For mirroring Chelonia's state into another process / store (e.g.
@@ -353,6 +436,19 @@ Chelonia in a service worker, Vuex/Pinia in the tab).
 | Selector | Source | Purpose |
 |---|---|---|
 | `chelonia/externalStateSetup` | `src/local-selectors/index.ts` | Wire up Chelonia → external store synchronization. |
+
+`chelonia/externalStateSetup` projects Chelonia's bookkeeping subtrees into
+the external store alongside `rootState.contracts`. Two of them travel with
+anything that exposes that subtree, so treat them as in-band data you may
+need to redact in consumer code:
+
+- **`rootState._kv`** — the KV slot mirror. Slot updates push the changed
+  `_kv[contractID][key]` entry; contract removal drops the full
+  per-contract KV subtree. For a `_kv`-free view, project
+  `{ ...rootState, _kv: undefined }`.
+- **`state.contracts[contractID]._journal`** — the per-contract journal
+  (when enabled). See [journal.md](./journal.md#consumer-visible-leakage)
+  for the journal-side caveats and the `_journal`-free projection.
 
 ## Events
 
@@ -421,6 +517,7 @@ The most useful exported types and values (re-exported from the package root):
 | `KvUpdater<T>` | `src/types.ts` | `(prev: T | undefined) => T | typeof KV_NOOP`. `prev` is `undefined` when the slot has neither a mirror value nor a `defaultValue`; return `KV_NOOP` to abort the write. Used by `chelonia/kv/update`. |
 | `KvUpdateCtx` | `src/types.ts` | Context object passed to `onUpdate`; `CHELONIA_KV_UPDATED` emits the same fields plus `value` as a flat payload. |
 | `KvLoadStatus` | `src/types.ts` | `'non-init' | 'loading' | 'loaded' | 'error'` — status of a slot's mirror entry. |
+| `KvMirrorEntry` | `src/types.ts` | Shape of a single mirror entry at `rootState._kv[contractID][key]`: `{ value: JSONType | undefined, etag: string | null, status: KvLoadStatus, lastError?: { name, message } }`. `value` is canonical (always a server-confirmed payload or `undefined`); see [Consumer caveats](#consumer-caveats). |
 | `KV_NOOP` | `src/kv.ts` | `Symbol.for('@chelonia/lib/KV_NOOP')` — return from an updater to abort the write. |
 
 ## Errors

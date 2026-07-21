@@ -538,7 +538,7 @@ export default sbp('sbp/selectors/register', {
       }
       sbp('chelonia/journal/clear')
     } else if (journalOverride !== undefined) {
-      // Reject `null` per individual field: AGENTS.md documents that
+      // Reject `null` per individual field: docs/configure.md documents that
       // only the typed values are accepted and that callers should
       // omit a field (or pass `undefined`) to leave it alone. Silently
       // accepting `null` here would let it slip through to the read
