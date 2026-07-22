@@ -1544,7 +1544,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // below. Since `okTurtles.events/emit` is synchronous, a handler
             // reading `chelonia/kv/status` here sees the pre-transition status
             // (e.g. still `'loading'`). Consumers needing a settled status
-            // must watch `CHELONIA_KV_STATUS_CHANGED` (see AGENTS.md).
+            // must watch `CHELONIA_KV_STATUS_CHANGED` (see docs/api.md
+            // §Consumer caveats).
             //
             // `silent` (update's data-loss-guard reload): skip the emit + onUpdate
             // so a single `chelonia/kv/update` call doesn't produce both a 'load'

@@ -296,7 +296,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             (0, sbp_1.default)('chelonia/journal/clear');
         }
         else if (journalOverride !== undefined) {
-            // Reject `null` per individual field: AGENTS.md documents that
+            // Reject `null` per individual field: docs/configure.md documents that
             // only the typed values are accepted and that callers should
             // omit a field (or pass `undefined`) to leave it alone. Silently
             // accepting `null` here would let it slip through to the read
@@ -830,11 +830,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 })),
                 [index_js_1.NOTIFICATION_TYPE.KV]: (msg) => {
                     if (!msg.channelID || !msg.key) {
-                        console.info('[chelonia] Discarding kv event without channelID or key');
+                        console.warn('[chelonia] Discarding kv event without channelID or key');
                         return;
                     }
                     if (!this.subscriptionSet.has(msg.channelID)) {
-                        console.info(`[chelonia] Discarding kv event for ${msg.channelID} because it's not in the current subscriptionSet`);
+                        console.warn(`[chelonia] Discarding kv event for ${msg.channelID} because it's not in the current subscriptionSet`);
                         return;
                     }
                     const kvSlotHandler = (0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_handleRemote');

@@ -1174,11 +1174,11 @@ export default sbp('sbp/selectors/register', {
           channelID: string; key: string; data: string; cid?: string
         }) => {
           if (!msg.channelID || !msg.key) {
-            console.info('[chelonia] Discarding kv event without channelID or key')
+            console.warn('[chelonia] Discarding kv event without channelID or key')
             return
           }
           if (!this.subscriptionSet.has(msg.channelID)) {
-            console.info(
+            console.warn(
               `[chelonia] Discarding kv event for ${msg.channelID} because it's not in the current subscriptionSet`
             )
             return
