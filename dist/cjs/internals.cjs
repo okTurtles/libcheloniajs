@@ -495,15 +495,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         // Drop per-contract KV runtime state on every removal; the
         // `CONTRACTS_MODIFIED` listener also performs this cleanup via
-        // `_onContractsModified`, so the direct call is an idempotent fast
-        // path when the selector is present.
-        if ((0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_cleanupContractRuntime')) {
-            try {
-                (0, sbp_1.default)('chelonia/kv/_cleanupContractRuntime', contractID);
-            }
-            catch (e) {
-                console.error('[chelonia] KV cleanup on contract removal failed', e);
-            }
+        // `_onContractsModified`, so the direct call is an idempotent fast path.
+        try {
+            (0, sbp_1.default)('chelonia/kv/_cleanupContractRuntime', contractID);
+        }
+        catch (e) {
+            console.error('[chelonia] KV cleanup on contract removal failed', e);
         }
         this.subscriptionSet.delete(contractID);
         // (Tracker + debounce cancellation moved to the top of this selector

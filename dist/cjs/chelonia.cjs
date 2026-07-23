@@ -23,6 +23,7 @@ const journal_js_1 = require("./journal.cjs");
 const encryptedData_js_1 = require("./encryptedData.cjs");
 require("./files.cjs");
 const internals_js_1 = require("./internals.cjs");
+require("./kv.cjs");
 const signedData_js_1 = require("./signedData.cjs");
 require("./time-sync.cjs");
 const utils_js_1 = require("./utils.cjs");
@@ -213,9 +214,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.pending = [];
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         rootState.secretKeys = rootState.secretKeys || Object.create(null);
-        // Initialise the KV mirror lazily — see KV-REVAMPED.md §5. Created
-        // as a plain object so reactive frameworks (Vue) can observe
-        // additions via `config.reactiveSet`.
+        // Initialise the KV mirror lazily (see docs/kv.md, "The local
+        // mirror" / "Lazy initialization"). Created as a null-prototype
+        // plain object so reactive frameworks (Vue) can observe additions
+        // via `config.reactiveSet`.
         if (!rootState._kv) {
             this.config.reactiveSet(rootState, '_kv', Object.create(null));
         }
@@ -462,13 +464,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // state teardown. `chelonia/kv/update` / `chelonia/kv/clear` run inside
         // the per-contract `chelonia/queueInvocation` lane, so `_waitInFlight`
         // resolves only once they settle. The trailing `wait` drains follow-up
-        // work a KV continuation enqueued. Guarded because `kv.ts` is optional.
+        // work a KV continuation enqueued.
         this.abortController.abort();
         this.abortController = new AbortController();
-        if ((0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_waitInFlight')) {
-            await (0, sbp_1.default)('chelonia/kv/_waitInFlight');
-            await (0, sbp_1.default)('chelonia/contract/wait');
-        }
+        await (0, sbp_1.default)('chelonia/kv/_waitInFlight');
+        await (0, sbp_1.default)('chelonia/contract/wait');
         const result = await postCleanupFn?.();
         // The following are all synchronous operations
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
@@ -786,9 +786,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         // actually set up. In these cases, force sync contracts to get them
                         // updated.
                         (0, sbp_1.default)('chelonia/private/in/sync', channelID, { force: true }).then(() => {
-                            if ((0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_onContractResynced')) {
-                                (0, sbp_1.default)('chelonia/kv/_onContractResynced', channelID);
-                            }
+                            (0, sbp_1.default)('chelonia/kv/_onContractResynced', channelID);
                         }).catch((err) => {
                             console.warn(`[chelonia] Syncing contract ${channelID} failed: ${err.message}`);
                         });
@@ -840,8 +838,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         console.warn(`[chelonia] Discarding kv event for ${msg.channelID} because it's not in the current subscriptionSet`);
                         return;
                     }
-                    const kvSlotHandler = (0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_handleRemote');
-                    if (!rawKvHandler && !kvSlotHandler)
+                    // Fast path: skip the queue lane entirely when no raw KV callback
+                    // is configured and no slot is registered for this contract. This
+                    // matches `_handleRemote`'s own no-op-on-miss semantics.
+                    if (!rawKvHandler && !this.kvSlotsByContractID.get(msg.channelID)?.size)
                         return;
                     (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, async () => {
                         // Share one lazy parsed wrapper between the raw KV callback and the
@@ -863,13 +863,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                 console.error(`[chelonia] raw kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
                             }
                         }
-                        if (kvSlotHandler) {
-                            try {
-                                await (0, sbp_1.default)('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed, msg.cid);
-                            }
-                            catch (e) {
-                                console.error(`[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`, e);
-                            }
+                        try {
+                            await (0, sbp_1.default)('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed, msg.cid);
+                        }
+                        catch (e) {
+                            console.error(`[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`, e);
                         }
                     }).catch((e) => {
                         console.error(`[chelonia] Error processing kv event for ${msg.channelID} and key ${msg.key}`, msg, e);
