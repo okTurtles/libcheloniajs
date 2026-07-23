@@ -58,9 +58,11 @@ const registryKey = (contractType, key) => `${contractType}${kv_constants_js_1.K
 // form. `contractType` arrays are flattened by the caller; this helper
 // produces one `SlotDefinition` per (already-singular) `contractType`.
 //
-// The `defaultValue` factory is invoked exactly once here — per the
-// KV-REVAMPED §4.1 contract that factories run at registration time
-// and the result is what every subsequent reader sees.
+// The `defaultValue` factory is invoked exactly once in
+// `_defineSlotInternal` (before the per-type loop); the resolved result
+// is passed in as `resolvedDefault`. Per the KV-REVAMPED §4.1 contract,
+// factories run at registration time and the result is what every
+// subsequent reader sees.
 function resolveSlotDefinition(def, contractType, resolvedDefault, source) {
     return {
         contractType,
@@ -737,13 +739,13 @@ async function flushDirtyFilters(ctx) {
             }
             catch (e) {
                 console.warn(`[chelonia/kv] setFilter flush failed for ${cID}`, e);
-                // Transient failure (e.g. server error while the socket stayed
-                // up). Re-dirtying inline would hot-spin this drain loop, so
-                // record the contract for a single backoff retry instead. The
-                // correct filter is still cached in `kvActiveFilters`, so the
-                // retry just re-sends it. Reconnect re-establishes filters
-                // independently (see chelonia.ts), so this only covers failures
-                // that leave the socket up.
+                // Synchronous dispatch failure (e.g. `this.pubsub` unset, or an
+                // SBP filter vetoing the selector). Note: server-side rejection
+                // of a KV_FILTER request does NOT surface here — `setKvFilter`
+                // is fire-and-forget and the pubsub ERR handler (pubsub/index.ts)
+                // warn-and-drops it independently. Server-side failures are
+                // healed on the next reconnect via `isKvFilterFresh`. This retry
+                // covers the (rare) synchronous-dispatch case only.
                 scheduleFilterRetry(ctx, cID);
             }
         }
@@ -957,6 +959,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         if (typeof def.key !== 'string' || def.key.length === 0) {
             throw new errors_js_1.ChelErrorKvSlotInvalid('[chelonia/kv] defineSlot: invalid key');
+        }
+        if (def.key.includes(kv_constants_js_1.KV_KEY_SEPARATOR)) {
+            throw new errors_js_1.ChelErrorKvSlotInvalid(`[chelonia/kv] defineSlot: key must not contain '${kv_constants_js_1.KV_KEY_SEPARATOR}'`);
         }
         const types = Array.from(new Set(Array.isArray(def.contractType) ? def.contractType : [def.contractType]));
         if (types.length === 0) {
@@ -1871,10 +1876,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // state instead so value + etag are re-paired from the server —
         // mirroring the conflict-reconciliation path. Only when `entry.etag`
         // is non-null is there a stale etag to protect; a never-loaded slot
-        // (etag null) applies the frame inline below (its first write
-        // carries no `if-match`, so no spurious 412). Per §4.9 a no-cid
-        // frame is already the exceptional legacy/non-Chelonia-writer path,
-        // so the extra round-trip is acceptable.
+        // (etag null) applies the frame inline below. Its next local write
+        // will send `if-match: '""'` (key must not exist) and, if the key
+        // now exists, receive a 412 that routes into `onconflict` — safe,
+        // not a spurious failure. Per §4.9 a no-cid frame is already the
+        // exceptional legacy/non-Chelonia-writer path, so the extra
+        // round-trip is acceptable.
         if (!hasCid && entry.etag != null) {
             // If a conflict marker is pending for this slot, demote it on
             // completion of this GET (mirroring the conflict branch above):
@@ -2369,7 +2376,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // misleading the caller with `undefined`.
                 return nextValue;
             }
-            this.config.reactiveSet(entryAfter, 'value', nextValue);
+            // Clone before the mirror write so neither the caller (via the
+            // resolved promise) nor the reducer author holds a live alias into
+            // the mirror — same invariant as `_handleRemote` (see its clone
+            // comment). `read` clones on the way out; this closes the write side.
+            this.config.reactiveSet(entryAfter, 'value', (0, turtledash_1.cloneDeep)(nextValue));
             this.config.reactiveSet(entryAfter, 'etag', setResult.etag);
             (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CHELONIA_KV_UPDATED, {
                 contractID,
