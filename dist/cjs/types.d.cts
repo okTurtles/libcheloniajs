@@ -4,6 +4,7 @@ import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.cjs';
 import type { EncryptedData } from './encryptedData.cjs';
 import type { PubSubClient } from './pubsub/index.cjs';
 import type { SignedDataContext } from './signedData.cjs';
+import type { KV_AUTO_LOAD, KV_LOAD_STATUS, KV_UPDATE_REASON, KvNoop } from './kv-constants.cjs';
 export type JSONType = null | string | number | boolean | JSONObject | JSONArray;
 export interface JSONObject {
     [x: string]: JSONType;
@@ -124,6 +125,82 @@ export type JournalConfig = {
     diff?: (before: unknown, after: unknown) => JournalPatch[];
     applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };
+export type KvUpdater<T> = (prev: T | undefined) => T | KvNoop;
+export type KvLoadStatus = typeof KV_LOAD_STATUS[keyof typeof KV_LOAD_STATUS];
+export type KvMirrorEntry = {
+    value: JSONType | undefined;
+    etag: string | null;
+    status: KvLoadStatus;
+    lastError?: {
+        name: string;
+        message: string;
+    };
+};
+export type KvUpdateCtx = {
+    contractID: string;
+    contractType: string;
+    key: string;
+    reason: typeof KV_UPDATE_REASON[keyof typeof KV_UPDATE_REASON];
+    etag: string | null;
+    previousValue: JSONType | undefined;
+};
+export type KvSlotDefinition = {
+    contractType: string | string[];
+    key: string;
+    defaultValue?: JSONType | (() => JSONType);
+    /**
+     * Synchronous validator with a `parse(value)` method (Zod-shaped).
+     * Runs on writes, remote updates, reconnect, and first activation of
+     * persisted mirror entries; reads return already-validated values and
+     * substitute the default for entries currently in `error` status (see
+     * KV-REVAMPED.md §6).
+     *
+     * Side effect of registration: if the schema is a `.transform()`
+     * (or otherwise mutating) parser, `defineSlot` runs the resolved
+     * `defaultValue` through `schema.parse` once and stores the
+     * **post-parse** value as the slot's effective default. Every
+     * subsequent `chelonia/kv/read` that returns the default returns
+     * a deep clone of that post-parse value, not the raw
+     * `defaultValue` you passed in. The parse must be idempotent
+     * (`parse(parse(x))` structurally equal to `parse(x)`), which
+     * `defineSlot` enforces at registration time.
+     */
+    schema?: {
+        parse: (value: unknown) => JSONType;
+    };
+    match?: (contractID: string, contractState: object, rootState: object) => boolean;
+    encryptionKeyName?: string | null;
+    signingKeyName?: string;
+    defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
+    autoSubscribe?: boolean;
+    autoLoad?: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
+    refreshOnReconnect?: boolean;
+    onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
+};
+export type SlotDefinitionSource = {
+    kind: 'defineContract';
+    manifest: string;
+} | {
+    kind: 'defineSlot';
+};
+export type SlotDefinition = {
+    contractType: string;
+    key: string;
+    defaultValue?: JSONType | (() => JSONType);
+    resolvedDefault: JSONType | undefined;
+    schema?: {
+        parse: (value: unknown) => JSONType;
+    };
+    match?: (contractID: string, contractState: object, rootState: object) => boolean;
+    encryptionKeyName: string | null;
+    signingKeyName: string;
+    defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
+    autoSubscribe: boolean;
+    autoLoad: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
+    refreshOnReconnect: boolean;
+    onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
+    source?: SlotDefinitionSource;
+};
 export type SendMessageHooks = Partial<{
     prepublish: (entry: SPMessage) => void | Promise<void>;
     onprocessed: (entry: SPMessage) => void;
@@ -184,6 +261,7 @@ export type CheloniaContractCtx = {
         }) => void | Promise<void>;
     }>;
     methods: Record<string, (...args: unknown[]) => unknown>;
+    kv?: Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>;
 };
 export type CheloniaContext = {
     config: CheloniaConfig;
@@ -218,7 +296,12 @@ export type CheloniaContext = {
         contractID: string;
     }[];
     pubsub: import('./pubsub/index.cjs').PubSubClient;
-    contractsModifiedListener: (contracts: Set<string>, { added, removed }: {
+    contractsModifiedListener: (contracts: string[], { added, removed }: {
+        added: string[];
+        removed: string[];
+    }) => void;
+    kvReconnectListener?: (client: import('./pubsub/index.cjs').PubSubClient) => void;
+    kvContractsModifiedListener?: (contracts: string[], { added, removed }: {
         added: string[];
         removed: string[];
     }) => void;
@@ -226,6 +309,22 @@ export type CheloniaContext = {
     defContractManifest: string;
     defContractSBP: typeof sbp;
     defContract: CheloniaContractCtx;
+    kvSlots: Map<string, SlotDefinition>;
+    kvSlotsByContractID: Map<string, Map<string, SlotDefinition>>;
+    kvActiveFilters: Map<string, Set<string>>;
+    kvFilterDirty: Set<string>;
+    kvFlushInFlight: boolean;
+    kvFilterRetry: Set<string>;
+    kvFilterRetryTimer?: ReturnType<typeof setTimeout>;
+    kvLocalEchoCIDs: Map<string, Map<string, {
+        expiry: number;
+        fromConflict: boolean;
+    }>>;
+    kvReconnectRefresh: Set<string>;
+    kvPendingWrites: Map<string, number>;
+    kvPendingLoads: Map<string, number>;
+    kvOnUpdateActive: Map<string, number>;
+    defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
 };
 export type ChelContractManifestBody = {
     name: string;
@@ -361,6 +460,7 @@ export type ChelRootState = {
         };
     }>;
     secretKeys: Record<string, string>;
+    _kv?: Record<string, Record<string, KvMirrorEntry>>;
 };
 export type Response = {
     type: ResType;
@@ -376,12 +476,53 @@ export type ParsedEncryptedOrUnencryptedMessage<T> = Readonly<{
     signingContractID?: string | null | undefined;
     innerSigningContractID?: string | null | undefined;
 }>;
+export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<T> & {
+    etag: string | null;
+};
+/**
+ * Callback supplied to `chelonia/kv/set` to resolve a `409` / `412`
+ * conflict (or to populate the body when `data` was omitted and the
+ * primitive performs a fetch-first GET — see the `data === undefined`
+ * branch in `src/chelonia.ts`).
+ *
+ * Return either:
+ *   - `[newData, ifMatch]` to retry the write with `newData` against
+ *     etag `ifMatch`. `ifMatch` may be `undefined` when the server
+ *     returned neither `x-cid` nor `etag` (typical for 404 / 410
+ *     fall-throughs) — the primitive substitutes `''` at the wire so
+ *     the POST still goes through.
+ *   - **any falsy value** (`false`, `null`, `undefined`, `0`, `''`)
+ *     to abort the write without an HTTP call. The slot API
+ *     (`chelonia/kv/update`) relies on this to honour `KV_NOOP` and
+ *     to short-circuit empty-data GETs.
+ *
+ * NOTE: the type now advertises `false` as a valid return value where
+ * previously the type only permitted a tuple. The runtime `if (!result)
+ * return false` guard already existed pre-revamp, so a falsy return
+ * always silently aborted at runtime — this is a type-level change, not
+ * a runtime behaviour change. Direct callers of `chelonia/kv/set` need
+ * not audit for a runtime regression; the high-level
+ * `chelonia/kv/update` API is unaffected.
+ */
 export type ChelKvOnConflictCallback = (args: {
     contractID: string;
     key: string;
     failedData?: JSONType;
     status: number;
     etag: string | null | undefined;
+    /**
+     * The decrypted/verified server data for the conflicting key.
+     *
+     * **Throws on access.** The runtime value is a lazy getter (see
+     * `resolveData` in `src/chelonia.ts`) that forces decryption and
+     * signature verification the first time it is read, and may reject
+     * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`.
+     * Access it inside a `try`/`catch` (falling back to `undefined` or
+     * re-throwing as appropriate), or read `currentValue.data` directly
+     * with the same precaution. The bundled slot API (`chelonia/kv/update`,
+     * `chelonia/kv/clear`) already guards access; this note applies to
+     * direct `chelonia/kv/set` callers supplying a custom `onconflict`.
+     */
     currentData: JSONType | undefined;
     currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string]>;
+}) => Promise<[JSONType, string | undefined] | false>;

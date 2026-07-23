@@ -14,6 +14,7 @@ be imported directly — use the package name.
 | [`configure.md`](./configure.md) | The `chelonia/configure` selector — every option, validation rules, and framework integration. |
 | [`contracts.md`](./contracts.md) | Defining contracts, registering them, syncing, publishing actions, key management, atomic batches, and tearing down. |
 | [`journal.md`](./journal.md) | The optional per-contract event journal: enabling it, redactions, snapshot tuning, reconstruct, and clear. |
+| [`kv.md`](./kv.md) | The server-side KV store and KV slots: the local mirror model, slot definitions, conflict retries, and consumer caveats. |
 | [`files.md`](./files.md) | Encrypted file upload, download, and delete — manifest layout and cipher choices. |
 | [`persistent-actions.md`](./persistent-actions.md) | The retry queue for must-succeed SBP calls — enqueue, cancel, persistence, and lifecycle. |
 | [`debugging.md`](./debugging.md) | Observability — error hooks, lifecycle events, inspecting state, and replaying from the journal. |

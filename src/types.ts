@@ -6,6 +6,12 @@ import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.js'
 import type { EncryptedData } from './encryptedData.js'
 import type { PubSubClient } from './pubsub/index.js'
 import type { SignedDataContext } from './signedData.js'
+import type {
+  KV_AUTO_LOAD,
+  KV_LOAD_STATUS,
+  KV_UPDATE_REASON,
+  KvNoop
+} from './kv-constants.js'
 
 export type JSONType = null | string | number | boolean | JSONObject | JSONArray;
 export interface JSONObject {
@@ -166,6 +172,113 @@ export type JournalConfig = {
   applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };
 
+// ---------------------------------------------------------------------------
+// KV slot API (see KV-REVAMPED.md and src/kv.ts).
+// ---------------------------------------------------------------------------
+
+// Reducer signature for `chelonia/kv/update`. The reducer receives the latest
+// known value (mirror on first attempt; server `currentData` on conflict
+// retry), or `undefined` when no mirror value and no `defaultValue` exist, and
+// returns the next value, or the `KV_NOOP` sentinel to abort the write. See
+// KV-REVAMPED.md §3.3.
+export type KvUpdater<T> = (prev: T | undefined) => T | KvNoop;
+
+// Status of a KV slot's mirror entry. See KV-REVAMPED.md §5.
+export type KvLoadStatus = typeof KV_LOAD_STATUS[keyof typeof KV_LOAD_STATUS];
+
+// Shape of a single KV mirror entry under `rootState._kv[contractID][key]`.
+// See KV-REVAMPED.md §5.
+export type KvMirrorEntry = {
+  value: JSONType | undefined;
+  etag: string | null;
+  status: KvLoadStatus;
+  lastError?: { name: string; message: string };
+};
+
+// Context passed to `onUpdate` and embedded in the `CHELONIA_KV_UPDATED`
+// event payload. See KV-REVAMPED.md §4.1.
+export type KvUpdateCtx = {
+  contractID: string;
+  // Resolved from `rootState.contracts[contractID].type`
+  // (fallback: `rootState[contractID]._vm.type`).
+  contractType: string;
+  key: string;
+  reason: typeof KV_UPDATE_REASON[keyof typeof KV_UPDATE_REASON];
+  etag: string | null;
+  // Mirror value before this update; `undefined` on first load.
+  previousValue: JSONType | undefined;
+};
+
+// Public subset of the internal `SlotDefinition`. Accepted by
+// `chelonia/kv/defineSlot`. See KV-REVAMPED.md §4.1.
+export type KvSlotDefinition = {
+  contractType: string | string[];
+  key: string;
+  defaultValue?: JSONType | (() => JSONType);
+  /**
+   * Synchronous validator with a `parse(value)` method (Zod-shaped).
+   * Runs on writes, remote updates, reconnect, and first activation of
+   * persisted mirror entries; reads return already-validated values and
+   * substitute the default for entries currently in `error` status (see
+   * KV-REVAMPED.md §6).
+   *
+   * Side effect of registration: if the schema is a `.transform()`
+   * (or otherwise mutating) parser, `defineSlot` runs the resolved
+   * `defaultValue` through `schema.parse` once and stores the
+   * **post-parse** value as the slot's effective default. Every
+   * subsequent `chelonia/kv/read` that returns the default returns
+   * a deep clone of that post-parse value, not the raw
+   * `defaultValue` you passed in. The parse must be idempotent
+   * (`parse(parse(x))` structurally equal to `parse(x)`), which
+   * `defineSlot` enforces at registration time.
+   */
+  schema?: { parse: (value: unknown) => JSONType };
+  match?: (contractID: string, contractState: object, rootState: object) => boolean;
+  encryptionKeyName?: string | null;
+  signingKeyName?: string;
+  // Optional default reducer factory; enables the `value`-form of
+  // `chelonia/kv/update`. See KV-REVAMPED.md §4.1 / §4.2.
+  defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
+  autoSubscribe?: boolean;
+  autoLoad?: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
+  refreshOnReconnect?: boolean;
+  onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
+};
+
+export type SlotDefinitionSource =
+  | { kind: 'defineContract'; manifest: string }
+  | { kind: 'defineSlot' }
+
+// Note: there is intentionally no public-facing `_source` field on
+// `KvSlotDefinition`. The manifest-ownership marker is passed
+// out-of-band as a second argument to the internal
+// `chelonia/kv/_defineSlotInternal` selector, so userland callers
+// cannot spoof `kind: 'defineContract'` and trick
+// `_cleanupContractSlots` into unregistering another contract's
+// slots.
+
+// Internal, resolved form of a slot definition. Built from a
+// `KvSlotDefinition` at `chelonia/kv/defineSlot` time: defaults applied,
+// `resolvedDefault` computed, `contractType` narrowed to a single string
+// (the public form accepts an array; each entry is stored as its own
+// `SlotDefinition`). NOT re-exported from `index.ts` — internal only.
+export type SlotDefinition = {
+  contractType: string;
+  key: string;
+  defaultValue?: JSONType | (() => JSONType);
+  resolvedDefault: JSONType | undefined;
+  schema?: { parse: (value: unknown) => JSONType };
+  match?: (contractID: string, contractState: object, rootState: object) => boolean;
+  encryptionKeyName: string | null;
+  signingKeyName: string;
+  defaultUpdater?: (value: JSONType) => KvUpdater<JSONType>;
+  autoSubscribe: boolean;
+  autoLoad: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
+  refreshOnReconnect: boolean;
+  onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
+  source?: SlotDefinitionSource;
+};
+
 export type SendMessageHooks = Partial<{
   prepublish: (entry: SPMessage) => void | Promise<void>;
   onprocessed: (entry: SPMessage) => void;
@@ -245,6 +358,11 @@ export type CheloniaContractCtx = {
     }
   >;
   methods: Record<string, (...args: unknown[]) => unknown>;
+  // Optional declarative KV slot block — sugar over
+  // `chelonia/kv/defineSlot`. See KV-REVAMPED.md §4.8. Each entry is
+  // registered as if the consumer had called `defineSlot` with
+  // `contractType` set to the contract name and `key` set from the entry name.
+  kv?: Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>;
 };
 export type CheloniaContext = {
   config: CheloniaConfig;
@@ -271,13 +389,84 @@ export type CheloniaContext = {
   pending: { contractID: string }[];
   pubsub: import('./pubsub/index.js').PubSubClient;
   contractsModifiedListener: (
-    contracts: Set<string>,
+    contracts: string[],
+    { added, removed }: { added: string[]; removed: string[] },
+  ) => void;
+  kvReconnectListener?: (client: import('./pubsub/index.js').PubSubClient) => void;
+  kvContractsModifiedListener?: (
+    contracts: string[],
     { added, removed }: { added: string[]; removed: string[] },
   ) => void;
   defContractSelectors: string[];
   defContractManifest: string;
   defContractSBP: typeof sbp;
   defContract: CheloniaContractCtx;
+  // KV slot registry — see KV-REVAMPED.md §11.2.
+  // Primary registry keyed by `${contractType}::${key}`.
+  kvSlots: Map<string, SlotDefinition>;
+  // Secondary index for O(1) pubsub dispatch: contractID → (key → slot).
+  kvSlotsByContractID: Map<string, Map<string, SlotDefinition>>;
+  // Effective filter cache per contract — used to coalesce setFilter.
+  kvActiveFilters: Map<string, Set<string>>;
+  // Microtask flush set for setFilter coalescing (see §11.5).
+  kvFilterDirty: Set<string>;
+  // Re-entrancy guard for the setFilter flush loop — ensures a single
+  // draining loop instead of concurrent racing flushes (see §11.5).
+  kvFlushInFlight: boolean;
+  // Contracts whose last `setFilter` flush failed transiently and are
+  // awaiting a backoff retry. Held separately from `kvFilterDirty` so the
+  // drain loop does not hot-spin re-sending a failing filter within the
+  // same pass; a single deferred timer moves these back into
+  // `kvFilterDirty` and re-flushes so the server's filter set converges
+  // without waiting for the next slot change to re-dirty the contract.
+  kvFilterRetry: Set<string>;
+  // Handle for the deferred timer scheduled by `scheduleFilterRetry`.
+  // Tracked so `chelonia/reset` can `clearTimeout` it and release the
+  // closure pinning `ctx` immediately, rather than waiting for the timer
+  // to fire (harmlessly) against the now-empty `kvFilterRetry` set.
+  kvFilterRetryTimer?: ReturnType<typeof setTimeout>;
+  // Server-issued data CIDs awaiting self-echo suppression.
+  // Keyed by `${contractID}::${key}`; inner map value carries expiry + source.
+  kvLocalEchoCIDs: Map<string, Map<string, { expiry: number; fromConflict: boolean }>>;
+  kvReconnectRefresh: Set<string>;
+  // Per-contract count of queued/in-flight `chelonia/kv/update` /
+  // `chelonia/kv/clear` operations. Incremented at call time (before the
+  // write body is enqueued, while the slot may still be active) and
+  // decremented when the queued body settles. `chelonia/kv/_waitInFlight`
+  // drains every contract with a non-zero count so a write whose slot
+  // index entry / echo CID was removed mid-flight (e.g. contract
+  // release, match→false) still settles before `chelonia/reset` tears
+  // down state.
+  kvPendingWrites: Map<string, number>;
+  // Per-contract count of queued/in-flight `chelonia/kv/_loadSlotNow`
+  // fetches (autoload, explicit sync, reconnect refresh, and the
+  // authoritative GETs `_handleRemote` issues for conflict resolution /
+  // no-cid frames). Incremented inside the load body and decremented
+  // when it settles. NOTE: a load initiated via the public queued
+  // wrapper `_loadSlot` is counted twice — once on schedule (in
+  // `_loadSlot`) and again on entry (in `_loadSlotNow`) — because both
+  // the wrapper and the inner function serve direct callers that need
+  // the counter. The only consumer is `defineSlot`'s `> 0` gate, so the
+  // inflation is harmless; do NOT rely on the exact count for telemetry
+  // or "exactly one load in flight" assertions. `defineSlot`'s
+  // post-reconcile gate consults this so replacing a slot whose load is
+  // merely queued (not yet running, so its status is still `loaded`)
+  // schedules a fresh load for the replacement instead of revalidating a
+  // value the superseded load is about to discard at its staleness guard
+  // — which would otherwise leave the mirror silently stale.
+  kvPendingLoads: Map<string, number>;
+  // Per-contract count of `onUpdate` callbacks currently executing
+  // inside the contract's `chelonia/queueInvocation` lane. A KV write
+  // selector (`update`/`clear`/`sync`) invoked while this is non-zero
+  // for the same contract would enqueue behind the lane that is blocked
+  // awaiting the callback → permanent deadlock, so those selectors
+  // reject with `ChelErrorKvReentrant` instead. Keyed by `contractID`
+  // to match the lane granularity exactly (cross-contract writes from
+  // `onUpdate` are safe and not rejected).
+  kvOnUpdateActive: Map<string, number>;
+  // Previous `kv` block per manifest, used by `defineContract`
+  // replacement to diff against the new block.
+  defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
 };
 
 export type ChelContractManifestBody = {
@@ -423,6 +612,10 @@ export type ChelRootState = {
   >;
   // Secret keys. Format secretKeys[keyId] = serializedSecretKey
   secretKeys: Record<string, string>;
+  // KV slot mirror — see KV-REVAMPED.md §5. Indexed by contractID then
+  // slot key. `null` is reserved as the wire-level clear sentinel and
+  // MUST NOT appear as a stored value.
+  _kv?: Record<string, Record<string, KvMirrorEntry>>;
 };
 
 export type Response = {
@@ -441,12 +634,54 @@ export type ParsedEncryptedOrUnencryptedMessage<T> = Readonly<{
   innerSigningContractID?: string | null | undefined;
 }>;
 
+export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<T> & {
+  etag: string | null
+};
+
+/**
+ * Callback supplied to `chelonia/kv/set` to resolve a `409` / `412`
+ * conflict (or to populate the body when `data` was omitted and the
+ * primitive performs a fetch-first GET — see the `data === undefined`
+ * branch in `src/chelonia.ts`).
+ *
+ * Return either:
+ *   - `[newData, ifMatch]` to retry the write with `newData` against
+ *     etag `ifMatch`. `ifMatch` may be `undefined` when the server
+ *     returned neither `x-cid` nor `etag` (typical for 404 / 410
+ *     fall-throughs) — the primitive substitutes `''` at the wire so
+ *     the POST still goes through.
+ *   - **any falsy value** (`false`, `null`, `undefined`, `0`, `''`)
+ *     to abort the write without an HTTP call. The slot API
+ *     (`chelonia/kv/update`) relies on this to honour `KV_NOOP` and
+ *     to short-circuit empty-data GETs.
+ *
+ * NOTE: the type now advertises `false` as a valid return value where
+ * previously the type only permitted a tuple. The runtime `if (!result)
+ * return false` guard already existed pre-revamp, so a falsy return
+ * always silently aborted at runtime — this is a type-level change, not
+ * a runtime behaviour change. Direct callers of `chelonia/kv/set` need
+ * not audit for a runtime regression; the high-level
+ * `chelonia/kv/update` API is unaffected.
+ */
 export type ChelKvOnConflictCallback = (args: {
   contractID: string;
   key: string;
   failedData?: JSONType;
   status: number;
   etag: string | null | undefined;
+  /**
+   * The decrypted/verified server data for the conflicting key.
+   *
+   * **Throws on access.** The runtime value is a lazy getter (see
+   * `resolveData` in `src/chelonia.ts`) that forces decryption and
+   * signature verification the first time it is read, and may reject
+   * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`.
+   * Access it inside a `try`/`catch` (falling back to `undefined` or
+   * re-throwing as appropriate), or read `currentValue.data` directly
+   * with the same precaution. The bundled slot API (`chelonia/kv/update`,
+   * `chelonia/kv/clear`) already guards access; this note applies to
+   * direct `chelonia/kv/set` callers supplying a custom `onconflict`.
+   */
   currentData: JSONType | undefined;
   currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string]>;
+}) => Promise<[JSONType, string | undefined] | false>;

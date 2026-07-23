@@ -457,6 +457,15 @@ export default sbp('sbp/selectors/register', {
             }
             this.config.reactiveDel(state, contractID);
         }
+        // Drop per-contract KV runtime state on every removal; the
+        // `CONTRACTS_MODIFIED` listener also performs this cleanup via
+        // `_onContractsModified`, so the direct call is an idempotent fast path.
+        try {
+            sbp('chelonia/kv/_cleanupContractRuntime', contractID);
+        }
+        catch (e) {
+            console.error('[chelonia] KV cleanup on contract removal failed', e);
+        }
         this.subscriptionSet.delete(contractID);
         // (Tracker + debounce cancellation moved to the top of this selector
         // so the early-return path on a missing contract row also clears.

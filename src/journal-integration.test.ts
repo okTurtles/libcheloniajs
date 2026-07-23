@@ -1012,7 +1012,7 @@ describe('journal: integration via SBP selectors', () => {
 
   it('treats explicit journal: undefined as "leave alone" (not a wipe)', async () => {
     // Spreads / conditional config builders commonly produce
-    // `{ journal: undefined }`. Per AGENTS.md, omission means "leave
+    // `{ journal: undefined }`. Per docs/configure.md, omission means "leave
     // alone"; an explicit `undefined` MUST behave the same. Otherwise
     // turtledash's `merge` would silently overwrite the live journal
     // block with `undefined`, killing journaling with no diagnostic.

@@ -13,3 +13,6 @@ export declare const CONTRACT_HAS_RECEIVED_KEYS = "contract-has-received-keys";
 export declare const PERSISTENT_ACTION_FAILURE = "persistent-action-failure";
 export declare const PERSISTENT_ACTION_SUCCESS = "persistent-action-success";
 export declare const PERSISTENT_ACTION_TOTAL_FAILURE = "persistent-action-total_failure";
+export declare const CHELONIA_KV_UPDATED = "chelonia-kv-updated";
+export declare const CHELONIA_KV_STATUS_CHANGED = "chelonia-kv-status-changed";
+export declare const CHELONIA_KV_VALIDATION_ERROR = "chelonia-kv-validation-error";

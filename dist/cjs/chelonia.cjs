@@ -14,6 +14,7 @@ const index_js_1 = require("./pubsub/index.cjs");
 const reingestTracker_js_1 = require("./reingestTracker.cjs");
 const crypto_1 = require("@chelonia/crypto");
 const errors_js_1 = require("./errors.cjs");
+const internal_errors_js_1 = require("./internal-errors.cjs");
 const events_js_1 = require("./events.cjs");
 const SPMessage_js_1 = require("./SPMessage.cjs");
 Object.defineProperty(exports, "SPMessage", { enumerable: true, get: function () { return SPMessage_js_1.SPMessage; } });
@@ -22,6 +23,7 @@ const journal_js_1 = require("./journal.cjs");
 const encryptedData_js_1 = require("./encryptedData.cjs");
 require("./files.cjs");
 const internals_js_1 = require("./internals.cjs");
+require("./kv.cjs");
 const signedData_js_1 = require("./signedData.cjs");
 require("./time-sync.cjs");
 const utils_js_1 = require("./utils.cjs");
@@ -188,12 +190,37 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // when there is a third contract (for example, a group chatroom) using
         // those rotated keys as foreign keys.
         this.subscriptionSet = new Set();
+        // KV slot registry — see KV-REVAMPED.md §11.2.
+        // `kvSlots` and `defContractKvByManifest` survive `chelonia/reset`
+        // because slot definitions are application code.
+        this.kvSlots = new Map();
+        this.kvSlotsByContractID = new Map();
+        this.kvActiveFilters = new Map();
+        this.kvFilterDirty = new Set();
+        this.kvFilterRetry = new Set();
+        this.kvFlushInFlight = false;
+        this.kvLocalEchoCIDs = new Map();
+        this.kvReconnectRefresh = new Set();
+        this.kvPendingWrites = new Map();
+        this.kvPendingLoads = new Map();
+        this.kvOnUpdateActive = new Map();
+        // Name for `defContractKvByManifest` doesn't start with
+        // `kv`, like the preceding keys, for consistency with
+        // `defContractManifest`.
+        this.defContractKvByManifest = new Map();
         // pending includes contracts that are scheduled for syncing or in the
         // process of syncing for the first time. After sync completes for the
         // first time, they are removed from pending and added to subscriptionSet
         this.pending = [];
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         rootState.secretKeys = rootState.secretKeys || Object.create(null);
+        // Initialise the KV mirror lazily (see docs/kv.md, "The local
+        // mirror" / "Lazy initialization"). Created as a null-prototype
+        // plain object so reactive frameworks (Vue) can observe additions
+        // via `config.reactiveSet`.
+        if (!rootState._kv) {
+            this.config.reactiveSet(rootState, '_kv', Object.create(null));
+        }
     },
     'chelonia/config': function () {
         const out = {
@@ -274,7 +301,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             (0, sbp_1.default)('chelonia/journal/clear');
         }
         else if (journalOverride !== undefined) {
-            // Reject `null` per individual field: AGENTS.md documents that
+            // Reject `null` per individual field: docs/configure.md documents that
             // only the typed values are accepted and that callers should
             // omit a field (or pass `undefined`) to leave it alone. Silently
             // accepting `null` here would let it slip through to the read
@@ -433,17 +460,47 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         });
         await (0, sbp_1.default)('chelonia/contract/waitPublish');
         await (0, sbp_1.default)('chelonia/contract/wait');
+        // Abort then drain in-flight KV writes before the persistence hook and
+        // state teardown. `chelonia/kv/update` / `chelonia/kv/clear` run inside
+        // the per-contract `chelonia/queueInvocation` lane, so `_waitInFlight`
+        // resolves only once they settle. The trailing `wait` drains follow-up
+        // work a KV continuation enqueued.
+        this.abortController.abort();
+        this.abortController = new AbortController();
+        await (0, sbp_1.default)('chelonia/kv/_waitInFlight');
+        await (0, sbp_1.default)('chelonia/contract/wait');
         const result = await postCleanupFn?.();
         // The following are all synchronous operations
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         // Cancel all outgoing messages by replacing this._instance
         this._instance = Object.create(null);
-        this.abortController.abort();
-        this.abortController = new AbortController();
         // Remove all contracts, including all contracts from pending
         (0, utils_js_1.reactiveClearObject)(rootState, this.config.reactiveDel);
         this.config.reactiveSet(rootState, 'contracts', Object.create(null));
         this.config.reactiveSet(rootState, 'secretKeys', Object.create(null));
+        // Re-seed the KV mirror — `reactiveClearObject` above stripped it
+        // along with everything else. Slot definitions (`kvSlots`) and the
+        // per-manifest cache (`defContractKvByManifest`) survive reset
+        // because they are code-level state; the five per-subscription maps
+        // are cleared alongside `subscriptionSet` below. In-flight KV writes
+        // were already drained via `chelonia/kv/_waitInFlight` above, so
+        // clearing `kvLocalEchoCIDs` / `kvPendingWrites` here cannot strand a
+        // continuation mid-write.
+        this.config.reactiveSet(rootState, '_kv', Object.create(null));
+        this.kvSlotsByContractID.clear();
+        this.kvActiveFilters.clear();
+        this.kvFilterDirty.clear();
+        this.kvFilterRetry.clear();
+        if (this.kvFilterRetryTimer != null) {
+            clearTimeout(this.kvFilterRetryTimer);
+            this.kvFilterRetryTimer = undefined;
+        }
+        this.kvFlushInFlight = false;
+        this.kvLocalEchoCIDs.clear();
+        this.kvReconnectRefresh.clear();
+        this.kvPendingWrites.clear();
+        this.kvPendingLoads.clear();
+        this.kvOnUpdateActive.clear();
         (0, utils_js_1.clearObject)(this.ephemeralReferenceCount);
         this.pending.splice(0);
         (0, utils_js_1.clearObject)(this.currentSyncs);
@@ -711,6 +768,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             (0, sbp_1.default)('chelonia/private/stopClockSync');
         }
         (0, sbp_1.default)('chelonia/private/startClockSync');
+        const rawKvHandler = options.messageHandlers?.[index_js_1.NOTIFICATION_TYPE.KV];
         this.pubsub = (0, index_js_1.createClient)(pubsubURL, {
             ...this.config.connectionOptions,
             handlers: {
@@ -727,7 +785,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         // between the time the subscription was requested and it was
                         // actually set up. In these cases, force sync contracts to get them
                         // updated.
-                        (0, sbp_1.default)('chelonia/private/in/sync', channelID, { force: true }).catch((err) => {
+                        (0, sbp_1.default)('chelonia/private/in/sync', channelID, { force: true }).then(() => {
+                            (0, sbp_1.default)('chelonia/kv/_onContractResynced', channelID);
+                        }).catch((err) => {
                             console.warn(`[chelonia] Syncing contract ${channelID} failed: ${err.message}`);
                         });
                     }
@@ -760,32 +820,6 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                     });
                                 }
                             ];
-                        case index_js_1.NOTIFICATION_TYPE.KV:
-                            return [
-                                k,
-                                (msg) => {
-                                    if (!msg.channelID || !msg.key) {
-                                        console.info('[chelonia] Discarding kv event without channelID or key');
-                                        return;
-                                    }
-                                    if (!this.subscriptionSet.has(msg.channelID)) {
-                                        console.info(`[chelonia] Discarding kv event for ${msg.channelID} because it's not in the current subscriptionSet`);
-                                        return;
-                                    }
-                                    (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, () => {
-                                        v.call(this.pubsub, [
-                                            msg.key,
-                                            parseEncryptedOrUnencryptedMessage(this, {
-                                                contractID: msg.channelID,
-                                                meta: msg.key,
-                                                serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
-                                            })
-                                        ]);
-                                    }).catch((e) => {
-                                        console.error(`[chelonia] Error processing kv event for ${msg.channelID} and key ${msg.key}`, msg, e);
-                                    });
-                                }
-                            ];
                         case index_js_1.NOTIFICATION_TYPE.DELETION:
                             return [
                                 k,
@@ -795,6 +829,60 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                             return [k, v];
                     }
                 })),
+                [index_js_1.NOTIFICATION_TYPE.KV]: (msg) => {
+                    if (!msg.channelID || !msg.key) {
+                        console.warn('[chelonia] Discarding kv event without channelID or key');
+                        return;
+                    }
+                    if (!this.subscriptionSet.has(msg.channelID)) {
+                        console.warn(`[chelonia] Discarding kv event for ${msg.channelID} because it's not in the current subscriptionSet`);
+                        return;
+                    }
+                    // Fast path: skip the queue lane entirely when no raw KV callback
+                    // is configured and no slot is registered for this contract. This
+                    // matches `_handleRemote`'s own no-op-on-miss semantics.
+                    if (!rawKvHandler && !this.kvSlotsByContractID.get(msg.channelID)?.size)
+                        return;
+                    (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, async () => {
+                        // Share one lazy parsed wrapper between the raw KV callback and the
+                        // slot layer. If either consumer forces `.data`, the decoded value
+                        // or thrown error is cached; both consumers can therefore observe
+                        // and log the same decode failure, and the raw KV callback may
+                        // decode frames the slot layer would skip as self-echoes.
+                        let parsed;
+                        try {
+                            parsed = parseEncryptedOrUnencryptedMessage(this, {
+                                contractID: msg.channelID,
+                                meta: msg.key,
+                                serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
+                            });
+                        }
+                        catch (e) {
+                            if (e instanceof errors_js_1.ChelErrorInvalidMessageHeight) {
+                                console.warn(`[chelonia] kv pubsub frame for ${msg.channelID}::${msg.key} has height ahead of local state; dropping until contract syncs`);
+                                return;
+                            }
+                            throw e;
+                        }
+                        if (rawKvHandler) {
+                            try {
+                                ;
+                                rawKvHandler.call(this.pubsub, [msg.key, parsed]);
+                            }
+                            catch (e) {
+                                console.error(`[chelonia] raw kv pubsub callback threw for ${msg.channelID}::${msg.key}`, e);
+                            }
+                        }
+                        try {
+                            await (0, sbp_1.default)('chelonia/kv/_handleRemote', msg.channelID, msg.key, parsed, msg.cid);
+                        }
+                        catch (e) {
+                            console.error(`[chelonia] kv slot _handleRemote threw for ${msg.channelID}::${msg.key}`, e);
+                        }
+                    }).catch((e) => {
+                        console.error(`[chelonia] Error processing kv event for ${msg.channelID} and key ${msg.key}`, msg, e);
+                    });
+                },
                 [index_js_1.NOTIFICATION_TYPE.ENTRY](msg) {
                     // We MUST use 'chelonia/private/in/enqueueHandleEvent' to ensure handleEvent()
                     // is called AFTER any currently-running calls to 'chelonia/private/in/sync'
@@ -805,10 +893,53 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 }
             }
         });
+        if (this.kvActiveFilters.size > 0) {
+            for (const [contractID, keys] of this.kvActiveFilters) {
+                this.pubsub.kvFilter.set(contractID, [...keys]);
+            }
+        }
         if (!this.contractsModifiedListener) {
             // Keep pubsub in sync (logged into the right "rooms") with 'state.contracts'
             this.contractsModifiedListener = () => (0, sbp_1.default)('chelonia/pubsub/update');
             (0, sbp_1.default)('okTurtles.events/on', events_js_1.CONTRACTS_MODIFIED, this.contractsModifiedListener);
+        }
+        if (!this.kvReconnectListener) {
+            // KV-REVAMPED §11.4 bullet 3: on websocket reconnect-open, clear
+            // echo CIDs and re-fetch every slot with `refreshOnReconnect: true`.
+            // `client.isNew` is `true` on the initial connection and `false`
+            // on reconnects, so we skip the initial connection to avoid
+            // duplicating the load that `_reconcileForSlot` already scheduled.
+            this.kvReconnectListener = (client) => {
+                if (client !== this.pubsub || client.isNew)
+                    return;
+                (0, sbp_1.default)('chelonia/kv/_onReconnect');
+            };
+            (0, sbp_1.default)('okTurtles.events/on', index_js_1.PUBSUB_RECONNECTION_SUCCEEDED, this.kvReconnectListener);
+        }
+        if (!this.kvContractsModifiedListener) {
+            // KV-REVAMPED §11.4: on CONTRACTS_MODIFIED(added), reconcile every
+            // matching slot for newly-synced contracts. Registered per-instance
+            // so multi-instance deployments dispatch against the correct context.
+            this.kvContractsModifiedListener = (_contracts, payload) => {
+                try {
+                    (0, sbp_1.default)('chelonia/kv/_onContractsModified', payload);
+                }
+                catch (e) {
+                    console.error('[chelonia/kv] CONTRACTS_MODIFIED listener threw', e);
+                }
+            };
+            (0, sbp_1.default)('okTurtles.events/on', events_js_1.CONTRACTS_MODIFIED, this.kvContractsModifiedListener);
+        }
+        if (this.subscriptionSet.size > 0) {
+            try {
+                (0, sbp_1.default)('chelonia/kv/_onContractsModified', {
+                    added: Array.from(this.subscriptionSet),
+                    removed: []
+                });
+            }
+            catch (e) {
+                console.error('[chelonia/kv] initial contract reconciliation threw', e);
+            }
         }
         return this.pubsub;
     },
@@ -830,6 +961,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         contract.state = (contractID) => (0, sbp_1.default)(this.config.stateSelector)[contractID];
         contract.manifest = this.defContractManifest;
         contract.sbp = this.defContractSBP;
+        // KV co-location bookkeeping (KV-REVAMPED §4.8 / §11.3 steps 7–8).
+        // Capture the previous `kv` block for this manifest *before*
+        // rebuilding selectors so the cleanup pass can diff old vs new
+        // key sets. `contract.kv` may legitimately be absent on a
+        // replacement; an absent `kv` with a non-empty `prevKv` is the
+        // signal to unregister every previously-declared key.
+        const prevKv = this.defContractKvByManifest.get(contract.manifest);
         this.defContractSelectors = [];
         this.defContract = contract;
         this.defContractSelectors.push(...(0, sbp_1.default)('sbp/selectors/register', {
@@ -921,6 +1059,23 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             this.defContractSelectors.push(...(0, sbp_1.default)('sbp/selectors/register', {
                 [`${contract.manifest}/${method}`]: contract.methods[method]
             }));
+        }
+        // Diff KV blocks and (re)register manifest-scoped slots.
+        // - Cleanup runs first so removed keys are unregistered before
+        //   the new ones are registered (keys present in both are handled
+        //   by `defineSlot`'s replacement path, which preserves persisted
+        //   mirror values and re-validates them against the new schema).
+        // - Bookkeeping update keeps the next `defineContract` call able
+        //   to diff against the current key set.
+        if (prevKv || contract.kv) {
+            (0, sbp_1.default)('chelonia/kv/_cleanupContractSlots', contract.name, contract.manifest, prevKv, contract.kv ?? {});
+        }
+        if (contract.kv) {
+            (0, sbp_1.default)('chelonia/kv/_registerContractSlots', contract.name, contract.manifest, contract.kv);
+            this.defContractKvByManifest.set(contract.manifest, contract.kv);
+        }
+        else if (prevKv) {
+            this.defContractKvByManifest.delete(contract.manifest);
         }
         (0, sbp_1.default)('okTurtles.events/emit', events_js_1.CONTRACT_REGISTERED, contract);
     },
@@ -1417,7 +1572,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         return stateCopy;
     },
-    'chelonia/contract/fullState': function (contractID) {
+    'chelonia/contract/fullState': function (contractID, key) {
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         if (Array.isArray(contractID)) {
             return Object.fromEntries(contractID.map((contractID) => {
@@ -1425,14 +1580,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     contractID,
                     {
                         contractState: rootState[contractID],
-                        cheloniaState: rootState.contracts[contractID]
+                        cheloniaState: rootState.contracts[contractID],
+                        kvState: rootState._kv?.[contractID],
+                        kvEntry: key === undefined ? undefined : rootState._kv?.[contractID]?.[key]
                     }
                 ];
             }));
         }
         return {
             contractState: rootState[contractID],
-            cheloniaState: rootState.contracts[contractID]
+            cheloniaState: rootState.contracts[contractID],
+            kvState: rootState._kv?.[contractID],
+            kvEntry: key === undefined ? undefined : rootState._kv?.[contractID]?.[key]
         };
     },
     // 'chelonia/out' - selectors that send data out to the server
@@ -1891,24 +2050,44 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // this case, see if `chelonia/kv/queuedSet` covers your needs.
     // `data` is allowed to be falsy, in which case a fetch will occur first and
     // the `onconflict` handler will be called.
-    'chelonia/kv/set': async function (contractID, key, data, { ifMatch, innerSigningKeyId, encryptionKeyId, signingKeyId, maxAttempts, onconflict }) {
+    'chelonia/kv/set': async function (contractID, key, data, { ifMatch, innerSigningKeyId, encryptionKeyId, signingKeyId, maxAttempts, onconflict, signal: callerSignal }) {
         maxAttempts = maxAttempts ?? 3;
         const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`;
         const hasOnconflict = typeof onconflict === 'function';
+        // Compose the caller-provided signal with Chelonia's global abort
+        // controller (KV-REVAMPED.md §4.2). When `callerSignal` is omitted,
+        // we fall back to the global signal unchanged for full backwards
+        // compatibility with existing call sites.
+        let cleanupFetchSignal;
+        const fetchSignal = callerSignal
+            ? (() => {
+                const composed = composeSignals([this.abortController.signal, callerSignal]);
+                cleanupFetchSignal = composed._cleanup;
+                return composed;
+            })()
+            : this.abortController.signal;
         let response;
+        let conflictEtag = null;
+        let successEtag = null;
+        let currentValue;
+        let lastRecoveredValue;
+        let recoveryGetAttempted = false;
         // The `resolveData` function is tasked with computing merged data, as in
         // merging the existing stored values (after a conflict or initial fetch)
         // and new data. The return value indicates whether there should be a new
         // attempt at storing updated data (if `true`) or not (if `false`)
-        const resolveData = async () => {
-            let currentValue;
+        const resolveData = async (invokeOnConflict = true) => {
+            currentValue = undefined;
+            let headerEtag = response.headers.get('x-cid') || response.headers.get('etag');
+            if (headerEtag)
+                conflictEtag = headerEtag;
             // Rationale:
             //  * response.ok could be the result of `GET` (no initial data)
             //  * 409 indicates a conflict because the height used is too old
             //  * 412 indicates a conflict (precondition failed) because the data
             //    on the KV store have been updated / is not what we expected
-            // All of these situations should trigger parsing the respinse and
-            // conlict resolution
+            // All of these situations should trigger parsing the response and
+            // conflict resolution
             if (response.ok || response.status === 409 || response.status === 412) {
                 const serializedDataText = await response.text();
                 // We can get 409 even if there's no data on the server. We still need
@@ -1917,19 +2096,69 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // This prevents this from failing in such cases, which can result in
                 // race conditions and data not being properly initialised.
                 // See <https://github.com/okTurtles/group-income/issues/2780>
-                currentValue = serializedDataText
-                    ? parseEncryptedOrUnencryptedMessage(this, {
-                        contractID,
-                        serializedData: JSON.parse(serializedDataText),
-                        meta: key
-                    })
-                    : undefined;
+                if (serializedDataText) {
+                    try {
+                        currentValue = parseEncryptedOrUnencryptedMessage(this, {
+                            contractID,
+                            serializedData: JSON.parse(serializedDataText),
+                            meta: key
+                        });
+                        lastRecoveredValue = currentValue;
+                    }
+                    catch (e) {
+                        if (!(e instanceof errors_js_1.ChelErrorInvalidMessageHeight))
+                            throw e;
+                    }
+                }
                 // Rationale: 404 and 410 both indicate that the store key doesn't exist.
                 // These are not treated as errors since we could still set the value.
             }
             else if (response.status !== 404 && response.status !== 410) {
                 throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode('[kv/set] Invalid response code: ' + response.status);
             }
+            // When a 409/412 response provides neither an etag header nor a
+            // body, the retry loop cannot recover — it would re-send
+            // if-match: '""' and loop until maxAttempts. Do at most one GET
+            // per set call to recover the current etag and value so
+            // onconflict can produce a valid retry.
+            if (!recoveryGetAttempted &&
+                !headerEtag &&
+                !currentValue &&
+                (response.status === 409 || response.status === 412)) {
+                recoveryGetAttempted = true;
+                const getResp = await this.config.fetch(url, {
+                    headers: new Headers([
+                        ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)]
+                    ]),
+                    signal: fetchSignal
+                });
+                if (getResp.ok) {
+                    const getText = await getResp.text();
+                    if (getText) {
+                        try {
+                            currentValue = parseEncryptedOrUnencryptedMessage(this, {
+                                contractID,
+                                serializedData: JSON.parse(getText),
+                                meta: key
+                            });
+                            lastRecoveredValue = currentValue;
+                        }
+                        catch (e) {
+                            if (!(e instanceof errors_js_1.ChelErrorInvalidMessageHeight))
+                                throw e;
+                        }
+                    }
+                    headerEtag = getResp.headers.get('x-cid') || getResp.headers.get('etag');
+                }
+                else {
+                    console.warn(`[kv/set] recovery GET for ${contractID}/${key} returned ` +
+                        `${getResp.status}; proceeding without recovered etag/value`);
+                }
+                if (headerEtag)
+                    conflictEtag = headerEtag;
+            }
+            if (!invokeOnConflict)
+                return false;
             const result = await onconflict({
                 contractID,
                 key,
@@ -1939,7 +2168,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // returned as undefined, which will then use the `''` fallback value
                 // when writing. This allows 404 / 410 responses to work even if no
                 // etag is explicitly given
-                etag: response.headers.get('x-cid') || response.headers.get('etag'),
+                etag: headerEtag,
                 get currentData() {
                     return currentValue?.data;
                 },
@@ -1951,57 +2180,79 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             ifMatch = result[1];
             return true;
         };
-        for (;;) {
-            if (data !== undefined) {
-                const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
-                    contractID,
-                    innerSigningKeyId,
-                    encryptionKeyId,
-                    signingKeyId,
-                    data: data,
-                    meta: key
-                });
-                response = await this.config.fetch(url, {
-                    headers: new Headers([
-                        ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)],
-                        ['if-match', ifMatch || '""']
-                    ]),
-                    method: 'POST',
-                    body: JSON.stringify(serializedData),
-                    signal: this.abortController.signal
-                });
-            }
-            else {
-                if (!hasOnconflict) {
-                    throw TypeError('onconflict required with empty data');
-                }
-                // If no initial data provided, perform a GET `fetch` to get the current
-                // data and CID. Then, `onconflict` will be used to merge the current
-                // and new data.
-                response = await this.config.fetch(url, {
-                    headers: new Headers([
-                        ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)]
-                    ]),
-                    signal: this.abortController.signal
-                });
-                // This is only for the initial case; the logic is replicated below
-                // for subsequent iterations that require conflic resolution.
-                if (await resolveData()) {
-                    continue;
+        try {
+            for (;;) {
+                if (data !== undefined) {
+                    const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
+                        contractID,
+                        innerSigningKeyId,
+                        encryptionKeyId,
+                        signingKeyId,
+                        data: data,
+                        meta: key
+                    });
+                    response = await this.config.fetch(url, {
+                        headers: new Headers([
+                            ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)],
+                            ['if-match', ifMatch || '""']
+                        ]),
+                        method: 'POST',
+                        body: JSON.stringify(serializedData),
+                        signal: fetchSignal
+                    });
                 }
                 else {
-                    break;
-                }
-            }
-            if (!response.ok) {
-                // Rationale: 409 and 412 indicate conflict resolution is needed
-                if (response.status === 409 || response.status === 412) {
-                    if (--maxAttempts <= 0) {
-                        throw new Error('kv/set conflict setting KV value');
+                    if (!hasOnconflict) {
+                        throw TypeError('onconflict required with empty data');
                     }
-                    // Only retry if an onconflict handler exists to potentially resolve it
-                    await (0, turtledash_1.delay)((0, turtledash_1.randomIntFromRange)(0, 1500));
-                    if (hasOnconflict) {
+                    // If no initial data provided, perform a GET `fetch` to get the current
+                    // data and CID. Then, `onconflict` will be used to merge the current
+                    // and new data.
+                    response = await this.config.fetch(url, {
+                        headers: new Headers([
+                            ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)]
+                        ]),
+                        signal: fetchSignal
+                    });
+                    // This is only for the initial case; the logic is replicated below
+                    // for subsequent iterations that require conflict resolution.
+                    if (await resolveData()) {
+                        continue;
+                    }
+                    else {
+                        break;
+                    }
+                }
+                if (!response.ok) {
+                    // Rationale: 409 and 412 indicate conflict resolution is needed
+                    if (response.status === 409 || response.status === 412) {
+                        if (--maxAttempts <= 0) {
+                            try {
+                                await resolveData(false);
+                            }
+                            catch { }
+                            let currentData;
+                            try {
+                                currentData = (currentValue ?? lastRecoveredValue)?.data;
+                            }
+                            catch { }
+                            throw new internal_errors_js_1.ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
+                                cause: { currentData, etag: conflictEtag ?? null }
+                            });
+                        }
+                        // Honour caller-side abort at every retry boundary so a
+                        // cancellation that lands between requests is respected
+                        // without waiting for the next fetch.
+                        if (callerSignal?.aborted) {
+                            throw callerSignal.reason instanceof Error
+                                ? callerSignal.reason
+                                : new DOMException('Aborted', 'AbortError');
+                        }
+                        if (!hasOnconflict) {
+                            // Can't resolve automatically if there's no conflict handler
+                            throw new Error(`kv/set failed with status ${response.status} and no onconflict handler was provided`);
+                        }
+                        await (0, turtledash_1.delay)((0, turtledash_1.randomIntFromRange)(0, 1500));
                         if (await resolveData()) {
                             continue;
                         }
@@ -2009,14 +2260,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                             break;
                         }
                     }
-                    else {
-                        // Can't resolve automatically if there's no conflict handler
-                        throw new Error(`kv/set failed with status ${response.status} and no onconflict handler was provided`);
-                    }
+                    throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode('kv/set invalid response status: ' + response.status);
                 }
-                throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode('kv/set invalid response status: ' + response.status);
+                // Successful write: capture the server-issued etag (x-cid /
+                // etag header) so the resolved value reflects the freshest
+                // version. See KV-REVAMPED.md §4.2 step 6.
+                successEtag = response.headers.get('x-cid') || response.headers.get('etag');
+                break;
             }
-            break;
+            return { etag: successEtag };
+        }
+        finally {
+            cleanupFetchSignal?.();
         }
     },
     'chelonia/kv/get': async function (contractID, key) {
@@ -2032,12 +2287,37 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (!response.ok) {
             throw new Error('Invalid response status: ' + response.status);
         }
+        const etag = response.headers.get('x-cid') || response.headers.get('etag');
         const data = await response.json();
-        return parseEncryptedOrUnencryptedMessage(this, {
-            contractID,
-            serializedData: data,
-            meta: key
+        let parsed;
+        try {
+            parsed = parseEncryptedOrUnencryptedMessage(this, {
+                contractID,
+                serializedData: data,
+                meta: key
+            });
+        }
+        catch (e) {
+            if (e instanceof errors_js_1.ChelErrorInvalidMessageHeight) {
+                throw new errors_js_1.ChelErrorInvalidMessageHeight(`[kv/get] ${contractID}::${key} was written at a contract height ` +
+                    'ahead of local state; sync the contract and retry', { cause: e });
+            }
+            throw e;
+        }
+        // Attach `etag` in place rather than spreading: `parsed` exposes
+        // `data` / `encryptionKeyId` / `innerSigningKeyId` / etc. as
+        // accessors that force eager unwrap (and throw on decryption
+        // failure) — spreading would materialise them synchronously here,
+        // changing the failure mode for callers that only need headers and
+        // collapsing the laziness `parseEncryptedOrUnencryptedMessage` is
+        // designed for.
+        Object.defineProperty(parsed, 'etag', {
+            value: etag,
+            enumerable: true,
+            writable: true,
+            configurable: true
         });
+        return parsed;
     },
     // To set filters for a contract, call with `filter` set to an array of KV
     // keys to receive updates for over the WebSocket. An empty array means that
@@ -2048,6 +2328,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // set to `['foo', 'bar']` and then with `['baz']` means that KV updates will
     // be received for `baz` only, not for `foo`, `bar` or any other keys.
     'chelonia/kv/setFilter': function (contractID, filter) {
+        if (!this.pubsub)
+            return;
         this.pubsub.setKvFilter(contractID, filter);
     },
     'chelonia/parseEncryptedOrUnencryptedDetachedMessage': function ({ contractID, serializedData, meta }) {
@@ -2058,6 +2340,31 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         });
     }
 });
+function composeSignals(signals) {
+    if (typeof AbortSignal.any === 'function')
+        return AbortSignal.any(signals);
+    const controller = new AbortController();
+    const cleanupFns = [];
+    const abort = (signal) => {
+        if (!controller.signal.aborted)
+            controller.abort(signal.reason);
+    };
+    for (const signal of signals) {
+        if (signal.aborted) {
+            abort(signal);
+            break;
+        }
+        const handler = () => abort(signal);
+        signal.addEventListener('abort', handler, { once: true });
+        cleanupFns.push(() => signal.removeEventListener('abort', handler));
+    }
+    const composed = controller.signal;
+    composed._cleanup = () => {
+        for (const cleanup of cleanupFns.splice(0))
+            cleanup();
+    };
+    return composed;
+}
 function contractNameFromAction(action) {
     const regexResult = exports.ACTION_REGEX.exec(action);
     const contractName = regexResult?.[2];
@@ -2091,7 +2398,7 @@ function parseEncryptedOrUnencryptedMessage(ctx, { contractID, serializedData, m
     const rootState = (0, sbp_1.default)(ctx.config.stateSelector);
     const currentHeight = rootState.contracts[contractID].height;
     if (!(numericHeight >= 0) || !(numericHeight <= currentHeight)) {
-        throw new Error(`[chelonia] parseEncryptedOrUnencryptedMessage: Invalid height ${serializedData.height}; it must be between 0 and ${currentHeight}`);
+        throw new errors_js_1.ChelErrorInvalidMessageHeight(`[chelonia] parseEncryptedOrUnencryptedMessage: Invalid height ${serializedData.height}; it must be between 0 and ${currentHeight}`);
     }
     // Additional data used for verification
     const aad = (meta ?? '') + serializedData.height;

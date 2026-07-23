@@ -112,6 +112,7 @@ type MessageHandlers = {
         channelID: string;
         key: string;
         data: JSONType;
+        cid?: string;
     }): void;
     [NOTIFICATION_TYPE.SUB](this: PubSubClient, msg: {
         channelID: string;
@@ -194,7 +195,7 @@ export declare function createMessage(type: string, data: JSONType, meta?: objec
     data: JSONType;
     [x: string]: JSONType;
 };
-export declare function createKvMessage(channelID: string, key: string, data: JSONType): string;
+export declare function createKvMessage(channelID: string, key: string, data: JSONType, cid?: string): string;
 export declare function createPubMessage(channelID: string, data: JSONType): string;
 export declare function createRequest(type: RequestTypeEnum, data: JSONObject): string;
 export declare const messageParser: (data: string) => Message;

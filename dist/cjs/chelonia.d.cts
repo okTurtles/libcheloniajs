@@ -7,6 +7,7 @@ import './chelonia-utils.cjs';
 import type { EncryptedData } from './encryptedData.cjs';
 import './files.cjs';
 import { type PublishOptions } from './internals.cjs';
+import './kv.cjs';
 import './time-sync.cjs';
 import { ChelContractState } from './types.cjs';
 export type { PublishOptions };

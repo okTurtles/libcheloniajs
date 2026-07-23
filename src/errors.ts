@@ -30,6 +30,7 @@ export const ChelErrorUnexpected = ChelErrorGenerator('ChelErrorUnexpected')
 export const ChelErrorKeyAlreadyExists = ChelErrorGenerator('ChelErrorKeyAlreadyExists')
 export const ChelErrorUnrecoverable = ChelErrorGenerator('ChelErrorUnrecoverable')
 export const ChelErrorForkedChain = ChelErrorGenerator('ChelErrorForkedChain')
+export const ChelErrorInvalidMessageHeight = ChelErrorGenerator('ChelErrorInvalidMessageHeight')
 export const ChelErrorDecryptionError = ChelErrorGenerator('ChelErrorDecryptionError')
 export const ChelErrorDecryptionKeyNotFound = ChelErrorGenerator(
   'ChelErrorDecryptionKeyNotFound',
@@ -53,3 +54,9 @@ export const ChelErrorResourceGone = ChelErrorGenerator(
   ChelErrorUnexpectedHttpResponseCode
 )
 export const ChelErrorJournalCorrupt = ChelErrorGenerator('ChelErrorJournalCorrupt')
+export const ChelErrorKvSlotUnknown = ChelErrorGenerator('ChelErrorKvSlotUnknown')
+export const ChelErrorKvSlotInvalid = ChelErrorGenerator('ChelErrorKvSlotInvalid')
+export const ChelErrorKvUpdateInvalid = ChelErrorGenerator('ChelErrorKvUpdateInvalid')
+export const ChelErrorKvValidation = ChelErrorGenerator('ChelErrorKvValidation')
+export const ChelErrorKvConflict = ChelErrorGenerator('ChelErrorKvConflict')
+export const ChelErrorKvReentrant = ChelErrorGenerator('ChelErrorKvReentrant')

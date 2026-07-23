@@ -73,6 +73,14 @@ export declare const ChelErrorForkedChain: {
         cause?: unknown;
     };
 };
+export declare const ChelErrorInvalidMessageHeight: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
 export declare const ChelErrorDecryptionError: {
     new (message?: string | undefined, options?: ErrorOptions | undefined): {
         name: string;
@@ -138,6 +146,54 @@ export declare const ChelErrorResourceGone: {
     };
 };
 export declare const ChelErrorJournalCorrupt: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvSlotUnknown: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvSlotInvalid: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvUpdateInvalid: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvValidation: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvConflict: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKvReentrant: {
     new (message?: string | undefined, options?: ErrorOptions | undefined): {
         name: string;
         message: string;

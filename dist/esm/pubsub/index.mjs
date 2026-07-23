@@ -239,8 +239,8 @@ export function createMessage(type, data, meta) {
     });
     return message;
 }
-export function createKvMessage(channelID, key, data) {
-    return JSON.stringify({ type: NOTIFICATION_TYPE.KV, channelID, key, data });
+export function createKvMessage(channelID, key, data, cid) {
+    return JSON.stringify({ type: NOTIFICATION_TYPE.KV, channelID, key, data, cid });
 }
 export function createPubMessage(channelID, data) {
     return JSON.stringify({ type: NOTIFICATION_TYPE.PUB, channelID, data });

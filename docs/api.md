@@ -178,10 +178,31 @@ See [`files.md`](./files.md) for the prose guide and full signatures.
 
 | Selector | Source | Purpose |
 |---|---|---|
-| `chelonia/kv/set` | `src/chelonia.ts` | `POST /kv/:contractID/:key`. Encrypts, signs, retries on `409`. |
-| `chelonia/kv/get` | `src/chelonia.ts` | `GET /kv/:contractID/:key`. Returns the decrypted value or `undefined`. |
+| `chelonia/kv/set` | `src/chelonia.ts` | `POST /kv/:contractID/:key`. Encrypts, signs, and retries conflicts on `409`/`412`. Resolves to `{ etag: string | null }`. |
+| `chelonia/kv/get` | `src/chelonia.ts` | `GET /kv/:contractID/:key`. Returns `ChelKvGetResult | null`: the parsed encrypted/unencrypted message with `.data` and `.etag`, or `null` on 404. |
 | `chelonia/kv/setFilter` | `src/chelonia.ts` | Restrict the set of KV keys subscribed to over pubsub. |
 | `chelonia/kv/queuedSet` | `src/chelonia-utils.ts` | Wrapper around `chelonia/kv/set` that serializes concurrent updates via `okTurtles.eventQueue`. Prefer this over `kv/set` for typical writes. |
+
+## KV slots
+
+A declarative key/value API layered on top of the primitives above.
+Consumers register typed "slots" via `defineSlot`; the library manages
+local mirroring, pubsub filters, conflict retries, and schema
+validation automatically. See [`kv.md`](./kv.md) for the full guide —
+[the local mirror](./kv.md#the-local-mirror) model, the
+`KvSlotDefinition` reference, and consumer caveats.
+
+All slot selectors live in `src/kv.ts`.
+
+| Selector | Purpose |
+|---|---|
+| `chelonia/kv/defineSlot` | Register a `KvSlotDefinition` (contract type + key + schema + options). Idempotent — subsequent calls replace and re-validate. |
+| `chelonia/kv/update` | `sbp('chelonia/kv/update', { contractID, key, updater? \| value?, maxAttempts?, signal?, ifMatch? })`. Writes a slot value via an `updater(prev) → next` reducer or a plain `value` (requires `defaultUpdater` on the slot). Returns `Promise<JSONType \| undefined>` and retries on `409`/`412`. |
+| `chelonia/kv/read` | Synchronous read of the local mirror for `(contractID, key)`. Returns the cloned default if no mirror entry exists or the slot is in `'error'` status. Non-primitive mirror values are deep-cloned on every call, so reads of large slot values are O(size); cache the result instead of reading on every frame. Check `chelonia/kv/status` to distinguish "empty" from "failed to load". |
+| `chelonia/kv/sync` | Force-fetch a single slot (with `key`) or every active slot for a contract and refresh the mirror. |
+| `chelonia/kv/clear` | Reset a slot to its declared `defaultValue` by writing the internal clear sentinel (`null`); the mirror value becomes a cloned default and status returns to `'non-init'`. |
+| `chelonia/kv/status` | Report the `KvLoadStatus` of a single slot (`'non-init' | 'loading' | 'loaded' | 'error'`) or the aggregate status of all slots for a contract. |
+| `chelonia/kv/refreshFilters` | Re-evaluate every slot's `match` predicate against the current root state. Call after login / logout transitions. |
 
 ## External state sync
 
@@ -191,6 +212,20 @@ Chelonia in a service worker, Vuex/Pinia in the tab).
 | Selector | Source | Purpose |
 |---|---|---|
 | `chelonia/externalStateSetup` | `src/local-selectors/index.ts` | Wire up Chelonia → external store synchronization. |
+
+`chelonia/externalStateSetup` projects Chelonia's bookkeeping subtrees into
+the external store alongside `rootState.contracts`. Two of them travel with
+anything that exposes that subtree, so treat them as in-band data you may
+need to redact in consumer code:
+
+- **`rootState._kv`** — the KV slot mirror (see
+  [The local mirror](./kv.md#the-local-mirror)). Slot updates push the
+  changed `_kv[contractID][key]` entry; contract removal drops the full
+  per-contract KV subtree. For a `_kv`-free view, project
+  `{ ...rootState, _kv: undefined }`.
+- **`state.contracts[contractID]._journal`** — the per-contract journal
+  (when enabled). See [journal.md](./journal.md#consumer-visible-leakage)
+  for the journal-side caveats and the `_journal`-free projection.
 
 ## Events
 
@@ -214,6 +249,9 @@ in `src/events.ts`; the most commonly observed:
 | `PERSISTENT_ACTION_FAILURE` | `src/events.ts` | A persistent action attempt failed (will retry unless `maxAttempts` reached). |
 | `PERSISTENT_ACTION_SUCCESS` | `src/events.ts` | A persistent action resolved. |
 | `PERSISTENT_ACTION_TOTAL_FAILURE` | `src/events.ts` | A persistent action gave up after `maxAttempts`. |
+| `CHELONIA_KV_UPDATED` | `src/events.ts` | After a slot's mirror value changes (load, remote push, local write, reconnect). Payload is a flat object with the same fields as `KvUpdateCtx` plus `value`: `{ contractID, contractType, key, value, previousValue, reason, etag }`. A cleared value always emits `value: undefined` in the event payload (whether discovered via 404 / missing-key load, received as a remote pubsub `null` frame, or performed via local `chelonia/kv/clear`); `onUpdate` receives the cloned default separately, and all three read back as the default through `chelonia/kv/read`. After conflict-resolution force-syncs, this client's own later echo can surface as `reason: 'remote'` with a value the mirror already holds, so keep update handlers idempotent. |
+| `CHELONIA_KV_STATUS_CHANGED` | `src/events.ts` | A slot's `KvLoadStatus` transitioned. Payload: `{ contractID, contractType, key, status, previousStatus, lastError }`; `lastError` is `{ name, message }` when entering or remaining in error and `null` when cleared. Conflict-recovery frames can trigger an authoritative re-fetch, so consumers may observe a transient `loading` transition even when no user-initiated fetch occurred. |
+| `CHELONIA_KV_VALIDATION_ERROR` | `src/events.ts` | A load/reconnect/remote/re-validation value failed `schema.parse`; local reducer-output validation rejects `chelonia/kv/update` with `ChelErrorKvValidation` instead of emitting this event. Payload: `{ contractID, contractType, key, error, reason }` where `reason ∈ { 'load', 'remote', 'reconnect', 're-validate' }`. |
 
 Subscribe with:
 
@@ -225,7 +263,7 @@ sbp('okTurtles.events/on', CHELONIA_RESET, () => { /* ... */ })
 
 ## Types
 
-The most useful exported types (re-exported from the package root):
+The most useful exported types and values (re-exported from the package root):
 
 | Type | Source | Purpose |
 |---|---|---|
@@ -252,6 +290,12 @@ The most useful exported types (re-exported from the package root):
 | `Secret<T>` | `src/Secret.ts` | `WeakMap`-backed wrapper that prevents accidental key leakage in logs / serialization. |
 | `EncryptedData<T>` | `src/encryptedData.ts` | Tagged wrapper around encrypted payloads. |
 | `SignedData<T>` | `src/signedData.ts` | Tagged wrapper around signed payloads. |
+| `KvSlotDefinition` | `src/types.ts` | Argument shape for `chelonia/kv/defineSlot`. |
+| `KvUpdater<T>` | `src/types.ts` | `(prev: T | undefined) => T | typeof KV_NOOP`. `prev` is `undefined` when the slot has neither a mirror value nor a `defaultValue`; return `KV_NOOP` to abort the write. Used by `chelonia/kv/update`. |
+| `KvUpdateCtx` | `src/types.ts` | Context object passed to `onUpdate`; `CHELONIA_KV_UPDATED` emits the same fields plus `value` as a flat payload. |
+| `KvLoadStatus` | `src/types.ts` | `'non-init' | 'loading' | 'loaded' | 'error'` — status of a slot's mirror entry. |
+| `KvMirrorEntry` | `src/types.ts` | Shape of a single mirror entry at `rootState._kv[contractID][key]`: `{ value: JSONType | undefined, etag: string | null, status: KvLoadStatus, lastError?: { name, message } }`. `value` is canonical (always a server-confirmed payload or `undefined`); see [Consumer caveats](./kv.md#consumer-caveats). |
+| `KV_NOOP` | `src/kv.ts` | `Symbol.for('@chelonia/lib/KV_NOOP')` — return from an updater to abort the write. |
 
 ## Errors
 
@@ -269,6 +313,7 @@ All errors are generated by `ChelErrorGenerator` in `src/errors.ts`.
 | `ChelErrorDBBadPreviousHEAD` | Strict-ordering rejected a future event. |
 | `ChelErrorDBConnection` | DB backend failed to read/write. |
 | `ChelErrorForkedChain` | Detected a forked event chain. |
+| `ChelErrorInvalidMessageHeight` | `parseEncryptedOrUnencryptedMessage` received a message whose height is outside `[0, currentHeight]`. Thrown on KV op decode; previously a generic `Error`. |
 | `ChelErrorKeyAlreadyExists` | Tried to add a key that already exists. |
 | `ChelErrorUnrecoverable` | Non-recoverable processing failure. |
 | `ChelErrorWarning` | Soft warning thrown as an error sentinel. |
@@ -276,6 +321,12 @@ All errors are generated by `ChelErrorGenerator` in `src/errors.ts`.
 | `ChelErrorUnexpectedHttpResponseCode` | Server returned an unexpected HTTP status. |
 | `ChelErrorResourceGone` | Server signalled the resource is permanently gone (HTTP 410). |
 | `ChelErrorJournalCorrupt` | `chelonia/journal/reconstruct` could not apply a stored patch. Has `entryIndex` and `contractID`. |
+| `ChelErrorKvSlotUnknown` | Unknown/inactive slot or unsynced contract. Thrown by `read`, `update`, `clear`, and single-slot `sync`; aggregate `sync` and `status` do not throw for this. |
+| `ChelErrorKvSlotInvalid` | Malformed `KvSlotDefinition` (bad key, schema, or defaultValue). Thrown by `defineSlot`. |
+| `ChelErrorKvUpdateInvalid` | Invalid `update` arguments or reducer/`defaultUpdater` contract violations, including throws, non-function reducers, unexpected symbols, or `null`/`undefined` outputs. |
+| `ChelErrorKvValidation` | A slot value failed `schema.parse` or `assertJsonShape`. Thrown by `update` (reducer output or server `currentData` on conflict), `_loadSlotNow` (GET response decode/shape), and `revalidateMirrorEntry`. Companion event: `CHELONIA_KV_VALIDATION_ERROR` for load/remote/re-validate failures (local reducer-output failures reject the `update` promise instead). |
+| `ChelErrorKvConflict` | Unrecoverable conflict during `chelonia/kv/update` after exhausting retries. |
+| `ChelErrorKvReentrant` | A KV write selector (`update`/`clear`/`sync`) was called synchronously from within the same contract's `onUpdate` callback, which would deadlock the per-contract queue lane. Only synchronous re-entrancy is detected. |
 
 ## Presets
 

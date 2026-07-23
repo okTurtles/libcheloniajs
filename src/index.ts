@@ -1,8 +1,11 @@
-import chelonia from './chelonia.js'
 import db from './db.js'
 import files from './files.js'
 import journal from './journal.js'
+import kv from './kv.js'
 import persistentActions from './persistent-actions.js'
+
+// Last because this implicitly locks the domain
+import chelonia from './chelonia.js'
 
 export * from './SPMessage.js'
 export * from './Secret.js'
@@ -14,6 +17,8 @@ export * from './errors.js'
 export * from './events.js'
 export * from './files.js'
 export * from './journal.js'
+export * from './kv-constants.js'
+export * from './kv.js'
 export * from './persistent-actions.js'
 export * from './presets.js'
 export * from './pubsub/index.js'
@@ -23,4 +28,4 @@ export * from './utils.js'
 export * from './zkpp.js'
 export * from './zkppConstants.js'
 
-export default [...chelonia, ...db, ...files, ...journal, ...persistentActions]
+export default [...chelonia, ...db, ...files, ...journal, ...kv, ...persistentActions]
