@@ -456,9 +456,10 @@ export default sbp('sbp/selectors/register', {
     this.pending = []
     const rootState = sbp(this.config.stateSelector)
     rootState.secretKeys = rootState.secretKeys || Object.create(null)
-    // Initialise the KV mirror lazily — see KV-REVAMPED.md §5. Created
-    // as a plain object so reactive frameworks (Vue) can observe
-    // additions via `config.reactiveSet`.
+    // Initialise the KV mirror lazily (see docs/kv.md, "The local
+    // mirror" / "Lazy initialization"). Created as a null-prototype
+    // plain object so reactive frameworks (Vue) can observe additions
+    // via `config.reactiveSet`.
     if (!rootState._kv) {
       this.config.reactiveSet(rootState, '_kv', Object.create(null))
     }

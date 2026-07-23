@@ -214,8 +214,9 @@ validation automatically.
 
 Full documentation:
 
-- Selector reference, `KvSlotDefinition` fields, events, and consumer
-  caveats: [docs/api.md](docs/api.md#kv-slots)
+- The local mirror model, `KvSlotDefinition` fields, and consumer
+  caveats: [docs/kv.md](docs/kv.md)
+- Selector reference and events: [docs/api.md](docs/api.md#kv-slots)
 - Public selectors: `chelonia/kv/defineSlot`, `chelonia/kv/update`,
   `chelonia/kv/read`, `chelonia/kv/sync`, `chelonia/kv/clear`,
   `chelonia/kv/status`, `chelonia/kv/refreshFilters`
