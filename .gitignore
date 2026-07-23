@@ -5,3 +5,4 @@ dist/**/*.test.*
 /.agent/
 /.tldr*
 /.agents
+/.claude/
