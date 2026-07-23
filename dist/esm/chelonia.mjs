@@ -197,6 +197,9 @@ export default sbp('sbp/selectors/register', {
         this.kvPendingWrites = new Map();
         this.kvPendingLoads = new Map();
         this.kvOnUpdateActive = new Map();
+        // Name for `defContractKvByManifest` doesn't start with
+        // `kv`, like the preceding keys, for consistency with
+        // `defContractManifest`.
         this.defContractKvByManifest = new Map();
         // pending includes contracts that are scheduled for syncing or in the
         // process of syncing for the first time. After sync completes for the
