@@ -5,6 +5,7 @@ import { beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
+import { ChelErrorInvalidMessageHeight } from './errors.js'
 import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import type { ChelRootState, CheloniaConfig, JSONType } from './types.js'
 
@@ -263,5 +264,117 @@ describe('chelonia/kv/set', () => {
         ) === undefined
     )
     assert.deepStrictEqual(calls, 3)
+  })
+
+  it('treats a height-ahead conflict body as no current value and retries', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    let capturedBody = ''
+    let posts = 0
+    const seenCurrentData: (JSONType | undefined)[] = []
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
+        if (opts?.method === 'POST') {
+          posts++
+          capturedBody ||= opts.body ?? ''
+          if (posts === 1) {
+            // Simulate a stored value written at a contract height (5) ahead
+            // of the locally synced height (1)
+            const ahead = { ...JSON.parse(capturedBody), height: '5' }
+            return new Response(JSON.stringify(ahead), {
+              status: 412,
+              headers: { etag: 'etag-ahead' }
+            })
+          }
+          return new Response('', { status: 200, headers: { 'x-cid': 'cid-ok' } })
+        }
+        return new Response('', { status: 404 })
+      }
+    } as Partial<CheloniaConfig>)
+
+    const result = await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+      signingKeyId,
+      onconflict: async (
+        args: { currentData: JSONType | undefined; etag: string | null | undefined }
+      ): Promise<[JSONType, string | undefined]> => {
+        seenCurrentData.push(args.currentData)
+        return [{ x: 2 }, args.etag ?? undefined]
+      }
+    }) as { etag: string | null }
+
+    assert.deepStrictEqual(result, { etag: 'cid-ok' })
+    assert.strictEqual(posts, 2)
+    assert.deepStrictEqual(seenCurrentData, [undefined])
+  })
+
+  it('recovery GET tolerates a height-ahead body and still recovers the etag', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    let capturedBody = ''
+    let posts = 0
+    let gets = 0
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
+        if (opts?.method === 'POST') {
+          posts++
+          capturedBody ||= opts.body ?? ''
+          if (posts === 1) return new Response('', { status: 412 })
+          return new Response('', { status: 200, headers: { 'x-cid': 'cid-ok' } })
+        }
+        gets++
+        const ahead = { ...JSON.parse(capturedBody), height: '5' }
+        return new Response(JSON.stringify(ahead), {
+          status: 200,
+          headers: { etag: 'etag-recovered' }
+        })
+      }
+    } as Partial<CheloniaConfig>)
+
+    const seenEtags: (string | null | undefined)[] = []
+    const result = await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+      signingKeyId,
+      onconflict: async (
+        args: { currentData: JSONType | undefined; etag: string | null | undefined }
+      ): Promise<[JSONType, string | undefined]> => {
+        seenEtags.push(args.etag)
+        return [{ x: 2 }, args.etag ?? undefined]
+      }
+    }) as { etag: string | null }
+
+    assert.deepStrictEqual(result, { etag: 'cid-ok' })
+    assert.strictEqual(gets, 1)
+    assert.deepStrictEqual(seenEtags, ['etag-recovered'])
+  })
+})
+
+describe('chelonia/kv/get', () => {
+  beforeEach(() => {
+    sbp('chelonia/_init')
+  })
+
+  it('rejects with a descriptive height error for height-ahead values', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    let capturedBody = ''
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
+        if (opts?.method === 'POST') {
+          capturedBody = opts.body ?? ''
+          return new Response('', { status: 200, headers: { 'x-cid': 'cid-ok' } })
+        }
+        const ahead = { ...JSON.parse(capturedBody), height: '5' }
+        return new Response(JSON.stringify(ahead), {
+          status: 200,
+          headers: { etag: 'etag-ahead' }
+        })
+      }
+    } as Partial<CheloniaConfig>)
+
+    await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, { signingKeyId })
+    await assert.rejects(
+      () => sbp('chelonia/kv/get', contractID, 'settings'),
+      (e: unknown) => e instanceof ChelErrorInvalidMessageHeight &&
+        (e as Error).message.includes('sync the contract and retry')
+    )
   })
 })

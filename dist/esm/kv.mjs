@@ -2280,15 +2280,12 @@ export default sbp('sbp/selectors/register', {
                 // this write is seen; the IDs are fixed for kv/set's retries.
                 const keyIds = resolveSlotKeyIds(contractID, key, slot, 'update');
                 setResult = await sbp('chelonia/kv/set', contractID, key, nextValue, {
-                    // Footgun for never-loaded slots: a `non-init` slot has
-                    // `etag: null`, so `mirrorEtag` is `undefined` and the write
-                    // carries no `if-match` precondition. If the server already
-                    // holds a value this client never read, the write overwrites
-                    // it instead of producing a 412. Harmless for the default
-                    // `autoLoad: 'on-sync'` (the slot loads before any write),
-                    // but for `autoLoad: 'on-demand'`/`'never'` slots, call
-                    // `chelonia/kv/sync` before `update` to avoid clobbering an
-                    // unread server value.
+                    // Never-loaded slots: a `non-init` slot has `etag: null`, so
+                    // `mirrorEtag` is `undefined` and `kv/set` falls back to
+                    // `if-match: '""'` ("key must not exist"). If the server
+                    // already holds a value this client never read, the write
+                    // gets a 412 (not a silent overwrite) and `onconflict`
+                    // merges against the server's current value as usual.
                     ifMatch: ifMatch ?? mirrorEtag,
                     encryptionKeyId: keyIds.encryptionKeyId,
                     signingKeyId: keyIds.signingKeyId,

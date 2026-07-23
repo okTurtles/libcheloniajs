@@ -849,11 +849,21 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         // or thrown error is cached; both consumers can therefore observe
                         // and log the same decode failure, and the raw KV callback may
                         // decode frames the slot layer would skip as self-echoes.
-                        const parsed = parseEncryptedOrUnencryptedMessage(this, {
-                            contractID: msg.channelID,
-                            meta: msg.key,
-                            serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
-                        });
+                        let parsed;
+                        try {
+                            parsed = parseEncryptedOrUnencryptedMessage(this, {
+                                contractID: msg.channelID,
+                                meta: msg.key,
+                                serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
+                            });
+                        }
+                        catch (e) {
+                            if (e instanceof errors_js_1.ChelErrorInvalidMessageHeight) {
+                                console.warn(`[chelonia] kv pubsub frame for ${msg.channelID}::${msg.key} has height ahead of local state; dropping until contract syncs`);
+                                return;
+                            }
+                            throw e;
+                        }
                         if (rawKvHandler) {
                             try {
                                 ;
@@ -902,9 +912,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             this.kvReconnectListener = (client) => {
                 if (client !== this.pubsub || client.isNew)
                     return;
-                if ((0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_onReconnect')) {
-                    (0, sbp_1.default)('chelonia/kv/_onReconnect');
-                }
+                (0, sbp_1.default)('chelonia/kv/_onReconnect');
             };
             (0, sbp_1.default)('okTurtles.events/on', index_js_1.PUBSUB_RECONNECTION_SUCCEEDED, this.kvReconnectListener);
         }
@@ -913,8 +921,6 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // matching slot for newly-synced contracts. Registered per-instance
             // so multi-instance deployments dispatch against the correct context.
             this.kvContractsModifiedListener = (_contracts, payload) => {
-                if (!(0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_onContractsModified'))
-                    return;
                 try {
                     (0, sbp_1.default)('chelonia/kv/_onContractsModified', payload);
                 }
@@ -924,8 +930,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             };
             (0, sbp_1.default)('okTurtles.events/on', events_js_1.CONTRACTS_MODIFIED, this.kvContractsModifiedListener);
         }
-        if (this.subscriptionSet.size > 0 &&
-            (0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_onContractsModified')) {
+        if (this.subscriptionSet.size > 0) {
             try {
                 (0, sbp_1.default)('chelonia/kv/_onContractsModified', {
                     added: Array.from(this.subscriptionSet),
@@ -956,11 +961,6 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         contract.state = (contractID) => (0, sbp_1.default)(this.config.stateSelector)[contractID];
         contract.manifest = this.defContractManifest;
         contract.sbp = this.defContractSBP;
-        const kvSlotsAvailable = (0, sbp_1.default)('sbp/selectors/fn', 'chelonia/kv/_registerContractSlots');
-        if (contract.kv && !kvSlotsAvailable) {
-            throw new Error(`[chelonia] contract '${contract.name}' declares a 'kv' block but the KV ` +
-                'module is not loaded. Import the package root or register kv.ts before defineContract.');
-        }
         // KV co-location bookkeeping (KV-REVAMPED §4.8 / §11.3 steps 7–8).
         // Capture the previous `kv` block for this manifest *before*
         // rebuilding selectors so the cleanup pass can diff old vs new
@@ -1067,10 +1067,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         //   mirror values and re-validates them against the new schema).
         // - Bookkeeping update keeps the next `defineContract` call able
         //   to diff against the current key set.
-        if (kvSlotsAvailable && (prevKv || contract.kv)) {
+        if (prevKv || contract.kv) {
             (0, sbp_1.default)('chelonia/kv/_cleanupContractSlots', contract.name, contract.manifest, prevKv, contract.kv ?? {});
         }
-        if (kvSlotsAvailable && contract.kv) {
+        if (contract.kv) {
             (0, sbp_1.default)('chelonia/kv/_registerContractSlots', contract.name, contract.manifest, contract.kv);
             this.defContractKvByManifest.set(contract.manifest, contract.kv);
         }
@@ -2096,15 +2096,20 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // This prevents this from failing in such cases, which can result in
                 // race conditions and data not being properly initialised.
                 // See <https://github.com/okTurtles/group-income/issues/2780>
-                currentValue = serializedDataText
-                    ? parseEncryptedOrUnencryptedMessage(this, {
-                        contractID,
-                        serializedData: JSON.parse(serializedDataText),
-                        meta: key
-                    })
-                    : undefined;
-                if (currentValue)
-                    lastRecoveredValue = currentValue;
+                if (serializedDataText) {
+                    try {
+                        currentValue = parseEncryptedOrUnencryptedMessage(this, {
+                            contractID,
+                            serializedData: JSON.parse(serializedDataText),
+                            meta: key
+                        });
+                        lastRecoveredValue = currentValue;
+                    }
+                    catch (e) {
+                        if (!(e instanceof errors_js_1.ChelErrorInvalidMessageHeight))
+                            throw e;
+                    }
+                }
                 // Rationale: 404 and 410 both indicate that the store key doesn't exist.
                 // These are not treated as errors since we could still set the value.
             }
@@ -2130,12 +2135,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 if (getResp.ok) {
                     const getText = await getResp.text();
                     if (getText) {
-                        currentValue = parseEncryptedOrUnencryptedMessage(this, {
-                            contractID,
-                            serializedData: JSON.parse(getText),
-                            meta: key
-                        });
-                        lastRecoveredValue = currentValue;
+                        try {
+                            currentValue = parseEncryptedOrUnencryptedMessage(this, {
+                                contractID,
+                                serializedData: JSON.parse(getText),
+                                meta: key
+                            });
+                            lastRecoveredValue = currentValue;
+                        }
+                        catch (e) {
+                            if (!(e instanceof errors_js_1.ChelErrorInvalidMessageHeight))
+                                throw e;
+                        }
                     }
                     headerEtag = getResp.headers.get('x-cid') || getResp.headers.get('etag');
                 }
@@ -2278,11 +2289,21 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         const etag = response.headers.get('x-cid') || response.headers.get('etag');
         const data = await response.json();
-        const parsed = parseEncryptedOrUnencryptedMessage(this, {
-            contractID,
-            serializedData: data,
-            meta: key
-        });
+        let parsed;
+        try {
+            parsed = parseEncryptedOrUnencryptedMessage(this, {
+                contractID,
+                serializedData: data,
+                meta: key
+            });
+        }
+        catch (e) {
+            if (e instanceof errors_js_1.ChelErrorInvalidMessageHeight) {
+                throw new errors_js_1.ChelErrorInvalidMessageHeight(`[kv/get] ${contractID}::${key} was written at a contract height ` +
+                    'ahead of local state; sync the contract and retry', { cause: e });
+            }
+            throw e;
+        }
         // Attach `etag` in place rather than spreading: `parsed` exposes
         // `data` / `encryptionKeyId` / `innerSigningKeyId` / etc. as
         // accessors that force eager unwrap (and throw on decryption
