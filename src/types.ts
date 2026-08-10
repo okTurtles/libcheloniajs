@@ -103,9 +103,30 @@ export type CheloniaConfig = {
 // `value` is required on add/replace and absent on remove, mirroring RFC
 // 6902 so the output is consumable by any standards-conformant JSON Patch
 // implementation (and vice versa).
+//
+// `redacted` marks an operation that exists solely to record that a
+// redacted value changed: the underlying state moved, but its redacted
+// projection did not, so the operation writes the redacted value back over
+// itself (an identity edit). Applying it is a no-op, and RFC 6902 §4
+// requires appliers to ignore members it does not define, so the marker is
+// safe to feed to any conformant JSON Patch implementation.
+//
+// `redacted?: undefined` is declared on the `remove` arm so the member is
+// readable on an un-narrowed `JournalPatch` (reading it there yields
+// `undefined`) while still rejecting a literal `redacted` on a remove op.
 export type JournalPatch =
-  | { op: 'add' | 'replace'; path: string; value: unknown }
-  | { op: 'remove'; path: string };
+  | { op: 'add' | 'replace'; path: string; value: unknown; redacted?: true }
+  | { op: 'remove'; path: string; redacted?: undefined };
+
+// A single redacted leaf recorded while `applyRedactions` walked the state:
+// the value found there before redaction and the value that replaced it.
+export type RedactionSite = {
+  original: unknown;
+  replacement: unknown;
+};
+
+// Redacted leaves keyed by their RFC-6901 JSON-Pointer path.
+export type RedactionSiteMap = Map<string, RedactionSite>;
 
 export type JournalEntry =
   | {
@@ -168,6 +189,13 @@ export type JournalConfig = {
   // true). Otherwise only listed contractIDs are journaled.
   contractIDs?: string[];
   redactions?: JournalRedaction[];
+  // When true (the default), a change to a value whose redacted projection
+  // is constant is still recorded, as an identity `replace` carrying
+  // `redacted: true`. Without it such changes are invisible in the journal
+  // and indistinguishable from an event that did nothing. Set to false to
+  // emit only the minimal diff (e.g. when a custom `diff` / `applyPatch`
+  // pair does not use RFC-6901 pointers).
+  markRedactedChanges?: boolean;
   diff?: (before: unknown, after: unknown) => JournalPatch[];
   applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };

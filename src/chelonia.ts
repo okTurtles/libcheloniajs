@@ -352,7 +352,10 @@ export default sbp('sbp/selectors/register', {
       // `diff`, `applyPatch`) are intentionally left unset here so they
       // survive `merge()` (which deep-clones via JSON and would otherwise
       // strip them); `chelonia/configure` reattaches them in a dedicated
-      // pass.
+      // pass. `markRedactedChanges` is likewise omitted: its default
+      // depends on which `diff`/`applyPatch` pair is active (the markers
+      // are RFC-6901 pointer ops, only valid for the built-in pair), so
+      // `resolveJournalConfig` derives it rather than storing it here.
       journal: {
         enabled: false,
         snapshotInterval: DEFAULT_SNAPSHOT_INTERVAL,
@@ -569,6 +572,7 @@ export default sbp('sbp/selectors/register', {
       rejectNull('snapshotInterval')
       rejectNull('contractIDs')
       rejectNull('redactions')
+      rejectNull('markRedactedChanges')
       rejectNull('diff')
       rejectNull('applyPatch')
       if (!this.config.journal) {
@@ -649,6 +653,17 @@ export default sbp('sbp/selectors/register', {
         // events re-seed with a fresh snapshot under the new
         // redactions. Mixing entries across redaction sets will leave
         // `reconstruct` output inconsistent until the next snapshot.
+      }
+      if (journalOverride.markRedactedChanges !== undefined) {
+        // Same strict-boolean rationale as `enabled`: `resolveJournalConfig`
+        // reads this with `!== false`, so a stringy `"false"` would
+        // silently keep the marking on.
+        if (typeof journalOverride.markRedactedChanges !== 'boolean') {
+          throw new TypeError(
+            `[chelonia][journal] config.journal.markRedactedChanges must be a boolean; got ${typeof journalOverride.markRedactedChanges}`
+          )
+        }
+        target.markRedactedChanges = journalOverride.markRedactedChanges
       }
       if (journalOverride.diff !== undefined) {
         if (typeof journalOverride.diff !== 'function') {

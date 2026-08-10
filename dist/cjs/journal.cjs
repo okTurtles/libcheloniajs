@@ -19,7 +19,9 @@
 // 6901 `-` token for array tail-appends, rejects `replace` on missing
 // object keys, and rejects `add`/`replace` whose `value` is absent. The
 // intent is that output is consumable by any standards-conformant RFC 6902
-// library and vice versa.
+// library and vice versa. Operations that only record "a redacted value
+// changed" carry an extra `redacted: true` member, which RFC 6902 §4
+// requires appliers to ignore.
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -32,9 +34,12 @@ exports.pointerToSegments = pointerToSegments;
 exports.parseDottedPath = parseDottedPath;
 exports.cloneValue = cloneValue;
 exports.defaultDiff = defaultDiff;
+exports.structurallyEqual = structurallyEqual;
 exports.defaultApplyPatch = defaultApplyPatch;
 exports.applyRedactions = applyRedactions;
 exports.shortHashRedactor = shortHashRedactor;
+exports.hasHiddenChange = hasHiddenChange;
+exports.synthesizeRedactedChangeOps = synthesizeRedactedChangeOps;
 const functions_js_1 = require("./functions.cjs");
 const sbp_1 = __importDefault(require("@sbp/sbp"));
 const turtledash_1 = require("turtledash");
@@ -228,6 +233,57 @@ function shallowEqualPrimitives(a, b) {
         return true;
     return false;
 }
+// Deep equality using exactly the same notion of "changed" as
+// `defaultDiff`: `a` and `b` are equal iff `defaultDiff(a, b)` would be
+// empty. Keeping the two in lock-step matters because this predicate
+// decides whether a change hidden behind a constant redactor gets its own
+// journal entry; a looser or stricter notion would either invent churn or
+// keep hiding real changes.
+//
+// Notably: `undefined` on one side only is a change (the diff emits
+// add/remove), NaN equals NaN, and non-plain containers (Date, Map, class
+// instances) are only equal by reference — mirroring `defaultDiff`, which
+// emits a wholesale `replace` for them.
+function structurallyEqual(a, b) {
+    if (a === b)
+        return true;
+    if (a === undefined || b === undefined)
+        return false;
+    const aIsArr = Array.isArray(a);
+    const bIsArr = Array.isArray(b);
+    const aIsObj = isPlainObject(a);
+    const bIsObj = isPlainObject(b);
+    if (aIsArr !== bIsArr || aIsObj !== bIsObj)
+        return false;
+    if (aIsArr && bIsArr) {
+        const aArr = a;
+        const bArr = b;
+        if (aArr.length !== bArr.length)
+            return false;
+        for (let i = 0; i < aArr.length; i++) {
+            if (!structurallyEqual(aArr[i], bArr[i]))
+                return false;
+        }
+        return true;
+    }
+    if (aIsObj && bIsObj) {
+        const aObj = a;
+        const bObj = b;
+        const aKeys = Object.keys(aObj);
+        if (aKeys.length !== Object.keys(bObj).length)
+            return false;
+        for (const k of aKeys) {
+            // Own properties only — never let the prototype chain make two
+            // states look alike.
+            if (!(0, turtledash_1.has)(bObj, k))
+                return false;
+            if (!structurallyEqual(aObj[k], bObj[k]))
+                return false;
+        }
+        return true;
+    }
+    return shallowEqualPrimitives(a, b);
+}
 // ---------------------------------------------------------------------------
 // Apply
 // ---------------------------------------------------------------------------
@@ -393,7 +449,14 @@ function applyOne(root, patch) {
 // A throwing redactor logs once and substitutes the sentinel string so a
 // single bad redactor cannot blank out unrelated parts of the state.
 exports.REDACTION_ERROR_SENTINEL = '[REDACTION_ERROR]';
-function applyRedactions(state, redactions, contractName) {
+function applyRedactions(state, redactions, contractName, 
+// Optional out-parameter. When supplied, every redacted leaf that was
+// actually written is recorded as `JSON-Pointer -> { original,
+// replacement }` so callers can tell whether the *underlying* value
+// changed even when its redacted projection is a constant. Passing a map
+// is the only way to obtain this: the returned state deliberately keeps
+// no trace of the original values.
+sites) {
     const cloned = cloneValue(state);
     if (!redactions || redactions.length === 0)
         return cloned;
@@ -401,11 +464,26 @@ function applyRedactions(state, redactions, contractName) {
         const segments = parseDottedPath(r.path);
         if (segments.length === 0)
             continue;
-        walkAndRedact(cloned, segments, 0, r.redact, [], contractName);
+        walkAndRedact(cloned, segments, 0, r.redact, [], contractName, sites);
     }
     return cloned;
 }
-function walkAndRedact(parent, segments, i, redact, resolved, contractName) {
+// Record a redacted leaf. When two directives match the same leaf the
+// second redactor sees the first one's output, so we keep the *first*
+// `original` (the true pre-redaction value, which is what change detection
+// must compare) and the *last* `replacement` (what actually ends up in the
+// journal).
+function recordSite(sites, fullPath, original, replacement) {
+    const pointer = segmentsToPointer(fullPath);
+    const existing = sites.get(pointer);
+    if (existing) {
+        existing.replacement = replacement;
+    }
+    else {
+        sites.set(pointer, { original, replacement });
+    }
+}
+function walkAndRedact(parent, segments, i, redact, resolved, contractName, sites) {
     if (parent === null || typeof parent !== 'object')
         return;
     const seg = segments[i];
@@ -440,6 +518,8 @@ function walkAndRedact(parent, segments, i, redact, resolved, contractName) {
                 const idx = Number(k);
                 if (Number.isInteger(idx) && idx >= 0 && idx < container.length) {
                     container[idx] = replacement;
+                    if (sites)
+                        recordSite(sites, fullPath, original, replacement);
                 }
             }
             else {
@@ -449,10 +529,12 @@ function walkAndRedact(parent, segments, i, redact, resolved, contractName) {
                     enumerable: true,
                     configurable: true
                 });
+                if (sites)
+                    recordSite(sites, fullPath, original, replacement);
             }
         }
         else {
-            walkAndRedact(parent[k], segments, i + 1, redact, fullPath, contractName);
+            walkAndRedact(parent[k], segments, i + 1, redact, fullPath, contractName, sites);
         }
     }
 }
@@ -479,6 +561,142 @@ function shortHashRedactor(value) {
     return (0, functions_js_1.blake32Hash)(serialized).slice(0, 8);
 }
 // ---------------------------------------------------------------------------
+// Redacted-change markers
+// ---------------------------------------------------------------------------
+// Resolve a JSON-Pointer against a value, reporting whether the location
+// exists. Own properties only, same as the applier's walk.
+function resolveAtPointer(root, pointer) {
+    const notFound = { found: false, value: undefined };
+    let current = root;
+    for (const seg of pointerToSegments(pointer)) {
+        if (current === null || typeof current !== 'object')
+            return notFound;
+        if (Array.isArray(current)) {
+            const idx = Number(seg);
+            if (!Number.isInteger(idx) || idx < 0 || idx >= current.length)
+                return notFound;
+            current = current[idx];
+        }
+        else {
+            if (!(0, turtledash_1.has)(current, seg))
+                return notFound;
+            current = current[seg];
+        }
+    }
+    return { found: true, value: current };
+}
+function buildCoverageIndex(patch) {
+    const paths = new Set();
+    let wholeRoot = false;
+    for (const p of patch) {
+        const path = p?.path;
+        if (typeof path !== 'string')
+            continue;
+        if (path === '') {
+            wholeRoot = true;
+            continue;
+        }
+        paths.add(path);
+    }
+    return { paths, wholeRoot };
+}
+function coveredByPatch(idx, pointer) {
+    if (idx.wholeRoot)
+        return true;
+    if (idx.paths.has(pointer))
+        return true;
+    // Any ancestor of `pointer` replaced wholesale.
+    for (let i = pointer.lastIndexOf('/'); i > 0; i = pointer.lastIndexOf('/', i - 1)) {
+        if (idx.paths.has(pointer.slice(0, i)))
+            return true;
+    }
+    return false;
+}
+// True when the underlying change at a redacted site is (at least partly)
+// invisible in the site's redacted projection — i.e. the diff of the
+// unredacted originals touches a pointer path that the diff of the
+// redacted projections does not (neither at the same path nor at an
+// ancestor of it).
+//
+// Why this replaces the old "descendant of the site already shows up in
+// the patch" heuristic: for a container-returning redactor (e.g. keep
+// `id`/`purpose`, hide `data`) a change to the *visible* part of the
+// container must not suppress the marker for the hidden part, and a
+// visible-only change must not *produce* one either. Comparing the two
+// per-site diffs makes exactly that distinction.
+//
+// Always uses `defaultDiff`, never `cfg.diff`: this asks a question
+// about RFC-6901 pointer paths within a single site, which is the same
+// vocabulary the markers themselves are emitted in.
+function hasHiddenChange(before, after) {
+    const visiblePaths = defaultDiff(before.replacement, after.replacement);
+    if (visiblePaths.some((p) => p.path === ''))
+        return false;
+    const visible = new Set(visiblePaths.map((p) => p.path));
+    for (const { path } of defaultDiff(before.original, after.original)) {
+        if (visible.has(path))
+            continue;
+        // A wholesale write at an ancestor of `path` in the projection
+        // covers it — the change is visible, just at a coarser level.
+        let shadowed = false;
+        for (const v of visible) {
+            if (path.startsWith(v + '/')) {
+                shadowed = true;
+                break;
+            }
+        }
+        if (!shadowed)
+            return true;
+    }
+    return false;
+}
+// Append an identity `replace` for every redacted leaf whose underlying
+// value changed while its redacted projection stayed the same.
+//
+// Why this is safe for `reconstruct`: each appended operation writes the
+// value that `redactedAfter` already holds at that location, and the
+// operations are appended *after* the diff — which by construction turns
+// `redactedBefore` into `redactedAfter`. So every marker is a no-op when
+// replayed. Leaves that are absent from `redactedAfter` (e.g. an
+// overlapping directive redacted an ancestor wholesale) are skipped rather
+// than emitted, since a `replace` on a missing location would throw.
+function synthesizeRedactedChangeOps(patch, beforeSites, afterSites, redactedAfter) {
+    if (beforeSites.size === 0 || afterSites.size === 0)
+        return patch;
+    const idx = buildCoverageIndex(patch);
+    const markers = [];
+    for (const [pointer, after] of afterSites) {
+        const before = beforeSites.get(pointer);
+        // Absent before: the location is new, so the diff already emits an
+        // `add` carrying the redacted value.
+        if (before === undefined)
+            continue;
+        if (structurallyEqual(before.original, after.original))
+            continue;
+        // The change is already fully visible through the diff: the exact
+        // location, or an ancestor replaced wholesale. O(pointer depth).
+        if (coveredByPatch(idx, pointer))
+            continue;
+        // A container-returning redactor can leave visible changes (e.g. a
+        // sibling field) alongside hidden ones; only mark when part of the
+        // change is genuinely invisible in the projection.
+        if (!hasHiddenChange(before, after))
+            continue;
+        const resolved = resolveAtPointer(redactedAfter, pointer);
+        if (!resolved.found)
+            continue;
+        markers.push({
+            op: 'replace',
+            path: pointer,
+            value: cloneValue(resolved.value),
+            redacted: true
+        });
+    }
+    if (markers.length === 0)
+        return patch;
+    return patch.concat(markers);
+}
+// ---------------------------------------------------------------------------
 // SBP integration
 // ---------------------------------------------------------------------------
 // Default snapshot interval (X). The journal holds between X and 2X entries.
@@ -500,7 +718,23 @@ function resolveJournalConfig(cfg) {
     const redactions = cfg?.redactions ?? [];
     const diff = cfg?.diff ?? defaultDiff;
     const applyPatch = cfg?.applyPatch ?? defaultApplyPatch;
-    return { enabled, snapshotInterval, contractIDs, redactions, diff, applyPatch };
+    // Opt-out rather than opt-in: a change hidden behind a constant redactor
+    // is indistinguishable from "nothing happened", which defeats the point
+    // of keeping a journal. But default on only while both halves of the
+    // patch pipeline are the built-ins: markers are always emitted as
+    // RFC-6901 pointer `replace` operations, which would be meaningless (or
+    // actively harmful) inside a foreign patch format. An explicit boolean
+    // always wins.
+    const markRedactedChanges = cfg?.markRedactedChanges ?? (diff === defaultDiff && applyPatch === defaultApplyPatch);
+    return {
+        enabled,
+        snapshotInterval,
+        contractIDs,
+        redactions,
+        markRedactedChanges,
+        diff,
+        applyPatch
+    };
 }
 function indexOfLastSnapshot(entries) {
     for (let i = entries.length - 1; i >= 0; i--) {
@@ -720,11 +954,20 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // never be trimmed, growing the journal without bound.
             let redactedBefore;
             let redactedAfter;
+            // Redacted-leaf bookkeeping, used to detect changes that the redacted
+            // projections hide (constant redactors such as `() => '[REDACTED]'`).
+            // Only allocated when it can actually be used.
+            const trackRedactedChanges = cfg.markRedactedChanges &&
+                cfg.redactions.length > 0 &&
+                !willEmitEmptyPatch &&
+                !isFirstOrResync;
+            const beforeSites = trackRedactedChanges ? new Map() : undefined;
+            const afterSites = trackRedactedChanges ? new Map() : undefined;
             if (!willEmitEmptyPatch && !isFirstOrResync) {
                 try {
                     redactedBefore = beforeState === undefined
                         ? undefined
-                        : applyRedactions(beforeState, cfg.redactions, contractName);
+                        : applyRedactions(beforeState, cfg.redactions, contractName, beforeSites);
                 }
                 catch (e) {
                     logJournalError('redaction (before) failed', e);
@@ -734,7 +977,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             try {
                 redactedAfter = afterState === undefined
                     ? null
-                    : applyRedactions(afterState, cfg.redactions, contractName);
+                    : applyRedactions(afterState, cfg.redactions, contractName, afterSites);
             }
             catch (e) {
                 logJournalError('redaction (after) failed', e);
@@ -768,12 +1011,30 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     patch = [];
                 }
                 else {
+                    let diffFailed = false;
                     try {
                         patch = cfg.diff(redactedBefore, redactedAfter);
                     }
                     catch (e) {
                         logJournalError('diff failed', e);
                         patch = [];
+                        diffFailed = true;
+                    }
+                    // A value that changed behind a constant redactor produces no
+                    // diff at all. Record it explicitly so the journal can tell
+                    // "redacted value changed" apart from "event did nothing" and
+                    // from "event failed". The appended operations are identity
+                    // writes, so `reconstruct` is unaffected — but only if the diff
+                    // they ride on is itself trustworthy, hence the `diffFailed`
+                    // guard: on a failed diff the replayed state is already stale
+                    // and a marker could then target a location that doesn't exist.
+                    if (trackRedactedChanges && !diffFailed && beforeSites && afterSites) {
+                        try {
+                            patch = synthesizeRedactedChangeOps(patch, beforeSites, afterSites, redactedAfter);
+                        }
+                        catch (e) {
+                            logJournalError('redacted-change marking failed', e);
+                        }
                     }
                 }
                 const entry = Object.create(null);

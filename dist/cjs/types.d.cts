@@ -86,10 +86,17 @@ export type JournalPatch = {
     op: 'add' | 'replace';
     path: string;
     value: unknown;
+    redacted?: true;
 } | {
     op: 'remove';
     path: string;
+    redacted?: undefined;
 };
+export type RedactionSite = {
+    original: unknown;
+    replacement: unknown;
+};
+export type RedactionSiteMap = Map<string, RedactionSite>;
 export type JournalEntry = {
     kind: 'snapshot';
     hash: string;
@@ -122,6 +129,7 @@ export type JournalConfig = {
     snapshotInterval?: number;
     contractIDs?: string[];
     redactions?: JournalRedaction[];
+    markRedactedChanges?: boolean;
     diff?: (before: unknown, after: unknown) => JournalPatch[];
     applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };

@@ -226,6 +226,7 @@ await sbp('chelonia/configure', {
       { path: 'profiles.*.email', redact: shortHashRedactor },
       { path: 'secrets.apiKey', redact: () => '[REDACTED]' }
     ],
+    markRedactedChanges: true,
     diff: defaultDiff,
     applyPatch: defaultApplyPatch
   }
@@ -237,7 +238,8 @@ await sbp('chelonia/configure', {
 | `enabled` | `boolean` | `false` | Master switch. Strict-typed — non-boolean throws `TypeError`. |
 | `snapshotInterval` | positive integer | `50` (`DEFAULT_SNAPSHOT_INTERVAL`) | A new snapshot is recorded every N patches; the journal is trimmed to the most recent snapshot once it reaches `2N` entries. Non-integer/non-positive values fall back to the default and emit a `console.warn`. |
 | `contractIDs` | `string[]` | `[]` (= all) | If non-empty, only these contracts are journaled. Stored via `.slice()` so later mutations on the caller's reference don't leak in. |
-| `redactions` | `{ path, redact }[]` | `[]` | Applied to both the before- and after-state **before diffing**. `path` uses dotted segments; `*` matches any key/index. `redact(value, fullPath, contractName)` MUST be pure and return the replacement. Deep-copied on the way in. |
+| `redactions` | `{ path, redact }[]` | `[]` | Applied to both the before- and after-state **before diffing**. `path` uses dotted segments; `*` matches any key/index. `redact(value, fullPath, contractName)` MUST be pure and return the replacement. Deep-copied on the way in. Avoid overlapping paths — see [`journal.md`](./journal.md#changes-behind-a-constant-redactor); the outcome is order-sensitive. |
+| `markRedactedChanges` | `boolean` | `true`* | Record changes that a constant redactor hides, as an identity `replace` flagged `redacted: true` — otherwise such an event is indistinguishable from one that changed nothing. Strict-typed — non-boolean throws `TypeError`. *Derived: defaults to `true` only while both `diff` and `applyPatch` are the built-ins, `false` otherwise; an explicit value always wins. See [`journal.md`](./journal.md#changes-behind-a-constant-redactor). |
 | `diff` | `(before, after) => JournalPatch[]` | `defaultDiff` | Override the diff implementation. Must be a function or `TypeError`. To revert to the built-in, pass `defaultDiff` explicitly. |
 | `applyPatch` | `(state, patches) => unknown` | `defaultApplyPatch` | Override the patch applier used by `chelonia/journal/reconstruct`. To revert, pass `defaultApplyPatch` explicitly. |
 
@@ -264,6 +266,10 @@ These are stricter than for top-level fields:
 - `contractIDs` and `redactions` accept an empty array to **clear**
   them. They are deep-copied on the way in so caller mutations don't
   leak into Chelonia.
+- **Toggling `markRedactedChanges` does not rewrite existing
+  entries.** It applies to events recorded from that point on, so one
+  journal can hold a mix. Both kinds stay replayable, since the
+  markers are identity edits.
 
 See [`journal.md`](./journal.md) for the public read/reconstruct/clear
 selectors, redaction details, and observability concerns.

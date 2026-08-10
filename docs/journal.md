@@ -63,6 +63,7 @@ await sbp('chelonia/configure', {
       { path: 'profiles.*.email', redact: shortHashRedactor },
       { path: 'secrets.apiKey', redact: () => '[REDACTED]' }
     ],
+    markRedactedChanges: true,   // default while diff/applyPatch are the built-ins
     diff: defaultDiff,           // optional override
     applyPatch: defaultApplyPatch // optional override
   }
@@ -75,6 +76,7 @@ await sbp('chelonia/configure', {
 | `snapshotInterval` | `50` | Snapshot every N patches; trim to most recent snapshot at `2N`. Non-positive / non-integer values fall back to `50` with a `console.warn`. |
 | `contractIDs` | `[]` (all) | Whitelist a subset. Stored via `.slice()`. |
 | `redactions` | `[]` | `{ path, redact }` directives applied before diffing. Deep-copied. |
+| `markRedactedChanges` | `true`* | Record changes that a constant redactor would otherwise hide. Must be a literal boolean. *Derived: defaults to `true` only while both `diff` and `applyPatch` are the built-ins, `false` otherwise. An explicit value always wins. |
 | `diff` | `defaultDiff` | RFC-6902 subset diff implementation. |
 | `applyPatch` | `defaultApplyPatch` | Patch applier used by `chelonia/journal/reconstruct`. |
 
@@ -147,6 +149,11 @@ wraps `SPMessage.description()` in a `try`/`catch` and falls back to
 `replace`), with RFC-6901 JSON-Pointer paths. Root-removal is
 represented as `{ op: 'replace', path: '', value: null }` because
 RFC-6902 doesn't define root-remove.
+
+Operations may additionally carry `redacted: true` — see
+[Changes behind a constant redactor](#changes-behind-a-constant-redactor).
+RFC-6902 §4 requires appliers to ignore members it doesn't define, so
+the marker is safe to hand to any conformant JSON Patch library.
 
 ### `chelonia/journal/reconstruct(contractID): unknown | undefined`
 
@@ -225,6 +232,68 @@ For low-entropy fields, use a constant sentinel:
 { path: 'profiles.*.role', redact: () => '[REDACTED]' }
 ```
 
+### Changes behind a constant redactor
+
+A constant redactor maps every value to the same output, so the
+before- and after-states look identical at that path and a plain diff
+emits nothing. The event would then be indistinguishable from one that
+did nothing at all — or from one that failed.
+
+Chelonia therefore records such changes explicitly, as an **identity
+edit** flagged with `redacted: true`:
+
+```js
+{
+  kind: 'patch',
+  hash: 'h7', height: 7, opType: 'ae',
+  patch: [
+    { op: 'replace', path: '/secrets/apiKey', value: '[REDACTED]', redacted: true }
+  ]
+}
+```
+
+Read it as "the value at this path changed, but its journal projection
+cannot show how". The operation writes back the value already stored
+at that location, so replaying it is a no-op and
+`chelonia/journal/reconstruct` is unaffected.
+
+Each event gets its own marker — three consecutive writes produce three
+patch entries with one marker each, and an event that leaves the value
+alone produces none. The journal does not grow beyond its normal
+cadence.
+
+Details worth knowing:
+
+- The decision is made by comparing the **unredacted** values on both
+  sides. Those values are only compared, never stored: the journal
+  still holds nothing but redacted output.
+- No marker is emitted when the change is already visible — because
+  the redactor is value-dependent (e.g. `shortHashRedactor`), because
+  the key was added or removed, or because a surrounding subtree was
+  replaced wholesale.
+- Container-returning redactors (e.g. keep `id`/`purpose`, hide `data`)
+  are handled per-field: a change to the hidden part is marked even when
+  a sibling field in the same container is also changing, and no marker
+  is invented when only the visible part changed.
+- **Overlapping directives are order-sensitive.** If one directive
+  redacts a subtree wholesale and another targets a leaf inside it, the
+  outcome depends on their order in the array: listing the ancestor
+  directive first still emits a marker (at the ancestor), while listing
+  the leaf first emits nothing, because the inner leaf is no longer
+  reachable in the projection. Prefer non-overlapping redaction paths;
+  if you must overlap, put the ancestor directive first.
+- Failed events are unaffected: they still record `patch: []` plus
+  `error` (see [Failed events](#failed-events)), so "redacted change"
+  and "processing failed" never look alike.
+- Arrays are diffed by index, so removing an element shifts its
+  successors and a redacted element that merely moved can surface as a
+  marker.
+- Set `markRedactedChanges: false` to opt out and get the minimal diff
+  instead. You normally don't need to: the default is derived from the
+  active patch pipeline (see below), so installing a custom `diff` /
+  `applyPatch` pair turns markers off automatically. Set it back to
+  `true` only if your custom format also speaks RFC-6901 pointers.
+
 ### Redaction scope
 
 Redactions cover **`state` only**. The `description` field on each
@@ -283,7 +352,9 @@ snapshot and no accompanying patch entry.
 ```
 
 This makes failed events distinguishable from no-op events on every
-path the recorder emits.
+path the recorder emits. Changes hidden behind a constant redactor are
+distinguishable too, via a separate mechanism — see
+[Changes behind a constant redactor](#changes-behind-a-constant-redactor).
 
 ### Recording is non-throwing
 
@@ -370,6 +441,15 @@ await sbp('chelonia/configure', {
 })
 ```
 
+Redacted-change markers are `{ op: 'replace', path, value, redacted: true }`
+operations with an RFC-6901 pointer path, so they are only meaningful to
+the built-in patch pipeline. Because of that, `markRedactedChanges`
+defaults to `true` only while both `diff` and `applyPatch` are the
+built-ins: as soon as you install a custom pair the default flips to
+`false`, so no foreign pointer ops are appended to your patch format.
+Pass `markRedactedChanges: true` explicitly if your custom format also
+speaks RFC-6901 pointers and you want the markers back.
+
 To revert to the built-ins after a swap, pass them explicitly:
 
 ```js
@@ -408,6 +488,7 @@ await sbp('chelonia/configure', {
       { path: 'profiles.*.email', redact: shortHashRedactor },
       { path: 'secrets.*',        redact: () => '[REDACTED]' }
     ],
+    markRedactedChanges: true,
     diff: defaultDiff,
     applyPatch: defaultApplyPatch
   }
@@ -425,7 +506,11 @@ if (journal) {
     } else if (e.error) {
       console.log(`[err ] @${e.height} ${e.opType}: ${e.error.name}: ${e.error.message}`)
     } else {
-      console.log(`[diff] @${e.height} ${e.opType} +${e.patch.length} ops`)
+      const hidden = e.patch.filter((p) => p.redacted).length
+      console.log(
+        `[diff] @${e.height} ${e.opType} +${e.patch.length} ops` +
+        (hidden ? ` (${hidden} redacted)` : '')
+      )
     }
   }
 }

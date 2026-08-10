@@ -6,13 +6,16 @@ import {
   defaultApplyPatch,
   defaultDiff,
   escapePointerSegment,
+  hasHiddenChange,
   parseDottedPath,
   pointerToSegments,
   segmentsToPointer,
   shortHashRedactor,
+  structurallyEqual,
+  synthesizeRedactedChangeOps,
   unescapePointerSegment
 } from './journal.js'
-import type { JournalPatch } from './types.js'
+import type { JournalPatch, JournalRedaction, RedactionSiteMap } from './types.js'
 
 describe('journal: JSON-Pointer helpers', () => {
   it('escapes and unescapes RFC 6901 special characters', () => {
@@ -434,6 +437,437 @@ describe('journal: applyRedactions', () => {
     const out = applyRedactions(before, [], 'test/contract')
     assert.deepStrictEqual(out, before)
     assert.notStrictEqual(out, before)
+  })
+
+  it('records each redacted leaf in the optional sites map', () => {
+    const sites: RedactionSiteMap = new Map()
+    applyRedactions(
+      { keys: { k1: { data: 'sec1' }, k2: { data: 'sec2' } } },
+      [{ path: 'keys.*.data', redact: () => 'R' }],
+      'test/contract',
+      sites
+    )
+    assert.deepStrictEqual([...sites.entries()], [
+      ['/keys/k1/data', { original: 'sec1', replacement: 'R' }],
+      ['/keys/k2/data', { original: 'sec2', replacement: 'R' }]
+    ])
+  })
+
+  it('escapes site pointers and covers array indices', () => {
+    const sites: RedactionSiteMap = new Map()
+    applyRedactions(
+      { 'a/b': [{ 'c~d': 'sec' }] },
+      [{ path: 'a/b.*.c~d', redact: () => 'R' }],
+      'test/contract',
+      sites
+    )
+    assert.deepStrictEqual([...sites.keys()], ['/a~1b/0/c~0d'])
+  })
+
+  it('keeps the first original and the last replacement for overlapping directives', () => {
+    // The second redactor sees the first one's output, so only the first
+    // `original` is the true pre-redaction value.
+    const sites: RedactionSiteMap = new Map()
+    applyRedactions(
+      { a: 'raw' },
+      [
+        { path: 'a', redact: () => 'first' },
+        { path: 'a', redact: () => 'second' }
+      ],
+      'test/contract',
+      sites
+    )
+    assert.deepStrictEqual([...sites.entries()], [
+      ['/a', { original: 'raw', replacement: 'second' }]
+    ])
+  })
+
+  it('does not record sites for paths that do not exist', () => {
+    const sites: RedactionSiteMap = new Map()
+    applyRedactions(
+      { a: 1 },
+      [{ path: 'does.not.exist', redact: () => 'R' }],
+      'test/contract',
+      sites
+    )
+    assert.strictEqual(sites.size, 0)
+  })
+})
+
+describe('journal: structurallyEqual', () => {
+  it('agrees with defaultDiff on what counts as a change', () => {
+    const samples: Array<[unknown, unknown]> = [
+      [1, 1],
+      [1, 2],
+      ['a', 'a'],
+      [null, null],
+      [null, 0],
+      [NaN, NaN],
+      [{ a: 1 }, { a: 1 }],
+      [{ a: 1 }, { a: 2 }],
+      [{ a: 1 }, { a: 1, b: 2 }],
+      [{ a: 1, b: 2 }, { a: 1 }],
+      [{ a: undefined }, {}],
+      [[1, 2], [1, 2]],
+      [[1, 2], [1, 2, 3]],
+      [[1, 2], { 0: 1, 1: 2 }],
+      [{ a: { b: [1, { c: 'x' }] } }, { a: { b: [1, { c: 'x' }] } }],
+      [{ a: { b: [1, { c: 'x' }] } }, { a: { b: [1, { c: 'y' }] } }],
+      [undefined, undefined],
+      [undefined, 1]
+    ]
+    for (const [a, b] of samples) {
+      assert.strictEqual(
+        structurallyEqual(a, b),
+        defaultDiff(a, b).length === 0,
+        `disagreed on ${JSON.stringify(a)} vs ${JSON.stringify(b)}`
+      )
+    }
+  })
+
+  it('compares own properties only', () => {
+    // Null-prototype objects are the common shape in Chelonia state.
+    const nullProto = Object.assign(Object.create(null), { a: 1 })
+    assert.strictEqual(structurallyEqual(nullProto, { a: 1 }), true)
+    assert.strictEqual(structurallyEqual(Object.create(null), {}), true)
+    // Same key count, different keys: not equal (and the diff agrees).
+    assert.strictEqual(structurallyEqual({ a: 1 }, { b: 1 }), false)
+    assert.ok(defaultDiff({ a: 1 }, { b: 1 }).length > 0)
+  })
+
+  it('treats non-plain containers as equal only by reference', () => {
+    // Matches defaultDiff, which emits a wholesale replace for values it
+    // won't recurse into.
+    const d = new Date(0)
+    assert.strictEqual(structurallyEqual(d, d), true)
+    assert.strictEqual(structurallyEqual(new Date(0), new Date(0)), false)
+    assert.strictEqual(structurallyEqual(Object.create({ inherited: 1 }), {}), false)
+  })
+})
+
+describe('journal: synthesizeRedactedChangeOps', () => {
+  const sites = (
+    entries: Array<[string, unknown, unknown]>
+  ): RedactionSiteMap => new Map(
+    entries.map(([p, original, replacement]) => [p, { original, replacement }])
+  )
+
+  it('marks a change that the redacted projection hides', () => {
+    const out = synthesizeRedactedChangeOps(
+      [],
+      sites([['/a/b', 'raw1', '[R]']]),
+      sites([['/a/b', 'raw2', '[R]']]),
+      { a: { b: '[R]' } }
+    )
+    assert.deepStrictEqual(out, [
+      { op: 'replace', path: '/a/b', value: '[R]', redacted: true }
+    ])
+  })
+
+  it('is an identity edit: reconstruction is unaffected', () => {
+    const before = { a: { b: '[R]' }, n: 1 }
+    const after = { a: { b: '[R]' }, n: 2 }
+    const patch = synthesizeRedactedChangeOps(
+      defaultDiff(before, after),
+      sites([['/a/b', 'raw1', '[R]']]),
+      sites([['/a/b', 'raw2', '[R]']]),
+      after
+    )
+    assert.strictEqual(patch.length, 2)
+    assert.deepStrictEqual(defaultApplyPatch(before, patch), after)
+  })
+
+  it('emits nothing when the underlying value did not change', () => {
+    const out = synthesizeRedactedChangeOps(
+      [],
+      sites([['/a/b', { deep: [1] }, '[R]']]),
+      sites([['/a/b', { deep: [1] }, '[R]']]),
+      { a: { b: '[R]' } }
+    )
+    assert.deepStrictEqual(out, [])
+  })
+
+  it('skips leaves the patch already covers', () => {
+    // Covers the exact location and an ancestor replaced wholesale. A
+    // *descendant* operation deliberately does NOT suppress a marker — see
+    // the container-redactor test below.
+    const beforeSites = sites([
+      ['/exact', 'raw1', '[R]'],
+      ['/parent/child', 'raw1', '[R]']
+    ])
+    const afterSites = sites([
+      ['/exact', 'raw2', '[R]'],
+      ['/parent/child', 'raw2', '[R]']
+    ])
+    const patch: JournalPatch[] = [
+      { op: 'replace', path: '/exact', value: '[R]' },
+      { op: 'replace', path: '/parent', value: { child: '[R]' } }
+    ]
+    const out = synthesizeRedactedChangeOps(patch, beforeSites, afterSites, {
+      exact: '[R]',
+      parent: { child: '[R]' }
+    })
+    assert.deepStrictEqual(out, patch)
+  })
+
+  // The tests below run the full redact → diff → synthesize pipeline so the
+  // site maps and the diff are guaranteed mutually consistent — shapes that
+  // cannot arise from `applyRedactions` (e.g. a string leaf with children)
+  // are impossible to construct here by design.
+  const containerRedactions: JournalRedaction[] = [{
+    // Keep `id`/`ring` visible, hide `data`: the natural partial-redactor
+    // shape for key material.
+    path: 'k.*',
+    redact: (v: unknown) => ({ ...(v as Record<string, unknown>), data: '[R]' })
+  }]
+
+  const runPipeline = (
+    before: unknown,
+    after: unknown,
+    redactions: JournalRedaction[]
+  ): { patch: JournalPatch[]; redactedBefore: unknown; redactedAfter: unknown } => {
+    const beforeSites: RedactionSiteMap = new Map()
+    const afterSites: RedactionSiteMap = new Map()
+    const redactedBefore = applyRedactions(before, redactions, 'test', beforeSites)
+    const redactedAfter = applyRedactions(after, redactions, 'test', afterSites)
+    const patch = synthesizeRedactedChangeOps(
+      defaultDiff(redactedBefore, redactedAfter),
+      beforeSites,
+      afterSites,
+      redactedAfter
+    )
+    return { patch, redactedBefore, redactedAfter }
+  }
+
+  const assertReplayIsIdentity = (
+    patch: JournalPatch[],
+    redactedBefore: unknown,
+    redactedAfter: unknown
+  ): void => {
+    assert.deepStrictEqual(
+      defaultApplyPatch(structuredClone(redactedBefore), patch),
+      redactedAfter
+    )
+  }
+
+  it('marks a hidden change even when a visible sibling changed', () => {
+    // Regression for the issue: a container-returning redactor used to make
+    // the visible `ring` change suppress the marker for the hidden `data`
+    // change, so the journal looked like only `ring` had moved.
+    const before = { k: { a: { id: 'a', data: 'SECRET-1', ring: 1 } } }
+    const after = { k: { a: { id: 'a', data: 'SECRET-2', ring: 2 } } }
+    const { patch, redactedBefore, redactedAfter } = runPipeline(
+      before, after, containerRedactions
+    )
+    assert.deepStrictEqual(patch, [
+      { op: 'replace', path: '/k/a/ring', value: 2 },
+      {
+        op: 'replace',
+        path: '/k/a',
+        value: { id: 'a', data: '[R]', ring: 2 },
+        redacted: true
+      }
+    ])
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
+  })
+
+  it('does not mark when only the visible part of a container redactor changed', () => {
+    // Guards the fix: a marker must not be invented when the hidden part is
+    // unchanged. `data` is identical on both sides.
+    const before = { k: { a: { id: 'a', data: 'SAME', ring: 1 } } }
+    const after = { k: { a: { id: 'a', data: 'SAME', ring: 2 } } }
+    const { patch, redactedBefore, redactedAfter } = runPipeline(
+      before, after, containerRedactions
+    )
+    assert.deepStrictEqual(patch, [
+      { op: 'replace', path: '/k/a/ring', value: 2 }
+    ])
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
+  })
+
+  it('marks a change hidden by a constant leaf redactor', () => {
+    const before = { k: { a: { id: 'a', data: 'SECRET-1' } } }
+    const after = { k: { a: { id: 'a', data: 'SECRET-2' } } }
+    const { patch, redactedBefore, redactedAfter } = runPipeline(before, after, [
+      { path: 'k.*.data', redact: () => '[R]' }
+    ])
+    assert.deepStrictEqual(patch, [
+      { op: 'replace', path: '/k/a/data', value: '[R]', redacted: true }
+    ])
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
+  })
+
+  it('does not mark when a value-dependent redactor already surfaces the change', () => {
+    const before = { k: { a: { id: 'a', data: 'SECRET-1' } } }
+    const after = { k: { a: { id: 'a', data: 'SECRET-2' } } }
+    const { patch, redactedBefore, redactedAfter } = runPipeline(before, after, [
+      { path: 'k.*.data', redact: shortHashRedactor }
+    ])
+    assert.strictEqual(patch.length, 1)
+    assert.notStrictEqual(patch[0].redacted, true)
+    assert.strictEqual(patch[0].path, '/k/a/data')
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
+  })
+
+  it('does not mark when nothing changed', () => {
+    const before = { k: { a: { id: 'a', data: 'SAME', ring: 1 } } }
+    const after = { k: { a: { id: 'a', data: 'SAME', ring: 1 } } }
+    const { patch } = runPipeline(before, after, containerRedactions)
+    assert.deepStrictEqual(patch, [])
+  })
+
+  it('overlapping directives are order-sensitive: ancestor first still marks', () => {
+    // The ancestor directive replaces the subtree wholesale and captures the
+    // true pre-redaction original, so its marker survives.
+    const before = { k: { a: { id: 'a', data: 'SECRET-1' } } }
+    const after = { k: { a: { id: 'a', data: 'SECRET-2' } } }
+    const { patch, redactedBefore, redactedAfter } = runPipeline(before, after, [
+      { path: 'k.*', redact: () => '[WHOLE]' },
+      { path: 'k.*.data', redact: () => '[HIDDEN]' }
+    ])
+    assert.deepStrictEqual(patch, [
+      { op: 'replace', path: '/k/a', value: '[WHOLE]', redacted: true }
+    ])
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
+  })
+
+  it('overlapping directives are order-sensitive: leaf first marks nothing', () => {
+    // Documented hazard: with the leaf directive first, the inner site is no
+    // longer reachable in the projection and the ancestor site recorded an
+    // already-partially-redacted original, so the change is invisible. Kept
+    // on purpose rather than silently "fixed" — redaction paths should not
+    // overlap.
+    const before = { k: { a: { id: 'a', data: 'SECRET-1' } } }
+    const after = { k: { a: { id: 'a', data: 'SECRET-2' } } }
+    const { patch } = runPipeline(before, after, [
+      { path: 'k.*.data', redact: () => '[HIDDEN]' },
+      { path: 'k.*', redact: () => '[WHOLE]' }
+    ])
+    assert.deepStrictEqual(patch, [])
+  })
+
+  it('stays linear when every key has a hidden and a visible change', () => {
+    // Correctness at scale (wall-clock is asserted out-of-band, not in CI).
+    // 1500 keys each changing `data` (hidden) and `ring` (visible) used to
+    // be quadratic: one `patchCovers` scan per site over the whole patch.
+    const n = 1500
+    const makeState = (salt: string, ring: number) => {
+      const authorizedKeys: Record<string, unknown> = {}
+      for (let i = 0; i < n; i++) {
+        authorizedKeys['key' + i] = {
+          id: 'key' + i,
+          data: 'SECRET-' + salt + '-' + i,
+          ring
+        }
+      }
+      return { _vm: { authorizedKeys } }
+    }
+    const { patch, redactedBefore, redactedAfter } = runPipeline(
+      makeState('a', 1), makeState('b', 2),
+      [{ path: '_vm.authorizedKeys.*.data', redact: () => '[R]' }]
+    )
+    const markers = patch.filter((p) => p.redacted === true)
+    assert.strictEqual(markers.length, n)
+    assert.strictEqual(patch.length, n * 2)
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
+  })
+
+  it('emits nothing when the whole state was replaced at the root', () => {
+    const out = synthesizeRedactedChangeOps(
+      [{ op: 'replace', path: '', value: { a: { b: '[R]' } } }],
+      sites([['/a/b', 'raw1', '[R]']]),
+      sites([['/a/b', 'raw2', '[R]']]),
+      { a: { b: '[R]' } }
+    )
+    assert.strictEqual(out.length, 1)
+  })
+
+  it('skips leaves that are absent from the after-state', () => {
+    // An overlapping directive can redact an ancestor wholesale, leaving
+    // the nested leaf unreachable. A `replace` there would throw on
+    // replay, so it must not be emitted.
+    const out = synthesizeRedactedChangeOps(
+      [],
+      sites([['/a/b', 'raw1', '[R]']]),
+      sites([['/a/b', 'raw2', '[R]']]),
+      { a: '[WHOLE]' }
+    )
+    assert.deepStrictEqual(out, [])
+  })
+
+  it('skips leaves that are new (the diff already reports the add)', () => {
+    const out = synthesizeRedactedChangeOps(
+      [{ op: 'add', path: '/a', value: { b: '[R]' } }],
+      new Map(),
+      sites([['/a/b', 'raw', '[R]']]),
+      { a: { b: '[R]' } }
+    )
+    assert.strictEqual(out.length, 1)
+  })
+
+  it('returns the original array when there is nothing to mark', () => {
+    const patch: JournalPatch[] = [{ op: 'remove', path: '/x' }]
+    assert.strictEqual(
+      synthesizeRedactedChangeOps(patch, new Map(), new Map(), {}),
+      patch
+    )
+  })
+})
+
+describe('journal: hasHiddenChange', () => {
+  const site = (original: unknown, replacement: unknown) => ({ original, replacement })
+
+  it('reports a hidden change when the projection is constant', () => {
+    assert.strictEqual(
+      hasHiddenChange(site('SECRET-1', '[R]'), site('SECRET-2', '[R]')),
+      true
+    )
+  })
+
+  it('reports no hidden change when the projection moved too', () => {
+    // Value-dependent redactor: the change is visible in the projection.
+    assert.strictEqual(
+      hasHiddenChange(site('SECRET-1', 'hashA'), site('SECRET-2', 'hashB')),
+      false
+    )
+  })
+
+  it('reports no hidden change when the originals are equal', () => {
+    assert.strictEqual(
+      hasHiddenChange(site('SAME', '[R]'), site('SAME', '[R]')),
+      false
+    )
+  })
+
+  it('reports a hidden change under a partial (container) redactor', () => {
+    const before = site({ id: 'a', data: 'SECRET-1', ring: 1 }, { id: 'a', data: '[R]', ring: 1 })
+    const after = site({ id: 'a', data: 'SECRET-2', ring: 2 }, { id: 'a', data: '[R]', ring: 2 })
+    assert.strictEqual(hasHiddenChange(before, after), true)
+  })
+
+  it('reports no hidden change when only the visible part of a container changed', () => {
+    const before = site({ id: 'a', data: 'SAME', ring: 1 }, { id: 'a', data: '[R]', ring: 1 })
+    const after = site({ id: 'a', data: 'SAME', ring: 2 }, { id: 'a', data: '[R]', ring: 2 })
+    assert.strictEqual(hasHiddenChange(before, after), false)
+  })
+})
+
+describe('journal: JournalPatch type ergonomics', () => {
+  it('exposes `redacted` on the un-narrowed union (docs snippet compiles)', () => {
+    const patch: JournalPatch[] = [
+      { op: 'replace', path: '/a', value: '[R]', redacted: true },
+      { op: 'remove', path: '/b' }
+    ]
+    // Reading `p.redacted` without narrowing must type-check; it yields
+    // `undefined` on the `remove` arm.
+    const hidden = patch.filter((p) => p.redacted).length
+    assert.strictEqual(hidden, 1)
+  })
+
+  it('rejects a literal `redacted` on a remove op at the type level', () => {
+    // @ts-expect-error `redacted` must not be assignable on a remove op
+    const bad: JournalPatch = { op: 'remove', path: '/b', redacted: true }
+    assert.strictEqual(bad.op, 'remove')
   })
 })
 
