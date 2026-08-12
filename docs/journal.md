@@ -150,7 +150,7 @@ wraps `SPMessage.description()` in a `try`/`catch` and falls back to
 represented as `{ op: 'replace', path: '', value: null }` because
 RFC-6902 doesn't define root-remove.
 
-Operations may additionally carry `redacted: true` — see
+`replace` operations may additionally carry `redacted: true` — see
 [Changes behind a constant redactor](#changes-behind-a-constant-redactor).
 RFC-6902 §4 requires appliers to ignore members it doesn't define, so
 the marker is safe to hand to any conformant JSON Patch library.

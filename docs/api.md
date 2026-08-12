@@ -284,9 +284,9 @@ The most useful exported types and values (re-exported from the package root):
 | `SendMessageHooks` | `src/types.ts` | `hooks` object on `/out/*` params: `prepublish`, `onprocessed`, `preSendCheck`, `beforeRequest`, `postpublish`. |
 | `JournalConfig` | `src/types.ts` | Journal sub-tree of `CheloniaConfig`. |
 | `JournalEntry` | `src/types.ts` | Discriminated union of `{ kind: 'snapshot', ..., state }` and `{ kind: 'patch', ..., patch, error? }`. See [`journal.md`](./journal.md#public-selectors). |
-| `JournalPatch` | `src/types.ts` | Strict subset of RFC-6902 (`add` / `remove` / `replace`). `add`/`replace` may carry `redacted: true`, marking an identity edit that records a change a redactor hid. See [`journal.md`](./journal.md#changes-behind-a-constant-redactor). |
+| `JournalPatch` | `src/types.ts` | Strict subset of RFC-6902 (`add` / `remove` / `replace`). `replace` may carry `redacted: true`, marking an identity edit that records a change a redactor hid. See [`journal.md`](./journal.md#changes-behind-a-constant-redactor). |
 | `JournalRedaction` | `src/types.ts` | `{ path, redact }` directive. |
-| `RedactionSite` / `RedactionSiteMap` | `src/types.ts` | Optional out-parameter of `applyRedactions`, mapping each redacted leaf's JSON Pointer to `{ original, replacement }`. Used to detect changes a constant redactor hides. |
+| `RedactionSite` / `RedactionSiteMap` | `src/types.ts` | `RedactionSiteMap` is the optional out-parameter of `applyRedactions`, mapping each redacted leaf's JSON Pointer to a `RedactionSite` (`{ original, replacement }`). `RedactionSite` is also the argument type of `hasHiddenChange()`. Used to detect changes a constant redactor hides. |
 | `SPMessage` | `src/SPMessage.ts` | Wire format for every on-chain message. |
 | `Secret<T>` | `src/Secret.ts` | `WeakMap`-backed wrapper that prevents accidental key leakage in logs / serialization. |
 | `EncryptedData<T>` | `src/encryptedData.ts` | Tagged wrapper around encrypted payloads. |
