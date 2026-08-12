@@ -404,8 +404,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             }
             if (journalOverride.markRedactedChanges !== undefined) {
                 // Same strict-boolean rationale as `enabled`: `resolveJournalConfig`
-                // reads this with `!== false`, so a stringy `"false"` would
-                // silently keep the marking on.
+                // reads this via `cfg?.markRedactedChanges ?? (derived)`, so a
+                // truthy non-boolean like `"false"` would silently keep the marking
+                // on instead of opting out.
                 if (typeof journalOverride.markRedactedChanges !== 'boolean') {
                     throw new TypeError(`[chelonia][journal] config.journal.markRedactedChanges must be a boolean; got ${typeof journalOverride.markRedactedChanges}`);
                 }

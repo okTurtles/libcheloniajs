@@ -466,11 +466,106 @@ function applyOne (root: unknown, patch: JournalPatch): unknown {
 // Redactions
 // ---------------------------------------------------------------------------
 
-// Deep-clone `state` and apply each redaction. Redactors are invoked on the
-// cloned value, so user code cannot mutate the live state object.
-// A throwing redactor logs once and substitutes the sentinel string so a
-// single bad redactor cannot blank out unrelated parts of the state.
+// Deep-clone `state` and apply each redaction. Redactors are invoked on
+// the cloned value with a disposable copy of the resolved path, so user
+// code can neither mutate the live state object nor corrupt the site
+// bookkeeping derived from the internal path. A throwing redactor logs and
+// substitutes `REDACTION_ERROR_SENTINEL` so a single bad redactor cannot
+// blank out unrelated parts of the state; a redactor returning a
+// non-JSON-safe value logs and substitutes
+// `REDACTION_UNSERIALIZABLE_SENTINEL` (deeply, preserving the JSON-safe
+// structure around an unsafe leaf) so projections, snapshots and markers
+// all stay persistable.
 export const REDACTION_ERROR_SENTINEL = '[REDACTION_ERROR]'
+
+// Substitute for redactor results that cannot survive JSON persistence.
+// The journal is serialized by whatever layer snapshots
+// `state.contracts[contractID]._journal`, and `JSON.stringify` drops
+// `undefined` members, renders `NaN` / `Infinity` as `null`, and throws on
+// `BigInt` and cycles — so a marker or snapshot carrying such a value would
+// corrupt `chelonia/journal/reconstruct` after a reload (a `replace` that
+// lost its `value` member is rejected by `defaultApplyPatch`).
+export const REDACTION_UNSERIALIZABLE_SENTINEL = '[REDACTION_UNSERIALIZABLE]'
+
+// True when `v` survives a JSON round-trip without changing shape: `null`,
+// strings, booleans, finite numbers, and arrays / plain objects whose
+// elements / own values are themselves JSON-safe. Cycles are rejected
+// (`JSON.stringify` throws on them), as are `undefined`, `BigInt`, symbols,
+// functions and non-plain containers (Dates, Maps, class instances — the
+// journal's "plain JSON state" contract passes those through by reference,
+// which persists lossily at best). The `seen` set tracks only the current
+// ancestor chain, so shared (DAG-shaped) references remain allowed exactly
+// as they are for `JSON.stringify`.
+function isJSONSafeValue (v: unknown, seen: Set<object>): boolean {
+  if (v === null) return true
+  const t = typeof v
+  if (t === 'string' || t === 'boolean') return true
+  if (t === 'number') return Number.isFinite(v as number)
+  if (t !== 'object') return false
+  if (seen.has(v as object)) return false
+  if (Array.isArray(v)) {
+    seen.add(v as object)
+    const ok = (v as unknown[]).every((el) => isJSONSafeValue(el, seen))
+    seen.delete(v as object)
+    return ok
+  }
+  if (!isPlainObject(v)) return false
+  seen.add(v)
+  const ok = Object.keys(v).every(
+    (k) => isJSONSafeValue((v as Record<string, unknown>)[k], seen)
+  )
+  seen.delete(v)
+  return ok
+}
+
+// Deep-rewrite a redactor result into JSON-safe shape, substituting
+// `REDACTION_UNSERIALIZABLE_SENTINEL` for every unsafe leaf (and for cyclic
+// back-references). Only called after `isJSONSafeValue` rejected the value,
+// so allocation here is the exceptional path.
+function normalizeToJSONSafe (v: unknown, seen: Set<object>): unknown {
+  if (v === null) return v
+  const t = typeof v
+  if (t === 'string' || t === 'boolean') return v
+  if (t === 'number') {
+    return Number.isFinite(v as number) ? v : REDACTION_UNSERIALIZABLE_SENTINEL
+  }
+  if (t !== 'object') return REDACTION_UNSERIALIZABLE_SENTINEL
+  if (seen.has(v as object)) return REDACTION_UNSERIALIZABLE_SENTINEL
+  if (Array.isArray(v)) {
+    seen.add(v as object)
+    const out = (v as unknown[]).map((el) => normalizeToJSONSafe(el, seen))
+    seen.delete(v as object)
+    return out
+  }
+  if (!isPlainObject(v)) return REDACTION_UNSERIALIZABLE_SENTINEL
+  seen.add(v)
+  const out: Record<string, unknown> = Object.create(Object.getPrototypeOf(v))
+  for (const k of Object.keys(v)) {
+    // `defineProperty` for the same reason as `cloneValue`: an own
+    // `__proto__` key must not pollute `Object.prototype`.
+    Object.defineProperty(out, k, {
+      value: normalizeToJSONSafe((v as Record<string, unknown>)[k], seen),
+      writable: true,
+      enumerable: true,
+      configurable: true
+    })
+  }
+  seen.delete(v)
+  return out
+}
+
+// A breadcrumb for the warning above. Deliberately describes the *shape*
+// only — the rejected value is precisely what the redactor was asked to
+// keep out of the journal, so it must not appear in logs.
+function describeNonJSONSafe (v: unknown): string {
+  if (typeof v === 'number') return 'non-finite number'
+  if (typeof v === 'object' && v !== null) {
+    if (Array.isArray(v)) return 'array containing a non-JSON-safe value'
+    if (isPlainObject(v)) return 'object containing a non-JSON-safe or cyclic value'
+    return `non-plain object (${(v as object).constructor?.name ?? 'unknown'})`
+  }
+  return typeof v
+}
 
 export function applyRedactions<T> (
   state: T,
@@ -486,10 +581,11 @@ export function applyRedactions<T> (
 ): T {
   const cloned = cloneValue(state)
   if (!redactions || redactions.length === 0) return cloned
+  const source = sites ? cloneValue(state) : undefined
   for (const r of redactions) {
     const segments = parseDottedPath(r.path)
     if (segments.length === 0) continue
-    walkAndRedact(cloned, segments, 0, r.redact, [], contractName, sites)
+    walkAndRedact(cloned, source, segments, 0, r.redact, [], contractName, sites)
   }
   return cloned
 }
@@ -516,6 +612,7 @@ function recordSite (
 
 function walkAndRedact (
   parent: unknown,
+  source: unknown,
   segments: string[],
   i: number,
   redact: JournalRedaction['redact'],
@@ -539,16 +636,31 @@ function walkAndRedact (
     const fullPath = [...resolved, k]
     if (isLast) {
       const container = parent as Record<string, unknown>
-      const original = container[k]
+      const value = container[k]
+      const sourceValue = sites
+        ? resolveAtPointer(source, segmentsToPointer(fullPath))
+        : undefined
+      const original = sourceValue?.found ? sourceValue.value : value
       let replacement: unknown
       try {
-        replacement = redact(original, fullPath, contractName)
+        // The path is handed over as a disposable copy: redactors are
+        // contracted pure, but a mutating callback must not be able to
+        // corrupt the site bookkeeping `recordSite` derives from
+        // `fullPath` right below.
+        replacement = redact(value, [...fullPath], contractName)
       } catch (e) {
         console.warn(
           `[chelonia][journal] redactor threw for path '${fullPath.join('.')}':`,
           e
         )
         replacement = REDACTION_ERROR_SENTINEL
+      }
+      if (!isJSONSafeValue(replacement, new Set())) {
+        console.warn(
+          `[chelonia][journal] redactor for path '${fullPath.join('.')}' returned a ` +
+          `non-JSON-safe value (${describeNonJSONSafe(replacement)}); substituting a sentinel`
+        )
+        replacement = normalizeToJSONSafe(replacement, new Set())
       }
       // Write via defineProperty on objects: even though `cloneValue`
       // produced this container, defending against prototype-polluting
@@ -574,6 +686,7 @@ function walkAndRedact (
     } else {
       walkAndRedact(
         (parent as Record<string, unknown>)[k],
+        source,
         segments,
         i + 1,
         redact,
@@ -675,8 +788,7 @@ function coveredByPatch (idx: CoverageIndex, pointer: string): boolean {
 // True when the underlying change at a redacted site is (at least partly)
 // invisible in the site's redacted projection — i.e. the diff of the
 // unredacted originals touches a pointer path that the diff of the
-// redacted projections does not (neither at the same path nor at an
-// ancestor of it).
+// redacted projections does not reproduce exactly.
 //
 // Why this replaces the old "descendant of the site already shows up in
 // the patch" heuristic: for a container-returning redactor (e.g. keep
@@ -684,6 +796,23 @@ function coveredByPatch (idx: CoverageIndex, pointer: string): boolean {
 // container must not suppress the marker for the hidden part, and a
 // visible-only change must not *produce* one either. Comparing the two
 // per-site diffs makes exactly that distinction.
+//
+// Only an exact path match counts as "visible". A projected *ancestor*
+// operation is never accepted as covering an original descendant change:
+// the visible paths live in the projection's path space while the original
+// paths live in the source's, and a reshaping redactor (e.g.
+// `(v) => ({ profile: v.profile.name })`) maps source leaves onto
+// projected ancestor positions, so those spaces do not correspond. A
+// projected ancestor op only proves that *something* inside that ancestor
+// changed — not that the hidden descendant change is visible. Moreover,
+// the built-in diff emits an op at an ancestor (instead of descending)
+// exactly when the projection changed container shape there between before
+// and after, which is precisely the lossy case where coverage cannot be
+// established. "Hidden" is the conservative direction: markers are
+// identity writes, so an extra one is noise while a suppressed one loses
+// the only record of the hidden change. (Contrast `coveredByPatch`, where
+// ancestor coverage IS sound: patch operations are real writes into the
+// reconstructed state, not observations about a projection.)
 //
 // Always uses `defaultDiff`, never `cfg.diff`: this asks a question
 // about RFC-6901 pointer paths within a single site, which is the same
@@ -696,17 +825,7 @@ export function hasHiddenChange (
   if (visiblePaths.some((p) => p.path === '')) return false
   const visible = new Set(visiblePaths.map((p) => p.path))
   for (const { path } of defaultDiff(before.original, after.original)) {
-    if (visible.has(path)) continue
-    // A wholesale write at an ancestor of `path` in the projection
-    // covers it — the change is visible, just at a coarser level.
-    let shadowed = false
-    for (const v of visible) {
-      if (path.startsWith(v + '/')) {
-        shadowed = true
-        break
-      }
-    }
-    if (!shadowed) return true
+    if (!visible.has(path)) return true
   }
   return false
 }

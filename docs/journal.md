@@ -214,8 +214,30 @@ already-redacted view.
   key or array index.
 - `redact(value, fullPath, contractName)` MUST:
   - Be pure (no I/O, no side-effects),
-  - **Not mutate** `value`,
-  - Return the replacement.
+  - **Not mutate** `value` or `fullPath` (`fullPath` is a disposable
+    copy anyway — mutating it cannot corrupt the journal's
+    bookkeeping, but don't rely on that),
+  - Return a **JSON-safe** replacement: `null`, strings, booleans,
+    finite numbers, and arrays / plain objects thereof.
+
+Non-JSON-safe results (`undefined`, `BigInt`, symbols, functions,
+non-finite numbers, class instances, cycles) are replaced with the
+string sentinel `'[REDACTION_UNSERIALIZABLE]'` (exported as
+`REDACTION_UNSERIALIZABLE_SENTINEL`) and a warning is logged — the
+description names the offending path and the value's *shape* only,
+never the value itself. Container results are normalized deeply, so a
+JSON-safe projection with one unsafe leaf keeps its structure:
+
+```js
+// redact returns { id: 1, raw: <function> }
+// journal stores   { id: 1, raw: '[REDACTION_UNSERIALIZABLE]' }
+```
+
+Why the strictness: the journal is serialized by whatever persistence
+layer snapshots `state.contracts`, and `JSON.stringify` drops
+`undefined` members, renders `NaN` / `Infinity` as `null`, and throws
+on `BigInt` and cycles. Letting such values in would corrupt
+`chelonia/journal/reconstruct` after a reload.
 
 ### Built-in redactors
 
@@ -274,14 +296,21 @@ Details worth knowing:
 - Container-returning redactors (e.g. keep `id`/`purpose`, hide `data`)
   are handled per-field: a change to the hidden part is marked even when
   a sibling field in the same container is also changing, and no marker
-  is invented when only the visible part changed.
-- **Overlapping directives are order-sensitive.** If one directive
-  redacts a subtree wholesale and another targets a leaf inside it, the
-  outcome depends on their order in the array: listing the ancestor
-  directive first still emits a marker (at the ancestor), while listing
-  the leaf first emits nothing, because the inner leaf is no longer
-  reachable in the projection. Prefer non-overlapping redaction paths;
-  if you must overlap, put the ancestor directive first.
+  is invented when only the visible part changed. This holds exactly
+  while the redactor preserves the container's path shape. A *reshaping*
+  redactor (e.g. `(v) => ({ profile: v.profile.name })`) breaks the
+  correspondence between source paths and projected paths, so hidden
+  changes under a visibly changed projected ancestor are still marked —
+  and, since the projection then provides no way to verify the hidden
+  parts, detection is conservative: a visible-only change under a lossy
+  projection may also retain a marker. An extra marker is a no-op; a
+  suppressed one would lose the only record of a hidden change.
+- **Overlapping directives are supported, but their projected output is
+  order-sensitive.** Each redactor still sees the result of earlier
+  directives, while change detection compares each recorded site with its
+  untouched pre-redaction value. If a later ancestor replaces a subtree
+  containing an earlier redacted leaf, the ancestor site records the hidden
+  change and the final projected value follows the configured order.
 - Failed events are unaffected: they still record `patch: []` plus
   `error` (see [Failed events](#failed-events)), so "redacted change"
   and "processing failed" never look alike.

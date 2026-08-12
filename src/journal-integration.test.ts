@@ -15,7 +15,7 @@ import { describe, it, before, beforeEach } from 'node:test'
 import './chelonia.js'
 import './db.js'
 import { ChelErrorJournalCorrupt } from './errors.js'
-import { defaultApplyPatch, defaultDiff } from './journal.js'
+import { REDACTION_UNSERIALIZABLE_SENTINEL, defaultApplyPatch, defaultDiff } from './journal.js'
 import type { ChelContractState, ChelRootState, JournalEntry, JournalPatch } from './types.js'
 
 type FakeMessage = {
@@ -344,6 +344,91 @@ describe('journal: integration via SBP selectors', () => {
       sbp('chelonia/journal/reconstruct', cid),
       redactKeyData(s2)
     )
+  })
+
+  it('survives JSON persistence when a redactor returns undefined', async () => {
+    // `() => undefined` is the natural "erase the value" redactor. Marker
+    // synthesis used to copy that `undefined` into the marker's required
+    // `value` member, which `JSON.stringify` drops — after a persist +
+    // reload, reconstruct rejected the patch as a `replace` without a
+    // value. Redactor results are now normalized to a sentinel before they
+    // enter the projection.
+    const orig = console.warn
+    console.warn = () => {}
+    try {
+      await sbp('chelonia/configure', {
+        journal: {
+          enabled: true,
+          snapshotInterval: 3,
+          contractIDs: [],
+          redactions: [
+            { path: '_vm.authorizedKeys.*.data', redact: () => undefined }
+          ]
+        }
+      })
+      const cid = 'cid-redact-undefined'
+      ensureContractMeta(cid)
+      const s1 = mkKeyState('SECRET-1')
+      const s2 = mkKeyState('SECRET-2')
+      record(cid, 'h0', 0, undefined, s1)
+      record(cid, 'h1', 1, s1, s2)
+      const entries = getEntries(cid)!
+      const patch = (entries[1] as Extract<JournalEntry, { kind: 'patch' }>).patch
+      assert.deepStrictEqual(patch, [{
+        op: 'replace',
+        path: '/_vm/authorizedKeys/k1/data',
+        value: REDACTION_UNSERIALIZABLE_SENTINEL,
+        redacted: true
+      }])
+      // Simulate persist + reload: swap in a JSON round-trip of the
+      // journal and reconstruct from it.
+      const persisted = JSON.parse(JSON.stringify(entries)) as JournalEntry[]
+      const meta = rootState().contracts[cid] as unknown as {
+        _journal?: { entries: JournalEntry[] };
+      }
+      meta._journal = { entries: persisted }
+      assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), {
+        _vm: {
+          authorizedKeys: {
+            k1: { id: 'k1', data: REDACTION_UNSERIALIZABLE_SENTINEL, purpose: ['sig'] }
+          }
+        }
+      })
+    } finally {
+      console.warn = orig
+    }
+  })
+
+  it('records hidden changes when a leaf redaction precedes an overlapping ancestor', async () => {
+    await sbp('chelonia/configure', {
+      journal: {
+        enabled: true,
+        snapshotInterval: 3,
+        contractIDs: [],
+        redactions: [
+          { path: '_vm.authorizedKeys.*.data', redact: () => '[HIDDEN]' },
+          { path: '_vm.authorizedKeys.*', redact: () => '[KEY]' }
+        ]
+      }
+    })
+    const cid = 'cid-redact-overlap'
+    ensureContractMeta(cid)
+    const s1 = mkKeyState('SECRET-1')
+    const s2 = mkKeyState('SECRET-2')
+    record(cid, 'h0', 0, undefined, s1)
+    record(cid, 'h1', 1, s1, s2)
+    const entries = getEntries(cid)!
+    const patch = (entries[1] as Extract<JournalEntry, { kind: 'patch' }>).patch
+    assert.deepStrictEqual(patch, [{
+      op: 'replace',
+      path: '/_vm/authorizedKeys/k1',
+      value: '[KEY]',
+      redacted: true
+    }])
+    assert.ok(!JSON.stringify(entries).includes('SECRET'))
+    assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), {
+      _vm: { authorizedKeys: { k1: '[KEY]' } }
+    })
   })
 
   it('omits redacted-change markers when markRedactedChanges is false', async () => {

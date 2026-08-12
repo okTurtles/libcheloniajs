@@ -2,6 +2,7 @@ import * as assert from 'node:assert'
 import { describe, it } from 'node:test'
 import {
   REDACTION_ERROR_SENTINEL,
+  REDACTION_UNSERIALIZABLE_SENTINEL,
   applyRedactions,
   defaultApplyPatch,
   defaultDiff,
@@ -425,6 +426,115 @@ describe('journal: applyRedactions', () => {
     }
   })
 
+  it('substitutes the sentinel for non-JSON-safe redactor results', () => {
+    // A marker or snapshot carrying any of these would corrupt
+    // `reconstruct` after JSON persistence: `JSON.stringify` drops
+    // `undefined` members (so the patch loses its `value`), renders
+    // `NaN` / `Infinity` as `null`, and throws on `BigInt`.
+    const orig = console.warn
+    let warned = 0
+    console.warn = () => { warned++ }
+    try {
+      const results: unknown[] = [
+        undefined,
+        BigInt(1),
+        Symbol('s'),
+        () => 'x',
+        NaN,
+        Infinity,
+        new Date(0)
+      ]
+      for (const result of results) {
+        const out = applyRedactions(
+          { a: 'v' },
+          [{ path: 'a', redact: () => result }],
+          'test/contract'
+        ) as { a: unknown }
+        assert.strictEqual(out.a, REDACTION_UNSERIALIZABLE_SENTINEL)
+      }
+      assert.strictEqual(warned, results.length)
+    } finally {
+      console.warn = orig
+    }
+  })
+
+  it('substitutes the sentinel for cyclic redactor results', () => {
+    const orig = console.warn
+    console.warn = () => {}
+    try {
+      const cyclic: Record<string, unknown> = { keep: 1 }
+      cyclic.self = cyclic
+      const out = applyRedactions(
+        { a: 'v' },
+        [{ path: 'a', redact: () => cyclic }],
+        'test/contract'
+      ) as { a: unknown }
+      // The cycle back-reference is replaced; the JSON-safe remainder of
+      // the structure is preserved.
+      assert.deepStrictEqual(out, {
+        a: { keep: 1, self: REDACTION_UNSERIALIZABLE_SENTINEL }
+      })
+      // Whatever comes out must serialize.
+      JSON.stringify(out)
+    } finally {
+      console.warn = orig
+    }
+  })
+
+  it('normalizes unsafe leaves inside an otherwise JSON-safe result', () => {
+    // Deep substitution preserves the JSON-safe structure around an
+    // unsafe leaf instead of rejecting the whole result.
+    const orig = console.warn
+    console.warn = () => {}
+    try {
+      const out = applyRedactions(
+        { a: 'v' },
+        [{ path: 'a', redact: () => ({ ok: 1, bad: undefined, list: [1, BigInt(2)] }) }],
+        'test/contract'
+      )
+      assert.deepStrictEqual(out, {
+        a: {
+          ok: 1,
+          bad: REDACTION_UNSERIALIZABLE_SENTINEL,
+          list: [1, REDACTION_UNSERIALIZABLE_SENTINEL]
+        }
+      })
+    } finally {
+      console.warn = orig
+    }
+  })
+
+  it('passes JSON-safe redactor results through unchanged', () => {
+    const out = applyRedactions(
+      { a: 'v' },
+      [{ path: 'a', redact: () => ({ s: 'x', n: 0, b: false, nil: null, arr: [1] }) }],
+      'test/contract'
+    )
+    assert.deepStrictEqual(out, { a: { s: 'x', n: 0, b: false, nil: null, arr: [1] } })
+  })
+
+  it('does not let a redactor corrupt site bookkeeping by mutating the path', () => {
+    // The callback receives a disposable copy: mutating it must not
+    // change where the site is recorded (or where the marker later
+    // resolves).
+    const sites: RedactionSiteMap = new Map()
+    const out = applyRedactions(
+      { a: { b: 'secret' } },
+      [{
+        path: 'a.b',
+        redact: (v: unknown, path: string[]) => {
+          path.reverse()
+          path.push('EXTRA')
+          return '[R]'
+        }
+      }],
+      'test/contract',
+      sites
+    )
+    assert.deepStrictEqual(out, { a: { b: '[R]' } })
+    assert.deepStrictEqual([...sites.keys()], ['/a/b'])
+  })
+
   it('does not mutate the input', () => {
     const before = { a: { b: 'secret' } }
     const snapshot = JSON.parse(JSON.stringify(before))
@@ -464,9 +574,7 @@ describe('journal: applyRedactions', () => {
     assert.deepStrictEqual([...sites.keys()], ['/a~1b/0/c~0d'])
   })
 
-  it('keeps the first original and the last replacement for overlapping directives', () => {
-    // The second redactor sees the first one's output, so only the first
-    // `original` is the true pre-redaction value.
+  it('keeps the raw original and the last replacement for overlapping directives', () => {
     const sites: RedactionSiteMap = new Map()
     applyRedactions(
       { a: 'raw' },
@@ -480,6 +588,23 @@ describe('journal: applyRedactions', () => {
     assert.deepStrictEqual([...sites.entries()], [
       ['/a', { original: 'raw', replacement: 'second' }]
     ])
+  })
+
+  it('captures an ancestor original before an earlier leaf redaction', () => {
+    const sites: RedactionSiteMap = new Map()
+    applyRedactions(
+      { a: { secret: 'raw' } },
+      [
+        { path: 'a.secret', redact: () => '[HIDDEN]' },
+        { path: 'a', redact: () => '[WHOLE]' }
+      ],
+      'test/contract',
+      sites
+    )
+    assert.deepStrictEqual(sites.get('/a'), {
+      original: { secret: 'raw' },
+      replacement: '[WHOLE]'
+    })
   })
 
   it('does not record sites for paths that do not exist', () => {
@@ -685,6 +810,104 @@ describe('journal: synthesizeRedactedChangeOps', () => {
     assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
   })
 
+  // A redactor that reshapes its container: the source leaf
+  // `/profile/name` is projected to `/profile`, so projected and source
+  // pointer paths stop corresponding.
+  const reshapingRedactions: JournalRedaction[] = [{
+    path: 'a',
+    redact: (v: unknown) => {
+      const profile = (v as { profile: { name: string } }).profile
+      return { profile: profile.name }
+    }
+  }]
+
+  it('marks a hidden deletion under a reshaping container redactor', () => {
+    // Regression: the visible `/a/profile` op used to be treated as
+    // covering the original descendant `/a/profile/secret`, silently
+    // dropping the marker for the deletion.
+    const before = { a: { profile: { name: 'Alice', secret: 'old' } } }
+    const after = { a: { profile: { name: 'Bob' } } }
+    const { patch, redactedBefore, redactedAfter } = runPipeline(
+      before, after, reshapingRedactions
+    )
+    assert.deepStrictEqual(patch, [
+      { op: 'replace', path: '/a/profile', value: 'Bob' },
+      { op: 'replace', path: '/a', value: { profile: 'Bob' }, redacted: true }
+    ])
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
+  })
+
+  it('marks a hidden addition under a reshaping container redactor', () => {
+    const before = { a: { profile: { name: 'Alice' } } }
+    const after = { a: { profile: { name: 'Bob', secret: 'new' } } }
+    const { patch, redactedBefore, redactedAfter } = runPipeline(
+      before, after, reshapingRedactions
+    )
+    assert.deepStrictEqual(patch, [
+      { op: 'replace', path: '/a/profile', value: 'Bob' },
+      { op: 'replace', path: '/a', value: { profile: 'Bob' }, redacted: true }
+    ])
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
+  })
+
+  it('conservatively marks when a lossy projection changed but hidden parts cannot be verified', () => {
+    // Only `profile.name` changed and `secret` stayed put, but the
+    // reshaping projection provides no way to verify that. The extra
+    // identity marker is noise; a suppressed one would lose information.
+    const before = { a: { profile: { name: 'Alice', secret: 'same' } } }
+    const after = { a: { profile: { name: 'Bob', secret: 'same' } } }
+    const { patch, redactedBefore, redactedAfter } = runPipeline(
+      before, after, reshapingRedactions
+    )
+    assert.deepStrictEqual(patch, [
+      { op: 'replace', path: '/a/profile', value: 'Bob' },
+      { op: 'replace', path: '/a', value: { profile: 'Bob' }, redacted: true }
+    ])
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
+  })
+
+  it('keeps markers JSON-safe when a redactor returns undefined', () => {
+    // `() => undefined` is the natural "erase the value" redactor. It used
+    // to produce `value: undefined` markers that lose their `value` member
+    // in JSON persistence, after which reconstruct rejects the patch.
+    const orig = console.warn
+    console.warn = () => {}
+    try {
+      const { patch, redactedBefore, redactedAfter } = runPipeline(
+        { s: 'raw1' }, { s: 'raw2' },
+        [{ path: 's', redact: () => undefined }]
+      )
+      assert.strictEqual(patch.length, 1)
+      assert.strictEqual(patch[0].redacted, true)
+      assert.strictEqual(
+        (patch[0] as { value: unknown }).value,
+        REDACTION_UNSERIALIZABLE_SENTINEL
+      )
+      const persisted = JSON.parse(JSON.stringify(patch)) as JournalPatch[]
+      assert.deepStrictEqual(persisted, patch)
+      assert.deepStrictEqual(
+        defaultApplyPatch(redactedBefore, persisted),
+        redactedAfter
+      )
+    } finally {
+      console.warn = orig
+    }
+  })
+
+  it('still marks hidden changes when a redactor mutates its path argument', () => {
+    const { patch, redactedBefore, redactedAfter } = runPipeline(
+      { a: { b: 'raw1' } }, { a: { b: 'raw2' } },
+      [{
+        path: 'a.b',
+        redact: (v: unknown, path: string[]) => { path.reverse(); return '[R]' }
+      }]
+    )
+    assert.deepStrictEqual(patch, [
+      { op: 'replace', path: '/a/b', value: '[R]', redacted: true }
+    ])
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
+  })
+
   it('marks a change hidden by a constant leaf redactor', () => {
     const before = { k: { a: { id: 'a', data: 'SECRET-1' } } }
     const after = { k: { a: { id: 'a', data: 'SECRET-2' } } }
@@ -716,9 +939,7 @@ describe('journal: synthesizeRedactedChangeOps', () => {
     assert.deepStrictEqual(patch, [])
   })
 
-  it('overlapping directives are order-sensitive: ancestor first still marks', () => {
-    // The ancestor directive replaces the subtree wholesale and captures the
-    // true pre-redaction original, so its marker survives.
+  it('marks overlapping directives when the ancestor runs first', () => {
     const before = { k: { a: { id: 'a', data: 'SECRET-1' } } }
     const after = { k: { a: { id: 'a', data: 'SECRET-2' } } }
     const { patch, redactedBefore, redactedAfter } = runPipeline(before, after, [
@@ -731,19 +952,17 @@ describe('journal: synthesizeRedactedChangeOps', () => {
     assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
   })
 
-  it('overlapping directives are order-sensitive: leaf first marks nothing', () => {
-    // Documented hazard: with the leaf directive first, the inner site is no
-    // longer reachable in the projection and the ancestor site recorded an
-    // already-partially-redacted original, so the change is invisible. Kept
-    // on purpose rather than silently "fixed" — redaction paths should not
-    // overlap.
+  it('marks overlapping directives when the leaf runs first', () => {
     const before = { k: { a: { id: 'a', data: 'SECRET-1' } } }
     const after = { k: { a: { id: 'a', data: 'SECRET-2' } } }
-    const { patch } = runPipeline(before, after, [
+    const { patch, redactedBefore, redactedAfter } = runPipeline(before, after, [
       { path: 'k.*.data', redact: () => '[HIDDEN]' },
       { path: 'k.*', redact: () => '[WHOLE]' }
     ])
-    assert.deepStrictEqual(patch, [])
+    assert.deepStrictEqual(patch, [
+      { op: 'replace', path: '/k/a', value: '[WHOLE]', redacted: true }
+    ])
+    assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
   })
 
   it('stays linear when every key has a hidden and a visible change', () => {
@@ -849,6 +1068,34 @@ describe('journal: hasHiddenChange', () => {
     const before = site({ id: 'a', data: 'SAME', ring: 1 }, { id: 'a', data: '[R]', ring: 1 })
     const after = site({ id: 'a', data: 'SAME', ring: 2 }, { id: 'a', data: '[R]', ring: 2 })
     assert.strictEqual(hasHiddenChange(before, after), false)
+  })
+
+  it('reports a hidden deletion a reshaping projection shadows', () => {
+    // Projection `(v) => ({ profile: v.profile.name })`: the visible
+    // `/profile` op reflects the name change but says nothing about the
+    // deleted `/profile/secret`. Projected and source pointer spaces do
+    // not correspond, so the ancestor op must not count as coverage.
+    const before = site(
+      { profile: { name: 'Alice', secret: 'old' } },
+      { profile: 'Alice' }
+    )
+    const after = site(
+      { profile: { name: 'Bob' } },
+      { profile: 'Bob' }
+    )
+    assert.strictEqual(hasHiddenChange(before, after), true)
+  })
+
+  it('reports a hidden addition a reshaping projection shadows', () => {
+    const before = site(
+      { profile: { name: 'Alice' } },
+      { profile: 'Alice' }
+    )
+    const after = site(
+      { profile: { name: 'Bob', secret: 'new' } },
+      { profile: 'Bob' }
+    )
+    assert.strictEqual(hasHiddenChange(before, after), true)
   })
 })
 
