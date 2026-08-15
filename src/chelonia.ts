@@ -1918,6 +1918,39 @@ export default sbp('sbp/selectors/register', {
       })
       .then(handleFetchResult('json'))
   },
+  // Resolves a registered name (e.g., a username) to a contract ID.
+  // A 404 means that the name isn't registered (or a 410 that the mapping
+  // was deleted), and both are reported as `null` rather than as errors.
+  'chelonia/out/nameToContractID': async function (
+    this: CheloniaContext,
+    name: string
+  ): Promise<string | null> {
+    if (!name) {
+      throw new TypeError('A name must be provided')
+    }
+    const response = await this.config.fetch(
+      `${this.config.connectionURL}/name/${encodeURIComponent(name)}`,
+      {
+        cache: 'no-store',
+        signal: this.abortController.signal
+      }
+    )
+    // 404 means the name was never registered; 410 means the mapping was
+    // deleted (e.g. the account was). Both are reported as `null`: from
+    // the caller's perspective there simply is no current mapping, and
+    // deliberately no ChelErrorResourceGone is thrown (unlike
+    // handleFetchResult) because names have no distinct "gone" state.
+    if (response.status === 404 || response.status === 410) return null
+    if (!response.ok) {
+      const msg = `${response.status}: ${response.statusText}`
+      throw new ChelErrorUnexpectedHttpResponseCode(msg, { cause: response.status })
+    }
+    // Contract IDs are CID strings and never contain whitespace, so
+    // trimming guards against proxies that append newlines / BOMs. An
+    // empty body is treated as an absent mapping, same as 404.
+    const value = (await response.text()).trim()
+    return value !== '' ? value : null
+  },
   'chelonia/out/deserializedHEAD': async function (
     this: CheloniaContext, hash: string, { contractID }: { contractID?: string } = {}
   ) {

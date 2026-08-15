@@ -1,0 +1,122 @@
+import sbp from '@sbp/sbp'
+import * as assert from 'node:assert'
+import { afterEach, beforeEach, describe, it } from 'node:test'
+
+import './chelonia.js'
+import { ChelErrorUnexpectedHttpResponseCode } from './errors.js'
+import type { CheloniaConfig } from './types.js'
+
+type FetchOptions = { cache?: string; signal?: AbortSignal };
+
+const configureWithFetch = (
+  fetchImpl: (url: string, opts?: FetchOptions) => Promise<Response>
+) => {
+  sbp('chelonia/configure', {
+    connectionURL: 'https://example.test',
+    fetch: fetchImpl
+  } as Partial<CheloniaConfig>)
+}
+
+describe('chelonia/out/nameToContractID', () => {
+  beforeEach(() => {
+    sbp('chelonia/_init')
+  })
+
+  // `_init` rebuilds the default config (fetch passthrough, unset
+  // connectionURL), so the stubbed `fetch` cannot leak into
+  // subsequently-imported test files. Within this file the next test's
+  // beforeEach would do this anyway; this call only matters after the
+  // final test. (A snapshot/restore via `chelonia/config` isn't possible:
+  // it deep-clones the config, which throws on a fresh one because the
+  // default `connectionURL` is a throwing getter.)
+  afterEach(() => {
+    sbp('chelonia/_init')
+  })
+
+  it('resolves a registered name to a contract ID', async () => {
+    const contractID = 'z9MzZR5EnJnHzQ7VXPjEDJbpBb4W2J9fQ7bYnF9Jg3FwN'
+    const seen: Array<{ url: string; cache?: string; hasSignal: boolean }> = []
+    configureWithFetch(async (url, opts) => {
+      seen.push({ url, cache: opts?.cache, hasSignal: !!opts?.signal })
+      return new Response(contractID, { status: 200 })
+    })
+
+    const result = await sbp('chelonia/out/nameToContractID', 'alice')
+    assert.strictEqual(result, contractID)
+    assert.strictEqual(seen.length, 1)
+    assert.strictEqual(seen[0].url, 'https://example.test/name/alice')
+    assert.strictEqual(seen[0].cache, 'no-store')
+    assert.ok(seen[0].hasSignal)
+  })
+
+  it('percent-encodes names with reserved characters', async () => {
+    const seen: string[] = []
+    configureWithFetch(async (url) => {
+      seen.push(url)
+      return new Response('some-contract-id', { status: 200 })
+    })
+
+    await sbp('chelonia/out/nameToContractID', 'alice smith/bob?x=1&y=2')
+    assert.deepStrictEqual(seen, [
+      'https://example.test/name/alice%20smith%2Fbob%3Fx%3D1%26y%3D2'
+    ])
+  })
+
+  it('returns null when the name is not registered (404)', async () => {
+    configureWithFetch(async () => new Response('Not Found', { status: 404 }))
+
+    const result = await sbp('chelonia/out/nameToContractID', 'mallory')
+    assert.strictEqual(result, null)
+  })
+
+  it('returns null when the mapping was deleted (410)', async () => {
+    configureWithFetch(async () => new Response('Gone', {
+      status: 410,
+      statusText: 'Gone'
+    }))
+
+    const result = await sbp('chelonia/out/nameToContractID', 'alice')
+    assert.strictEqual(result, null)
+  })
+
+  it('trims whitespace around the returned contract ID', async () => {
+    const contractID = 'z9MzZR5EnJnHzQ7VXPjEDJbpBb4W2J9fQ7bYnF9Jg3FwN'
+    configureWithFetch(async () => new Response(`\n  ${contractID}  \n`, {
+      status: 200
+    }))
+
+    const result = await sbp('chelonia/out/nameToContractID', 'alice')
+    assert.strictEqual(result, contractID)
+  })
+
+  it('returns null for an empty 200 body', async () => {
+    configureWithFetch(async () => new Response('', { status: 200 }))
+
+    const result = await sbp('chelonia/out/nameToContractID', 'alice')
+    assert.strictEqual(result, null)
+  })
+
+  it('throws ChelErrorUnexpectedHttpResponseCode on other failed statuses', async () => {
+    configureWithFetch(async () => new Response('Internal Server Error', {
+      status: 500,
+      statusText: 'Internal Server Error'
+    }))
+
+    await assert.rejects(
+      () => sbp('chelonia/out/nameToContractID', 'alice'),
+      (e: unknown) =>
+        e instanceof ChelErrorUnexpectedHttpResponseCode &&
+        e.message === '500: Internal Server Error' &&
+        e.cause === 500
+    )
+  })
+
+  it('throws a TypeError when no name is provided', async () => {
+    configureWithFetch(async () => new Response('', { status: 200 }))
+
+    await assert.rejects(
+      () => sbp('chelonia/out/nameToContractID', ''),
+      TypeError
+    )
+  })
+})

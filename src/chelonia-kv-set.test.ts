@@ -1,7 +1,7 @@
 import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert'
-import { beforeEach, describe, it } from 'node:test'
+import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
@@ -39,6 +39,13 @@ const setupContract = (): { contractID: string; signingKeyId: string } => {
 
 describe('chelonia/kv/set', () => {
   beforeEach(() => {
+    sbp('chelonia/_init')
+  })
+
+  // Re-init after the last test so the stubbed `fetch` doesn't leak into
+  // subsequently-imported test files (`_init` rebuilds the default
+  // config; the next test's beforeEach would do this anyway).
+  afterEach(() => {
     sbp('chelonia/_init')
   })
 
@@ -349,6 +356,11 @@ describe('chelonia/kv/set', () => {
 
 describe('chelonia/kv/get', () => {
   beforeEach(() => {
+    sbp('chelonia/_init')
+  })
+
+  // Same leak-prevention as the `chelonia/kv/set` block above.
+  afterEach(() => {
     sbp('chelonia/_init')
   })
 
