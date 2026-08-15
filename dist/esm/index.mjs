@@ -1,6 +1,7 @@
 import db from './db.mjs';
 import files from './files.mjs';
 import journal from './journal.mjs';
+import keys from './keys.mjs';
 import kv from './kv.mjs';
 import persistentActions from './persistent-actions.mjs';
 // Last because this implicitly locks the domain
@@ -15,6 +16,7 @@ export * from './errors.mjs';
 export * from './events.mjs';
 export * from './files.mjs';
 export * from './journal.mjs';
+export * from './keys.mjs';
 export * from './kv-constants.mjs';
 export * from './kv.mjs';
 export * from './persistent-actions.mjs';
@@ -25,4 +27,4 @@ export * from './types.mjs';
 export * from './utils.mjs';
 export * from './zkpp.mjs';
 export * from './zkppConstants.mjs';
-export default [...chelonia, ...db, ...files, ...journal, ...kv, ...persistentActions];
+export default [...chelonia, ...db, ...files, ...journal, ...keys, ...kv, ...persistentActions];

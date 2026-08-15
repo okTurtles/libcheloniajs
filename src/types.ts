@@ -498,6 +498,9 @@ export type ChelFileManifest = {
   alternatives?: Record<string, { type?: string; meta?: unknown; size: number }>;
 };
 
+// Processed form of a contract key as it lives in `_vm.authorizedKeys`.
+// Extends the authored wire form with fields computed during message
+// processing (`_notBeforeHeight`, `_notAfterHeight`, `_private`).
 export type ChelContractKey = {
   id: string;
   name: string;
@@ -509,12 +512,18 @@ export type ChelContractKey = {
   _notAfterHeight?: number | undefined;
   _private?: string;
   foreignKey?: string;
+  // After processing, `meta.private.content` is usually the serialized
+  // (JSON array) form of the authored `EncryptedData<string>` — an
+  // `[encryptionKeyId, ciphertext]` tuple (see `isRawEncryptedData`) — but
+  // it can also be a live `EncryptedData<string>` wrapper, because
+  // `updateKey` stores an incoming update's metadata by reference after
+  // OP_KEY_UPDATE processing.
   meta?: {
     quantity?: number;
     expires?: number;
     private?: {
       transient?: boolean;
-      content?: string;
+      content?: [string, string] | EncryptedData<string>;
       shareable?: boolean;
       oldKeys?: string;
     };

@@ -1,0 +1,990 @@
+"use strict";
+// Declarative, name-addressed key API.
+//
+// This module layers a spec-driven vocabulary on top of the existing
+// `chelonia/out/*` key operations without changing the Shelter wire format
+// (see docs/specs/KEYS-API.md and docs/specs/KEYS-API-IMPLEMENTATION.md).
+//
+// Everything in the first half of this file (types, markers, normalization,
+// `expandKeySpecs`, `expandKeyUpdateSpecs`, reference resolution) is pure
+// with respect to Chelonia/SBP: contract state is passed in explicitly and
+// no selector is called. The `EncryptedData` wrappers it produces are lazy,
+// so encryption (and any state lookup it needs) happens at serialization
+// time, not at expansion time. The selectors at the bottom (`chelonia/key/
+// generate`, `chelonia/key/rotate`) wire the pure engine into Chelonia's
+// root state and secret storage.
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.storeGeneratedSecretKeys = exports.expandKeyUpdateSpecs = exports.expandKeySpecs = exports.resolveStateKeyReference = exports.resolveGeneratedKeyReference = exports.normalizeKeyUpdateSpecs = exports.normalizeKeySpecs = exports.INVITE_KEY_NAME = exports.SAK_NAME = exports.isKeyUpdateSpec = exports.keyUpdateSpec = exports.isKeySpec = exports.keySpec = void 0;
+const crypto_1 = require("@chelonia/crypto");
+const sbp_1 = __importDefault(require("@sbp/sbp"));
+const SPMessage_js_1 = require("./SPMessage.cjs");
+const encryptedData_js_1 = require("./encryptedData.cjs");
+const errors_js_1 = require("./errors.cjs");
+const Secret_js_1 = require("./Secret.cjs");
+const utils_js_1 = require("./utils.cjs");
+// ---------------------------------------------------------------------------
+// Markers (prototype tags, same technique as EncryptedData — never instanceof)
+// ---------------------------------------------------------------------------
+const keySpecProto = Object.create(null, {
+    _isKeySpec: { value: true }
+});
+const keyUpdateSpecProto = Object.create(null, {
+    _isKeyUpdateSpec: { value: true }
+});
+// Marker factory for the array form of key specs. The alias is a
+// caller-chosen label (the record-key equivalent in map form), used in the
+// returned `KeyMap`, `encryptWith`, and name-based registration fields; it
+// may differ from the spec's wire `name`.
+const keySpec = (alias, spec = {}) => {
+    if (!alias || typeof alias !== 'string') {
+        throw new TypeError('keySpec: alias must be a non-empty string');
+    }
+    return Object.setPrototypeOf({ ...spec, alias }, keySpecProto);
+};
+exports.keySpec = keySpec;
+const isKeySpec = (value) => !!value && !!Object.getPrototypeOf(value)?._isKeySpec;
+exports.isKeySpec = isKeySpec;
+// Marker factory for the array form of key update specs. The alias is a
+// caller-chosen label, not the wire name; use `oldKeyName`/`oldKeyId` (or
+// rely on the alias defaulting to `oldKeyName`) to select the key.
+const keyUpdateSpec = (alias, spec = {}) => {
+    if (!alias || typeof alias !== 'string') {
+        throw new TypeError('keyUpdateSpec: alias must be a non-empty string');
+    }
+    return Object.setPrototypeOf({ ...spec, alias }, keyUpdateSpecProto);
+};
+exports.keyUpdateSpec = keyUpdateSpec;
+const isKeyUpdateSpec = (value) => !!value && !!Object.getPrototypeOf(value)
+    ?._isKeyUpdateSpec;
+exports.isKeyUpdateSpec = isKeyUpdateSpec;
+// ---------------------------------------------------------------------------
+// Reserved names / conventions
+// ---------------------------------------------------------------------------
+exports.SAK_NAME = '#sak';
+exports.INVITE_KEY_NAME = '#inviteKey';
+const KNOWN_RESERVED_PREFIXES = ['#sak', '#inviteKey', '#krrk'];
+const isReservedName = (name) => name.startsWith('#');
+const isKnownReservedName = (name) => KNOWN_RESERVED_PREFIXES.some((prefix) => name === prefix || name.startsWith(prefix + '-'));
+const isInviteName = (name) => name === exports.INVITE_KEY_NAME || name.startsWith(exports.INVITE_KEY_NAME + '-');
+const typeSupportsPurpose = (type, purpose) => {
+    if (purpose === 'enc')
+        return type === crypto_1.CURVE25519XSALSA20POLY1305;
+    return type === crypto_1.EDWARDS25519SHA512BATCH;
+};
+const inferTypeFromPurpose = (purpose) => {
+    const hasEnc = purpose.includes('enc');
+    const hasSigOrSak = purpose.includes('sig') || purpose.includes('sak');
+    if (hasEnc && hasSigOrSak) {
+        throw new errors_js_1.ChelErrorKeySpecInvalid(`Cannot infer a key type for purpose ${JSON.stringify(purpose)}: ` +
+            "'enc' requires a curve key and 'sig'/'sak' require an edwards key");
+    }
+    if (hasEnc)
+        return crypto_1.CURVE25519XSALSA20POLY1305;
+    if (hasSigOrSak)
+        return crypto_1.EDWARDS25519SHA512BATCH;
+    throw new errors_js_1.ChelErrorKeySpecInvalid(`Cannot infer a key type for empty purpose ${JSON.stringify(purpose)}`);
+};
+const defaultPurposeForType = (type) => type === crypto_1.CURVE25519XSALSA20POLY1305 ? ['enc'] : ['sig'];
+// Normalize the object and (marked) array forms into an ordered list of
+// `{ alias, spec }` entries. Rejects duplicate aliases and unmarked array
+// entries.
+const normalizeKeySpecs = (input) => {
+    const entries = [];
+    const seen = new Set();
+    if (Array.isArray(input)) {
+        for (const item of input) {
+            if (!(0, exports.isKeySpec)(item)) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid('Array key specs must be created with keySpec(alias, spec); ' +
+                    'found an unmarked entry. Raw SPKey objects may be mixed in at the ' +
+                    'selector level, not inside the spec list.');
+            }
+            if (seen.has(item.alias)) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Duplicate key spec alias: ${item.alias}`);
+            }
+            seen.add(item.alias);
+            entries.push({ alias: item.alias, spec: item });
+        }
+    }
+    else {
+        if (input == null || typeof input !== 'object') {
+            throw new TypeError('keys must be a KeySpecMap object or an array of keySpec() entries');
+        }
+        for (const [alias, spec] of Object.entries(input)) {
+            if (!alias) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid('Empty key spec alias');
+            }
+            if (seen.has(alias)) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Duplicate key spec alias: ${alias}`);
+            }
+            seen.add(alias);
+            entries.push({ alias, spec });
+        }
+    }
+    return entries;
+};
+exports.normalizeKeySpecs = normalizeKeySpecs;
+const normalizeKeyUpdateSpecs = (input) => {
+    const entries = [];
+    const seen = new Set();
+    if (Array.isArray(input)) {
+        for (const item of input) {
+            if (!(0, exports.isKeyUpdateSpec)(item)) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid('Array key update specs must be created with keyUpdateSpec(alias, spec)');
+            }
+            if (seen.has(item.alias)) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Duplicate key update spec alias: ${item.alias}`);
+            }
+            seen.add(item.alias);
+            entries.push({ alias: item.alias, spec: item });
+        }
+    }
+    else {
+        if (input == null || typeof input !== 'object') {
+            throw new TypeError('updates must be a KeyUpdateSpecMap object or an array of keyUpdateSpec() entries');
+        }
+        for (const [alias, spec] of Object.entries(input)) {
+            if (!alias) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid('Empty key update spec alias');
+            }
+            if (seen.has(alias)) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Duplicate key update spec alias: ${alias}`);
+            }
+            seen.add(alias);
+            entries.push({ alias, spec });
+        }
+    }
+    return entries;
+};
+exports.normalizeKeyUpdateSpecs = normalizeKeyUpdateSpecs;
+// ---------------------------------------------------------------------------
+// Key-reference resolution (§2.7 of the implementation plan)
+// ---------------------------------------------------------------------------
+const findGeneratedKeyByAliasOrName = (keyMap, name, label) => {
+    const byAlias = keyMap[name];
+    if (byAlias)
+        return byAlias.id;
+    const byWireName = Object.values(keyMap).find((k) => k.name === name);
+    if (byWireName)
+        return byWireName.id;
+    throw new errors_js_1.ChelErrorKeyNameNotFound(`${label}: unknown key name '${name}'`);
+};
+// Resolve an id/name pair against a generated `KeyMap`. Names resolve against
+// both the caller aliases and the final wire names. Returns the key id, or
+// the passed-through id value (`string | null | undefined`) when no reference
+// was given and none is required.
+const resolveGeneratedKeyReference = (keyMap, id, name, label, required = true) => {
+    if (id == null && name == null) {
+        if (required) {
+            throw new TypeError(`${label}: either a key ID or a key name must be provided`);
+        }
+        return id;
+    }
+    if (id != null) {
+        if (name != null) {
+            const resolved = findGeneratedKeyByAliasOrName(keyMap, name, label);
+            if (resolved !== id) {
+                throw new errors_js_1.ChelErrorKeyNameNotFound(`${label}: key name '${name}' resolves to ${resolved} but key ID ${id} was given`);
+            }
+        }
+        return id;
+    }
+    return findGeneratedKeyByAliasOrName(keyMap, name, label);
+};
+exports.resolveGeneratedKeyReference = resolveGeneratedKeyReference;
+// Resolve an id/name pair against a contract state. Names resolve to the
+// current unrevoked key with that name. A mismatch between a provided id and
+// the resolved name is an error (almost certainly a stale key or a bug).
+const resolveStateKeyReference = (state, id, name, label, required = true) => {
+    if (id == null && name == null) {
+        if (required) {
+            throw new TypeError(`${label}: either a key ID or a key name must be provided`);
+        }
+        return id;
+    }
+    if (id != null) {
+        if (name != null) {
+            const currentId = state && (0, utils_js_1.findKeyIdByName)(state, name);
+            if (currentId !== id) {
+                throw new errors_js_1.ChelErrorKeyNameNotFound(`${label}: key name '${name}' resolves to ${String(currentId)} ` +
+                    `but key ID ${id} was given`);
+            }
+        }
+        return id;
+    }
+    if (!state) {
+        throw new errors_js_1.ChelErrorKeyNameNotFound(`${label}: cannot resolve key name '${name}' because the contract state ` +
+            'is not loaded');
+    }
+    const currentId = (0, utils_js_1.findKeyIdByName)(state, name);
+    if (!currentId) {
+        throw new errors_js_1.ChelErrorKeyNameNotFound(`${label}: no active key with name '${name}' in contract state`);
+    }
+    return currentId;
+};
+exports.resolveStateKeyReference = resolveStateKeyReference;
+// Extract the wrapping key id from a `meta.private.content` value, which may
+// be a live `EncryptedData` wrapper (outgoing direction) or its serialized
+// tuple form (processed contract state).
+const contentWrapperId = (content) => {
+    if (content == null)
+        return undefined;
+    const raw = (0, encryptedData_js_1.isEncryptedData)(content) ? content.serialize() : content;
+    if (raw == null)
+        return undefined;
+    return (0, encryptedData_js_1.encryptedDataKeyId)(raw);
+};
+const expandKeySpecs = (params) => {
+    const { context } = params;
+    const entries = (0, exports.normalizeKeySpecs)(params.keys);
+    const getContractState = context?.getContractState;
+    const materialized = [];
+    const byFinalName = new Map();
+    const byId = new Map();
+    const register = (m) => {
+        if (byFinalName.has(m.finalName)) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Duplicate final key name: ${m.finalName}`);
+        }
+        if (byId.has(m.id)) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Duplicate key ID ${m.id} (generated for both '${byId.get(m.id).alias}' ` +
+                `and '${m.alias}')`);
+        }
+        byFinalName.set(m.finalName, m);
+        byId.set(m.id, m);
+    };
+    // --- stages 1-5: normalize, apply conventions, materialize keys ---------
+    for (const { alias, spec } of entries) {
+        const wireName = spec.name ?? alias;
+        if (!wireName || typeof wireName !== 'string') {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Invalid key name for alias '${alias}'`);
+        }
+        if (isReservedName(wireName) && !isKnownReservedName(wireName)) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Unknown reserved key name '${wireName}': the '#' namespace is ` +
+                `limited to ${KNOWN_RESERVED_PREFIXES.map((p) => p + '*').join(', ')}`);
+        }
+        const isSak = wireName === exports.SAK_NAME;
+        const isInvite = isInviteName(wireName);
+        if (spec.key != null && spec.type != null) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': 'key' and 'type' are mutually exclusive`);
+        }
+        if (spec.key != null && spec.data != null) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': 'key' and 'data' are mutually exclusive ` +
+                '(the public half is derived from the raw key)');
+        }
+        // ---- foreign key built from another contract ---------------------------
+        if (spec.foreignKeyFrom != null) {
+            const [originID, originKeyName] = spec.foreignKeyFrom;
+            if (!originID || !originKeyName) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': foreignKeyFrom must be [contractID, keyName]`);
+            }
+            if (spec.key != null || spec.type != null || spec.data != null) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': foreignKeyFrom cannot be combined with 'key', ` +
+                    "'type' or 'data' (the public half is copied from the origin contract)");
+            }
+            if (spec.encryptWith != null) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': foreignKeyFrom produces no secret material, so ` +
+                    "'encryptWith' cannot be used");
+            }
+            if (!getContractState) {
+                throw new errors_js_1.ChelErrorKeyNameNotFound(`Key spec '${alias}': foreignKeyFrom requires contract state access ` +
+                    `(no state lookup was provided for origin contract ${originID})`);
+            }
+            const originState = getContractState(originID);
+            if (!originState?._vm?.authorizedKeys) {
+                throw new errors_js_1.ChelErrorKeyNameNotFound(`Key spec '${alias}': origin contract ${originID} is not loaded; ` +
+                    'retain and sync it before building foreign keys from it');
+            }
+            const originKeyId = (0, utils_js_1.findKeyIdByName)(originState, originKeyName);
+            if (!originKeyId) {
+                throw new errors_js_1.ChelErrorKeyNameNotFound(`Key spec '${alias}': no active key named '${originKeyName}' in ` +
+                    `origin contract ${originID}`);
+            }
+            const originKey = originState._vm.authorizedKeys[originKeyId];
+            const m = {
+                alias,
+                spec,
+                wireName,
+                finalName: spec.name ?? `${originID}/${originKeyId}`,
+                isSak: false,
+                isInvite: false,
+                purpose: spec.purpose ?? originKey.purpose,
+                ringLevel: requireRingLevel(spec, alias, false, false),
+                permissions: spec.permissions ?? [],
+                allowedActions: spec.allowedActions ?? [],
+                id: originKeyId,
+                data: originKey.data,
+                foreignKey: `shelter:${encodeURIComponent(originID)}` +
+                    `?keyName=${encodeURIComponent(originKeyName)}`,
+                hasSecret: false
+            };
+            materialized.push(m);
+            register(m);
+            continue;
+        }
+        // ---- foreign key given directly as a URI --------------------------------
+        if (spec.foreignKey != null) {
+            if (spec.data == null) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': a direct 'foreignKey' declaration requires 'data' ` +
+                    '(the public half of the origin key)');
+            }
+            if (spec.encryptWith != null) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': a foreign key declaration has no secret material, ` +
+                    "so 'encryptWith' cannot be used");
+            }
+            const m = {
+                alias,
+                spec,
+                wireName,
+                finalName: wireName,
+                isSak: false,
+                isInvite: false,
+                type: deserializeTypeOf(spec.data, alias),
+                purpose: spec.purpose ?? defaultPurposeForType(deserializeTypeOf(spec.data, alias)),
+                ringLevel: requireRingLevel(spec, alias, false, false),
+                permissions: spec.permissions ?? [],
+                allowedActions: spec.allowedActions ?? [],
+                id: (0, crypto_1.keyId)(spec.data),
+                data: spec.data,
+                foreignKey: spec.foreignKey,
+                hasSecret: false
+            };
+            materialized.push(m);
+            register(m);
+            continue;
+        }
+        // ---- #sak convention invariants (fail at authoring time) ---------------
+        if (isSak)
+            validateSakPolicy(spec);
+        // ---- invite conventions --------------------------------------------------
+        if (isInvite && spec.quantity == null && spec.meta?.quantity == null) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': '#inviteKey*' specs require 'quantity'`);
+        }
+        // ---- determine type / key / purpose --------------------------------------
+        let type;
+        let key;
+        let data;
+        if (spec.key != null) {
+            key = spec.key;
+            type = key.type;
+        }
+        else if (spec.data != null) {
+            data = spec.data;
+            type = deserializeTypeOf(data, alias);
+        }
+        else if (spec.type != null) {
+            type = spec.type;
+        }
+        else if (spec.purpose != null && spec.purpose.length > 0) {
+            type = inferTypeFromPurpose(spec.purpose);
+        }
+        else if (isSak || isInvite) {
+            // Convention names default to edwards keys (`#sak` is always an
+            // edwards server-accounting key; invite keys are edwards signing keys).
+            type = crypto_1.EDWARDS25519SHA512BATCH;
+        }
+        else {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': nothing to derive the key from — provide one of ` +
+                "'key', 'type', 'purpose' or 'data'");
+        }
+        if (type !== crypto_1.EDWARDS25519SHA512BATCH &&
+            type !== crypto_1.CURVE25519XSALSA20POLY1305) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': unsupported contract key type '${type}' ` +
+                `(expected ${crypto_1.EDWARDS25519SHA512BATCH} or ${crypto_1.CURVE25519XSALSA20POLY1305})`);
+        }
+        const purpose = isSak
+            ? ['sak']
+            : (spec.purpose ?? defaultPurposeForType(type));
+        for (const p of purpose) {
+            if (!typeSupportsPurpose(type, p)) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': purpose '${p}' is not compatible with key type '${type}'`);
+            }
+        }
+        if (key == null && data == null) {
+            key = (0, crypto_1.keygen)(type);
+        }
+        const id = key != null ? (0, crypto_1.keyId)(key) : (0, crypto_1.keyId)(data);
+        const finalName = isInvite && wireName === exports.INVITE_KEY_NAME
+            ? `${exports.INVITE_KEY_NAME}-${id}`
+            : wireName;
+        const m = {
+            alias,
+            spec,
+            wireName,
+            finalName,
+            isSak,
+            isInvite,
+            type,
+            purpose,
+            ringLevel: requireRingLevel(spec, alias, isSak, isInvite),
+            permissions: spec.permissions ?? [],
+            allowedActions: spec.allowedActions ?? [],
+            ...(key != null && { key }),
+            id,
+            data: data ?? (0, crypto_1.serializeKey)(key, false),
+            ...(spec.encryptWith != null && { wrapWith: spec.encryptWith }),
+            hasSecret: key != null
+        };
+        materialized.push(m);
+        register(m);
+    }
+    const findInSet = (name) => byFinalName.get(name) ?? materialized.find((m) => m.alias === name);
+    const assertEncPurpose = (key, label) => {
+        if (!key || !Array.isArray(key.purpose) || !key.purpose.includes('enc')) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`encryptWith references '${label}', which is not an encryption key`);
+        }
+    };
+    const resolveWrapTarget = (alias, wrapWith) => {
+        if (typeof wrapWith === 'string') {
+            const inSet = findInSet(wrapWith);
+            if (inSet) {
+                assertEncPurpose({ purpose: inSet.purpose }, wrapWith);
+                return { kind: 'set', target: inSet };
+            }
+            // Not in the set: an active key in the target contract (keyAdd /
+            // rotation contexts).
+            if (context?.contractID != null) {
+                const state = context.contractState ?? getContractState?.(context.contractID);
+                const wrapperId = state && (0, utils_js_1.findKeyIdByName)(state, wrapWith);
+                if (wrapperId && state) {
+                    assertEncPurpose(state._vm?.authorizedKeys?.[wrapperId], wrapWith);
+                    return { kind: 'contract', contractID: context.contractID, keyId: wrapperId };
+                }
+            }
+            throw new errors_js_1.ChelErrorKeyNameNotFound(`Key spec '${alias}': encryptWith references '${wrapWith}', which is ` +
+                'neither another key in the same set nor an active key in the target contract');
+        }
+        if ('key' in wrapWith) {
+            if (!wrapWith.key) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': encryptWith was given an empty raw key`);
+            }
+            return { kind: 'rawKey', target: wrapWith.key };
+        }
+        // { contractID, name }
+        const state = getContractState?.(wrapWith.contractID);
+        if (!state?._vm?.authorizedKeys) {
+            throw new errors_js_1.ChelErrorKeyNameNotFound(`Key spec '${alias}': encryptWith references contract ` +
+                `${wrapWith.contractID}, which is not loaded`);
+        }
+        const wrapperId = (0, utils_js_1.findKeyIdByName)(state, wrapWith.name);
+        if (!wrapperId) {
+            throw new errors_js_1.ChelErrorKeyNameNotFound(`Key spec '${alias}': no active key named '${wrapWith.name}' in contract ` +
+                wrapWith.contractID);
+        }
+        assertEncPurpose(state._vm.authorizedKeys[wrapperId], wrapWith.name);
+        return { kind: 'contract', contractID: wrapWith.contractID, keyId: wrapperId };
+    };
+    // Build in-set edges and detect multi-node cycles (self-wrap is valid).
+    const edges = new Map();
+    for (const m of materialized) {
+        if (m.wrapWith == null || typeof m.wrapWith !== 'string')
+            continue;
+        const target = findInSet(m.wrapWith);
+        if (target) {
+            if (!target.hasSecret) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${m.alias}': encryptWith references '${m.wrapWith}', which ` +
+                    'has no secret material to wrap with');
+            }
+            edges.set(m.alias, target.alias);
+        }
+    }
+    detectWrapCycles(edges);
+    const wrapTargets = new Map();
+    for (const m of materialized) {
+        if (m.wrapWith == null)
+            continue;
+        if (!m.hasSecret) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${m.alias}': 'encryptWith' requires secret material, but this ` +
+                'spec produces a public-half-only key');
+        }
+        wrapTargets.set(m.alias, resolveWrapTarget(m.alias, m.wrapWith));
+    }
+    // --- stages 7-9: assemble -------------------------------------------------
+    const keyMap = Object.create(null);
+    for (const m of materialized) {
+        const meta = buildMeta(m, wrapTargets.get(m.alias));
+        const spkey = {
+            id: m.id,
+            name: m.finalName,
+            purpose: m.purpose,
+            ringLevel: m.ringLevel,
+            permissions: m.permissions,
+            allowedActions: m.allowedActions,
+            ...(meta != null && { meta }),
+            data: m.data,
+            ...(m.foreignKey != null && { foreignKey: m.foreignKey })
+        };
+        keyMap[m.alias] = {
+            name: m.finalName,
+            id: m.id,
+            ...(m.key != null && { key: m.key }),
+            spkey
+        };
+    }
+    return keyMap;
+};
+exports.expandKeySpecs = expandKeySpecs;
+const deserializeTypeOf = (data, alias) => {
+    try {
+        return (0, crypto_1.deserializeKey)(data).type;
+    }
+    catch (e) {
+        throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': 'data' is not a valid serialized public key`, { cause: e });
+    }
+};
+const requireRingLevel = (spec, alias, isSak, isInvite) => {
+    if (spec.ringLevel != null)
+        return spec.ringLevel;
+    if (isSak)
+        return 0;
+    if (isInvite)
+        return Number.MAX_SAFE_INTEGER;
+    throw new errors_js_1.ChelErrorKeySpecInvalid(`Key spec '${alias}': 'ringLevel' is required for ordinary key names — ` +
+        'it is a security decision, not a detail');
+};
+// `keyAdditionProcessor` (src/utils.ts) rejects any #sak that violates these
+// invariants at processing time; validating here surfaces the same error at
+// authoring time, at the right stack trace.
+const validateSakPolicy = (spec) => {
+    if (spec.purpose != null &&
+        (spec.purpose.length !== 1 || spec.purpose[0] !== 'sak')) {
+        throw new errors_js_1.ChelErrorKeySpecInvalid("#sak must have exactly one purpose: 'sak'");
+    }
+    if (spec.ringLevel != null && spec.ringLevel !== 0) {
+        throw new errors_js_1.ChelErrorKeySpecInvalid('#sak must have ringLevel 0');
+    }
+    if (spec.permissions === '*' ||
+        (Array.isArray(spec.permissions) && spec.permissions.length > 0)) {
+        throw new errors_js_1.ChelErrorKeySpecInvalid('#sak may not have permissions');
+    }
+    if (spec.allowedActions === '*' ||
+        (Array.isArray(spec.allowedActions) && spec.allowedActions.length > 0)) {
+        throw new errors_js_1.ChelErrorKeySpecInvalid('#sak may not have allowedActions');
+    }
+    if (spec.type != null && spec.type !== crypto_1.EDWARDS25519SHA512BATCH) {
+        throw new errors_js_1.ChelErrorKeySpecInvalid('#sak must be an edwards key');
+    }
+};
+// Build the final `meta` for a materialized spec, merging caller-provided
+// meta under the generated fields (caller meta may add unrelated fields but
+// cannot override generated `content`, `transient` or `shareable`).
+const buildMeta = (m, wrap) => {
+    const callerMeta = m.spec.meta ?? {};
+    const generated = {};
+    if (m.spec.quantity != null)
+        generated.quantity = m.spec.quantity;
+    if (m.spec.expires != null)
+        generated.expires = m.spec.expires;
+    if (m.hasSecret) {
+        const secret = (0, crypto_1.serializeKey)(m.key, true);
+        const priv = {};
+        if (wrap != null) {
+            if (wrap.kind === 'set') {
+                priv.content = (0, encryptedData_js_1.encryptedOutgoingDataWithRawKey)(wrap.target.key, secret);
+            }
+            else if (wrap.kind === 'rawKey') {
+                priv.content = (0, encryptedData_js_1.encryptedOutgoingDataWithRawKey)(wrap.target, secret);
+            }
+            else {
+                priv.content = (0, encryptedData_js_1.encryptedOutgoingData)(wrap.contractID, wrap.keyId, secret);
+            }
+        }
+        if (m.spec.transient === true)
+            priv.transient = true;
+        if (m.spec.shareable === true)
+            priv.shareable = true;
+        if (Object.keys(priv).length > 0)
+            generated.private = priv;
+    }
+    if (Object.keys(generated).length === 0 &&
+        Object.keys(callerMeta).length === 0) {
+        return undefined;
+    }
+    const merged = { ...callerMeta };
+    if (generated.quantity != null)
+        merged.quantity = generated.quantity;
+    if (generated.expires != null)
+        merged.expires = generated.expires;
+    if (generated.private != null || callerMeta.private != null) {
+        merged.private = {
+            ...callerMeta.private,
+            ...(generated.private ?? {})
+        };
+    }
+    if (merged.private != null && Object.keys(merged.private).length === 0) {
+        delete merged.private;
+    }
+    if (Object.keys(merged).length === 0)
+        return undefined;
+    return merged;
+};
+// Detect wrapping cycles involving two or more distinct aliases. Self-wrap
+// (`a -> a`, common for self-encrypted CEKs) is a valid terminal edge: the
+// key's own secret half is encrypted under itself.
+const detectWrapCycles = (edges) => {
+    const state = new Map();
+    const stack = [];
+    const visit = (node) => {
+        const status = state.get(node);
+        if (status === 'done')
+            return;
+        if (status === 'visiting') {
+            const cycleStart = stack.indexOf(node);
+            const cycle = [...stack.slice(cycleStart), node].join(' -> ');
+            throw new errors_js_1.ChelErrorKeyWrapCycle(`Key wrapping cycle detected: ${cycle}`);
+        }
+        state.set(node, 'visiting');
+        stack.push(node);
+        const next = edges.get(node);
+        // A self-edge is terminal and valid; only follow edges to other nodes.
+        if (next != null && next !== node)
+            visit(next);
+        stack.pop();
+        state.set(node, 'done');
+    };
+    for (const node of edges.keys())
+        visit(node);
+};
+// ---------------------------------------------------------------------------
+// Update-spec expansion (work package 7)
+// ---------------------------------------------------------------------------
+const expandKeyUpdateSpecs = (params) => {
+    const { contractID, contractState } = params;
+    const entries = (0, exports.normalizeKeyUpdateSpecs)(params.updates);
+    const authorizedKeys = contractState._vm?.authorizedKeys ?? {};
+    const resolved = [];
+    for (const { alias, spec } of entries) {
+        // The spec alias (record key or `keyUpdateSpec(alias, ...)` name) is the
+        // natural name of the key being updated: when neither `oldKeyId` nor
+        // `oldKeyName` is given, the alias serves as `oldKeyName`. Kept in a
+        // local — expansion must not mutate caller-provided spec objects.
+        const oldKeyName = spec.oldKeyName ?? (spec.oldKeyId == null ? alias : undefined);
+        if (spec.oldKeyId == null && oldKeyName == null) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Key update spec '${alias}': either 'oldKeyId' or 'oldKeyName' must be provided`);
+        }
+        let oldKeyId;
+        if (spec.oldKeyId != null) {
+            oldKeyId = spec.oldKeyId;
+            if (oldKeyName != null) {
+                const byName = (0, utils_js_1.findKeyIdByName)(contractState, oldKeyName);
+                if (byName !== oldKeyId) {
+                    throw new errors_js_1.ChelErrorKeyNameNotFound(`Key update spec '${alias}': oldKeyName '${oldKeyName}' resolves ` +
+                        `to ${String(byName)} but oldKeyId ${oldKeyId} was given`);
+                }
+            }
+        }
+        else {
+            oldKeyId = (0, utils_js_1.findKeyIdByName)(contractState, oldKeyName);
+            if (!oldKeyId) {
+                throw new errors_js_1.ChelErrorKeyNameNotFound(`Key update spec '${alias}': no active key named '${oldKeyName}' ` +
+                    `in contract ${contractID}`);
+            }
+        }
+        const existing = authorizedKeys[oldKeyId];
+        if (!existing) {
+            throw new errors_js_1.ChelErrorKeyNameNotFound(`Key update spec '${alias}': old key ${oldKeyId} does not exist in ` +
+                `contract ${contractID}`);
+        }
+        if (existing._notAfterHeight != null) {
+            throw new errors_js_1.ChelErrorKeyNameNotFound(`Key update spec '${alias}': old key ${oldKeyId} has been revoked`);
+        }
+        if (spec.name != null && spec.name !== existing.name) {
+            throw new errors_js_1.ChelErrorKeyNameNotFound(`Key update spec '${alias}': 'name' is an optional consistency assertion ` +
+                `and '${spec.name}' does not match the existing key name ` +
+                `'${existing.name}' (names cannot be updated; the alias is a label, ` +
+                'select the key with oldKeyName/oldKeyId)');
+        }
+        let newKey;
+        if (spec.rotate === true) {
+            if (spec.key != null) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Key update spec '${alias}': 'rotate' and 'key' are mutually exclusive`);
+            }
+            newKey = (0, crypto_1.keygenOfSameType)(existing.data);
+        }
+        else if (spec.key != null) {
+            newKey = spec.key;
+            if (newKey.type !== (0, crypto_1.deserializeKey)(existing.data).type) {
+                throw new errors_js_1.ChelErrorKeySpecInvalid(`Key update spec '${alias}': replacement key type '${newKey.type}' ` +
+                    'does not match the existing key type');
+            }
+        }
+        resolved.push({
+            alias,
+            spec,
+            existing,
+            oldKeyId,
+            newKey,
+            newId: newKey != null ? (0, crypto_1.keyId)(newKey) : undefined,
+            newData: newKey != null ? (0, crypto_1.serializeKey)(newKey, false) : undefined
+        });
+    }
+    // Second pass: re-wrap secrets. If a key's current wrapper is itself being
+    // replaced in this same set, wrap with the NEW raw key; otherwise wrap
+    // by-id against the contract so a concurrent rotation of the wrapper
+    // still decrypts (the two-case rule, one implementation).
+    const oldIdToNewKey = new Map();
+    for (const r of resolved) {
+        if (r.newKey != null)
+            oldIdToNewKey.set(r.oldKeyId, r.newKey);
+    }
+    const updates = resolved.map((r) => {
+        const { existing, spec } = r;
+        const update = {
+            name: existing.name,
+            oldKeyId: r.oldKeyId
+        };
+        if (r.newKey != null) {
+            update.id = r.newId;
+            update.data = r.newData;
+        }
+        const existingPriv = existing.meta?.private;
+        const existingContent = existingPriv?.content;
+        const wrapperId = contentWrapperId(existingContent);
+        const secret = r.newKey != null ? (0, crypto_1.serializeKey)(r.newKey, true) : undefined;
+        // Explicit `encryptWith` in update specs only accepts a raw key
+        // ({ key }); wrapping under another contract or by name is not
+        // supported for replacements.
+        const explicitRawWrapper = spec.encryptWith != null && typeof spec.encryptWith !== 'string' && 'key' in spec.encryptWith
+            ? spec.encryptWith.key
+            : undefined;
+        if (spec.encryptWith != null && explicitRawWrapper == null) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Key update spec '${r.alias}': 'encryptWith' in update specs only ` +
+                'supports { key } targets');
+        }
+        if (spec.encryptWith != null && secret == null) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`Key update spec '${r.alias}': 'encryptWith' requires a replacement key ` +
+                "('rotate' or 'key')");
+        }
+        const mergedMeta = { ...existing.meta, ...(spec.meta ?? {}) };
+        if (secret != null) {
+            const priv = {
+                ...existingPriv,
+                ...(spec.meta?.private ?? {})
+            };
+            const transient = spec.transient ?? priv.transient === true;
+            if (transient)
+                priv.transient = true;
+            else
+                delete priv.transient;
+            const shareable = spec.shareable ?? priv.shareable === true;
+            if (shareable)
+                priv.shareable = true;
+            else
+                delete priv.shareable;
+            if (explicitRawWrapper != null) {
+                priv.content = (0, encryptedData_js_1.encryptedOutgoingDataWithRawKey)(explicitRawWrapper, secret);
+            }
+            else {
+                const rotatingWrapper = wrapperId != null ? oldIdToNewKey.get(wrapperId) : undefined;
+                if (rotatingWrapper != null) {
+                    priv.content = (0, encryptedData_js_1.encryptedOutgoingDataWithRawKey)(rotatingWrapper, secret);
+                }
+                else if (wrapperId != null) {
+                    priv.content = (0, encryptedData_js_1.encryptedOutgoingData)(contractID, wrapperId, secret);
+                }
+            }
+            if (Object.keys(priv).length > 0)
+                mergedMeta.private = priv;
+            else if (mergedMeta != null)
+                delete mergedMeta.private;
+        }
+        else if (mergedMeta != null) {
+            // Policy-only update: preserve existing private meta (including the
+            // encrypted content, copied verbatim) unless the caller overrides it.
+            if (existingPriv != null || spec.meta?.private != null) {
+                mergedMeta.private = {
+                    ...existingPriv,
+                    ...(spec.meta?.private ?? {})
+                };
+            }
+            // The copied content is the serialized tuple from processed state, not
+            // a live EncryptedData. Without this marker the sender's local
+            // processing (keyAdditionProcessor) would treat it as fresh content
+            // and throw when the sender lacks the target key's secret — the
+            // legacy raw path avoids this by omitting `meta` entirely. Symbols
+            // don't serialize, so remote receivers are unaffected. Only mark when
+            // the content was actually copied: caller-supplied fresh content must
+            // still be processed normally.
+            if (spec.meta?.private?.content == null && existingPriv?.content != null) {
+                Object.defineProperty(mergedMeta, utils_js_1.copiedExistingData, { value: true });
+            }
+        }
+        if (mergedMeta != null && Object.keys(mergedMeta).length > 0) {
+            update.meta = mergedMeta;
+        }
+        if (spec.purpose != null)
+            update.purpose = spec.purpose;
+        if (spec.permissions != null)
+            update.permissions = spec.permissions;
+        if (spec.allowedActions != null)
+            update.allowedActions = spec.allowedActions;
+        return update;
+    });
+    const newKeys = Object.create(null);
+    for (const r of resolved) {
+        if (r.newKey != null) {
+            newKeys[r.existing.name] = { id: r.newId, key: r.newKey };
+        }
+    }
+    return { updates, newKeys };
+};
+exports.expandKeyUpdateSpecs = expandKeyUpdateSpecs;
+// ---------------------------------------------------------------------------
+// Selectors
+// ---------------------------------------------------------------------------
+// Shared helper: store every generated/provided raw key as transient. The
+// storage invocation is transient regardless of `KeySpec.transient`; the
+// spec flag only controls `meta.private.transient` (and therefore eventual
+// persistence when the operation is processed by `keyAdditionProcessor`).
+const storeGeneratedSecretKeys = (ctx, keys) => {
+    const rawKeys = Array.from(keys)
+        .filter((k) => k.key != null)
+        .map((k) => ({ key: k.key, transient: true }));
+    if (rawKeys.length > 0) {
+        (0, sbp_1.default)('chelonia/storeSecretKeys', new Secret_js_1.Secret(rawKeys));
+    }
+};
+exports.storeGeneratedSecretKeys = storeGeneratedSecretKeys;
+exports.default = (0, sbp_1.default)('sbp/selectors/register', {
+    // Two-phase, composable key generation. Expands the given specs against
+    // the (optional) target contract, stores every raw key transiently, and
+    // returns the `KeyMap`. No messages are created or sent.
+    'chelonia/key/generate': function (params) {
+        const rootState = (0, sbp_1.default)(this.config.stateSelector);
+        const contractState = params.contractID != null
+            ? rootState[params.contractID]
+            : undefined;
+        const keyMap = (0, exports.expandKeySpecs)({
+            keys: params.keys,
+            context: {
+                contractID: params.contractID,
+                ...(contractState != null && { contractState }),
+                getContractState: (contractID) => rootState[contractID]
+            }
+        });
+        (0, exports.storeGeneratedSecretKeys)(this, Object.values(keyMap));
+        return keyMap;
+    },
+    // Generic key rotation, promoted from Group Income's rotateKeysInternal.
+    // See docs/keys.md and docs/specs/KEYS-API-IMPLEMENTATION.md §10.3.
+    'chelonia/key/rotate': async function (params) {
+        const { contractID, contractName, names, additionalOperations } = params;
+        const rootState = (0, sbp_1.default)(this.config.stateSelector);
+        const state = rootState[contractID];
+        if (!state?._vm?.authorizedKeys) {
+            throw new Error(`chelonia/key/rotate: contract ${contractID} is not loaded`);
+        }
+        // --- select the keys to rotate -----------------------------------------
+        const pendingRevocations = state._volatile?.pendingKeyRevocations ?? {};
+        const activeKeys = Object.values(state._vm.authorizedKeys).filter((k) => k._notAfterHeight == null);
+        let selected;
+        if (names === '*') {
+            selected = activeKeys;
+        }
+        else if (names === 'pending') {
+            // Entries whose revocation marker is exactly `true` (not 'del')
+            selected = activeKeys.filter((k) => pendingRevocations[k.id] === true);
+        }
+        else {
+            selected = names.map((name) => {
+                const keyId = (0, utils_js_1.findKeyIdByName)(state, name);
+                if (!keyId) {
+                    throw new errors_js_1.ChelErrorKeyNameNotFound(`chelonia/key/rotate: no active key named '${name}' in ${contractID}`);
+                }
+                return state._vm.authorizedKeys[keyId];
+            });
+        }
+        // Only keys whose secret is recoverable (wrapped) and locally available
+        // can be rotated.
+        selected = selected.filter((k) => k.meta?.private?.content != null && (0, sbp_1.default)('chelonia/haveSecretKey', k.id));
+        if (selected.length === 0)
+            return undefined;
+        // --- expand one update set (two-case wrapper handling inside) ----------
+        const updateSpecs = Object.create(null);
+        for (const k of selected) {
+            if (updateSpecs[k.name] == null)
+                updateSpecs[k.name] = { rotate: true };
+        }
+        const { updates, newKeys } = (0, exports.expandKeyUpdateSpecs)({
+            updates: updateSpecs,
+            contractID,
+            contractState: state
+        });
+        (0, exports.storeGeneratedSecretKeys)(this, Object.values(newKeys));
+        // --- choose the signing key ---------------------------------------------
+        const usesAdditionalOps = typeof additionalOperations === 'function';
+        const hasExplicitSigner = params.signingKeyId != null || params.signingKeyName != null;
+        let signingKeyId = hasExplicitSigner
+            ? (0, exports.resolveStateKeyReference)(state, params.signingKeyId ?? null, params.signingKeyName ?? null, 'chelonia/key/rotate signingKey')
+            : undefined;
+        if (signingKeyId == null) {
+            // KEYS-API.md §4.6 step 4: sign at the minimum ringLevel of the rotated
+            // set so the OP_KEY_UPDATE passes validateKeyAddPermissions for every
+            // rotated key.
+            const minRingLevel = Math.min(...selected.map((k) => k.ringLevel));
+            signingKeyId = (0, utils_js_1.findSuitableSecretKeyId)(state, usesAdditionalOps
+                ? [SPMessage_js_1.SPMessage.OP_ATOMIC, SPMessage_js_1.SPMessage.OP_KEY_UPDATE]
+                : [SPMessage_js_1.SPMessage.OP_KEY_UPDATE], ['sig'], minRingLevel) ?? undefined;
+        }
+        if (!signingKeyId) {
+            throw new Error('chelonia/key/rotate: no suitable signing key with OP_KEY_UPDATE ' +
+                `permission in ${contractID}`);
+        }
+        // --- extra operations around the OP_KEY_UPDATE -------------------------
+        const extraOps = await additionalOperations?.(newKeys, {
+            ...(params.lastAttempt != null && { lastAttempt: params.lastAttempt })
+        });
+        const extraBefore = extraOps?.before ?? [];
+        const extraAfter = extraOps?.after ?? [];
+        const hasExtraOps = extraBefore.length > 0 || extraAfter.length > 0;
+        // --- publish -------------------------------------------------------------
+        const oldKeyIds = updates.map((u) => u.oldKeyId);
+        const callerPreSendCheck = params.hooks?.preSendCheck;
+        const hooks = {
+            ...params.hooks,
+            preSendCheck: async (entry, currentState) => {
+                if (callerPreSendCheck != null && !(await callerPreSendCheck(entry, currentState))) {
+                    return false;
+                }
+                // Stale-update suppression: if every old key has already been
+                // revoked by the time we are about to send, skip publishing.
+                const allRevoked = oldKeyIds.every((id) => currentState?._vm?.authorizedKeys?.[id]?._notAfterHeight != null);
+                return !allRevoked;
+            }
+        };
+        let msg;
+        if (!hasExtraOps) {
+            msg = (await (0, sbp_1.default)('chelonia/out/keyUpdate', {
+                contractID,
+                contractName,
+                data: updates,
+                signingKeyId,
+                hooks,
+                publishOptions: params.publishOptions
+            }));
+        }
+        else {
+            const data = [
+                ...extraBefore,
+                ['chelonia/out/keyUpdate', {
+                        contractID,
+                        contractName,
+                        data: updates,
+                        signingKeyId,
+                        atomic: true
+                    }],
+                ...extraAfter
+            ];
+            msg = (await (0, sbp_1.default)('chelonia/out/atomic', {
+                contractID,
+                contractName,
+                signingKeyId,
+                data,
+                hooks,
+                publishOptions: params.publishOptions
+            }));
+        }
+        return { updates, newKeys, msg };
+    }
+});

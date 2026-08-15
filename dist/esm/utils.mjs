@@ -10,7 +10,12 @@ import { CONTRACT_IS_PENDING_KEY_REQUESTS } from './events.mjs';
 import { b64ToStr } from './functions.mjs';
 import { isSignedData } from './signedData.mjs';
 const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10) || Infinity;
-const copiedExistingData = Symbol('copiedExistingData');
+// Marker for key metadata copied verbatim from an existing key on
+// OP_KEY_UPDATE (as opposed to freshly authored content). Symbols don't
+// serialize, so this only affects local (sender-side) processing: copied
+// content must not be re-decrypted/persisted as if it were new. Exported so
+// the spec-form update expansion (src/keys.ts) can apply the same protection.
+export const copiedExistingData = Symbol('copiedExistingData');
 export const findKeyIdByName = (state, name) => state._vm?.authorizedKeys &&
     Object.values(state._vm.authorizedKeys).find((k) => k.name === name && k._notAfterHeight == null)
         ?.id;
@@ -296,6 +301,11 @@ export const keyAdditionProcessor = function (_msg, hash, keys, state, contractI
         // existing key on OP_KEY_UPDATE. These shouldn't be processed.
         if (key.meta?.private?.content && !has(key.meta, copiedExistingData)) {
             if (key.id && !sbp('chelonia/haveSecretKey', key.id, !key.meta.private.transient)) {
+                // At this point `content` is a live `EncryptedData` wrapper: freshly
+                // authored outgoing data, or incoming data re-wrapped by the
+                // deserializer. Copied-from-state tuples are excluded above by the
+                // `copiedExistingData` marker, so the serialized form never reaches
+                // `unwrapMaybeEncryptedData` here.
                 const decryptedKeyResult = this.config.unwrapMaybeEncryptedData(key.meta.private.content);
                 // Ignore data that couldn't be decrypted
                 if (decryptedKeyResult) {

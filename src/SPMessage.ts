@@ -31,6 +31,25 @@ export type SPKeyType =
 
 export type SPKeyPurpose = 'enc' | 'sig' | 'sak';
 
+// Authored form of a contract key: what callers put on the wire. Processed-only
+// fields (`_notBeforeHeight`, `_notAfterHeight`, `_private`) live on
+// `ChelContractKey` (src/types.ts) and are added by `keysToMap()` during
+// message processing.
+export type SPKeyMeta = {
+  quantity?: number;
+  expires?: number;
+  private?: {
+    transient?: boolean;
+    content?: EncryptedData<string>;
+    shareable?: boolean;
+    oldKeys?: string;
+  };
+  keyRequest?: {
+    contractID?: string;
+    reference?: string | EncryptedData<string>;
+  };
+}
+
 export type SPKey = {
   id: string;
   name: string;
@@ -38,25 +57,9 @@ export type SPKey = {
   ringLevel: number;
   permissions: '*' | string[];
   allowedActions?: '*' | string[];
-  meta?: {
-    quantity?: number;
-    expires?: number;
-    private?: {
-      transient?: boolean;
-      content?: EncryptedData<string>;
-      shareable?: boolean;
-      oldKeys?: string;
-    };
-    keyRequest?: {
-      contractID?: string;
-      reference?: string | EncryptedData<string>;
-    };
-  };
+  meta?: SPKeyMeta;
   data: string;
   foreignKey?: string;
-  _notBeforeHeight: number;
-  _notAfterHeight?: number;
-  _private?: string;
 };
 // Allows server to check if the user is allowed to register this type of contract
 // TODO: rename 'type' to 'contractName':
@@ -135,14 +138,16 @@ export type SPKeyUpdate = {
   oldKeyId: string;
   data?: string;
   purpose?: string[];
-  permissions?: string[];
+  permissions?: '*' | string[];
   allowedActions?: '*' | string[];
   meta?: {
     quantity?: number;
     expires?: number;
     private?: {
       transient?: boolean;
-      content?: string;
+      // Authored form carries a lazy `EncryptedData` wrapper; processed form
+      // is its serialized `[eKeyId, ciphertext]` tuple.
+      content?: string | EncryptedData<string>;
       shareable?: boolean;
       oldKeys?: string;
     };

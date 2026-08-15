@@ -390,6 +390,14 @@ operation-specific `data` payload. Each can also be embedded in
 `chelonia/out/atomic` (see next section) by setting `atomic: true` and
 letting the atomic call publish.
 
+Every `signingKeyId` below also accepts a `signingKeyName` twin (resolved
+against the contract's current unrevoked keys), and `chelonia/out/keyAdd`
+additionally accepts declarative `keySpec()` entries — including
+`foreignKeyFrom` construction — expanded against the live contract. For
+generating keys from specs, name-addressed references throughout, generic
+sharing (`chelonia/out/shareKeys`), and rotation
+(`chelonia/key/rotate`), see [`keys.md`](./keys.md).
+
 ### `chelonia/out/keyAdd`
 
 ```js
@@ -715,6 +723,8 @@ await sbp('chelonia/reset', async () => {
 - [`configure.md`](./configure.md) — config surface, hooks, reconfigure
   semantics.
 - [`journal.md`](./journal.md) — per-contract state-change journal.
+- [`keys.md`](./keys.md) — the declarative key API: specs, wrapping,
+  names, sharing, rotation.
 - [`api.md`](./api.md) — flat selector / type / error index.
 - `src/chelonia.ts` — authoritative source for every selector listed
   here.

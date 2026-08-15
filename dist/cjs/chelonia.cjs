@@ -19,6 +19,11 @@ const events_js_1 = require("./events.cjs");
 const SPMessage_js_1 = require("./SPMessage.cjs");
 Object.defineProperty(exports, "SPMessage", { enumerable: true, get: function () { return SPMessage_js_1.SPMessage; } });
 require("./chelonia-utils.cjs");
+// './keys.cjs' registers the key API selectors; it must be imported before
+// the `sbp('sbp/domains/lock', ['chelonia'])` call at the bottom of this
+// module so that direct `@chelonia/lib/chelonia` imports register them too.
+require("./keys.cjs");
+const keys_js_1 = require("./keys.cjs");
 const journal_js_1 = require("./journal.cjs");
 const encryptedData_js_1 = require("./encryptedData.cjs");
 require("./files.cjs");
@@ -1596,11 +1601,42 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     },
     // 'chelonia/out' - selectors that send data out to the server
     'chelonia/out/registerContract': async function (params) {
-        const { contractName, keys, hooks, publishOptions, signingKeyId, actionSigningKeyId, actionEncryptionKeyId } = params;
+        const { contractName, hooks, publishOptions } = params;
         const manifestHash = this.config.contracts.manifests[contractName];
         const contractInfo = this.manifestToContract[manifestHash];
         if (!contractInfo)
             throw new Error(`contract not defined: ${contractName}`);
+        // Spec form is detected by a non-array `keys` record or marked array
+        // entries; plain raw arrays keep the exact legacy behavior (no auto-SAK,
+        // no callbacks, no expansion).
+        const specParams = isSpecRegistration(params) ? params : undefined;
+        let keys;
+        let signingKeyId;
+        let actionSigningKeyId;
+        let actionEncryptionKeyId;
+        let data;
+        if (specParams != null) {
+            const keyMap = await expandRegistrationKeys.call(this, specParams);
+            signingKeyId = (0, keys_js_1.resolveGeneratedKeyReference)(keyMap, specParams.signingKeyId ?? null, specParams.signingKeyName ?? null, 'signingKey');
+            actionSigningKeyId = (0, keys_js_1.resolveGeneratedKeyReference)(keyMap, specParams.actionSigningKeyId ?? null, specParams.actionSigningKeyName ?? null, 'actionSigningKey');
+            actionEncryptionKeyId = specParams.actionEncryptionKeyId != null ||
+                specParams.actionEncryptionKeyName != null
+                ? (0, keys_js_1.resolveGeneratedKeyReference)(keyMap, specParams.actionEncryptionKeyId ?? null, specParams.actionEncryptionKeyName ?? null, 'actionEncryptionKey')
+                : undefined;
+            // `onKeysReady` runs after transient registration and before the
+            // payload/message is created; a callback error prevents publication.
+            await specParams.onKeysReady?.(keyMap);
+            data = typeof specParams.data === 'function' ? specParams.data(keyMap) : specParams.data;
+            keys = Object.values(keyMap).map((k) => k.spkey);
+        }
+        else {
+            const legacy = params;
+            signingKeyId = legacy.signingKeyId;
+            actionSigningKeyId = legacy.actionSigningKeyId;
+            actionEncryptionKeyId = legacy.actionEncryptionKeyId;
+            data = legacy.data;
+            keys = legacy.keys;
+        }
         const signingKey = this.transientSecretKeys[signingKeyId];
         if (!signingKey)
             throw new Error(`Signing key ${signingKeyId} is not defined`);
@@ -1634,7 +1670,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const msg = await (0, sbp_1.default)(actionEncryptionKeyId ? 'chelonia/out/actionEncrypted' : 'chelonia/out/actionUnencrypted', {
             action: contractName,
             contractID,
-            data: params.data,
+            data,
             signingKeyId: actionSigningKeyId ?? signingKeyId,
             encryptionKeyId: actionEncryptionKeyId,
             hooks,
@@ -1714,15 +1750,19 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             throw new Error('Contract name not found');
         }
         const payload = data;
-        if (!params.signingKeyId && !params.signingKey) {
-            throw new TypeError('Either signingKeyId or signingKey must be specified');
+        const hasExplicitSigner = params.signingKeyId != null || params.signingKeyName != null;
+        const signingKeyId = hasExplicitSigner
+            ? resolveKeyIdOrName.call(this, contractID, params.signingKeyId ?? null, params.signingKeyName ?? null, 'signingKey', false)
+            : undefined;
+        if (!signingKeyId && !params.signingKey) {
+            throw new TypeError('Either signingKeyId, signingKeyName or signingKey must be specified');
         }
         let msg = SPMessage_js_1.SPMessage.createV1_0({
             contractID,
             op: [
                 SPMessage_js_1.SPMessage.OP_KEY_SHARE,
-                params.signingKeyId
-                    ? (0, signedData_js_1.signedOutgoingData)(contractID, params.signingKeyId, payload, this.transientSecretKeys)
+                signingKeyId
+                    ? (0, signedData_js_1.signedOutgoingData)(contractID, signingKeyId, payload, this.transientSecretKeys)
                     : (0, signedData_js_1.signedOutgoingDataWithRawKey)(params.signingKey, payload)
             ],
             manifest: destinationManifestHash
@@ -1732,16 +1772,158 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         return msg;
     },
+    // Generic cross-contract key sharing, promoted from Group Income's
+    // `gi.actions/out/shareVolatileKeys`. Selects the subject contract's
+    // active recoverable keys, re-encrypts each secret under the destination
+    // contract's encryption key (default: its current 'cek'), encrypts the
+    // whole OP_KEY_SHARE payload under that same key, and delegates the
+    // wire operation to `chelonia/out/keyShare`.
+    'chelonia/out/shareKeys': async function (params) {
+        const { contractID, contractName, subjectContractID, keyIds, keyNames, encryptionKeyId, encryptionKeyName, signingKeyId, signingKeyName, foreignContractID, hooks, publishOptions, atomic } = params;
+        if (keyIds != null && keyNames != null) {
+            throw new TypeError('chelonia/out/shareKeys: provide either keyIds or keyNames, not both');
+        }
+        // Sharing a contract's keys with itself is a no-op (matches Group
+        // Income's behavior for same-subject/destination calls).
+        if (subjectContractID === contractID)
+            return;
+        return await (0, sbp_1.default)('chelonia/contract/withRetained', [contractID, subjectContractID], async () => {
+            const rootState = (0, sbp_1.default)(this.config.stateSelector);
+            const destState = rootState[contractID];
+            const subjectState = rootState[subjectContractID];
+            if (!destState?._vm?.authorizedKeys) {
+                throw new Error(`chelonia/out/shareKeys: destination contract ${contractID} is not loaded`);
+            }
+            if (!subjectState?._vm?.authorizedKeys) {
+                throw new Error(`chelonia/out/shareKeys: subject contract ${subjectContractID} is not loaded`);
+            }
+            // Destination encryption key: explicit id/name, defaulting to the
+            // destination's current 'cek'.
+            const destEncryptionKeyId = (encryptionKeyId != null || encryptionKeyName != null
+                ? (0, keys_js_1.resolveStateKeyReference)(destState, encryptionKeyId ?? null, encryptionKeyName ?? null, 'encryptionKey')
+                : (0, keys_js_1.resolveStateKeyReference)(destState, null, 'cek', 'encryptionKey'));
+            // Destination signing key: explicit id/name (validated as a pair,
+            // §2.7), or auto-select a suitable key with OP_KEY_SHARE permission.
+            let signingKey = signingKeyId != null || signingKeyName != null
+                ? (0, keys_js_1.resolveStateKeyReference)(destState, signingKeyId ?? null, signingKeyName ?? null, 'signingKey')
+                : undefined;
+            if (signingKey == null) {
+                signingKey = (0, utils_js_1.findSuitableSecretKeyId)(destState, [SPMessage_js_1.SPMessage.OP_KEY_SHARE], ['sig']) ?? undefined;
+            }
+            if (!signingKey) {
+                throw new Error('chelonia/out/shareKeys: no suitable signing key with OP_KEY_SHARE ' +
+                    `permission in ${contractID}`);
+            }
+            // Select only active subject keys with recoverable secrets
+            // (`meta.private.content`).
+            const isSelectable = (k) => k._notAfterHeight == null && k.meta?.private?.content != null;
+            const activeKeys = Object.values(subjectState._vm.authorizedKeys).filter(isSelectable);
+            let selected;
+            if (keyNames != null && keyNames !== '*') {
+                selected = keyNames.map((name) => {
+                    const keyId = (0, utils_js_1.findKeyIdByName)(subjectState, name);
+                    const k = keyId != null ? subjectState._vm.authorizedKeys[keyId] : undefined;
+                    if (!k || !isSelectable(k)) {
+                        throw new errors_js_1.ChelErrorKeyNameNotFound(`chelonia/out/shareKeys: no active recoverable key named '${name}' ` +
+                            `in subject contract ${subjectContractID}`);
+                    }
+                    return k;
+                });
+            }
+            else if (keyIds != null && keyIds !== '*') {
+                selected = keyIds.map((id) => {
+                    const k = subjectState._vm.authorizedKeys[id];
+                    if (!k || !isSelectable(k)) {
+                        throw new errors_js_1.ChelErrorKeyNameNotFound(`chelonia/out/shareKeys: no active recoverable key with ID '${id}' ` +
+                            `in subject contract ${subjectContractID}`);
+                    }
+                    return k;
+                });
+            }
+            else {
+                selected = activeKeys;
+            }
+            const sharedKeys = selected.map((k) => {
+                // Availability through the canonical primitive; retrieval through
+                // the transient-key proxy, which falls back to persistent storage
+                // (transient-only secrets are covered in both directions).
+                if (!(0, sbp_1.default)('chelonia/haveSecretKey', k.id)) {
+                    throw new Error(`chelonia/out/shareKeys: missing secret for key ${k.id} (${k.name}) in ` +
+                        subjectContractID);
+                }
+                const rawKey = this.transientSecretKeys[k.id];
+                if (!rawKey) {
+                    throw new Error(`chelonia/out/shareKeys: missing secret for key ${k.id} (${k.name}) in ` +
+                        subjectContractID);
+                }
+                const secret = (0, crypto_1.serializeKey)(rawKey, true);
+                // Minimal share entry: OP_KEY_SHARE processing only consumes `id`
+                // and `meta.private.content`.
+                return {
+                    id: k.id,
+                    meta: {
+                        private: {
+                            content: (0, encryptedData_js_1.encryptedOutgoingData)(contractID, destEncryptionKeyId, secret)
+                        }
+                    }
+                };
+            });
+            const subjectContractTypeName = rootState.contracts[subjectContractID]?.type;
+            if (!subjectContractTypeName) {
+                throw new Error(`chelonia/out/shareKeys: unknown contract type for ${subjectContractID}`);
+            }
+            const payload = {
+                contractID: subjectContractID,
+                keys: sharedKeys,
+                ...(foreignContractID != null && { foreignContractID })
+            };
+            return await (0, sbp_1.default)('chelonia/out/keyShare', {
+                contractID,
+                contractName,
+                originatingContractID: subjectContractID,
+                originatingContractName: subjectContractTypeName,
+                data: (0, encryptedData_js_1.encryptedOutgoingData)(contractID, destEncryptionKeyId, payload),
+                signingKeyId: signingKey,
+                hooks,
+                publishOptions,
+                atomic: !!atomic
+            });
+        });
+    },
     'chelonia/out/keyAdd': async function (params) {
         // TODO: For foreign keys, recalculate the key id
         // TODO: Make this a noop if the key already exsits with the given permissions
-        const { atomic, contractID, contractName, data, hooks, publishOptions } = params;
+        const { atomic, contractID, contractName, hooks, publishOptions } = params;
         const manifestHash = this.config.contracts.manifests[contractName];
         const contract = this.manifestToContract[manifestHash]?.contract;
         if (!contract) {
             throw new Error('Contract name not found');
         }
         const state = contract.state(contractID);
+        const signingKeyId = resolveKeyIdOrName.call(this, contractID, params.signingKeyId ?? null, params.signingKeyName ?? null, 'signingKey');
+        // Expand spec entries against the live contract state before the
+        // duplicate-key filtering, splicing generated keys back into the
+        // original array order. Raw and encrypted entries stay untouched.
+        let data;
+        if (!Array.isArray(params.data)) {
+            // KeySpecMap object form: every entry is a spec
+            const keyMap = (await (0, sbp_1.default)('chelonia/key/generate', {
+                contractID,
+                keys: params.data
+            }));
+            data = Object.values(keyMap).map((k) => k.spkey);
+        }
+        else if (params.data.some((entry) => (0, keys_js_1.isKeySpec)(entry))) {
+            const markedSpecs = params.data.filter((entry) => (0, keys_js_1.isKeySpec)(entry));
+            const keyMap = (await (0, sbp_1.default)('chelonia/key/generate', {
+                contractID,
+                keys: markedSpecs
+            }));
+            data = params.data.map((entry) => (0, keys_js_1.isKeySpec)(entry) ? keyMap[entry.alias].spkey : entry);
+        }
+        else {
+            data = params.data;
+        }
         const payload = params.skipExistingKeyCheck
             ? data
             : data.filter((wk) => {
@@ -1760,7 +1942,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             contractID,
             op: [
                 SPMessage_js_1.SPMessage.OP_KEY_ADD,
-                (0, signedData_js_1.signedOutgoingData)(contractID, params.signingKeyId, payload, this.transientSecretKeys)
+                (0, signedData_js_1.signedOutgoingData)(contractID, signingKeyId, payload, this.transientSecretKeys)
             ],
             manifest: manifestHash
         });
@@ -1777,6 +1959,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             throw new Error('Contract name not found');
         }
         const state = contract.state(contractID);
+        const signingKeyId = resolveKeyIdOrName.call(this, contractID, params.signingKeyId ?? null, params.signingKeyName ?? null, 'signingKey');
         const payload = data
             .map((keyId) => {
             if ((0, encryptedData_js_1.isEncryptedData)(keyId))
@@ -1797,7 +1980,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             contractID,
             op: [
                 SPMessage_js_1.SPMessage.OP_KEY_DEL,
-                (0, signedData_js_1.signedOutgoingData)(contractID, params.signingKeyId, payload, this.transientSecretKeys)
+                (0, signedData_js_1.signedOutgoingData)(contractID, signingKeyId, payload, this.transientSecretKeys)
             ],
             manifest: manifestHash
         });
@@ -1807,13 +1990,45 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         return msg;
     },
     'chelonia/out/keyUpdate': async function (params) {
-        const { atomic, contractID, contractName, data, hooks, publishOptions } = params;
+        const { atomic, contractID, contractName, hooks, publishOptions } = params;
         const manifestHash = this.config.contracts.manifests[contractName];
         const contract = this.manifestToContract[manifestHash]?.contract;
         if (!contract) {
             throw new Error('Contract name not found');
         }
         const state = contract.state(contractID);
+        const signingKeyId = resolveKeyIdOrName.call(this, contractID, params.signingKeyId ?? null, params.signingKeyName ?? null, 'signingKey');
+        // Expand marked update specs against the live contract state before the
+        // privacy-wrapper logic below. The expansion does not double-encrypt
+        // `meta.private.content`: it stays an inner EncryptedData object bound
+        // to the message's additional data at serialization time.
+        let data;
+        if (!Array.isArray(params.data)) {
+            const { updates, newKeys } = (0, keys_js_1.expandKeyUpdateSpecs)({
+                updates: params.data,
+                contractID,
+                contractState: state
+            });
+            (0, keys_js_1.storeGeneratedSecretKeys)(this, Object.values(newKeys));
+            data = updates;
+        }
+        else if (params.data.some((entry) => (0, keys_js_1.isKeyUpdateSpec)(entry))) {
+            const markedSpecs = params.data.filter((entry) => (0, keys_js_1.isKeyUpdateSpec)(entry));
+            const { updates, newKeys } = (0, keys_js_1.expandKeyUpdateSpecs)({
+                updates: markedSpecs,
+                contractID,
+                contractState: state
+            });
+            (0, keys_js_1.storeGeneratedSecretKeys)(this, Object.values(newKeys));
+            // Splice expanded updates back into the original array order
+            let specIndex = 0;
+            data = params.data.map((entry) => (0, keys_js_1.isKeyUpdateSpec)(entry)
+                ? updates[specIndex++]
+                : entry);
+        }
+        else {
+            data = params.data;
+        }
         const payload = data.map((key) => {
             if ((0, encryptedData_js_1.isEncryptedData)(key))
                 return key;
@@ -1829,7 +2044,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             contractID,
             op: [
                 SPMessage_js_1.SPMessage.OP_KEY_UPDATE,
-                (0, signedData_js_1.signedOutgoingData)(contractID, params.signingKeyId, payload, this.transientSecretKeys)
+                (0, signedData_js_1.signedOutgoingData)(contractID, signingKeyId, payload, this.transientSecretKeys)
             ],
             manifest: manifestHash
         });
@@ -1839,7 +2054,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         return msg;
     },
     'chelonia/out/keyRequest': async function (params) {
-        const { originatingContractID, originatingContractName, contractID, contractName, hooks, publishOptions, innerSigningKeyId, encryptionKeyId, innerEncryptionKeyId, encryptKeyRequestMetadata, reference, request, keyRequestResponseId, skipInviteAccounting } = params;
+        const { originatingContractID, originatingContractName, contractID, contractName, hooks, publishOptions, encryptKeyRequestMetadata, reference, request, keyRequestResponseId, skipInviteAccounting } = params;
         // `encryptKeyRequestMetadata` is optional because it could be desirable
         // sometimes to allow anyone to audit OP_KEY_REQUEST and OP_KEY_SHARE
         // operations. If `encryptKeyRequestMetadata` were always true, it would
@@ -1855,6 +2070,14 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             const rootState = (0, sbp_1.default)(this.config.stateSelector);
             const state = contract.state(contractID);
             const originatingState = originatingContract.state(originatingContractID);
+            // Name resolution, each against its real owner (easy to invert):
+            //   outer signing + inner encryption keys live in the DESTINATION
+            //   contract; inner signing + encryption keys live in the ORIGINATING
+            //   contract.
+            const signingKeyId = resolveKeyIdOrName.call(this, contractID, params.signingKeyId ?? null, params.signingKeyName ?? null, 'signingKey');
+            const innerSigningKeyId = resolveKeyIdOrName.call(this, originatingContractID, params.innerSigningKeyId ?? null, params.innerSigningKeyName ?? null, 'innerSigningKey');
+            const encryptionKeyId = resolveKeyIdOrName.call(this, originatingContractID, params.encryptionKeyId ?? null, params.encryptionKeyName ?? null, 'encryptionKey');
+            const innerEncryptionKeyId = resolveKeyIdOrName.call(this, contractID, params.innerEncryptionKeyId ?? null, params.innerEncryptionKeyName ?? null, 'innerEncryptionKey');
             const havePendingKeyRequest = Object.values(originatingState._vm.authorizedKeys).some((k) => {
                 return (k._notAfterHeight == null &&
                     k.meta?.keyRequest?.contractID === contractID &&
@@ -1945,7 +2168,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 contractID,
                 op: [
                     SPMessage_js_1.SPMessage.OP_KEY_REQUEST,
-                    (0, signedData_js_1.signedOutgoingData)(contractID, params.signingKeyId, {
+                    (0, signedData_js_1.signedOutgoingData)(contractID, signingKeyId, {
                         ...(skipInviteAccounting && { skipInviteAccounting: true }),
                         innerData: encryptKeyRequestMetadata
                             ? (0, encryptedData_js_1.encryptedOutgoingData)(contractID, innerEncryptionKeyId, payload)
@@ -1971,12 +2194,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (!contract) {
             throw new Error('Contract name not found');
         }
+        const signingKeyId = resolveKeyIdOrName.call(this, contractID, params.signingKeyId ?? null, params.signingKeyName ?? null, 'signingKey');
         const payload = data;
         let message = SPMessage_js_1.SPMessage.createV1_0({
             contractID,
             op: [
                 SPMessage_js_1.SPMessage.OP_KEY_REQUEST_SEEN,
-                (0, signedData_js_1.signedOutgoingData)(contractID, params.signingKeyId, payload, this.transientSecretKeys)
+                (0, signedData_js_1.signedOutgoingData)(contractID, signingKeyId, payload, this.transientSecretKeys)
             ],
             manifest: manifestHash
         });
@@ -1992,6 +2216,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (!contract) {
             throw new Error('Contract name not found');
         }
+        // The outer message's signing key. Nested invocations carry their own key
+        // references and are never overwritten by this one.
+        const signingKeyId = resolveKeyIdOrName.call(this, contractID, params.signingKeyId ?? null, params.signingKeyName ?? null, 'signingKey');
         const payload = (await Promise.all(data.map(([selector, opParams]) => {
             if (![
                 'chelonia/out/actionEncrypted',
@@ -2000,13 +2227,29 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 'chelonia/out/keyDel',
                 'chelonia/out/keyUpdate',
                 'chelonia/out/keyRequestResponse',
-                'chelonia/out/keyShare'
+                'chelonia/out/keyShare',
+                'chelonia/out/shareKeys'
             ].includes(selector)) {
                 throw new Error('Selector not allowed in OP_ATOMIC: ' + selector);
             }
+            // Only shared operation context is passed down. Each nested
+            // invocation keeps its own key references untouched: outer key
+            // references are never mixed with nested ones (a cross-bred
+            // id/name pair would fail §2.7 pair validation in the nested
+            // selector). Signer-less nested operations inherit the outer
+            // signing reference, preserving the legacy inheritance behavior.
+            const op = opParams;
+            const hasOwnSigner = op.signingKeyId != null || op.signingKeyName != null || op.signingKey != null;
             return (0, sbp_1.default)(selector, {
+                hooks: params.hooks,
+                publishOptions: params.publishOptions,
+                ...(!hasOwnSigner && {
+                    ...(params.signingKeyId != null && { signingKeyId: params.signingKeyId }),
+                    ...(params.signingKeyName != null && { signingKeyName: params.signingKeyName })
+                }),
                 ...opParams,
-                ...params,
+                contractID: params.contractID,
+                contractName: params.contractName,
                 data: opParams.data,
                 atomic: true
             });
@@ -2020,7 +2263,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             contractID,
             op: [
                 SPMessage_js_1.SPMessage.OP_ATOMIC,
-                (0, signedData_js_1.signedOutgoingData)(contractID, params.signingKeyId, payload, this.transientSecretKeys)
+                (0, signedData_js_1.signedOutgoingData)(contractID, signingKeyId, payload, this.transientSecretKeys)
             ],
             manifest: manifestHash
         });
@@ -2030,12 +2273,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     'chelonia/out/protocolUpgrade': async function () { },
     'chelonia/out/propSet': async function () { },
     'chelonia/out/propDel': async function () { },
-    'chelonia/out/encryptedOrUnencryptedPubMessage': function ({ contractID, innerSigningKeyId, encryptionKeyId, signingKeyId, data }) {
+    'chelonia/out/encryptedOrUnencryptedPubMessage': function ({ contractID, innerSigningKeyId, innerSigningKeyName, encryptionKeyId, encryptionKeyName, signingKeyId, signingKeyName, data }) {
+        // Resolve name references once, at selector entry (same id/name rules as
+        // every other outgoing selector); the lower-level message builder stays
+        // id-based.
+        const resolvedSigningKeyId = resolveKeyIdOrName.call(this, contractID, signingKeyId ?? null, signingKeyName ?? null, 'signingKey');
+        const resolvedInnerSigningKeyId = resolveKeyIdOrName.call(this, contractID, innerSigningKeyId ?? null, innerSigningKeyName ?? null, 'innerSigningKey', false);
+        const resolvedEncryptionKeyId = resolveKeyIdOrName.call(this, contractID, encryptionKeyId ?? null, encryptionKeyName ?? null, 'encryptionKey', false);
         const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
             contractID,
-            innerSigningKeyId,
-            encryptionKeyId,
-            signingKeyId,
+            innerSigningKeyId: resolvedInnerSigningKeyId,
+            encryptionKeyId: resolvedEncryptionKeyId,
+            signingKeyId: resolvedSigningKeyId,
             data
         });
         this.pubsub.pub(contractID, serializedData);
@@ -2372,6 +2621,47 @@ function contractNameFromAction(action) {
         throw new Error(`Poorly named action '${action}': missing contract name.`);
     return contractName;
 }
+// A registration is in spec form when `keys` is a `KeySpecMap` record or an
+// array containing at least one marked `keySpec()` entry. Empty and raw-only
+// arrays are legacy form.
+const isSpecRegistration = (params) => {
+    const keys = params.keys;
+    if (Array.isArray(keys))
+        return keys.some((k) => (0, keys_js_1.isKeySpec)(k));
+    return keys != null && typeof keys === 'object';
+};
+// Expand registration keys: append the opt-in auto-SAK spec when explicitly
+// enabled and absent, then generate + transiently store every raw key.
+const expandRegistrationKeys = async function (params) {
+    let keys = params.keys;
+    if (params.autoSak) {
+        // Plan §2.6: when enabled, autoSak requires an explicit wrapper. The
+        // type says so, but JS callers bypass types — enforce it at runtime so a
+        // malformed opt-in fails loudly instead of silently generating an
+        // unrecoverable server-accounting key (no `meta.private.content`).
+        if (typeof params.autoSak.encryptWith !== 'string' || !params.autoSak.encryptWith) {
+            throw new errors_js_1.ChelErrorKeySpecInvalid('autoSak requires an explicit encryptWith wrapper name');
+        }
+        const entries = (0, keys_js_1.normalizeKeySpecs)(keys);
+        const hasSak = entries.some(({ alias, spec }) => (spec.name ?? alias) === '#sak');
+        if (!hasSak) {
+            const sakSpec = {
+                '#sak': { encryptWith: params.autoSak.encryptWith }
+            };
+            keys = Array.isArray(keys)
+                ? [...keys, (0, keys_js_1.keySpec)('#sak', sakSpec['#sak'])]
+                : { ...keys, ...sakSpec };
+        }
+    }
+    return await (0, sbp_1.default)('chelonia/key/generate', { keys });
+};
+// Resolve an id/name pair against a contract's current state. Called at
+// selector entry; the resolved id is used for all downstream (id-based)
+// crypto primitives.
+const resolveKeyIdOrName = function (contractID, id, name, label, required = true) {
+    const state = (0, sbp_1.default)(this.config.stateSelector)[contractID];
+    return (0, keys_js_1.resolveStateKeyReference)(state, id, name, label, required);
+};
 function outputEncryptedOrUnencryptedMessage({ contractID, innerSigningKeyId, encryptionKeyId, signingKeyId, data, meta }) {
     const state = (0, sbp_1.default)(this.config.stateSelector)[contractID];
     const signedMessage = innerSigningKeyId
@@ -2499,19 +2789,24 @@ async function outEncryptedOrUnencryptedAction(opType, params) {
     const manifestHash = this.config.contracts.manifests[contractName];
     const { contract } = this.manifestToContract[manifestHash];
     const state = contract.state(contractID);
+    // Resolve name references once, at selector entry; everything below is
+    // id-based. The lower-level crypto primitives never see names.
+    const signingKeyId = resolveKeyIdOrName.call(this, contractID, params.signingKeyId ?? null, params.signingKeyName ?? null, 'signingKey');
+    const innerSigningKeyId = resolveKeyIdOrName.call(this, contractID, params.innerSigningKeyId ?? null, params.innerSigningKeyName ?? null, 'innerSigningKey', false);
+    const encryptionKeyId = resolveKeyIdOrName.call(this, contractID, params.encryptionKeyId ?? null, params.encryptionKeyName ?? null, 'encryptionKey', false);
     const meta = await contract.metadata.create();
     const unencMessage = { action, data, meta };
-    const signedMessage = params.innerSigningKeyId
-        ? state._vm.authorizedKeys[params.innerSigningKeyId] &&
-            state._vm.authorizedKeys[params.innerSigningKeyId]?._notAfterHeight == null
-            ? (0, signedData_js_1.signedOutgoingData)(contractID, params.innerSigningKeyId, unencMessage, this.transientSecretKeys)
-            : (0, signedData_js_1.signedOutgoingDataWithRawKey)(this.transientSecretKeys[params.innerSigningKeyId], unencMessage)
+    const signedMessage = innerSigningKeyId
+        ? state._vm.authorizedKeys[innerSigningKeyId] &&
+            state._vm.authorizedKeys[innerSigningKeyId]?._notAfterHeight == null
+            ? (0, signedData_js_1.signedOutgoingData)(contractID, innerSigningKeyId, unencMessage, this.transientSecretKeys)
+            : (0, signedData_js_1.signedOutgoingDataWithRawKey)(this.transientSecretKeys[innerSigningKeyId], unencMessage)
         : unencMessage;
-    if (opType === SPMessage_js_1.SPMessage.OP_ACTION_ENCRYPTED && !params.encryptionKeyId) {
+    if (opType === SPMessage_js_1.SPMessage.OP_ACTION_ENCRYPTED && !encryptionKeyId && !params.encryptionKey) {
         throw new Error('OP_ACTION_ENCRYPTED requires an encryption key ID be given');
     }
     if (params.encryptionKey) {
-        if (params.encryptionKeyId !== (0, crypto_1.keyId)(params.encryptionKey)) {
+        if (encryptionKeyId !== (0, crypto_1.keyId)(params.encryptionKey)) {
             throw new Error('OP_ACTION_ENCRYPTED raw encryption key does not match encryptionKeyId');
         }
     }
@@ -2519,12 +2814,12 @@ async function outEncryptedOrUnencryptedAction(opType, params) {
         ? signedMessage
         : params.encryptionKey
             ? (0, encryptedData_js_1.encryptedOutgoingDataWithRawKey)(params.encryptionKey, signedMessage)
-            : (0, encryptedData_js_1.encryptedOutgoingData)(contractID, params.encryptionKeyId, signedMessage);
+            : (0, encryptedData_js_1.encryptedOutgoingData)(contractID, encryptionKeyId, signedMessage);
     let message = SPMessage_js_1.SPMessage.createV1_0({
         contractID,
         op: [
             opType,
-            (0, signedData_js_1.signedOutgoingData)(contractID, params.signingKeyId, payload, this.transientSecretKeys)
+            (0, signedData_js_1.signedOutgoingData)(contractID, signingKeyId, payload, this.transientSecretKeys)
         ],
         manifest: manifestHash
     });

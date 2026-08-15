@@ -1,6 +1,7 @@
 import db from './db.js'
 import files from './files.js'
 import journal from './journal.js'
+import keys from './keys.js'
 import kv from './kv.js'
 import persistentActions from './persistent-actions.js'
 
@@ -17,6 +18,7 @@ export * from './errors.js'
 export * from './events.js'
 export * from './files.js'
 export * from './journal.js'
+export * from './keys.js'
 export * from './kv-constants.js'
 export * from './kv.js'
 export * from './persistent-actions.js'
@@ -28,4 +30,4 @@ export * from './utils.js'
 export * from './zkpp.js'
 export * from './zkppConstants.js'
 
-export default [...chelonia, ...db, ...files, ...journal, ...kv, ...persistentActions]
+export default [...chelonia, ...db, ...files, ...journal, ...keys, ...kv, ...persistentActions]

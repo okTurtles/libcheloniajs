@@ -33,6 +33,11 @@ import './local-selectors/index.test.js'
 // Journal unit tests — pull in journal.ts but not chelonia.ts.
 import './journal.test.js'
 
+// Key API unit tests — pure, must run before anything that locks the
+// chelonia SBP domain (keys.test.js asserts expansion purity, which
+// requires an unlocked environment).
+import './keys.test.js'
+
 // First test that imports `./chelonia.js` (transitively locks the
 // `chelonia` SBP domain). Everything after this point cannot register
 // `chelonia/*` selectors.

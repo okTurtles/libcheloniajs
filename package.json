@@ -127,6 +127,16 @@
         "default": "./dist/cjs/kv-constants.cjs"
       }
     },
+    "./keys": {
+      "import": {
+        "types": "./dist/esm/keys.d.mts",
+        "default": "./dist/esm/keys.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/keys.d.cts",
+        "default": "./dist/cjs/keys.cjs"
+      }
+    },
     "./kv": {
       "import": {
         "types": "./dist/esm/kv.d.mts",
@@ -259,7 +269,7 @@
     }
   },
   "scripts": {
-    "test": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' src/kv.test.ts && node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' src/index.test.ts",
+    "test": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' src/kv.test.ts && node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' src/index.test.ts && node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' src/keys-integration.test.ts",
     "build:esm": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' buildHelper.ts esm",
     "build:cjs": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' buildHelper.ts cjs",
     "build": "npm run build:esm && npm run build:cjs",

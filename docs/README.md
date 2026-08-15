@@ -13,6 +13,7 @@ be imported directly — use the package name.
 | [`quickstart.md`](./quickstart.md) | End-to-end "hello world": configure → connect → register a contract → publish an action → tear down. |
 | [`configure.md`](./configure.md) | The `chelonia/configure` selector — every option, validation rules, and framework integration. |
 | [`contracts.md`](./contracts.md) | Defining contracts, registering them, syncing, publishing actions, key management, atomic batches, and tearing down. |
+| [`keys.md`](./keys.md) | The declarative key API: key specs, the wrapping graph, name references, spec-based registration/keyAdd, `shareKeys`, and rotation. |
 | [`journal.md`](./journal.md) | The optional per-contract event journal: enabling it, redactions, snapshot tuning, reconstruct, and clear. |
 | [`kv.md`](./kv.md) | The server-side KV store and KV slots: the local mirror model, slot definitions, conflict retries, and consumer caveats. |
 | [`files.md`](./files.md) | Encrypted file upload, download, and delete — manifest layout and cipher choices. |

@@ -40,6 +40,10 @@ More guides are coming. In the meantime, see the [`docs/`](./docs) directory:
   semantics) with a complete working app example.
 - [`docs/journal.md`](./docs/journal.md) — the optional per-contract event
   journal: enabling it, redactions, snapshot tuning, reconstruct, and clear.
+- [`docs/keys.md`](./docs/keys.md) — the declarative key API: define a
+  contract's keys as name-addressed specs (generation, wrapping, invite and
+  `#sak` conventions), reference keys by name everywhere, share keys across
+  contracts, and rotate with the two-case re-encryption rule.
 
 [Join our Slack](https://join.slack.com/t/okturtles/shared_invite/zt-10jmpfgxj-tXQ1MKW7t8qqdyY6fB7uyQ) or use [Github Discussions](https://github.com/okTurtles/libcheloniajs/discussions) if you have questions.
 

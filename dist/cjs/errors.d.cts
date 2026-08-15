@@ -153,6 +153,30 @@ export declare const ChelErrorJournalCorrupt: {
         cause?: unknown;
     };
 };
+export declare const ChelErrorKeySpecInvalid: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKeyWrapCycle: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare const ChelErrorKeyNameNotFound: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
 export declare const ChelErrorKvSlotUnknown: {
     new (message?: string | undefined, options?: ErrorOptions | undefined): {
         name: string;
