@@ -288,9 +288,27 @@ const contractID = await sbp('chelonia/out/nameToContractID', 'alice')
 
 It performs `GET ${connectionURL}/name/:name` through `config.fetch`,
 percent-encodes the name, and resolves to `null` when there is no current
-mapping — HTTP 404 (never registered), HTTP 410 (mapping deleted), or an
-empty response body. Any other failed status rejects with
+mapping — HTTP 404 (never registered), HTTP 410 (mapping deleted), HTTP 400
+(the name is malformed, so it can't be registered at all), or an empty
+response body. Any other failed status rejects with
 `ChelErrorUnexpectedHttpResponseCode`.
+
+If you need to tell an invalid name apart from an unregistered one — for
+example to show "that username isn't allowed" instead of "not found" —
+pass `throwOnInvalidName`, which makes an HTTP 400 reject with
+`ChelErrorUnexpectedHttpResponseCode` (`cause: 400`) rather than resolve to
+`null`. 404 and 410 still resolve to `null` in that mode.
+
+```js
+try {
+  const contractID = await sbp(
+    'chelonia/out/nameToContractID', name, { throwOnInvalidName: true }
+  )
+  // → contract ID, or null if the name is valid but unregistered
+} catch (e) {
+  if (e.cause === 400) { /* the name itself is invalid */ }
+}
+```
 
 ---
 

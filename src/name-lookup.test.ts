@@ -79,6 +79,42 @@ describe('chelonia/out/nameToContractID', () => {
     assert.strictEqual(result, null)
   })
 
+  it('returns null when the name is malformed (400)', async () => {
+    configureWithFetch(async () => new Response('Bad Request', {
+      status: 400,
+      statusText: 'Bad Request'
+    }))
+
+    const result = await sbp('chelonia/out/nameToContractID', 'a')
+    assert.strictEqual(result, null)
+  })
+
+  it('throws on a 400 when throwOnInvalidName is set', async () => {
+    configureWithFetch(async () => new Response('Bad Request', {
+      status: 400,
+      statusText: 'Bad Request'
+    }))
+
+    await assert.rejects(
+      () => sbp('chelonia/out/nameToContractID', 'a', { throwOnInvalidName: true }),
+      (e: unknown) =>
+        e instanceof ChelErrorUnexpectedHttpResponseCode &&
+        e.message === '400: Bad Request' &&
+        e.cause === 400
+    )
+  })
+
+  it('still returns null on 404 / 410 when throwOnInvalidName is set', async () => {
+    for (const status of [404, 410]) {
+      configureWithFetch(async () => new Response('', { status }))
+
+      const result = await sbp(
+        'chelonia/out/nameToContractID', 'alice', { throwOnInvalidName: true }
+      )
+      assert.strictEqual(result, null)
+    }
+  })
+
   it('trims whitespace around the returned contract ID', async () => {
     const contractID = 'z9MzZR5EnJnHzQ7VXPjEDJbpBb4W2J9fQ7bYnF9Jg3FwN'
     configureWithFetch(async () => new Response(`\n  ${contractID}  \n`, {

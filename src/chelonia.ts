@@ -1920,10 +1920,13 @@ export default sbp('sbp/selectors/register', {
   },
   // Resolves a registered name (e.g., a username) to a contract ID.
   // A 404 means that the name isn't registered (or a 410 that the mapping
-  // was deleted), and both are reported as `null` rather than as errors.
+  // was deleted), and a 400 that the name can't be registered at all
+  // because it's malformed. All three are reported as `null` rather than
+  // as errors, unless `throwOnInvalidName` is set (see below).
   'chelonia/out/nameToContractID': async function (
     this: CheloniaContext,
-    name: string
+    name: string,
+    { throwOnInvalidName }: { throwOnInvalidName?: boolean } = {}
   ): Promise<string | null> {
     if (!name) {
       throw new TypeError('A name must be provided')
@@ -1935,6 +1938,13 @@ export default sbp('sbp/selectors/register', {
         signal: this.abortController.signal
       }
     )
+    // 400 means the name doesn't conform to the server's name rules, so it
+    // can't possibly be registered. It's reported as `null` by default
+    // because callers looking up a name usually only care whether a mapping
+    // exists. Set `throwOnInvalidName` to surface it as a
+    // ChelErrorUnexpectedHttpResponseCode instead, e.g. to tell a user that
+    // the name they typed is invalid rather than merely unknown.
+    if (response.status === 400 && !throwOnInvalidName) return null
     // 404 means the name was never registered; 410 means the mapping was
     // deleted (e.g. the account was). Both are reported as `null`: from
     // the caller's perspective there simply is no current mapping, and
