@@ -9,7 +9,7 @@ export declare function defaultDiff(before: unknown, after: unknown): JournalPat
 export declare function structurallyEqual(a: unknown, b: unknown): boolean;
 export declare function defaultApplyPatch(state: unknown, patches: JournalPatch[]): unknown;
 export declare const REDACTION_ERROR_SENTINEL = "[REDACTION_ERROR]";
-export declare const REDACTION_UNSERIALIZABLE_SENTINEL = "[REDACTION_UNSERIALIZABLE]";
+export declare const REDACTION_NON_JSON_SAFE_SENTINEL = "[REDACTION_NON_JSON_SAFE]";
 export declare function applyRedactions<T>(state: T, redactions: JournalRedaction[] | undefined, contractName: string, sites?: RedactionSiteMap): T;
 export declare function shortHashRedactor(value: unknown): string;
 export declare function hasHiddenChange(before: RedactionSite, after: RedactionSite): boolean;

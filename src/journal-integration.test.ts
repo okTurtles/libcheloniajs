@@ -15,7 +15,7 @@ import { describe, it, before, beforeEach } from 'node:test'
 import './chelonia.js'
 import './db.js'
 import { ChelErrorJournalCorrupt } from './errors.js'
-import { REDACTION_UNSERIALIZABLE_SENTINEL, defaultApplyPatch, defaultDiff } from './journal.js'
+import { REDACTION_NON_JSON_SAFE_SENTINEL, defaultApplyPatch, defaultDiff } from './journal.js'
 import type { ChelContractState, ChelRootState, JournalEntry, JournalPatch } from './types.js'
 
 type FakeMessage = {
@@ -377,7 +377,7 @@ describe('journal: integration via SBP selectors', () => {
       assert.deepStrictEqual(patch, [{
         op: 'replace',
         path: '/_vm/authorizedKeys/k1/data',
-        value: REDACTION_UNSERIALIZABLE_SENTINEL,
+        value: REDACTION_NON_JSON_SAFE_SENTINEL,
         redacted: true
       }])
       // Simulate persist + reload: swap in a JSON round-trip of the
@@ -390,7 +390,7 @@ describe('journal: integration via SBP selectors', () => {
       assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), {
         _vm: {
           authorizedKeys: {
-            k1: { id: 'k1', data: REDACTION_UNSERIALIZABLE_SENTINEL, purpose: ['sig'] }
+            k1: { id: 'k1', data: REDACTION_NON_JSON_SAFE_SENTINEL, purpose: ['sig'] }
           }
         }
       })

@@ -180,7 +180,7 @@ export type JournalEntry =
 // and MUST return a JSON-safe replacement (null / string / boolean /
 // finite number / arrays / plain objects thereof): the journal is
 // persisted as plain JSON. Non-JSON-safe results are substituted with a
-// sentinel (see `REDACTION_UNSERIALIZABLE_SENTINEL`).
+// sentinel (see `REDACTION_NON_JSON_SAFE_SENTINEL`).
 export type JournalRedaction = {
   path: string;
   redact: (value: unknown, fullPath: string[], contractName: string) => unknown;

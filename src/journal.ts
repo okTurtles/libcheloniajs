@@ -473,19 +473,21 @@ function applyOne (root: unknown, patch: JournalPatch): unknown {
 // substitutes `REDACTION_ERROR_SENTINEL` so a single bad redactor cannot
 // blank out unrelated parts of the state; a redactor returning a
 // non-JSON-safe value logs and substitutes
-// `REDACTION_UNSERIALIZABLE_SENTINEL` (deeply, preserving the JSON-safe
+// `REDACTION_NON_JSON_SAFE_SENTINEL` (deeply, preserving the JSON-safe
 // structure around an unsafe leaf) so projections, snapshots and markers
 // all stay persistable.
 export const REDACTION_ERROR_SENTINEL = '[REDACTION_ERROR]'
 
-// Substitute for redactor results that cannot survive JSON persistence.
-// The journal is serialized by whatever layer snapshots
+// Substitute for redactor results that cannot survive JSON persistence
+// unchanged. The journal is serialized by whatever layer snapshots
 // `state.contracts[contractID]._journal`, and `JSON.stringify` drops
 // `undefined` members, renders `NaN` / `Infinity` as `null`, and throws on
 // `BigInt` and cycles — so a marker or snapshot carrying such a value would
 // corrupt `chelonia/journal/reconstruct` after a reload (a `replace` that
-// lost its `value` member is rejected by `defaultApplyPatch`).
-export const REDACTION_UNSERIALIZABLE_SENTINEL = '[REDACTION_UNSERIALIZABLE]'
+// lost its `value` member is rejected by `defaultApplyPatch`). The bar is a
+// lossless JSON round-trip, not merely a successful `JSON.stringify`: a
+// `Date` serializes fine yet comes back as a string, so it is rejected too.
+export const REDACTION_NON_JSON_SAFE_SENTINEL = '[REDACTION_NON_JSON_SAFE]'
 
 // True when `v` survives a JSON round-trip without changing shape: `null`,
 // strings, booleans, finite numbers, and arrays / plain objects whose
@@ -496,6 +498,12 @@ export const REDACTION_UNSERIALIZABLE_SENTINEL = '[REDACTION_UNSERIALIZABLE]'
 // which persists lossily at best). The `seen` set tracks only the current
 // ancestor chain, so shared (DAG-shaped) references remain allowed exactly
 // as they are for `JSON.stringify`.
+//
+// This acceptance test and `normalizeToJSONSafe` below are deliberately
+// separate traversals (this one allocates nothing on the common path), so
+// they MUST classify every value identically. The agreement is asserted by
+// the "JSON-safety acceptance and normalization agree" suite; extend both
+// functions and that suite together.
 function isJSONSafeValue (v: unknown, seen: Set<object>): boolean {
   if (v === null) return true
   const t = typeof v
@@ -519,25 +527,26 @@ function isJSONSafeValue (v: unknown, seen: Set<object>): boolean {
 }
 
 // Deep-rewrite a redactor result into JSON-safe shape, substituting
-// `REDACTION_UNSERIALIZABLE_SENTINEL` for every unsafe leaf (and for cyclic
+// `REDACTION_NON_JSON_SAFE_SENTINEL` for every unsafe leaf (and for cyclic
 // back-references). Only called after `isJSONSafeValue` rejected the value,
-// so allocation here is the exceptional path.
+// so allocation here is the exceptional path. MUST stay in agreement with
+// `isJSONSafeValue` on what counts as unsafe (see the note above it).
 function normalizeToJSONSafe (v: unknown, seen: Set<object>): unknown {
   if (v === null) return v
   const t = typeof v
   if (t === 'string' || t === 'boolean') return v
   if (t === 'number') {
-    return Number.isFinite(v as number) ? v : REDACTION_UNSERIALIZABLE_SENTINEL
+    return Number.isFinite(v as number) ? v : REDACTION_NON_JSON_SAFE_SENTINEL
   }
-  if (t !== 'object') return REDACTION_UNSERIALIZABLE_SENTINEL
-  if (seen.has(v as object)) return REDACTION_UNSERIALIZABLE_SENTINEL
+  if (t !== 'object') return REDACTION_NON_JSON_SAFE_SENTINEL
+  if (seen.has(v as object)) return REDACTION_NON_JSON_SAFE_SENTINEL
   if (Array.isArray(v)) {
     seen.add(v as object)
     const out = (v as unknown[]).map((el) => normalizeToJSONSafe(el, seen))
     seen.delete(v as object)
     return out
   }
-  if (!isPlainObject(v)) return REDACTION_UNSERIALIZABLE_SENTINEL
+  if (!isPlainObject(v)) return REDACTION_NON_JSON_SAFE_SENTINEL
   seen.add(v)
   const out: Record<string, unknown> = Object.create(Object.getPrototypeOf(v))
   for (const k of Object.keys(v)) {
@@ -638,7 +647,7 @@ function walkAndRedact (
       const container = parent as Record<string, unknown>
       const value = container[k]
       const sourceValue = sites
-        ? resolveAtPointer(source, segmentsToPointer(fullPath))
+        ? resolveAtSegments(source, fullPath)
         : undefined
       const original = sourceValue?.found ? sourceValue.value : value
       let replacement: unknown
@@ -724,15 +733,15 @@ export function shortHashRedactor (value: unknown): string {
 // Redacted-change markers
 // ---------------------------------------------------------------------------
 
-// Resolve a JSON-Pointer against a value, reporting whether the location
-// exists. Own properties only, same as the applier's walk.
-function resolveAtPointer (
+// Resolve a path against a value, reporting whether the location exists.
+// Own properties only, same as the applier's walk.
+function resolveAtSegments (
   root: unknown,
-  pointer: string
+  segments: string[]
 ): { found: boolean; value: unknown } {
   const notFound = { found: false, value: undefined }
   let current: unknown = root
-  for (const seg of pointerToSegments(pointer)) {
+  for (const seg of segments) {
     if (current === null || typeof current !== 'object') return notFound
     if (Array.isArray(current)) {
       const idx = Number(seg)
@@ -744,6 +753,14 @@ function resolveAtPointer (
     }
   }
   return { found: true, value: current }
+}
+
+// Same, for callers that only hold a JSON Pointer (site-map keys).
+function resolveAtPointer (
+  root: unknown,
+  pointer: string
+): { found: boolean; value: unknown } {
+  return resolveAtSegments(root, pointerToSegments(pointer))
 }
 
 // Index the patch once so the per-site coverage test is O(pointer depth)

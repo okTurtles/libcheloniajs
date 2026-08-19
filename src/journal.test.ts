@@ -2,7 +2,7 @@ import * as assert from 'node:assert'
 import { describe, it } from 'node:test'
 import {
   REDACTION_ERROR_SENTINEL,
-  REDACTION_UNSERIALIZABLE_SENTINEL,
+  REDACTION_NON_JSON_SAFE_SENTINEL,
   applyRedactions,
   defaultApplyPatch,
   defaultDiff,
@@ -450,7 +450,7 @@ describe('journal: applyRedactions', () => {
           [{ path: 'a', redact: () => result }],
           'test/contract'
         ) as { a: unknown }
-        assert.strictEqual(out.a, REDACTION_UNSERIALIZABLE_SENTINEL)
+        assert.strictEqual(out.a, REDACTION_NON_JSON_SAFE_SENTINEL)
       }
       assert.strictEqual(warned, results.length)
     } finally {
@@ -472,7 +472,7 @@ describe('journal: applyRedactions', () => {
       // The cycle back-reference is replaced; the JSON-safe remainder of
       // the structure is preserved.
       assert.deepStrictEqual(out, {
-        a: { keep: 1, self: REDACTION_UNSERIALIZABLE_SENTINEL }
+        a: { keep: 1, self: REDACTION_NON_JSON_SAFE_SENTINEL }
       })
       // Whatever comes out must serialize.
       JSON.stringify(out)
@@ -495,8 +495,8 @@ describe('journal: applyRedactions', () => {
       assert.deepStrictEqual(out, {
         a: {
           ok: 1,
-          bad: REDACTION_UNSERIALIZABLE_SENTINEL,
-          list: [1, REDACTION_UNSERIALIZABLE_SENTINEL]
+          bad: REDACTION_NON_JSON_SAFE_SENTINEL,
+          list: [1, REDACTION_NON_JSON_SAFE_SENTINEL]
         }
       })
     } finally {
@@ -616,6 +616,96 @@ describe('journal: applyRedactions', () => {
       sites
     )
     assert.strictEqual(sites.size, 0)
+  })
+})
+
+// The acceptance check and the deep rewrite behind the sentinel are two
+// separate traversals; they must classify every value identically or the
+// journal either persists something lossy or mangles something safe. These
+// cases pin the agreement so the two cannot drift apart silently.
+describe('journal: JSON-safety acceptance and normalization agree', () => {
+  const cyclic: Record<string, unknown> = { keep: 1 }
+  cyclic.self = cyclic
+  const shared = { s: 1 }
+
+  // `safe` is stated per fixture rather than derived, so the test cannot
+  // drift along with the implementation it is guarding.
+  const fixtures: Array<{ name: string; value: unknown; safe: boolean }> = [
+    { name: 'null', value: null, safe: true },
+    { name: 'empty string', value: '', safe: true },
+    { name: 'zero', value: 0, safe: true },
+    { name: 'false', value: false, safe: true },
+    { name: 'nested arrays', value: [1, [2, [3]]], safe: true },
+    { name: 'nested plain object', value: { a: { b: [true, 'x'] } }, safe: true },
+    // Shared (DAG) references serialize fine; only cycles do not.
+    { name: 'shared reference', value: { l: shared, r: shared }, safe: true },
+    { name: 'null-prototype object', value: Object.assign(Object.create(null), { a: 1 }), safe: true },
+    { name: 'negative zero', value: -0, safe: true },
+    { name: 'NaN', value: NaN, safe: false },
+    { name: 'Infinity', value: Infinity, safe: false },
+    { name: 'undefined', value: undefined, safe: false },
+    { name: 'BigInt', value: BigInt(1), safe: false },
+    { name: 'symbol', value: Symbol('s'), safe: false },
+    { name: 'function', value: () => {}, safe: false },
+    { name: 'Date', value: new Date(0), safe: false },
+    { name: 'Map', value: new Map(), safe: false },
+    { name: 'class instance', value: new (class { x = 1 })(), safe: false },
+    { name: 'cyclic object', value: cyclic, safe: false },
+    { name: 'unsafe leaf in a safe container', value: { ok: 1, bad: undefined }, safe: false }
+  ]
+
+  const containsSentinel = (v: unknown): boolean => {
+    if (v === REDACTION_NON_JSON_SAFE_SENTINEL) return true
+    if (v === null || typeof v !== 'object') return false
+    return Object.values(v as Record<string, unknown>).some(containsSentinel)
+  }
+
+  const redactTo = (value: unknown): unknown => {
+    const orig = console.warn
+    console.warn = () => {}
+    try {
+      const out = applyRedactions(
+        { a: 'original' },
+        [{ path: 'a', redact: () => value }],
+        'test/contract'
+      ) as { a: unknown }
+      return out.a
+    } finally {
+      console.warn = orig
+    }
+  }
+
+  for (const { name, value, safe } of fixtures) {
+    it(`${safe ? 'accepts' : 'substitutes a sentinel for'} ${name}`, () => {
+      const out = redactTo(value)
+      assert.strictEqual(containsSentinel(out), !safe)
+      if (safe) assert.ok(structurallyEqual(out, value))
+      // The property that actually matters: whatever is stored must survive
+      // persistence as the same value, judged by the journal's own notion of
+      // equality (the one `defaultDiff` uses).
+      assert.ok(structurallyEqual(JSON.parse(JSON.stringify(out)), out))
+    })
+  }
+
+  it('persists accepted values that JSON cannot represent exactly as equivalents', () => {
+    // Two accepted shapes come back from JSON differently than they went
+    // in: `-0` reads back as `0`, and an object created without a
+    // prototype reads back as an ordinary one. Neither is a defect: the
+    // journal compares states by own keys and treats `-0` and `0` as the
+    // same number, so a reload cannot manufacture a spurious diff. The
+    // case is pinned here so a future stricter equality would surface it.
+    const negativeZero = redactTo(-0)
+    assert.ok(Object.is(negativeZero, -0))
+    assert.ok(Object.is(JSON.parse(JSON.stringify(negativeZero)), 0))
+    assert.ok(structurallyEqual(negativeZero, 0))
+
+    const nullProto = redactTo(Object.assign(Object.create(null), { a: 1 }))
+    assert.strictEqual(Object.getPrototypeOf(nullProto), null)
+    assert.deepStrictEqual(
+      Object.getPrototypeOf(JSON.parse(JSON.stringify(nullProto))),
+      Object.prototype
+    )
+    assert.ok(structurallyEqual(nullProto, { a: 1 }))
   })
 })
 
@@ -881,7 +971,7 @@ describe('journal: synthesizeRedactedChangeOps', () => {
       assert.strictEqual(patch[0].redacted, true)
       assert.strictEqual(
         (patch[0] as { value: unknown }).value,
-        REDACTION_UNSERIALIZABLE_SENTINEL
+        REDACTION_NON_JSON_SAFE_SENTINEL
       )
       const persisted = JSON.parse(JSON.stringify(patch)) as JournalPatch[]
       assert.deepStrictEqual(persisted, patch)
@@ -1070,7 +1160,7 @@ describe('journal: hasHiddenChange', () => {
     assert.strictEqual(hasHiddenChange(before, after), false)
   })
 
-  it('reports a hidden deletion a reshaping projection shadows', () => {
+  it('reports a hidden deletion shadowed by a reshaping projection', () => {
     // Projection `(v) => ({ profile: v.profile.name })`: the visible
     // `/profile` op reflects the name change but says nothing about the
     // deleted `/profile/secret`. Projected and source pointer spaces do
@@ -1086,7 +1176,7 @@ describe('journal: hasHiddenChange', () => {
     assert.strictEqual(hasHiddenChange(before, after), true)
   })
 
-  it('reports a hidden addition a reshaping projection shadows', () => {
+  it('reports a hidden addition shadowed by a reshaping projection', () => {
     const before = site(
       { profile: { name: 'Alice' } },
       { profile: 'Alice' }

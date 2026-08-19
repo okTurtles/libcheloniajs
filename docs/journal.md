@@ -222,22 +222,25 @@ already-redacted view.
 
 Non-JSON-safe results (`undefined`, `BigInt`, symbols, functions,
 non-finite numbers, class instances, cycles) are replaced with the
-string sentinel `'[REDACTION_UNSERIALIZABLE]'` (exported as
-`REDACTION_UNSERIALIZABLE_SENTINEL`) and a warning is logged — the
+string sentinel `'[REDACTION_NON_JSON_SAFE]'` (exported as
+`REDACTION_NON_JSON_SAFE_SENTINEL`) and a warning is logged — the
 description names the offending path and the value's *shape* only,
 never the value itself. Container results are normalized deeply, so a
 JSON-safe projection with one unsafe leaf keeps its structure:
 
 ```js
 // redact returns { id: 1, raw: <function> }
-// journal stores   { id: 1, raw: '[REDACTION_UNSERIALIZABLE]' }
+// journal stores   { id: 1, raw: '[REDACTION_NON_JSON_SAFE]' }
 ```
 
 Why the strictness: the journal is serialized by whatever persistence
 layer snapshots `state.contracts`, and `JSON.stringify` drops
 `undefined` members, renders `NaN` / `Infinity` as `null`, and throws
 on `BigInt` and cycles. Letting such values in would corrupt
-`chelonia/journal/reconstruct` after a reload.
+`chelonia/journal/reconstruct` after a reload. The requirement is a
+*lossless* round-trip rather than a successful `JSON.stringify`, which
+is why values that do serialize but come back reshaped — a `Date`
+becomes a string — are rejected as well.
 
 ### Built-in redactors
 
