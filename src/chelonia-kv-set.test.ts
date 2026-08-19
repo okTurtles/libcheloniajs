@@ -38,13 +38,18 @@ const setupContract = (): { contractID: string; signingKeyId: string } => {
 }
 
 describe('chelonia/kv/set', () => {
+  // Intentionally duplicated per describe rather than hoisted to module
+  // scope: every test file is imported into the single `src/index.test.ts`
+  // entry point, so a module-scope beforeEach/afterEach registers on the
+  // shared root suite and would re-init Chelonia around every test in
+  // every other file.
   beforeEach(() => {
     sbp('chelonia/_init')
   })
 
-  // Re-init after the last test so the stubbed `fetch` doesn't leak into
-  // subsequently-imported test files (`_init` rebuilds the default
-  // config; the next test's beforeEach would do this anyway).
+  // Re-init after each test so the stubbed `fetch` doesn't leak past this
+  // block into subsequently-imported test files (`_init` rebuilds the
+  // default config; the next test's beforeEach would do this anyway).
   afterEach(() => {
     sbp('chelonia/_init')
   })

@@ -3,10 +3,15 @@ import * as assert from 'node:assert'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
-import { ChelErrorUnexpectedHttpResponseCode } from './errors.js'
+import { ChelErrorUnexpected, ChelErrorUnexpectedHttpResponseCode } from './errors.js'
+import { createCID, multicodes } from './functions.js'
 import type { CheloniaConfig } from './types.js'
 
 type FetchOptions = { cache?: string; signal?: AbortSignal };
+
+// Built with the real hasher so the fixture can't drift from the CID
+// validation done by the selector.
+const CONTRACT_ID = createCID('name-lookup-fixture', multicodes.SHELTER_CONTRACT_DATA)
 
 const configureWithFetch = (
   fetchImpl: (url: string, opts?: FetchOptions) => Promise<Response>
@@ -34,7 +39,7 @@ describe('chelonia/out/nameToContractID', () => {
   })
 
   it('resolves a registered name to a contract ID', async () => {
-    const contractID = 'z9MzZR5EnJnHzQ7VXPjEDJbpBb4W2J9fQ7bYnF9Jg3FwN'
+    const contractID = CONTRACT_ID
     const seen: Array<{ url: string; cache?: string; hasSignal: boolean }> = []
     configureWithFetch(async (url, opts) => {
       seen.push({ url, cache: opts?.cache, hasSignal: !!opts?.signal })
@@ -53,7 +58,7 @@ describe('chelonia/out/nameToContractID', () => {
     const seen: string[] = []
     configureWithFetch(async (url) => {
       seen.push(url)
-      return new Response('some-contract-id', { status: 200 })
+      return new Response(CONTRACT_ID, { status: 200 })
     })
 
     await sbp('chelonia/out/nameToContractID', 'alice smith/bob?x=1&y=2')
@@ -116,7 +121,7 @@ describe('chelonia/out/nameToContractID', () => {
   })
 
   it('trims whitespace around the returned contract ID', async () => {
-    const contractID = 'z9MzZR5EnJnHzQ7VXPjEDJbpBb4W2J9fQ7bYnF9Jg3FwN'
+    const contractID = CONTRACT_ID
     configureWithFetch(async () => new Response(`\n  ${contractID}  \n`, {
       status: 200
     }))
@@ -153,6 +158,56 @@ describe('chelonia/out/nameToContractID', () => {
     await assert.rejects(
       () => sbp('chelonia/out/nameToContractID', ''),
       TypeError
+    )
+  })
+
+  it('returns null for dot-only names without sending a request', async () => {
+    for (const name of ['.', '..']) {
+      let called = 0
+      configureWithFetch(async () => {
+        called++
+        return new Response(CONTRACT_ID, { status: 200 })
+      })
+
+      const result = await sbp('chelonia/out/nameToContractID', name)
+      assert.strictEqual(result, null)
+      assert.strictEqual(called, 0)
+    }
+  })
+
+  it('throws on dot-only names when throwOnInvalidName is set', async () => {
+    let called = 0
+    configureWithFetch(async () => {
+      called++
+      return new Response(CONTRACT_ID, { status: 200 })
+    })
+
+    await assert.rejects(
+      () => sbp('chelonia/out/nameToContractID', '..', { throwOnInvalidName: true }),
+      (e: unknown) =>
+        e instanceof ChelErrorUnexpectedHttpResponseCode &&
+        e.message === '400: invalid name ..' &&
+        e.cause === 400
+    )
+    assert.strictEqual(called, 0)
+  })
+
+  it('throws when a 200 body is not a CID', async () => {
+    configureWithFetch(async () => new Response('<html>hello</html>', { status: 200 }))
+
+    await assert.rejects(
+      () => sbp('chelonia/out/nameToContractID', 'alice'),
+      ChelErrorUnexpected
+    )
+  })
+
+  it('throws when a 200 body is a CID with the wrong multicodec', async () => {
+    const rawCID = createCID('name-lookup-fixture', multicodes.RAW)
+    configureWithFetch(async () => new Response(rawCID, { status: 200 }))
+
+    await assert.rejects(
+      () => sbp('chelonia/out/nameToContractID', 'alice'),
+      ChelErrorUnexpected
     )
   })
 })

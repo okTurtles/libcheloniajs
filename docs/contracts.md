@@ -276,22 +276,28 @@ Passing `namespaceRegistration: 'alice'` to `chelonia/out/registerContract`
 asks the relay to register the name `alice` → this contract's ID (sent as
 the `shelter-namespace-registration` header). The reference relay only
 honors this for identity contracts and validates the name against its own
-name rules: malformed names are rejected with HTTP 400 and duplicates with
-HTTP 409; for other contract types the header is silently ignored, so the
-name simply never registers. To resolve a registered name back to a contract ID, use
+name rules: malformed names are rejected with HTTP 400 and duplicates are
+rejected with HTTP 409. For other contract types the header is silently
+ignored, so the name simply never registers.
+
+To resolve a registered name back to a contract ID, use
 `chelonia/out/nameToContractID`:
 
 ```js
 const contractID = await sbp('chelonia/out/nameToContractID', 'alice')
-// → 'z9MzZR5…' (the identity contract ID), or null if not registered
+// → 'zLDXeQ2Agf…' (the identity contract ID), or null if not registered
 ```
 
 It performs `GET ${connectionURL}/name/:name` through `config.fetch`,
 percent-encodes the name, and resolves to `null` when there is no current
 mapping — HTTP 404 (never registered), HTTP 410 (mapping deleted), HTTP 400
 (the name is malformed, so it can't be registered at all), or an empty
-response body. Any other failed status rejects with
-`ChelErrorUnexpectedHttpResponseCode`.
+response body. The names `.` and `..` are rejected locally as malformed,
+without sending a request, because the URL parser would otherwise collapse
+them into a different path. Any other failed status rejects with
+`ChelErrorUnexpectedHttpResponseCode`, and an HTTP 200 whose body isn't a
+`SHELTER_CONTRACT_DATA` CID rejects with `ChelErrorUnexpected` (it means
+something other than the name endpoint answered).
 
 If you need to tell an invalid name apart from an unregistered one — for
 example to show "that username isn't allowed" instead of "not found" —

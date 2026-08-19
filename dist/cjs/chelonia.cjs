@@ -1463,6 +1463,16 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         if (!name) {
             throw new TypeError('A name must be provided');
         }
+        // The WHATWG URL parser collapses dot segments before the request is
+        // sent (`/name/..` -> `/`, `/name/.` -> `/name/`), and
+        // `encodeURIComponent` does not escape `.`, so these two names would
+        // silently query an unrelated endpoint. They're also names no relay can
+        // register, so they're handled locally as an invalid name (HTTP 400).
+        if (name === '.' || name === '..') {
+            if (!throwOnInvalidName)
+                return null;
+            throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode(`400: invalid name ${name}`, { cause: 400 });
+        }
         const response = await this.config.fetch(`${this.config.connectionURL}/name/${encodeURIComponent(name)}`, {
             cache: 'no-store',
             signal: this.abortController.signal
@@ -1479,10 +1489,14 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // deleted (e.g. the account was). Both are reported as `null`: from
         // the caller's perspective there simply is no current mapping, and
         // deliberately no ChelErrorResourceGone is thrown (unlike
-        // handleFetchResult) because names have no distinct "gone" state.
+        // handleFetchResult) because callers have no use for distinguishing
+        // "gone" from "never registered".
         if (response.status === 404 || response.status === 410)
             return null;
         if (!response.ok) {
+            // These status checks intentionally mirror `handleFetchResult`'s
+            // message format, so a future change to that format should update
+            // both places.
             const msg = `${response.status}: ${response.statusText}`;
             throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode(msg, { cause: response.status });
         }
@@ -1490,7 +1504,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // trimming guards against proxies that append newlines / BOMs. An
         // empty body is treated as an absent mapping, same as 404.
         const value = (await response.text()).trim();
-        return value !== '' ? value : null;
+        if (value === '')
+            return null;
+        // A 200 whose body isn't a contract CID means we didn't talk to the
+        // name endpoint at all (captive portal, transparent proxy, misrouted
+        // path), so it must not be handed back as a contract ID.
+        if ((0, functions_js_1.maybeParseCID)(value)?.code !== functions_js_1.multicodes.SHELTER_CONTRACT_DATA) {
+            throw new errors_js_1.ChelErrorUnexpected(`Invalid contract ID in name lookup response for ${name}`);
+        }
+        return value;
     },
     'chelonia/out/deserializedHEAD': async function (hash, { contractID } = {}) {
         // contractID is optional because this selector could be used for looking up
