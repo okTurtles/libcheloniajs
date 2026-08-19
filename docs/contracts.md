@@ -305,6 +305,11 @@ pass `throwOnInvalidName`, which makes an HTTP 400 reject with
 `ChelErrorUnexpectedHttpResponseCode` (`cause: 400`) rather than resolve to
 `null`. 404 and 410 still resolve to `null` in that mode.
 
+An empty, `null` or `undefined` name is a caller bug rather than a name the
+relay might reject, so it throws a `TypeError` synchronously and is not
+affected by `throwOnInvalidName`. Check user input for emptiness before
+calling.
+
 ```js
 try {
   const contractID = await sbp(
@@ -312,7 +317,10 @@ try {
   )
   // → contract ID, or null if the name is valid but unregistered
 } catch (e) {
-  if (e.cause === 400) { /* the name itself is invalid */ }
+  // Anything that isn't a 400 is a real failure (5xx, network error,
+  // abort) and must not be mistaken for an unregistered name.
+  if (e.cause !== 400) throw e
+  /* the name itself is invalid */
 }
 ```
 

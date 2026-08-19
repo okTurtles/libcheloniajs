@@ -80,6 +80,7 @@ import {
   findSuitableSecretKeyId,
   getContractIDfromKeyId,
   handleFetchResult,
+  httpErrorMessage,
   reactiveClearObject
 } from './utils.js'
 import {
@@ -1922,12 +1923,18 @@ export default sbp('sbp/selectors/register', {
   // A 404 means that the name isn't registered (or a 410 that the mapping
   // was deleted), and a 400 that the name can't be registered at all
   // because it's malformed. All three are reported as `null` rather than
-  // as errors, unless `throwOnInvalidName` is set (see below).
+  // as errors; with `throwOnInvalidName` set, a 400 instead rejects with
+  // ChelErrorUnexpectedHttpResponseCode (see below), while 404 and 410
+  // still resolve to `null`.
   'chelonia/out/nameToContractID': async function (
     this: CheloniaContext,
     name: string,
     { throwOnInvalidName }: { throwOnInvalidName?: boolean } = {}
   ): Promise<string | null> {
+    // A missing name is a caller bug, not a name the relay might reject, so
+    // it's deliberately not routed through `throwOnInvalidName`: reporting
+    // `nameToContractID(undefined)` as an unregistered name would hide the
+    // bug from the caller.
     if (!name) {
       throw new TypeError('A name must be provided')
     }
@@ -1964,11 +1971,9 @@ export default sbp('sbp/selectors/register', {
     // "gone" from "never registered".
     if (response.status === 404 || response.status === 410) return null
     if (!response.ok) {
-      // These status checks intentionally mirror `handleFetchResult`'s
-      // message format, so a future change to that format should update
-      // both places.
-      const msg = `${response.status}: ${response.statusText}`
-      throw new ChelErrorUnexpectedHttpResponseCode(msg, { cause: response.status })
+      throw new ChelErrorUnexpectedHttpResponseCode(
+        httpErrorMessage(response), { cause: response.status }
+      )
     }
     // Contract IDs are CID strings and never contain whitespace, so
     // trimming guards against proxies that append newlines / BOMs. An

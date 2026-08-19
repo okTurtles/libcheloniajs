@@ -153,12 +153,17 @@ describe('chelonia/out/nameToContractID', () => {
   })
 
   it('throws a TypeError when no name is provided', async () => {
-    configureWithFetch(async () => new Response('', { status: 200 }))
+    let called = 0
+    configureWithFetch(async () => {
+      called++
+      return new Response('', { status: 200 })
+    })
 
     await assert.rejects(
       () => sbp('chelonia/out/nameToContractID', ''),
       TypeError
     )
+    assert.strictEqual(called, 0)
   })
 
   it('returns null for dot-only names without sending a request', async () => {
