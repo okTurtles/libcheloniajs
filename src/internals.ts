@@ -71,12 +71,12 @@ import {
 import {
   buildShelterAuthorizationHeader,
   deleteKeyHelper,
-  errorMessageFromResponse,
   findKeyIdByName,
   findSuitablePublicKeyIds,
   findSuitableSecretKeyId,
   getContractIDfromKeyId,
   handleFetchResult,
+  httpErrorDetail,
   keyAdditionProcessor,
   logEvtError,
   recreateEvent,
@@ -880,8 +880,10 @@ export default sbp('sbp/selectors/register', {
                 `[chelonia] failed to publish ${entry.description()} after ${attempt} attempts`,
                 entry
               )
+              // The body is deliberately not read here: a 409 means the HEAD
+              // raced, which the attempt count already explains.
               throw new ChelErrorUnexpectedHttpResponseCode(
-                `publishEvent: ${r.status} - ${r.statusText}. attempt ${attempt}`,
+                `publishEvent: ${r.status}: ${r.statusText}. attempt ${attempt}`,
                 { cause: r.status }
               )
             }
@@ -900,8 +902,10 @@ export default sbp('sbp/selectors/register', {
               await sbp('chelonia/private/in/sync', contractID, { force: true })
             }
           } else {
-            const detail = await errorMessageFromResponse(r)
-            const description = `${r.status} - ${r.statusText}${detail ? `: ${detail}` : ''}`
+            // Same `${status}: ${statusText}` shape the rest of the library
+            // raises HTTP errors with, plus whatever the body explains.
+            const detail = await httpErrorDetail(r)
+            const description = `${r.status}: ${r.statusText}${detail ? ` - ${detail}` : ''}`
             console.error(
               `[chelonia] ERROR: failed to publish ${entry.description()}: ${description}`,
               entry

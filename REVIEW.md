@@ -2,7 +2,7 @@
 
 **Base**: `origin/main` (b2a82be, includes #95)
 **Head**: `fix/94-publish-error-status` (73f6c5a)
-**Date**: 2026-08-19
+**Date**: 2026-08-20
 **Model**: Claude Opus 5
 
 Reviewed against `origin/main` rather than the local `main`, which is stale at
@@ -14,7 +14,7 @@ this branch should be using (finding 1).
 
 ## 1. 🟡 `httpErrorMessage` from #95 is not used, so there are now two formats
 
-- [ ] Addressed
+- [x] Addressed
 - [ ] Dismissed
 
 #95 added a helper to `src/utils.ts` whose stated purpose is exactly this case:
@@ -59,12 +59,17 @@ and then in `publishEvent`:
 +const description = httpErrorMessage(r, detail)
 ```
 
-Worth raising with @corrideat before changing it, since he wrote that comment
-in #95 and may have a view on which separator wins.
+**Fixed.** The status line now uses the same `${status}: ${statusText}` shape
+as `httpErrorMessage`, with the body detail appended after ` - `, so the library
+speaks one format again. `httpErrorMessage` itself only exists on `origin/main`,
+so `publishEvent` cannot call it from this branch without merging main in first;
+once that happens the status line becomes a one-line swap to
+`httpErrorMessage(r)`. Still worth confirming the separator with @corrideat,
+since he wrote that comment.
 
 ## 2. 🟡 The bug being fixed has no automated test
 
-- [ ] Addressed
+- [x] Addressed
 - [ ] Dismissed
 
 `errorMessageFromResponse` is well covered in `src/utils.test.ts` (7 cases,
@@ -86,12 +91,20 @@ work here is building a valid `SPMessage` to publish;
 `createTestContractRegistration` in chel's `src/serve/routes-test-helpers.ts`
 does that and could be adapted.
 
-If that turns out to be too much for this PR, say so in the PR description
-rather than leaving it silent.
+**Fixed.** Added `src/publish-error.test.ts`, wired into `src/index.test.ts`.
+It turned out not to need a manifest fixture: `skipActionProcessing: true` stops
+`processMessage` from loading one, so a self-signed OP_CONTRACT and a stubbed
+`config.fetch` are enough to reach the POST. Four cases: a plain text error body
+(the actual regression), a JSON body, a body that lies about its content type,
+and a 409 that exhausts its retries. Each asserts both the error type and
+`.cause`.
+
+Checked the tests can fail: inverting the content-type branch in
+`httpErrorDetail` fails 10 tests, including all three message-detail cases here.
 
 ## 3. ⚪️ `errorMessageFromResponse` sits far from the helper it belongs with
 
-- [ ] Addressed
+- [x] Addressed
 - [ ] Dismissed
 
 It is defined after `handleFetchResult` but the related `httpErrorMessage` is
@@ -101,9 +114,13 @@ Grouping them, and naming them consistently (`httpErrorMessage` /
 three separate utilities. Cosmetic, but this file is long and easy to duplicate
 things in, which is how finding 1 happened.
 
+**Fixed.** Renamed `errorMessageFromResponse` to `httpErrorDetail` and it sits
+directly after `handleFetchResult`, so after main merges it reads as a pair with
+`httpErrorMessage`: one builds the status line, the other reads the body.
+
 ## 4. ⚪️ A 409 that exhausts its retries still reports no detail
 
-- [ ] Addressed
+- [x] Addressed
 - [ ] Dismissed
 
 `src/internals.ts:877` now throws the right error type with `.cause`, which is
@@ -115,6 +132,9 @@ Probably fine, since a 409 here means "HEAD raced" and the body rarely adds
 anything. Worth a one-line comment saying that is deliberate, otherwise the
 asymmetry looks like an oversight.
 
+**Fixed.** Comment added saying the body is deliberately not read, because the
+attempt count already explains a 409. Behaviour unchanged.
+
 ## Checked and clear
 
 - No consumer parses the `publishEvent:` message string, so changing the thrown
@@ -122,8 +142,8 @@ asymmetry looks like an oversight.
   `ChelErrorGenerator` extends `Error`, so `instanceof Error` still holds and
   the persistent-action retry path (which only reads `error.message`) is
   unaffected.
-- `src/utils.test.ts` is imported by `src/index.test.ts:46`, so the new tests do
-  run under `npm test`. 143 pass.
+- `src/utils.test.ts` is imported by `src/index.test.ts`, so the new tests do
+  run under `npm test`. 147 pass after the fixes above (143 before).
 - Merging `origin/main` into this branch is conflict-free.
 - The previous code interpolated `undefined` into the message when a JSON body
   had no `message` field; that is now omitted. An improvement, not a regression.

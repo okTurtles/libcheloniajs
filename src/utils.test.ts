@@ -134,7 +134,7 @@ describe('Chelonia utils', () => {
   })
 })
 
-describe('errorMessageFromResponse', () => {
+describe('httpErrorDetail', () => {
   const response = (body: string, contentType?: string) =>
     new Response(body, {
       status: 403,
@@ -143,18 +143,18 @@ describe('errorMessageFromResponse', () => {
 
   it('reads `message` out of a JSON body', async () => {
     const r = response('{"message":"Registration disabled"}', 'application/json')
-    assert.strictEqual(await utils.errorMessageFromResponse(r), 'Registration disabled')
+    assert.strictEqual(await utils.httpErrorDetail(r), 'Registration disabled')
   })
 
   it('accepts a charset and a +json suffix on the content type', async () => {
     assert.strictEqual(
-      await utils.errorMessageFromResponse(
+      await utils.httpErrorDetail(
         response('{"message":"with charset"}', 'application/json; charset=utf-8')
       ),
       'with charset'
     )
     assert.strictEqual(
-      await utils.errorMessageFromResponse(
+      await utils.httpErrorDetail(
         response('{"message":"problem json"}', 'application/problem+json')
       ),
       'problem json'
@@ -165,16 +165,16 @@ describe('errorMessageFromResponse', () => {
   // so parsing as JSON threw and the status never reached the caller.
   it('reads a plain text body as the message', async () => {
     const r = response('Registration disabled', 'text/plain;charset=UTF-8')
-    assert.strictEqual(await utils.errorMessageFromResponse(r), 'Registration disabled')
+    assert.strictEqual(await utils.httpErrorDetail(r), 'Registration disabled')
   })
 
   it('reads the body as text when there is no content type', async () => {
-    assert.strictEqual(await utils.errorMessageFromResponse(response('no type here')), 'no type here')
+    assert.strictEqual(await utils.httpErrorDetail(response('no type here')), 'no type here')
   })
 
   it('trims a text body and reports an empty one as no detail', async () => {
-    assert.strictEqual(await utils.errorMessageFromResponse(response('  spaced  ')), 'spaced')
-    assert.strictEqual(await utils.errorMessageFromResponse(response('   ')), '')
+    assert.strictEqual(await utils.httpErrorDetail(response('  spaced  ')), 'spaced')
+    assert.strictEqual(await utils.httpErrorDetail(response('   ')), '')
   })
 
   it('reports no detail rather than throwing when the body is not what it claims', async () => {
@@ -182,7 +182,7 @@ describe('errorMessageFromResponse', () => {
     console.warn = () => {}
     try {
       const r = response('Registration disabled', 'application/json')
-      assert.strictEqual(await utils.errorMessageFromResponse(r), '')
+      assert.strictEqual(await utils.httpErrorDetail(r), '')
     } finally {
       console.warn = originalWarn
     }
@@ -190,11 +190,11 @@ describe('errorMessageFromResponse', () => {
 
   it('reports no detail when a JSON body has no usable message', async () => {
     assert.strictEqual(
-      await utils.errorMessageFromResponse(response('{"error":"nope"}', 'application/json')),
+      await utils.httpErrorDetail(response('{"error":"nope"}', 'application/json')),
       ''
     )
     assert.strictEqual(
-      await utils.errorMessageFromResponse(response('{"message":42}', 'application/json')),
+      await utils.httpErrorDetail(response('{"message":42}', 'application/json')),
       ''
     )
   })

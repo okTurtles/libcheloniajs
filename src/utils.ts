@@ -1179,17 +1179,17 @@ export const handleFetchResult = (
 }
 
 /**
- * Reads the human-readable detail out of a failed HTTP response.
  *
- * A relay may answer with JSON (`{ message }`) or with plain text, so the
- * `Content-Type` decides how the body is read rather than guessing by trying
- * to parse it. Reading must never throw: the status code is the useful part of
- * a failed response, and a body that does not match its declared type should
- * not hide it.
+ * Companion to the `${status}: ${statusText}` line that callers build from the
+ * response itself. A relay may answer with JSON (`{ message }`) or with plain
+ * text, so the `Content-Type` decides how the body is read rather than guessing
+ * by trying to parse it. Reading must never throw: the status code is the
+ * useful part of a failed response, and a body that does not match its declared
+ * type should not hide it.
  *
  * Returns an empty string when there is no usable detail.
  */
-export const errorMessageFromResponse = async (r: Response): Promise<string> => {
+export const httpErrorDetail = async (r: Response): Promise<string> => {
   try {
     const mediaType = (r.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
     if (mediaType === 'application/json' || mediaType.endsWith('+json')) {
