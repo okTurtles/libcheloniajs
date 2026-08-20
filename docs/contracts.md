@@ -589,6 +589,25 @@ the initial `OP_CONTRACT` rather than to the follow-up action.
 | `bearer` | `string` | none | Sets `Authorization: Bearer <token>` instead. |
 | `disableAutoDedup` | `boolean` | `false` | Skip Chelonia's automatic \"already-processed\" detection. Rarely needed; set when intentionally re-publishing a known-duplicate op. |
 
+### When a publish fails
+
+A publish that the relay rejects throws
+`ChelErrorUnexpectedHttpResponseCode` with the HTTP status on `.cause`, so an
+app can tell the user why instead of showing one generic message:
+
+```js
+try {
+  await sbp('chelonia/out/registerContract', { /* … */ })
+} catch (e) {
+  if (e.cause === 403) { /* signups are disabled on this relay */ }
+  if (e.cause === 429) { /* rate limited */ }
+}
+```
+
+The detail in the message comes from the response body, read as JSON
+(`{ message }`) or as text according to the response's `Content-Type`. A body
+that cannot be read is skipped rather than masking the status.
+
 ```js
 await sbp('chelonia/out/actionEncrypted', {
   action: 'my.app/chatroom/post',

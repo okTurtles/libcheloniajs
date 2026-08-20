@@ -133,3 +133,69 @@ describe('Chelonia utils', () => {
     }, /^Error: Signing key has ringLevel/, 'Ring level is not being enforced')
   })
 })
+
+describe('errorMessageFromResponse', () => {
+  const response = (body: string, contentType?: string) =>
+    new Response(body, {
+      status: 403,
+      headers: contentType ? { 'content-type': contentType } : {}
+    })
+
+  it('reads `message` out of a JSON body', async () => {
+    const r = response('{"message":"Registration disabled"}', 'application/json')
+    assert.strictEqual(await utils.errorMessageFromResponse(r), 'Registration disabled')
+  })
+
+  it('accepts a charset and a +json suffix on the content type', async () => {
+    assert.strictEqual(
+      await utils.errorMessageFromResponse(
+        response('{"message":"with charset"}', 'application/json; charset=utf-8')
+      ),
+      'with charset'
+    )
+    assert.strictEqual(
+      await utils.errorMessageFromResponse(
+        response('{"message":"problem json"}', 'application/problem+json')
+      ),
+      'problem json'
+    )
+  })
+
+  // The reason for this issue: Hono's HTTPException answers with plain text,
+  // so parsing as JSON threw and the status never reached the caller.
+  it('reads a plain text body as the message', async () => {
+    const r = response('Registration disabled', 'text/plain;charset=UTF-8')
+    assert.strictEqual(await utils.errorMessageFromResponse(r), 'Registration disabled')
+  })
+
+  it('reads the body as text when there is no content type', async () => {
+    assert.strictEqual(await utils.errorMessageFromResponse(response('no type here')), 'no type here')
+  })
+
+  it('trims a text body and reports an empty one as no detail', async () => {
+    assert.strictEqual(await utils.errorMessageFromResponse(response('  spaced  ')), 'spaced')
+    assert.strictEqual(await utils.errorMessageFromResponse(response('   ')), '')
+  })
+
+  it('reports no detail rather than throwing when the body is not what it claims', async () => {
+    const originalWarn = console.warn
+    console.warn = () => {}
+    try {
+      const r = response('Registration disabled', 'application/json')
+      assert.strictEqual(await utils.errorMessageFromResponse(r), '')
+    } finally {
+      console.warn = originalWarn
+    }
+  })
+
+  it('reports no detail when a JSON body has no usable message', async () => {
+    assert.strictEqual(
+      await utils.errorMessageFromResponse(response('{"error":"nope"}', 'application/json')),
+      ''
+    )
+    assert.strictEqual(
+      await utils.errorMessageFromResponse(response('{"message":42}', 'application/json')),
+      ''
+    )
+  })
+})

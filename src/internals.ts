@@ -36,6 +36,7 @@ import {
   ChelErrorForkedChain,
   ChelErrorKeyAlreadyExists,
   ChelErrorResourceGone,
+  ChelErrorUnexpectedHttpResponseCode,
   ChelErrorUnrecoverable,
   ChelErrorWarning
 } from './errors.js'
@@ -70,6 +71,7 @@ import {
 import {
   buildShelterAuthorizationHeader,
   deleteKeyHelper,
+  errorMessageFromResponse,
   findKeyIdByName,
   findSuitablePublicKeyIds,
   findSuitableSecretKeyId,
@@ -878,7 +880,10 @@ export default sbp('sbp/selectors/register', {
                 `[chelonia] failed to publish ${entry.description()} after ${attempt} attempts`,
                 entry
               )
-              throw new Error(`publishEvent: ${r.status} - ${r.statusText}. attempt ${attempt}`)
+              throw new ChelErrorUnexpectedHttpResponseCode(
+                `publishEvent: ${r.status} - ${r.statusText}. attempt ${attempt}`,
+                { cause: r.status }
+              )
             }
             // create new entry
             const randDelay = randomIntFromRange(0, 1500)
@@ -895,12 +900,15 @@ export default sbp('sbp/selectors/register', {
               await sbp('chelonia/private/in/sync', contractID, { force: true })
             }
           } else {
-            const message = (await r.json())?.message
+            const detail = await errorMessageFromResponse(r)
+            const description = `${r.status} - ${r.statusText}${detail ? `: ${detail}` : ''}`
             console.error(
-              `[chelonia] ERROR: failed to publish ${entry.description()}: ${r.status} - ${r.statusText}: ${message}`,
+              `[chelonia] ERROR: failed to publish ${entry.description()}: ${description}`,
               entry
             )
-            throw new Error(`publishEvent: ${r.status} - ${r.statusText}: ${message}`)
+            throw new ChelErrorUnexpectedHttpResponseCode(`publishEvent: ${description}`, {
+              cause: r.status
+            })
           }
         } catch (e) {
           sbp('okTurtles.events/off', EVENT_HANDLED, onreceivedHandler)

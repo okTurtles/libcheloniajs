@@ -1179,6 +1179,31 @@ export const handleFetchResult = (
 }
 
 /**
+ * Reads the human-readable detail out of a failed HTTP response.
+ *
+ * A relay may answer with JSON (`{ message }`) or with plain text, so the
+ * `Content-Type` decides how the body is read rather than guessing by trying
+ * to parse it. Reading must never throw: the status code is the useful part of
+ * a failed response, and a body that does not match its declared type should
+ * not hide it.
+ *
+ * Returns an empty string when there is no usable detail.
+ */
+export const errorMessageFromResponse = async (r: Response): Promise<string> => {
+  try {
+    const mediaType = (r.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+    if (mediaType === 'application/json' || mediaType.endsWith('+json')) {
+      const body = await r.json()
+      return typeof body?.message === 'string' ? body.message : ''
+    }
+    return (await r.text()).trim()
+  } catch (e) {
+    console.warn('[chelonia] Could not read the body of a failed response', e)
+    return ''
+  }
+}
+
+/**
  * Helper function to delete keys from the state and clear related pending revocations.
  * Handles key rotation scenarios by clearing pending revocations for all keys with the same name.
  *
