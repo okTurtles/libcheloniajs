@@ -146,6 +146,7 @@ chelonia/contract/sync      — Sync contract state from server
 chelonia/contract/retain    — Increment contract reference count
 chelonia/contract/release   — Decrement reference count (unsubscribe at 0)
 chelonia/out/registerContract    — Create a new contract on-chain
+chelonia/out/nameToContractID    — Resolve a registered name (username) to a contract ID
 chelonia/out/actionEncrypted     — Send an encrypted action
 chelonia/out/actionUnencrypted   — Send an unencrypted action
 chelonia/out/keyAdd              — Add a key to a contract

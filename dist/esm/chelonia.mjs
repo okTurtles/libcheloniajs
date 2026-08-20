@@ -2,7 +2,7 @@ import '@sbp/okturtles.eventqueue';
 import '@sbp/okturtles.events';
 import sbp from '@sbp/sbp';
 import { cloneDeep, delay, difference, has, intersection, merge, randomHexString, randomIntFromRange } from 'turtledash';
-import { createCID, multicodes, parseCID } from './functions.mjs';
+import { createCID, maybeParseCID, multicodes, parseCID } from './functions.mjs';
 import { Buffer } from 'buffer';
 import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, createClient } from './pubsub/index.mjs';
 import { clearReingestTrackerAll } from './reingestTracker.mjs';
@@ -19,7 +19,7 @@ import { clearReprocessDebounceAll } from './internals.mjs';
 import './kv.mjs';
 import { isSignedData, signedIncomingData, signedOutgoingData, signedOutgoingDataWithRawKey } from './signedData.mjs';
 import './time-sync.mjs';
-import { buildShelterAuthorizationHeader, checkCanBeGarbageCollected, clearObject, collectEventStream, eventsAfter, findForeignKeysByContractID, findKeyIdByName, findRevokedKeyIdsByName, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, reactiveClearObject } from './utils.mjs';
+import { buildShelterAuthorizationHeader, checkCanBeGarbageCollected, clearObject, collectEventStream, eventsAfter, findForeignKeysByContractID, findKeyIdByName, findRevokedKeyIdsByName, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, httpErrorMessage, reactiveClearObject } from './utils.mjs';
 export { SPMessage };
 export const ACTION_REGEX = /^((([\w.]+)\/([^/]+))(?:\/(?:([^/]+)\/)?)?)\w*/;
 // ACTION_REGEX.exec('gi.contracts/group/payment/process')
@@ -1447,6 +1447,68 @@ export default sbp('sbp/selectors/register', {
             signal: this.abortController.signal
         })
             .then(handleFetchResult('json'));
+    },
+    // Resolves a registered name (e.g., a username) to a contract ID.
+    // A 404 means that the name isn't registered (or a 410 that the mapping
+    // was deleted), and a 400 that the name can't be registered at all
+    // because it's malformed. All three are reported as `null` rather than
+    // as errors; with `throwOnInvalidName` set, a 400 instead rejects with
+    // ChelErrorUnexpectedHttpResponseCode (see below), while 404 and 410
+    // still resolve to `null`.
+    'chelonia/out/nameToContractID': async function (name, { throwOnInvalidName } = {}) {
+        // A missing name is a caller bug, not a name the relay might reject, so
+        // it's deliberately not routed through `throwOnInvalidName`: reporting
+        // `nameToContractID(undefined)` as an unregistered name would hide the
+        // bug from the caller.
+        if (!name) {
+            throw new TypeError('A name must be provided');
+        }
+        // The WHATWG URL parser collapses dot segments before the request is
+        // sent (`/name/..` -> `/`, `/name/.` -> `/name/`), and
+        // `encodeURIComponent` does not escape `.`, so these two names would
+        // silently query an unrelated endpoint. They're also names no relay can
+        // register, so they're handled locally as an invalid name (HTTP 400).
+        if (name === '.' || name === '..') {
+            if (!throwOnInvalidName)
+                return null;
+            throw new ChelErrorUnexpectedHttpResponseCode(`400: invalid name ${name}`, { cause: 400 });
+        }
+        const response = await this.config.fetch(`${this.config.connectionURL}/name/${encodeURIComponent(name)}`, {
+            cache: 'no-store',
+            signal: this.abortController.signal
+        });
+        // 400 means the name doesn't conform to the server's name rules, so it
+        // can't possibly be registered. It's reported as `null` by default
+        // because callers looking up a name usually only care whether a mapping
+        // exists. Set `throwOnInvalidName` to surface it as a
+        // ChelErrorUnexpectedHttpResponseCode instead, e.g. to tell a user that
+        // the name they typed is invalid rather than merely unknown.
+        if (response.status === 400 && !throwOnInvalidName)
+            return null;
+        // 404 means the name was never registered; 410 means the mapping was
+        // deleted (e.g. the account was). Both are reported as `null`: from
+        // the caller's perspective there simply is no current mapping, and
+        // deliberately no ChelErrorResourceGone is thrown (unlike
+        // handleFetchResult) because callers have no use for distinguishing
+        // "gone" from "never registered".
+        if (response.status === 404 || response.status === 410)
+            return null;
+        if (!response.ok) {
+            throw new ChelErrorUnexpectedHttpResponseCode(httpErrorMessage(response), { cause: response.status });
+        }
+        // Contract IDs are CID strings and never contain whitespace, so
+        // trimming guards against proxies that append newlines / BOMs. An
+        // empty body is treated as an absent mapping, same as 404.
+        const value = (await response.text()).trim();
+        if (value === '')
+            return null;
+        // A 200 whose body isn't a contract CID means we didn't talk to the
+        // name endpoint at all (captive portal, transparent proxy, misrouted
+        // path), so it must not be handed back as a contract ID.
+        if (maybeParseCID(value)?.code !== multicodes.SHELTER_CONTRACT_DATA) {
+            throw new ChelErrorUnexpected(`Invalid contract ID in name lookup response for ${name}`);
+        }
+        return value;
     },
     'chelonia/out/deserializedHEAD': async function (hash, { contractID } = {}) {
         // contractID is optional because this selector could be used for looking up

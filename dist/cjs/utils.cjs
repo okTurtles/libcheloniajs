@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.updateKey = exports.deleteKeyHelper = exports.handleFetchResult = exports.logEvtError = exports.collectEventStream = exports.checkCanBeGarbageCollected = exports.reactiveClearObject = exports.clearObject = exports.getContractIDfromKeyId = exports.recreateEvent = exports.subscribeToForeignKeyContracts = exports.keyAdditionProcessor = exports.validateKeyUpdatePermissions = exports.validateKeyDelPermissions = exports.validateKeyAddPermissions = exports.validateKeyPermissions = exports.findSuitablePublicKeyIds = exports.findContractIDByForeignKeyId = exports.findSuitableSecretKeyId = exports.findRevokedKeyIdsByName = exports.findForeignKeysByContractID = exports.findKeyIdByName = void 0;
+exports.updateKey = exports.deleteKeyHelper = exports.handleFetchResult = exports.httpErrorMessage = exports.logEvtError = exports.collectEventStream = exports.checkCanBeGarbageCollected = exports.reactiveClearObject = exports.clearObject = exports.getContractIDfromKeyId = exports.recreateEvent = exports.subscribeToForeignKeyContracts = exports.keyAdditionProcessor = exports.validateKeyUpdatePermissions = exports.validateKeyDelPermissions = exports.validateKeyAddPermissions = exports.validateKeyPermissions = exports.findSuitablePublicKeyIds = exports.findContractIDByForeignKeyId = exports.findSuitableSecretKeyId = exports.findRevokedKeyIdsByName = exports.findForeignKeysByContractID = exports.findKeyIdByName = void 0;
 exports.eventsAfter = eventsAfter;
 exports.buildShelterAuthorizationHeader = buildShelterAuthorizationHeader;
 exports.verifyShelterAuthorizationHeader = verifyShelterAuthorizationHeader;
@@ -619,7 +619,7 @@ function eventsAfter(contractID, { sinceHeight, limit, sinceHash, stream = true 
         lastUrl = `${this.config.connectionURL}/eventsAfter/${contractID}/${sinceHeight}${Number.isInteger(requestLimit) ? `/${requestLimit}` : ''}`;
         const eventsResponse = await this.config.fetch(lastUrl, { signal });
         if (!eventsResponse.ok) {
-            const msg = `${eventsResponse.status}: ${eventsResponse.statusText}`;
+            const msg = (0, exports.httpErrorMessage)(eventsResponse);
             if (eventsResponse.status === 404 || eventsResponse.status === 410) {
                 throw new errors_js_1.ChelErrorResourceGone(msg, { cause: eventsResponse.status });
             }
@@ -927,10 +927,15 @@ const logEvtError = (msg, ...args) => {
     }
 };
 exports.logEvtError = logEvtError;
+// Single source of truth for the message of errors raised from a failed HTTP
+// response, so callers that map statuses themselves stay consistent with
+// `handleFetchResult`.
+const httpErrorMessage = (r) => `${r.status}: ${r.statusText}`;
+exports.httpErrorMessage = httpErrorMessage;
 const handleFetchResult = (type) => {
     return function (r) {
         if (!r.ok) {
-            const msg = `${r.status}: ${r.statusText}`;
+            const msg = (0, exports.httpErrorMessage)(r);
             // 410 is sometimes special (for example, it can mean that a contract or
             // a file been deleted)
             if (r.status === 404 || r.status === 410) {

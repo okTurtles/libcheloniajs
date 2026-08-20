@@ -1,7 +1,7 @@
 import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert'
-import { beforeEach, describe, it } from 'node:test'
+import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
@@ -38,7 +38,19 @@ const setupContract = (): { contractID: string; signingKeyId: string } => {
 }
 
 describe('chelonia/kv/set', () => {
+  // Intentionally duplicated per describe rather than hoisted to module
+  // scope: every test file is imported into the single `src/index.test.ts`
+  // entry point, so a module-scope beforeEach/afterEach registers on the
+  // shared root suite and would re-init Chelonia around every test in
+  // every other file.
   beforeEach(() => {
+    sbp('chelonia/_init')
+  })
+
+  // Re-init after each test so the stubbed `fetch` doesn't leak past this
+  // block into subsequently-imported test files (`_init` rebuilds the
+  // default config; the next test's beforeEach would do this anyway).
+  afterEach(() => {
     sbp('chelonia/_init')
   })
 
@@ -349,6 +361,11 @@ describe('chelonia/kv/set', () => {
 
 describe('chelonia/kv/get', () => {
   beforeEach(() => {
+    sbp('chelonia/_init')
+  })
+
+  // Same leak-prevention as the `chelonia/kv/set` block above.
+  afterEach(() => {
     sbp('chelonia/_init')
   })
 

@@ -42,6 +42,7 @@ import './chelonia-kv-set.test.js'
 // Depends on `chelonia.js` being loaded (locked domain), same as the tests
 // above.
 import './publish-error.test.js'
+import './name-lookup.test.js'
 
 import './persistent-actions.test.js'
 import './pubsub/index.test.js'
