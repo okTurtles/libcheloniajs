@@ -161,6 +161,45 @@ describe('httpErrorDetail', () => {
     )
   })
 
+  // The `application/` prefix is required, so a `+json` suffix on any other
+  // type is read as text rather than parsed.
+  it('only treats a +json suffix as JSON under application/', async () => {
+    assert.strictEqual(
+      await utils.httpErrorDetail(response('{"message":"not parsed"}', 'text/x+json')),
+      '{"message":"not parsed"}'
+    )
+  })
+
+  // RFC 7807 problem documents put the text in `detail`, not `message`.
+  it('falls back to the RFC 7807 detail field', async () => {
+    assert.strictEqual(
+      await utils.httpErrorDetail(
+        response('{"title":"Forbidden","detail":"signups are off"}', 'application/problem+json')
+      ),
+      'signups are off'
+    )
+    // `message` still wins when both are present
+    assert.strictEqual(
+      await utils.httpErrorDetail(
+        response('{"message":"from message","detail":"from detail"}', 'application/json')
+      ),
+      'from message'
+    )
+  })
+
+  // A proxy error page can be kilobytes of HTML, and this text reaches
+  // `e.message` and the logs.
+  it('truncates a long detail', async () => {
+    const long = 'x'.repeat(1000)
+    const fromText = await utils.httpErrorDetail(response(long))
+    assert.strictEqual(fromText, `${'x'.repeat(512)}…[truncated]`)
+
+    const fromJson = await utils.httpErrorDetail(
+      response(JSON.stringify({ message: long }), 'application/json')
+    )
+    assert.strictEqual(fromJson, `${'x'.repeat(512)}…[truncated]`)
+  })
+
   // The reason for this issue: Hono's HTTPException answers with plain text,
   // so parsing as JSON threw and the status never reached the caller.
   it('reads a plain text body as the message', async () => {

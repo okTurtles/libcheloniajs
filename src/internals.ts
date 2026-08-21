@@ -77,6 +77,7 @@ import {
   getContractIDfromKeyId,
   handleFetchResult,
   httpErrorDetail,
+  httpErrorMessage,
   keyAdditionProcessor,
   logEvtError,
   recreateEvent,
@@ -883,7 +884,7 @@ export default sbp('sbp/selectors/register', {
               // The body is deliberately not read here: a 409 means the HEAD
               // raced, which the attempt count already explains.
               throw new ChelErrorUnexpectedHttpResponseCode(
-                `publishEvent: ${r.status}: ${r.statusText}. attempt ${attempt}`,
+                `publishEvent: ${httpErrorMessage(r)}. attempt ${attempt}`,
                 { cause: r.status }
               )
             }
@@ -902,10 +903,10 @@ export default sbp('sbp/selectors/register', {
               await sbp('chelonia/private/in/sync', contractID, { force: true })
             }
           } else {
-            // Same `${status}: ${statusText}` shape the rest of the library
-            // raises HTTP errors with, plus whatever the body explains.
+            // The same line the rest of the library raises HTTP errors with,
+            // plus whatever the body explains.
             const detail = await httpErrorDetail(r)
-            const description = `${r.status}: ${r.statusText}${detail ? ` - ${detail}` : ''}`
+            const description = `${httpErrorMessage(r)}${detail ? ` - ${detail}` : ''}`
             console.error(
               `[chelonia] ERROR: failed to publish ${entry.description()}: ${description}`,
               entry

@@ -1183,25 +1183,41 @@ export const handleFetchResult = (
   }
 }
 
+// This text ends up in `e.message` and in the logs, and a proxy answering with
+// an HTML error page can send kilobytes of markup, so it is capped.
+const MAX_ERROR_DETAIL_LENGTH = 512
+
+const truncateDetail = (s: string) => {
+  return s.length > MAX_ERROR_DETAIL_LENGTH
+    ? `${s.slice(0, MAX_ERROR_DETAIL_LENGTH)}…[truncated]`
+    : s
+}
+
 /**
- *
- * Companion to the `${status}: ${statusText}` line that callers build from the
- * response itself. A relay may answer with JSON (`{ message }`) or with plain
- * text, so the `Content-Type` decides how the body is read rather than guessing
- * by trying to parse it. Reading must never throw: the status code is the
- * useful part of a failed response, and a body that does not match its declared
- * type should not hide it.
+ * Companion to the `${status}: ${statusText}` line from `httpErrorMessage`.
+ * A relay may answer with JSON (`{ message }`) or with plain text, so the
+ * `Content-Type` decides how the body is read rather than guessing by trying to
+ * parse it. Reading must never throw: the status code is the useful part of a
+ * failed response, and a body that does not match its declared type should not
+ * hide it.
  *
  * Returns an empty string when there is no usable detail.
  */
 export const httpErrorDetail = async (r: Response): Promise<string> => {
   try {
     const mediaType = (r.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
-    if (mediaType === 'application/json' || mediaType.endsWith('+json')) {
+    // `application/json` plus structured suffixes such as
+    // `application/problem+json`. The `application/` prefix is required, so
+    // something like `text/x+json` is read as text.
+    const isJson = mediaType === 'application/json' ||
+      (mediaType.startsWith('application/') && mediaType.endsWith('+json'))
+    if (isJson) {
       const body = await r.json()
-      return typeof body?.message === 'string' ? body.message : ''
+      // RFC 7807 problem documents carry the text in `detail`, not `message`.
+      const detail = typeof body?.message === 'string' ? body.message : body?.detail
+      return typeof detail === 'string' ? truncateDetail(detail.trim()) : ''
     }
-    return (await r.text()).trim()
+    return truncateDetail((await r.text()).trim())
   } catch (e) {
     console.warn('[chelonia] Could not read the body of a failed response', e)
     return ''

@@ -2893,7 +2893,7 @@ export default sbp('sbp/selectors/register', {
         // These are not treated as errors since we could still set the value.
       } else if (response.status !== 404 && response.status !== 410) {
         throw new ChelErrorUnexpectedHttpResponseCode(
-          '[kv/set] Invalid response code: ' + response.status
+          `[kv/set] ${httpErrorMessage(response)}`, { cause: response.status }
         )
       }
       // When a 409/412 response provides neither an etag header nor a
@@ -3039,7 +3039,7 @@ export default sbp('sbp/selectors/register', {
             }
           }
           throw new ChelErrorUnexpectedHttpResponseCode(
-            'kv/set invalid response status: ' + response.status
+            `[kv/set] ${httpErrorMessage(response)}`, { cause: response.status }
           )
         }
         // Successful write: capture the server-issued etag (x-cid /
