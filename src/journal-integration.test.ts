@@ -15,7 +15,7 @@ import { describe, it, before, beforeEach } from 'node:test'
 import './chelonia.js'
 import './db.js'
 import { ChelErrorJournalCorrupt } from './errors.js'
-import { REDACTION_NON_JSON_SAFE_SENTINEL, defaultApplyPatch, defaultDiff } from './journal.js'
+import { REDACTION_NON_JSON_SAFE_SENTINEL, defaultApplyPatch, defaultDiff, defaultJournalConfig } from './journal.js'
 import type { ChelContractState, ChelRootState, JournalEntry, JournalPatch } from './types.js'
 
 type FakeMessage = {
@@ -456,6 +456,44 @@ describe('journal: integration via SBP selectors', () => {
       'opting out must restore the minimal-diff behaviour'
     )
     await sbp('chelonia/configure', { journal: { markRedactedChanges: true } })
+  })
+
+  it('keeps no live reference to the recorded states', async () => {
+    // Site tracking reads pre-redaction originals directly out of the
+    // caller's states rather than cloning them. That is only safe because
+    // nothing derived from them is retained: marker values are cloned out
+    // of the redacted projection. Mutating the recorded states afterwards
+    // must therefore leave the persisted journal untouched.
+    await sbp('chelonia/configure', {
+      journal: {
+        enabled: true,
+        snapshotInterval: 3,
+        contractIDs: [],
+        redactions: [
+          { path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED]' }
+        ]
+      }
+    })
+    const cid = 'cid-redact-no-aliasing'
+    ensureContractMeta(cid)
+    const s1 = mkKeyState('SECRET-1')
+    const s2 = mkKeyState('SECRET-2')
+    record(cid, 'h0', 0, undefined, s1)
+    record(cid, 'h1', 1, s1, s2)
+    // Read the raw persisted journal, not the deep clone `journal/get`
+    // hands out, so aliasing cannot hide behind the copy.
+    const persisted = rootState().contracts[cid]._journal
+    const snapshot = JSON.stringify(persisted)
+    const keysOf = (s: ChelContractState) => (s as unknown as {
+      _vm: { authorizedKeys: Record<string, Record<string, unknown>> };
+    })._vm.authorizedKeys
+    keysOf(s1).k1.data = 'MUTATED-1'
+    keysOf(s2).k1.data = 'MUTATED-2'
+    keysOf(s2).k1.purpose = ['enc']
+    delete keysOf(s2).k1.id
+    assert.strictEqual(JSON.stringify(persisted), snapshot,
+      'mutating the recorded states must not reach the persisted journal')
+    assert.ok(!snapshot.includes('SECRET'), 'redacted data must never be journaled')
   })
 
   it('records one marker per event when a redacted value changes repeatedly', async () => {
@@ -1358,6 +1396,36 @@ describe('journal: integration via SBP selectors', () => {
     record(cid, 'h1', 1, undefined, mkState(2))
     assert.strictEqual(getEntries(cid), undefined,
       'recordEvent must not journal while disabled')
+
+    // The reset must land on exactly the documented defaults, not merely
+    // flip `enabled` off. Re-enable *only* that field and prove each of
+    // the others is back at its default by observation.
+    const defaults = defaultJournalConfig()
+    await sbp('chelonia/configure', { journal: { enabled: true } })
+    const probe = 'cid-journal-null-defaults'
+    ensureContractMeta(probe)
+    const p1 = mkKeyState('PLAINTEXT-1')
+    const p2 = mkKeyState('PLAINTEXT-2')
+    record(probe, 'p0', 0, undefined, p1)
+    record(probe, 'p1', 1, p1, p2)
+    const probeEntries = getEntries(probe)!
+    // `contractIDs: []` means "all contracts", so a never-allow-listed
+    // contract is journaled again.
+    assert.strictEqual(probeEntries.length, 2,
+      'journal: null must reset contractIDs to "all"')
+    // `redactions: []` means raw values reach the journal.
+    assert.ok(JSON.stringify(probeEntries).includes('PLAINTEXT-2'),
+      'journal: null must reset redactions to none')
+    // `snapshotInterval` is back to the default, not the small value this
+    // suite configures, so no boundary snapshot appears this soon.
+    assert.ok(defaults.snapshotInterval! > 3, 'test assumes a default above 3')
+    const p3 = mkKeyState('PLAINTEXT-3')
+    record(probe, 'p2', 2, p2, p3)
+    record(probe, 'p3', 3, p3, mkKeyState('PLAINTEXT-4'))
+    assert.ok(
+      !getEntries(probe)!.slice(1).some((e) => e.kind === 'snapshot'),
+      'journal: null must reset snapshotInterval to its default'
+    )
 
     // Restore enabled state for subsequent tests (beforeEach also does
     // this, but be explicit).

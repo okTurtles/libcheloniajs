@@ -233,6 +233,12 @@ await sbp('chelonia/configure', {
 })
 ```
 
+The defaults in the table below are also available programmatically as
+`defaultJournalConfig()`, which returns a fresh copy of the block Chelonia
+seeds itself with (and resets to on `journal: null`). It deliberately omits
+`markRedactedChanges`, `diff` and `applyPatch`, which are resolved at read
+time — see their rows below.
+
 | Field | Type | Default | Purpose |
 |---|---|---|---|
 | `enabled` | `boolean` | `false` | Master switch. Strict-typed — non-boolean throws `TypeError`. |

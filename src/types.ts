@@ -120,6 +120,12 @@ export type JournalPatch =
 
 // A single redacted leaf recorded while `applyRedactions` walked the state:
 // the value found there before redaction and the value that replaced it.
+//
+// `original` is a live reference into the state that was passed to
+// `applyRedactions`, not a copy: it exists so change detection can compare
+// pre-redaction values, and it is never persisted. Treat it as read-only and
+// read it before the underlying state can change. `replacement` is the value
+// that actually ended up in the projection, so it is safe to keep.
 export type RedactionSite = {
   original: unknown;
   replacement: unknown;

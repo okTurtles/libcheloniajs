@@ -1,4 +1,4 @@
-import type { JournalPatch, JournalRedaction, RedactionSite, RedactionSiteMap } from './types.mjs';
+import type { JournalConfig, JournalPatch, JournalRedaction, RedactionSite, RedactionSiteMap } from './types.mjs';
 export declare function escapePointerSegment(segment: string): string;
 export declare function unescapePointerSegment(segment: string): string;
 export declare function segmentsToPointer(segments: string[]): string;
@@ -15,5 +15,6 @@ export declare function shortHashRedactor(value: unknown): string;
 export declare function hasHiddenChange(before: RedactionSite, after: RedactionSite): boolean;
 export declare function synthesizeRedactedChangeOps(patch: JournalPatch[], beforeSites: RedactionSiteMap, afterSites: RedactionSiteMap, redactedAfter: unknown): JournalPatch[];
 export declare const DEFAULT_SNAPSHOT_INTERVAL = 50;
+export declare function defaultJournalConfig(): JournalConfig;
 declare const _default: string[];
 export default _default;

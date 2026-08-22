@@ -12,7 +12,7 @@ import { ChelErrorKvMaxAttempts } from './internal-errors.mjs';
 import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './events.mjs';
 import { SPMessage } from './SPMessage.mjs';
 import './chelonia-utils.mjs';
-import { DEFAULT_SNAPSHOT_INTERVAL } from './journal.mjs';
+import { DEFAULT_SNAPSHOT_INTERVAL, defaultJournalConfig } from './journal.mjs';
 import { encryptedOutgoingData, encryptedOutgoingDataWithRawKey, isEncryptedData, maybeEncryptedIncomingData, unwrapMaybeEncryptedData } from './encryptedData.mjs';
 import './files.mjs';
 import { clearReprocessDebounceAll } from './internals.mjs';
@@ -98,20 +98,10 @@ export default sbp('sbp/selectors/register', {
             // Opt-in by default: enabling it imposes per-event CPU (deep clones
             // + diff) and persisted-state cost (up to ~2X entries plus full
             // snapshots) on every active contract. Consumers turn it on via
-            // `chelonia/configure`. Function fields (`redactions[*].redact`,
-            // `diff`, `applyPatch`) are intentionally left unset here so they
-            // survive `merge()` (which deep-clones via JSON and would otherwise
-            // strip them); `chelonia/configure` reattaches them in a dedicated
-            // pass. `markRedactedChanges` is likewise omitted: its default
-            // depends on which `diff`/`applyPatch` pair is active (the markers
-            // are RFC-6901 pointer ops, only valid for the built-in pair), so
-            // `resolveJournalConfig` derives it rather than storing it here.
-            journal: {
-                enabled: false,
-                snapshotInterval: DEFAULT_SNAPSHOT_INTERVAL,
-                contractIDs: [],
-                redactions: []
-            },
+            // `chelonia/configure`. See `defaultJournalConfig` for why the block
+            // is deliberately partial (function fields must survive `merge()`;
+            // `markRedactedChanges` is derived, not stored).
+            journal: defaultJournalConfig(),
             unwrapMaybeEncryptedData
         };
         // Used in publishEvent to cancel sending events after reset (logout)
@@ -289,12 +279,7 @@ export default sbp('sbp/selectors/register', {
             // journals. This is the documented "don't journal" escape hatch
             // and is symmetric with the way other config blocks accept a
             // null/empty value to mean "off".
-            this.config.journal = {
-                enabled: false,
-                snapshotInterval: DEFAULT_SNAPSHOT_INTERVAL,
-                contractIDs: [],
-                redactions: []
-            };
+            this.config.journal = defaultJournalConfig();
             sbp('chelonia/journal/clear');
         }
         else if (journalOverride !== undefined) {
@@ -329,12 +314,7 @@ export default sbp('sbp/selectors/register', {
                 // No prior journal block (e.g. configure called before _init in
                 // tests). Seed with the documented defaults so subsequent
                 // field-by-field overrides have somewhere to land.
-                this.config.journal = {
-                    enabled: false,
-                    snapshotInterval: DEFAULT_SNAPSHOT_INTERVAL,
-                    contractIDs: [],
-                    redactions: []
-                };
+                this.config.journal = defaultJournalConfig();
             }
             const target = this.config.journal;
             if (journalOverride.enabled !== undefined) {

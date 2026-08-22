@@ -1,11 +1,13 @@
 import * as assert from 'node:assert'
 import { describe, it } from 'node:test'
 import {
+  DEFAULT_SNAPSHOT_INTERVAL,
   REDACTION_ERROR_SENTINEL,
   REDACTION_NON_JSON_SAFE_SENTINEL,
   applyRedactions,
   defaultApplyPatch,
   defaultDiff,
+  defaultJournalConfig,
   escapePointerSegment,
   hasHiddenChange,
   parseDottedPath,
@@ -47,6 +49,41 @@ describe('journal: JSON-Pointer helpers', () => {
     assert.deepStrictEqual(parseDottedPath('a.b.c'), ['a', 'b', 'c'])
     assert.deepStrictEqual(parseDottedPath(''), [])
     assert.deepStrictEqual(parseDottedPath('a.*.c'), ['a', '*', 'c'])
+  })
+})
+
+// The seed for every journal config in the codebase. Its *omissions* are
+// load-bearing, so they are asserted rather than left to a comment.
+describe('journal: defaultJournalConfig', () => {
+  it('returns the documented defaults', () => {
+    assert.deepStrictEqual(defaultJournalConfig(), {
+      enabled: false,
+      snapshotInterval: DEFAULT_SNAPSHOT_INTERVAL,
+      contractIDs: [],
+      redactions: []
+    })
+  })
+
+  it('omits the fields whose defaults are derived elsewhere', () => {
+    // `markRedactedChanges` is derived from which `diff` / `applyPatch`
+    // pair is active (markers are RFC-6901 ops, valid only for the
+    // built-ins), and the function fields would not survive `configure`'s
+    // JSON deep-clone. Setting any of them here would silently break both
+    // behaviours, so pin their absence.
+    const cfg = defaultJournalConfig() as Record<string, unknown>
+    for (const field of ['markRedactedChanges', 'diff', 'applyPatch']) {
+      assert.ok(!(field in cfg), `${field} must not be seeded`)
+    }
+  })
+
+  it('hands every caller its own arrays', () => {
+    // Three call sites share this factory; a shared literal would let one
+    // consumer's `contractIDs.push` show up in another's config.
+    const a = defaultJournalConfig()
+    const b = defaultJournalConfig()
+    assert.notStrictEqual(a, b)
+    assert.notStrictEqual(a.contractIDs, b.contractIDs)
+    assert.notStrictEqual(a.redactions, b.redactions)
   })
 })
 
@@ -616,6 +653,75 @@ describe('journal: applyRedactions', () => {
       sites
     )
     assert.strictEqual(sites.size, 0)
+  })
+
+  it('does not mutate the input while tracking sites', () => {
+    // The no-sites path is covered above; site tracking takes a different
+    // branch (it resolves originals from the input itself), so pin it too.
+    const before = { a: { b: 'secret', keep: 1 }, arr: [{ s: 'x' }] }
+    const snapshot = JSON.parse(JSON.stringify(before))
+    applyRedactions(
+      before,
+      [
+        { path: 'a.b', redact: () => 'R' },
+        { path: 'arr.*.s', redact: () => 'R' }
+      ],
+      'test/contract',
+      new Map()
+    )
+    assert.deepStrictEqual(before, snapshot)
+  })
+
+  it('never writes through the input when tracking sites (frozen input)', () => {
+    // Site tracking reads pre-redaction originals straight out of the
+    // caller's state instead of cloning it, so "we only ever write into the
+    // clone" has to hold mechanically, not just by convention. Modules are
+    // strict mode, so any write through the input throws here. Overlapping
+    // leaf + ancestor directives exercise the ancestor-original path too.
+    const deepFreeze = <T>(v: T): T => {
+      if (v === null || typeof v !== 'object') return v
+      Object.values(v as Record<string, unknown>).forEach(deepFreeze)
+      return Object.freeze(v)
+    }
+    const frozen = deepFreeze({
+      a: { secret: 'raw', keep: 1 },
+      list: [{ s: 'one' }, { s: 'two' }]
+    })
+    const sites: RedactionSiteMap = new Map()
+    const out = applyRedactions(
+      frozen,
+      [
+        { path: 'a.secret', redact: () => '[HIDDEN]' },
+        { path: 'a', redact: () => '[WHOLE]' },
+        { path: 'list.*.s', redact: () => '[R]' }
+      ],
+      'test/contract',
+      sites
+    )
+    assert.deepStrictEqual(out, {
+      a: '[WHOLE]',
+      list: [{ s: '[R]' }, { s: '[R]' }]
+    })
+    assert.deepStrictEqual(sites.get('/a'), {
+      original: { secret: 'raw', keep: 1 },
+      replacement: '[WHOLE]'
+    })
+  })
+
+  it('records originals as live references into the input, not copies', () => {
+    // Deliberate: `original` is only ever compared (and then dropped), so
+    // it aliases the caller's state rather than paying for a second
+    // full-state clone per projection. Re-introducing a clone here would be
+    // a conscious perf regression, hence the identity assertion.
+    const input = { a: { secret: 'raw' } }
+    const sites: RedactionSiteMap = new Map()
+    applyRedactions(
+      input,
+      [{ path: 'a', redact: () => '[WHOLE]' }],
+      'test/contract',
+      sites
+    )
+    assert.strictEqual(sites.get('/a')!.original, input.a)
   })
 })
 

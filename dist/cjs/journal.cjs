@@ -40,6 +40,7 @@ exports.applyRedactions = applyRedactions;
 exports.shortHashRedactor = shortHashRedactor;
 exports.hasHiddenChange = hasHiddenChange;
 exports.synthesizeRedactedChangeOps = synthesizeRedactedChangeOps;
+exports.defaultJournalConfig = defaultJournalConfig;
 const functions_js_1 = require("./functions.cjs");
 const sbp_1 = __importDefault(require("@sbp/sbp"));
 const turtledash_1 = require("turtledash");
@@ -568,11 +569,23 @@ function applyRedactions(state, redactions, contractName,
 // changed even when its redacted projection is a constant. Passing a map
 // is the only way to obtain this: the returned state deliberately keeps
 // no trace of the original values.
+//
+// The recorded `original`s are live references into `state`, not copies.
+// Treat the map as read-only, and consume it before `state` can change
+// (see the aliasing note below).
 sites) {
     const cloned = cloneValue(state);
     if (!redactions || redactions.length === 0)
         return cloned;
-    const source = sites ? cloneValue(state) : undefined;
+    // Read-only view used to resolve pre-redaction originals. Aliasing the
+    // input rather than cloning it a second time is safe on two counts:
+    // `walkAndRedact` writes exclusively into `cloned`, and every recorded
+    // `original` is consumed synchronously by the caller (see `recordEvent`)
+    // before control returns to the event loop. Cloning bought no temporal
+    // isolation anyway (the copy was taken at the same instant as the reads)
+    // while costing a second full-state deep clone per projection, i.e. four
+    // per journaled event instead of two.
+    const source = sites ? state : undefined;
     for (const r of redactions) {
         const segments = parseDottedPath(r.path);
         if (segments.length === 0)
@@ -836,6 +849,31 @@ function synthesizeRedactedChangeOps(patch, beforeSites, afterSites, redactedAft
 // ---------------------------------------------------------------------------
 // Default snapshot interval (X). The journal holds between X and 2X entries.
 exports.DEFAULT_SNAPSHOT_INTERVAL = 50;
+// The documented default journal block, in one place. `chelonia/_init` seeds
+// the live config with it, and `chelonia/configure` reuses it both for the
+// `journal: null` reset and for the no-prior-block fallback: three call sites
+// that previously each carried their own copy of the literal and could drift
+// apart.
+//
+// A factory rather than a shared constant: each caller must own its arrays,
+// or one consumer's `contractIDs.push` would surface in another's config.
+//
+// Deliberately partial. The function fields (`diff`, `applyPatch`,
+// `redactions[*].redact`) are left unset because `chelonia/configure` merges
+// through a JSON deep-clone that would strip them; it reattaches them in a
+// dedicated pass. `markRedactedChanges` is left unset because its default is
+// *derived* from which `diff` / `applyPatch` pair is active (markers are
+// RFC-6901 pointer ops, only meaningful for the built-ins), so
+// `resolveJournalConfig` computes it instead of storing it. Adding either
+// here would silently change that behaviour.
+function defaultJournalConfig() {
+    return {
+        enabled: false,
+        snapshotInterval: exports.DEFAULT_SNAPSHOT_INTERVAL,
+        contractIDs: [],
+        redactions: []
+    };
+}
 function resolveJournalConfig(cfg) {
     // `chelonia/_init` populates `this.config.journal` with all of the
     // documented defaults so the policy lives in exactly one place. We still
@@ -1092,6 +1130,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // Redacted-leaf bookkeeping, used to detect changes that the redacted
             // projections hide (constant redactors such as `() => '[REDACTED]'`).
             // Only allocated when it can actually be used.
+            //
+            // These maps hold live references into `beforeState` / `afterState`
+            // (see `applyRedactions`), so they MUST be consumed before this
+            // function yields. Keep the path from the projections below to
+            // `synthesizeRedactedChangeOps` synchronous: an `await` in between
+            // would let the states move under the recorded originals.
             const trackRedactedChanges = cfg.markRedactedChanges &&
                 cfg.redactions.length > 0 &&
                 !willEmitEmptyPatch &&

@@ -306,7 +306,7 @@ Details worth knowing:
   changes under a visibly changed projected ancestor are still marked —
   and, since the projection then provides no way to verify the hidden
   parts, detection is conservative: a visible-only change under a lossy
-  projection may also retain a marker. An extra marker is a no-op; a
+  projection may also be marked. An extra marker is a no-op; a
   suppressed one would lose the only record of a hidden change.
 - **Overlapping directives are supported, but their projected output is
   order-sensitive.** Each redactor still sees the result of earlier
