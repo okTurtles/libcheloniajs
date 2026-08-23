@@ -221,8 +221,9 @@ already-redacted view.
     finite numbers, and arrays / plain objects thereof.
 
 Non-JSON-safe results (`undefined`, `BigInt`, symbols, functions,
-non-finite numbers, class instances, cycles) are replaced with the
-string sentinel `'[REDACTION_NON_JSON_SAFE]'` (exported as
+non-finite numbers, class instances, cycles, and holes in a sparse
+array) are replaced with the string sentinel
+`'[REDACTION_NON_JSON_SAFE]'` (exported as
 `REDACTION_NON_JSON_SAFE_SENTINEL`) and a warning is logged — the
 description names the offending path and the value's *shape* only,
 never the value itself. Container results are normalized deeply, so a
@@ -240,7 +241,12 @@ on `BigInt` and cycles. Letting such values in would corrupt
 `chelonia/journal/reconstruct` after a reload. The requirement is a
 *lossless* round-trip rather than a successful `JSON.stringify`, which
 is why values that do serialize but come back reshaped — a `Date`
-becomes a string — are rejected as well.
+becomes a string, an array hole becomes `null` — are rejected as well.
+
+Holes in contract state itself are treated differently: they are data
+rather than caller error, so the journal reads them as `null` (their
+exact JSON equivalent) instead of flagging them. See
+[Supported state shape](#supported-state-shape).
 
 ### Built-in redactors
 
@@ -256,6 +262,56 @@ For low-entropy fields, use a constant sentinel:
 ```js
 { path: 'profiles.*.role', redact: () => '[REDACTED]' }
 ```
+
+### Low-level redaction helpers
+
+These are exported for people building a **custom diff pipeline** (a
+`diff` / `applyPatch` pair that needs to reproduce the built-in
+redaction behaviour). Normal use of the journal never calls them: the
+recorder applies redactions, detects hidden changes and emits markers
+on its own.
+
+#### `applyRedactions(state, redactions, contractName, sites?)`
+
+Deep-clones `state` and applies each `{ path, redact }` directive to
+the clone, returning the redacted projection. Never mutates `state`. A
+throwing redactor is caught and its leaf becomes
+`REDACTION_ERROR_SENTINEL`; a non-JSON-safe result becomes
+`REDACTION_NON_JSON_SAFE_SENTINEL` (see above).
+
+Pass a `RedactionSiteMap` (a plain `Map`) as `sites` to learn what was
+redacted where: each redacted leaf is recorded as its JSON Pointer
+mapped to `{ original, replacement }`. This is the only way to recover
+that information, because the returned projection deliberately keeps no
+trace of the originals.
+
+> `original` is a **live reference** into `state`, not a copy. Treat
+> the map as read-only and read it before `state` can change.
+
+#### `hasHiddenChange(before, after)`
+
+Takes two `RedactionSite`s for the *same* pointer (one from the
+before-projection's site map, one from the after-projection's) and
+returns `true` when the underlying value changed while its redacted
+replacement did not — i.e. exactly the case a plain diff would drop.
+
+#### `synthesizeRedactedChangeOps(patch, beforeSites, afterSites, redactedAfter)`
+
+Given a diff and the two site maps, returns the patch with an identity
+`replace` carrying `redacted: true` appended for every hidden change
+that the diff did not already cover (`redactedAfter` is the redacted
+after-projection, used to read the value each marker writes back over
+itself). This is what produces the markers described in [Changes behind
+a constant redactor](#changes-behind-a-constant-redactor).
+
+#### `structurallyEqual(a, b)`
+
+Deep equality defined as "`defaultDiff(a, b)` would be empty": own keys
+only, `NaN` equals `NaN`, array holes compare as `null`, `undefined` on
+one side only is a difference, and non-plain containers (`Date`, `Map`,
+class instances) are equal only by reference. A custom pipeline that
+substitutes its own equality must keep it in lock-step with its own
+diff, or markers will either invent churn or keep hiding real changes.
 
 ### Changes behind a constant redactor
 
@@ -451,6 +507,20 @@ Either:
 - Keep contract state plain JSON, or
 - Swap in a `structuredClone`-based `diff`/`applyPatch` override (see
   next section).
+
+Two JSON-shape details worth knowing, both chosen to match what
+persistence would do anyway:
+
+- **Array holes read as `null`.** A sparse array (`[1, , 3]`) has no
+  JSON representation; `JSON.stringify` writes `null` in the hole. The
+  journal does the same when cloning, diffing and comparing state, so a
+  hole can never be mistaken for a missing index — which would
+  otherwise produce an insert/delete that shifts every later element and
+  leave `reconstruct` returning an array of the wrong length.
+- **Own keys explicitly set to `undefined` are dropped.** Also matching
+  `JSON.stringify` (`{ a: undefined }` serializes to `{}`). State that
+  needs to distinguish "absent" from "present but undefined" must supply
+  a custom `diff` / `applyPatch`.
 
 ---
 

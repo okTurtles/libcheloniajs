@@ -84,6 +84,42 @@ function isPlainObject (v: unknown): v is Record<string, unknown> {
   return proto === Object.prototype || proto === null
 }
 
+// Read array element `i`, reporting a hole (a missing index in a sparse
+// array) as `null`.
+//
+// JSON has no representation for a hole: `JSON.stringify` writes `null` in
+// its place. A plain `arr[i]` read yields `undefined` instead, which the
+// diff interprets as "index absent" and turns into an `add` / `remove` —
+// ops that `defaultApplyPatch` applies with `splice`, shifting every later
+// index and desynchronising the reconstructed state from the real one. So
+// every traversal in this module reads holes as `null`, which is both what
+// persistence produces and what the "plain JSON state" contract implies.
+function readIndex (arr: unknown[], i: number): unknown {
+  return i in arr ? arr[i] : null
+}
+
+// Write `value` at `key` on `obj` without invoking inherited setters. This
+// is the single write primitive for every object the journal builds or
+// mutates: clones, JSON-safety normalization, redaction output and patch
+// application all go through it.
+//
+// Why this matters: `obj[key] = value` on a plain object will trigger any
+// setter inherited from the prototype chain. The most important case is
+// `key === '__proto__'`: the assignment form invokes the inherited
+// `Object.prototype.__proto__` setter and re-parents `obj`. Using
+// `Object.defineProperty` instead defines an *own* data property literally
+// named `"__proto__"` that shadows the accessor — `Object.prototype` is
+// never touched and `Object.getPrototypeOf(obj)` is unchanged. The same
+// reasoning covers any user-defined accessor on the prototype chain.
+function safeDefine (obj: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(obj, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true
+  })
+}
+
 export function cloneValue<T> (v: T): T {
   // Minimal structural clone for plain JSON-ish values. Functions, Dates,
   // Maps, Sets, etc. fall through and are returned as-is — Chelonia state
@@ -97,8 +133,20 @@ export function cloneValue<T> (v: T): T {
   // (`JSON.stringify({ a: undefined })` is `"{}"`) and matches the
   // documented "plain JSON state" contract; states that rely on
   // explicit-undefined keys must supply a custom `diff` / `applyPatch`.
+  // Array holes, by contrast, are normalized to `null` (see `readIndex`),
+  // so a clone is always dense.
   if (v === null || typeof v !== 'object') return v
-  if (Array.isArray(v)) return (v.map(cloneValue) as unknown) as T
+  if (Array.isArray(v)) {
+    // `Array.prototype.map` preserves holes, so build the copy index by
+    // index through `readIndex` — a clone that is handed to the diff must
+    // already be dense (see `readIndex`).
+    const src = v as unknown[]
+    const out: unknown[] = new Array(src.length)
+    for (let i = 0; i < src.length; i++) {
+      out[i] = cloneValue(readIndex(src, i))
+    }
+    return (out as unknown) as T
+  }
   if (isPlainObject(v)) {
     // Preserve the source prototype so `Object.create(null)` containers
     // (which Chelonia uses throughout contract state — `_vm`, `_volatile`,
@@ -107,15 +155,7 @@ export function cloneValue<T> (v: T): T {
     // state would otherwise diverge on prototype.
     const out: Record<string, unknown> = Object.create(Object.getPrototypeOf(v))
     for (const k of Object.keys(v)) {
-      // Use `defineProperty` instead of `out[k] = ...` so a state with an
-      // own enumerable `__proto__` key cannot pollute `Object.prototype`
-      // via this clone path.
-      Object.defineProperty(out, k, {
-        value: cloneValue((v as Record<string, unknown>)[k]),
-        writable: true,
-        enumerable: true,
-        configurable: true
-      })
+      safeDefine(out, k, cloneValue((v as Record<string, unknown>)[k]))
     }
     return (out as unknown) as T
   }
@@ -183,14 +223,17 @@ function diffInto (
     const aArr = after as unknown[]
     const minLen = Math.min(bArr.length, aArr.length)
     for (let i = 0; i < minLen; i++) {
-      diffInto(bArr[i], aArr[i], [...segments, String(i)], out)
+      // `readIndex`, not `bArr[i]`: a hole must compare as `null` rather
+      // than as an absent index, or the emitted add/remove would splice
+      // the array and shift every later element.
+      diffInto(readIndex(bArr, i), readIndex(aArr, i), [...segments, String(i)], out)
     }
     if (aArr.length > bArr.length) {
       for (let i = bArr.length; i < aArr.length; i++) {
         out.push({
           op: 'add',
           path: segmentsToPointer([...segments, String(i)]),
-          value: cloneValue(aArr[i])
+          value: cloneValue(readIndex(aArr, i))
         })
       }
     } else if (bArr.length > aArr.length) {
@@ -247,9 +290,10 @@ function shallowEqualPrimitives (a: unknown, b: unknown): boolean {
 // keep hiding real changes.
 //
 // Notably: `undefined` on one side only is a change (the diff emits
-// add/remove), NaN equals NaN, and non-plain containers (Date, Map, class
-// instances) are only equal by reference — mirroring `defaultDiff`, which
-// emits a wholesale `replace` for them.
+// add/remove), NaN equals NaN, array holes compare as `null` (see
+// `readIndex`), and non-plain containers (Date, Map, class instances) are
+// only equal by reference — mirroring `defaultDiff`, which emits a
+// wholesale `replace` for them.
 export function structurallyEqual (a: unknown, b: unknown): boolean {
   if (a === b) return true
   if (a === undefined || b === undefined) return false
@@ -263,7 +307,7 @@ export function structurallyEqual (a: unknown, b: unknown): boolean {
     const bArr = b as unknown[]
     if (aArr.length !== bArr.length) return false
     for (let i = 0; i < aArr.length; i++) {
-      if (!structurallyEqual(aArr[i], bArr[i])) return false
+      if (!structurallyEqual(readIndex(aArr, i), readIndex(bArr, i))) return false
     }
     return true
   }
@@ -286,25 +330,6 @@ export function structurallyEqual (a: unknown, b: unknown): boolean {
 // ---------------------------------------------------------------------------
 // Apply
 // ---------------------------------------------------------------------------
-
-// Write `value` at key `last` on `obj` without invoking inherited setters.
-//
-// Why this matters: `obj[last] = value` on a plain object will trigger any
-// setter inherited from the prototype chain. The most important case is
-// `last === '__proto__'`: the assignment form invokes the inherited
-// `Object.prototype.__proto__` setter and re-parents `obj`. Using
-// `Object.defineProperty` instead defines an *own* data property literally
-// named `"__proto__"` that shadows the accessor — `Object.prototype` is
-// never touched and `Object.getPrototypeOf(obj)` is unchanged. The same
-// reasoning covers any user-defined accessor on the prototype chain.
-function safeDefine (obj: Record<string, unknown>, last: string, value: unknown): void {
-  Object.defineProperty(obj, last, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true
-  })
-}
 
 // Apply a sequence of patches to a value, returning a new value. Does not
 // mutate the input. Rejects unknown op kinds.
@@ -495,9 +520,17 @@ export const REDACTION_NON_JSON_SAFE_SENTINEL = '[REDACTION_NON_JSON_SAFE]'
 // (`JSON.stringify` throws on them), as are `undefined`, `BigInt`, symbols,
 // functions and non-plain containers (Dates, Maps, class instances — the
 // journal's "plain JSON state" contract passes those through by reference,
-// which persists lossily at best). The `seen` set tracks only the current
-// ancestor chain, so shared (DAG-shaped) references remain allowed exactly
-// as they are for `JSON.stringify`.
+// which persists lossily at best). Holes in a sparse array are rejected too:
+// `JSON.stringify` writes `null` in their place, so the array would come
+// back a different shape. The `seen` set tracks only the current ancestor
+// chain, so shared (DAG-shaped) references remain allowed exactly as they
+// are for `JSON.stringify`.
+//
+// Note the deliberate asymmetry with `readIndex`, which reads a hole in
+// *contract state* as `null`: state is data the journal must record
+// faithfully, and `null` is its lossless JSON equivalent, whereas a hole in
+// a *redactor result* is a bug in caller code that is better surfaced
+// loudly through the sentinel than silently rewritten.
 //
 // This acceptance test and `normalizeToJSONSafe` below are deliberately
 // separate traversals (this one allocates nothing on the common path), so
@@ -513,7 +546,15 @@ function isJSONSafeValue (v: unknown, seen: Set<object>): boolean {
   if (seen.has(v as object)) return false
   if (Array.isArray(v)) {
     seen.add(v as object)
-    const ok = (v as unknown[]).every((el) => isJSONSafeValue(el, seen))
+    const arr = v as unknown[]
+    let ok = true
+    for (let i = 0; i < arr.length; i++) {
+      // `every` would skip holes, silently accepting a sparse array.
+      if (!(i in arr) || !isJSONSafeValue(arr[i], seen)) {
+        ok = false
+        break
+      }
+    }
     seen.delete(v as object)
     return ok
   }
@@ -542,7 +583,16 @@ function normalizeToJSONSafe (v: unknown, seen: Set<object>): unknown {
   if (seen.has(v as object)) return REDACTION_NON_JSON_SAFE_SENTINEL
   if (Array.isArray(v)) {
     seen.add(v as object)
-    const out = (v as unknown[]).map((el) => normalizeToJSONSafe(el, seen))
+    const arr = v as unknown[]
+    const out: unknown[] = new Array(arr.length)
+    for (let i = 0; i < arr.length; i++) {
+      // `map` would preserve holes, so this loop is what actually repairs
+      // a sparse array. Holes get the sentinel for the reason given above
+      // `isJSONSafeValue`.
+      out[i] = i in arr
+        ? normalizeToJSONSafe(arr[i], seen)
+        : REDACTION_NON_JSON_SAFE_SENTINEL
+    }
     seen.delete(v as object)
     return out
   }
@@ -550,14 +600,7 @@ function normalizeToJSONSafe (v: unknown, seen: Set<object>): unknown {
   seen.add(v)
   const out: Record<string, unknown> = Object.create(Object.getPrototypeOf(v))
   for (const k of Object.keys(v)) {
-    // `defineProperty` for the same reason as `cloneValue`: an own
-    // `__proto__` key must not pollute `Object.prototype`.
-    Object.defineProperty(out, k, {
-      value: normalizeToJSONSafe((v as Record<string, unknown>)[k], seen),
-      writable: true,
-      enumerable: true,
-      configurable: true
-    })
+    safeDefine(out, k, normalizeToJSONSafe((v as Record<string, unknown>)[k], seen))
   }
   seen.delete(v)
   return out
@@ -569,7 +612,13 @@ function normalizeToJSONSafe (v: unknown, seen: Set<object>): unknown {
 function describeNonJSONSafe (v: unknown): string {
   if (typeof v === 'number') return 'non-finite number'
   if (typeof v === 'object' && v !== null) {
-    if (Array.isArray(v)) return 'array containing a non-JSON-safe value'
+    if (Array.isArray(v)) {
+      // A hole is a different failure than an unsafe element, and naming it
+      // saves the reader from hunting for a value that looks fine.
+      return v.length !== Object.keys(v).length
+        ? 'sparse array (holes are not JSON values)'
+        : 'array containing a non-JSON-safe value'
+    }
     if (isPlainObject(v)) return 'object containing a non-JSON-safe or cyclic value'
     return `non-plain object (${(v as object).constructor?.name ?? 'unknown'})`
   }
@@ -683,7 +732,7 @@ function walkAndRedact (
         )
         replacement = normalizeToJSONSafe(replacement, new Set())
       }
-      // Write via defineProperty on objects: even though `cloneValue`
+      // Write via `safeDefine` on objects: even though `cloneValue`
       // produced this container, defending against prototype-polluting
       // keys at the write site costs nothing and keeps the invariant
       // local. On arrays we validate the index and use bracket
@@ -696,12 +745,7 @@ function walkAndRedact (
           if (sites) recordSite(sites, fullPath, original, replacement)
         }
       } else {
-        Object.defineProperty(container, k, {
-          value: replacement,
-          writable: true,
-          enumerable: true,
-          configurable: true
-        })
+        safeDefine(container, k, replacement)
         if (sites) recordSite(sites, fullPath, original, replacement)
       }
     } else {

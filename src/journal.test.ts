@@ -5,6 +5,7 @@ import {
   REDACTION_ERROR_SENTINEL,
   REDACTION_NON_JSON_SAFE_SENTINEL,
   applyRedactions,
+  cloneValue,
   defaultApplyPatch,
   defaultDiff,
   defaultJournalConfig,
@@ -183,6 +184,39 @@ describe('journal: defaultDiff', () => {
     const patch = defaultDiff({ a: null }, { a: null })
     assert.deepStrictEqual(patch, [])
   })
+
+  it('treats an array hole as null instead of an absent index', () => {
+    // A hole read as "absent" would produce an add/remove, and those are
+    // applied with `splice`, shifting every later element and desyncing the
+    // reconstructed array from the real one.
+    const holeBefore: unknown[] = ['a', 'x']
+    delete holeBefore[0]
+    assert.deepStrictEqual(
+      defaultDiff(holeBefore, ['a', 'x']),
+      [{ op: 'replace', path: '/0', value: 'a' }]
+    )
+
+    const holeAfter: unknown[] = ['a', 'x']
+    delete holeAfter[0]
+    assert.deepStrictEqual(
+      defaultDiff(['a', 'x'], holeAfter),
+      [{ op: 'replace', path: '/0', value: null }]
+    )
+
+    // Two holes at the same index are not a change at all.
+    const otherHole: unknown[] = ['b', 'x']
+    delete otherHole[0]
+    assert.deepStrictEqual(defaultDiff(holeAfter, otherHole), [])
+
+    // Tail extension carries the hole across as null, not as `undefined`
+    // (which `defaultApplyPatch` rejects as a missing patch value).
+    const grown: unknown[] = ['a', 'b', 'c']
+    delete grown[2]
+    assert.deepStrictEqual(
+      defaultDiff(['a', 'b'], grown),
+      [{ op: 'add', path: '/2', value: null }]
+    )
+  })
 })
 
 describe('journal: defaultApplyPatch', () => {
@@ -211,6 +245,39 @@ describe('journal: defaultApplyPatch', () => {
     const patch = defaultDiff(before, { a: { b: 2 }, arr: [1, 2] })
     defaultApplyPatch(before, patch)
     assert.deepStrictEqual(before, snapshot)
+  })
+
+  it('replays states containing array holes without shifting later elements', () => {
+    // Regression: the diff used to read a hole as an absent index, so this
+    // pair produced `add`/`remove` ops that `splice` applied at the wrong
+    // offset — the reconstructed array came back a different length than
+    // the state it was supposed to reproduce.
+    const withHole = (source: unknown[], index: number): unknown[] => {
+      const out = source.slice()
+      delete out[index]
+      return out
+    }
+    const fixtures: Array<[unknown, unknown]> = [
+      [withHole(['a', 'b'], 0), ['a', 'b']],
+      [['a', 'b'], withHole(['a', 'b'], 0)],
+      [withHole(['a', 'b', 'c'], 1), ['a', 'b', 'c']],
+      [{ arr: withHole(['a', 'b'], 1) }, { arr: ['a', 'b'] }],
+      [withHole(['a'], 0), ['a', 'b']]
+    ]
+    for (const [before, after] of fixtures) {
+      const out = defaultApplyPatch(before, defaultDiff(before, after))
+      // `deepStrictEqual` reads a hole as `undefined`, so compare through
+      // the module's own equality too: it is the notion `reconstruct`
+      // ultimately has to satisfy.
+      assert.ok(
+        structurallyEqual(out, after),
+        `failed for ${JSON.stringify(before)} -> ${JSON.stringify(after)}`
+      )
+      assert.deepStrictEqual(
+        JSON.parse(JSON.stringify(out)),
+        JSON.parse(JSON.stringify(after))
+      )
+    }
   })
 
   it('rejects unknown ops', () => {
@@ -541,6 +608,50 @@ describe('journal: applyRedactions', () => {
     }
   })
 
+  it('densifies holes in a sparse redactor result', () => {
+    // A hole survives `JSON.stringify` as `null`, so storing one would mean
+    // the journal changed shape across a reload. Each hole gets the
+    // sentinel, which also flags the caller-side bug that produced it.
+    const warnings: string[] = []
+    const orig = console.warn
+    console.warn = (...args: unknown[]) => { warnings.push(String(args[0])) }
+    try {
+      const sparse: unknown[] = ['keep', 'x']
+      delete sparse[0]
+      const out = applyRedactions(
+        { a: 'v' },
+        [{ path: 'a', redact: () => sparse }],
+        'test/contract'
+      ) as unknown as { a: unknown[] }
+      assert.deepStrictEqual(out.a, [REDACTION_NON_JSON_SAFE_SENTINEL, 'x'])
+      assert.ok(0 in out.a)
+      // Storing it and reading it back must yield the same value.
+      assert.ok(structurallyEqual(JSON.parse(JSON.stringify(out)), out))
+      assert.ok(warnings.some(w => w.includes('sparse array')))
+    } finally {
+      console.warn = orig
+    }
+  })
+
+  it('densifies array holes in the state it clones', () => {
+    // Holes in *state* are data, not caller error, so they take the
+    // lossless JSON equivalent (`null`) rather than the sentinel. Either
+    // way the projection handed to the diff is dense.
+    const state: { arr: unknown[] } = { arr: ['a', 'b', 'c'] }
+    delete state.arr[1]
+    const out = applyRedactions(
+      state,
+      [{ path: 'arr.0', redact: () => 'X' }],
+      'test/contract'
+    ) as { arr: unknown[] }
+    assert.deepStrictEqual(out.arr, ['X', null, 'c'])
+    assert.ok(1 in out.arr)
+    // The clone primitive behaves the same on its own, including nested.
+    const nested: unknown[] = [['a', 'b']]
+    delete (nested[0] as unknown[])[0]
+    assert.deepStrictEqual(cloneValue(nested), [[null, 'b']])
+  })
+
   it('passes JSON-safe redactor results through unchanged', () => {
     const out = applyRedactions(
       { a: 'v' },
@@ -733,6 +844,10 @@ describe('journal: JSON-safety acceptance and normalization agree', () => {
   const cyclic: Record<string, unknown> = { keep: 1 }
   cyclic.self = cyclic
   const shared = { s: 1 }
+  // Built by deleting an index rather than written as `[, 'x']`, which the
+  // linter rejects (`no-sparse-arrays`).
+  const sparse: unknown[] = ['a', 'x']
+  delete sparse[0]
 
   // `safe` is stated per fixture rather than derived, so the test cannot
   // drift along with the implementation it is guarding.
@@ -757,6 +872,11 @@ describe('journal: JSON-safety acceptance and normalization agree', () => {
     { name: 'Map', value: new Map(), safe: false },
     { name: 'class instance', value: new (class { x = 1 })(), safe: false },
     { name: 'cyclic object', value: cyclic, safe: false },
+    // A hole reads as `undefined` but persists as `null`, so an array with
+    // one is not the lossless round-trip this gate is checking for.
+    { name: 'sparse array', value: sparse, safe: false },
+    { name: 'fully sparse array', value: new Array(3), safe: false },
+    { name: 'sparse array nested in a safe container', value: { a: [sparse] }, safe: false },
     { name: 'unsafe leaf in a safe container', value: { ok: 1, bad: undefined }, safe: false }
   ]
 
