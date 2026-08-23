@@ -127,10 +127,13 @@ type JournalEntry =
       description?: string
       state: unknown // redacted clone of post-event state; null if
                      // the contract state was undefined (e.g., failed
-                     // first-message processing)
+                     // first-message processing) or if `redactions` threw
       error?: { name: string; message: string } // set if processMutation threw
                                                 // on a first-event / resync /
                                                 // forward-gap snapshot
+      redactionError?: { name: string; message: string } // set if `redactions` threw
+      diffError?: { name: string; message: string }      // carried forward from the
+                                                         // patch entry at a boundary
     }
   | {
       kind: 'patch'
@@ -138,6 +141,8 @@ type JournalEntry =
       description?: string
       patch: JournalPatch[]
       error?: { name: string; message: string } // set if processMutation threw
+      diffError?: { name: string; message: string }      // set if `diff` threw
+      redactionError?: { name: string; message: string } // set if `redactions` threw
     }
 ```
 
@@ -292,8 +297,15 @@ trace of the originals.
 
 Takes two `RedactionSite`s for the *same* pointer (one from the
 before-projection's site map, one from the after-projection's) and
-returns `true` when the underlying value changed while its redacted
-replacement did not — i.e. exactly the case a plain diff would drop.
+returns `true` when some path of the diff between the two `original`s
+is not exactly reproduced by the diff between the two `replacement`s —
+the leaf case being "the underlying value changed while its redacted
+projection did not". Two consequences worth knowing: a change to a
+*visible sibling* alongside a hidden one still returns `true` (both
+diffs are non-empty but do not coincide), and a projection that changed
+wholesale at its root returns `false`. Note `synthesizeRedactedChangeOps`
+additionally suppresses markers the outer diff already covers, so
+`hasHiddenChange(...) === true` alone does not guarantee a marker.
 
 #### `synthesizeRedactedChangeOps(patch, beforeSites, afterSites, redactedAfter)`
 
@@ -371,8 +383,12 @@ Details worth knowing:
   containing an earlier redacted leaf, the ancestor site records the hidden
   change and the final projected value follows the configured order.
 - Failed events are unaffected: they still record `patch: []` plus
-  `error` (see [Failed events](#failed-events)), so "redacted change"
-  and "processing failed" never look alike.
+  `error` (see [Failed events](#failed-events)). An empty patch is never
+  ambiguous — five cases are distinguishable: a no-op event (`patch: []`,
+  no error fields), a redacted change (`redacted: true` marker), a
+  processing failure (`error`), a journal diff failure (`diffError`), and
+  a journal redaction failure (`redactionError`). The last two are
+  described under [Journal-side failures](#journal-side-failures).
 - Arrays are diffed by index, so removing an element shifts its
   successors and a redacted element that merely moved can surface as a
   marker.
@@ -392,7 +408,8 @@ If you need to scrub descriptions, strip them after reading via
 `chelonia/journal/get`.
 
 The `error.name` / `error.message` fields on failed-event patches are
-also **not** redacted. Strip them downstream if leakage is a concern.
+also **not** redacted, and neither are `diffError` / `redactionError`.
+Strip them downstream if leakage is a concern.
 
 ---
 
@@ -443,6 +460,46 @@ This makes failed events distinguishable from no-op events on every
 path the recorder emits. Changes hidden behind a constant redactor are
 distinguishable too, via a separate mechanism — see
 [Changes behind a constant redactor](#changes-behind-a-constant-redactor).
+
+### Journal-side failures
+
+A configured `diff` or `redactions` set can throw on its own, while the
+event itself processed perfectly well. That is a *journal-side* failure:
+the recorder swallows it (recording never throws), records `patch: []`,
+and labels the entry so the empty patch is not misread as "this event
+changed nothing".
+
+| Field | Meaning |
+|---|---|
+| `diffError` | The configured `diff` threw. |
+| `redactionError` | A redactor threw *outside* the per-leaf guard — i.e. the whole projection failed, not a single leaf (a throwing leaf redactor yields `REDACTION_ERROR_SENTINEL` instead and is not a failure). |
+
+```js
+{
+  kind: 'patch',
+  hash: 'h4', height: 4, opType: 'ae',
+  patch: [],
+  redactionError: { name: 'TypeError', message: '...' }
+}
+```
+
+On a redaction failure the diff is skipped entirely rather than run
+against a missing projection: doing otherwise would fabricate a
+whole-root `add` of the entire state (before-projection failed) or a
+whole-root replace-to-`null` (after-projection failed), the latter
+corrupting `reconstruct` outright. `diffError` and `redactionError` are
+therefore mutually exclusive.
+
+Both are **degradations, not corruptions**: the affected event's changes
+are missing from the patch stream, so `reconstruct` returns the last
+good state until the next snapshot re-seeds the window (bounded by
+`2 * snapshotInterval` entries). When the *after*-projection is the one
+that failed, the boundary auto-snapshot is deferred — snapshotting the
+placeholder `null` would anchor the window on a bogus state once
+trimming discards everything before it. Snapshot entries carry
+`redactionError` too, which is what distinguishes a `state: null`
+snapshot caused by a failed projection from one caused by an undefined
+post-state.
 
 ### Recording is non-throwing
 
@@ -508,8 +565,7 @@ Either:
 - Swap in a `structuredClone`-based `diff`/`applyPatch` override (see
   next section).
 
-Two JSON-shape details worth knowing, both chosen to match what
-persistence would do anyway:
+Two JSON-shape details worth knowing:
 
 - **Array holes read as `null`.** A sparse array (`[1, , 3]`) has no
   JSON representation; `JSON.stringify` writes `null` in the hole. The
@@ -517,10 +573,14 @@ persistence would do anyway:
   hole can never be mistaken for a missing index — which would
   otherwise produce an insert/delete that shifts every later element and
   leave `reconstruct` returning an array of the wrong length.
-- **Own keys explicitly set to `undefined` are dropped.** Also matching
-  `JSON.stringify` (`{ a: undefined }` serializes to `{}`). State that
-  needs to distinguish "absent" from "present but undefined" must supply
-  a custom `diff` / `applyPatch`.
+- **Own keys explicitly set to `undefined` do not survive replay.** The
+  journal's clone keeps them faithfully (`{ a: undefined }` clones to
+  `{ a: undefined }`, so a same-session `chelonia/journal/get` snapshot
+  still has the key), but `defaultDiff` treats `undefined` as "absent"
+  — matching `JSON.stringify`, where `{ a: undefined }` serializes to
+  `{}` — so `reconstruct` never produces them. State that needs to
+  distinguish "absent" from "present but undefined" must supply a custom
+  `diff` / `applyPatch`.
 
 ---
 
@@ -607,6 +667,9 @@ if (journal) {
       console.log(`[snap] @${e.height} ${e.opType} (${e.hash})`)
     } else if (e.error) {
       console.log(`[err ] @${e.height} ${e.opType}: ${e.error.name}: ${e.error.message}`)
+    } else if (e.diffError || e.redactionError) {
+      const j = e.diffError ?? e.redactionError
+      console.log(`[jrnl] @${e.height} ${e.opType}: not recorded: ${j.name}: ${j.message}`)
     } else {
       const hidden = e.patch.filter((p) => p.redacted).length
       console.log(

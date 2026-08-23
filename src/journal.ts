@@ -802,7 +802,7 @@ function resolveAtSegments (
     if (Array.isArray(current)) {
       const idx = Number(seg)
       if (!Number.isInteger(idx) || idx < 0 || idx >= current.length) return notFound
-      current = current[idx]
+      current = readIndex(current, idx)
     } else {
       if (!has(current as Record<string, unknown>, seg)) return notFound
       current = (current as Record<string, unknown>)[seg]
@@ -1083,8 +1083,15 @@ function appendAndTrim (
       // (which currently lives only on the trimmed-away patch entry)
       // would be lost. Keeping the snapshot and the patch in sync
       // guarantees error detail survives trimming on every code path.
+      // The journal-side failure fields ride along for the same reason.
       if (entry.kind === 'patch' && entry.error !== undefined) {
         snap.error = entry.error
+      }
+      if (entry.kind === 'patch' && entry.diffError !== undefined) {
+        snap.diffError = entry.diffError
+      }
+      if (entry.kind === 'patch' && entry.redactionError !== undefined) {
+        snap.redactionError = entry.redactionError
       }
       entries.push(snap)
     }
@@ -1261,6 +1268,16 @@ export default sbp('sbp/selectors/register', {
         trackRedactedChanges ? new Map() : undefined
       const afterSites: RedactionSiteMap | undefined =
         trackRedactedChanges ? new Map() : undefined
+      // A throwing `redactions` set is a journal-side failure, not a
+      // contract failure. Capture it so the entry can say so instead of
+      // silently degrading into an entry that looks like a real change:
+      // diffing against a missing projection emits a whole-root `add`
+      // (before failed) or a whole-root replace-to-`null` (after failed),
+      // the latter actively corrupting `reconstruct`. The two flags are
+      // tracked separately because only an after-failure invalidates the
+      // snapshot state hint below.
+      let redactionError: unknown = null
+      let redactionAfterFailed = false
       if (!willEmitEmptyPatch && !isFirstOrResync) {
         try {
           redactedBefore = beforeState === undefined
@@ -1274,6 +1291,7 @@ export default sbp('sbp/selectors/register', {
         } catch (e) {
           logJournalError('redaction (before) failed', e)
           redactedBefore = undefined
+          if (redactionError == null) redactionError = e
         }
       }
       try {
@@ -1288,6 +1306,8 @@ export default sbp('sbp/selectors/register', {
       } catch (e) {
         logJournalError('redaction (after) failed', e)
         redactedAfter = null
+        redactionAfterFailed = true
+        if (redactionError == null) redactionError = e
       }
 
       let nextEntries: JournalEntry[]
@@ -1308,12 +1328,26 @@ export default sbp('sbp/selectors/register', {
         if (processingErrored && processingError != null) {
           snap.error = normalizeProcessingError(processingError)
         }
+        // A projection failure leaves `state: null`. Label it, or the
+        // snapshot is indistinguishable from the legitimate "post-state
+        // was undefined because the mutation threw" null.
+        if (redactionError != null) {
+          snap.redactionError = normalizeProcessingError(redactionError)
+        }
         nextEntries = [snap]
       } else {
         let patch: JournalPatch[]
+        let diffError: unknown = null
         if (processingErrored) {
           // Empty patch is itself a diagnostic signal. Skip redaction
           // entirely above by short-circuiting the diff here.
+          patch = []
+        } else if (redactionError != null) {
+          // One of the projections is missing. Diffing against it would
+          // fabricate a whole-root operation: an `add` of the entire
+          // state (before failed) or a replace-to-`null` that wipes the
+          // reconstructed state (after failed). Record nothing and let
+          // `entry.redactionError` carry the reason instead.
           patch = []
         } else {
           let diffFailed = false
@@ -1323,6 +1357,7 @@ export default sbp('sbp/selectors/register', {
             logJournalError('diff failed', e)
             patch = []
             diffFailed = true
+            diffError = e
           }
           // A value that changed behind a constant redactor produces no
           // diff at all. Record it explicitly so the journal can tell
@@ -1368,11 +1403,30 @@ export default sbp('sbp/selectors/register', {
         if (processingErrored && processingError != null) {
           entry.error = normalizeProcessingError(processingError)
         }
+        // Journal-side failures. Both mean "the event processed fine but
+        // the journal could not record what changed", which `patch: []`
+        // alone cannot express — it is also what a no-op event records.
+        // They are mutually exclusive: a redaction failure skips the diff
+        // entirely. `error` is independent and can co-occur with neither
+        // (an errored event skips both projections and the diff) except
+        // on paths where the before-projection was already attempted.
+        if (diffError != null) {
+          entry.diffError = normalizeProcessingError(diffError)
+        }
+        if (redactionError != null) {
+          entry.redactionError = normalizeProcessingError(redactionError)
+        }
         nextEntries = appendAndTrim(
           existing,
           entry,
           cfg.snapshotInterval,
-          { state: redactedAfter }
+          // A failed *after*-projection means `redactedAfter` is a
+          // placeholder `null`, not the real state: snapshotting it would
+          // anchor `reconstruct` on a bogus state once trimming discards
+          // everything before it. Skip the boundary snapshot in that case
+          // (same deferral the errored-event path relies on). A failed
+          // before-projection leaves `redactedAfter` valid and usable.
+          redactionAfterFailed ? null : { state: redactedAfter }
         )
       }
 

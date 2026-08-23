@@ -1126,6 +1126,27 @@ describe('journal: synthesizeRedactedChangeOps', () => {
     assertReplayIsIdentity(patch, redactedBefore, redactedAfter)
   })
 
+  it('emits no marker when a hole becomes null (a no-op per defaultDiff)', () => {
+    // Every traversal in the module reads an array hole as `null` (see
+    // `readIndex`), so a hole turning into an explicit `null` is not a
+    // change at all. Resolving the pre-redaction original used to read
+    // the hole as `undefined`, which made it compare unequal to `null`
+    // and invented a marker for an event that did nothing.
+    const holeRedactions: JournalRedaction[] = [{ path: 'arr.*', redact: () => '[R]' }]
+    const mkHole = (): unknown[] => {
+      const a: unknown[] = ['a', 'x']
+      delete a[0]
+      return a
+    }
+    const forward = runPipeline({ arr: mkHole() }, { arr: [null, 'x'] }, holeRedactions)
+    assert.deepStrictEqual(forward.patch, [])
+    assertReplayIsIdentity(forward.patch, forward.redactedBefore, forward.redactedAfter)
+
+    const backward = runPipeline({ arr: [null, 'x'] }, { arr: mkHole() }, holeRedactions)
+    assert.deepStrictEqual(backward.patch, [])
+    assertReplayIsIdentity(backward.patch, backward.redactedBefore, backward.redactedAfter)
+  })
+
   // A redactor that reshapes its container: the source leaf
   // `/profile/name` is projected to `/profile`, so projected and source
   // pointer paths stop corresponding.

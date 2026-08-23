@@ -157,6 +157,16 @@ export type JournalEntry =
       // detail that patch entries preserve. Same shape, same trust level,
       // and same NOT-redacted caveat as the patch variant's `error`.
       error?: { name: string; message: string };
+      // Populated when the configured `redactions` threw while projecting
+      // this event's state. The event itself processed fine — this is a
+      // journal-side failure, and `state` is `null` because no projection
+      // could be produced. Recorded so a null state is not misread as
+      // "the contract state was undefined".
+      redactionError?: { name: string; message: string };
+      // Copied forward from the patch entry that triggered an
+      // auto-snapshot at a snapshot boundary, so trimming cannot orphan
+      // the detail. See the patch variant for the semantics.
+      diffError?: { name: string; message: string };
     }
   | {
       kind: 'patch';
@@ -175,6 +185,19 @@ export type JournalEntry =
       // unencrypted ops it can echo action data, treat it at the same
       // trust level as `description`.
       error?: { name: string; message: string };
+      // Populated when the configured `diff` threw while journaling this
+      // event. The event itself processed fine — this is a journal-side
+      // failure, recorded so the resulting `patch: []` is not misread as
+      // "this event changed nothing". `reconstruct` silently misses this
+      // event's changes until the next snapshot re-seeds the window.
+      // Same NOT-redacted caveat as `error`.
+      diffError?: { name: string; message: string };
+      // Populated when the configured `redactions` threw while projecting
+      // this event's before- or after-state. The diff is skipped entirely
+      // (`patch: []`) rather than diffing against a missing projection,
+      // which would emit a bogus whole-root operation. Same staleness and
+      // NOT-redacted caveats as `diffError`.
+      redactionError?: { name: string; message: string };
     };
 
 // A single redaction directive. `path` uses dotted segments and supports a

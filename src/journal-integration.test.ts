@@ -16,7 +16,7 @@ import './chelonia.js'
 import './db.js'
 import { ChelErrorJournalCorrupt } from './errors.js'
 import { REDACTION_NON_JSON_SAFE_SENTINEL, defaultApplyPatch, defaultDiff, defaultJournalConfig } from './journal.js'
-import type { ChelContractState, ChelRootState, JournalEntry, JournalPatch } from './types.js'
+import type { ChelContractState, ChelRootState, JournalConfig, JournalEntry, JournalPatch } from './types.js'
 
 type FakeMessage = {
   hash: () => string;
@@ -104,6 +104,23 @@ const record = (
 const getEntries = (contractID: string): JournalEntry[] | undefined => {
   const j = sbp('chelonia/journal/get', contractID) as { entries: JournalEntry[] } | undefined
   return j?.entries
+}
+
+// The "configure, seed a contract, then move a redacted value" preamble
+// shared by the redacted-change tests. The journal block is passed
+// verbatim rather than defaulted: several callers exercise *partial*
+// reconfigures, which a defaulting helper would silently overwrite.
+const recordKeyPair = async (
+  contractID: string,
+  journal: JournalConfig
+): Promise<{ s1: ChelContractState; s2: ChelContractState }> => {
+  await sbp('chelonia/configure', { journal })
+  ensureContractMeta(contractID)
+  const s1 = mkKeyState('SECRET-1')
+  const s2 = mkKeyState('SECRET-2')
+  record(contractID, 'h0', 0, undefined, s1)
+  record(contractID, 'h1', 1, s1, s2)
+  return { s1, s2 }
 }
 
 describe('journal: integration via SBP selectors', () => {
@@ -400,23 +417,16 @@ describe('journal: integration via SBP selectors', () => {
   })
 
   it('records hidden changes when a leaf redaction precedes an overlapping ancestor', async () => {
-    await sbp('chelonia/configure', {
-      journal: {
-        enabled: true,
-        snapshotInterval: 3,
-        contractIDs: [],
-        redactions: [
-          { path: '_vm.authorizedKeys.*.data', redact: () => '[HIDDEN]' },
-          { path: '_vm.authorizedKeys.*', redact: () => '[KEY]' }
-        ]
-      }
-    })
     const cid = 'cid-redact-overlap'
-    ensureContractMeta(cid)
-    const s1 = mkKeyState('SECRET-1')
-    const s2 = mkKeyState('SECRET-2')
-    record(cid, 'h0', 0, undefined, s1)
-    record(cid, 'h1', 1, s1, s2)
+    await recordKeyPair(cid, {
+      enabled: true,
+      snapshotInterval: 3,
+      contractIDs: [],
+      redactions: [
+        { path: '_vm.authorizedKeys.*.data', redact: () => '[HIDDEN]' },
+        { path: '_vm.authorizedKeys.*', redact: () => '[KEY]' }
+      ]
+    })
     const entries = getEntries(cid)!
     const patch = (entries[1] as Extract<JournalEntry, { kind: 'patch' }>).patch
     assert.deepStrictEqual(patch, [{
@@ -432,23 +442,16 @@ describe('journal: integration via SBP selectors', () => {
   })
 
   it('omits redacted-change markers when markRedactedChanges is false', async () => {
-    await sbp('chelonia/configure', {
-      journal: {
-        enabled: true,
-        snapshotInterval: 3,
-        contractIDs: [],
-        markRedactedChanges: false,
-        redactions: [
-          { path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED]' }
-        ]
-      }
-    })
     const cid = 'cid-redact-optout'
-    ensureContractMeta(cid)
-    const s1 = mkKeyState('SECRET-1')
-    const s2 = mkKeyState('SECRET-2')
-    record(cid, 'h0', 0, undefined, s1)
-    record(cid, 'h1', 1, s1, s2)
+    await recordKeyPair(cid, {
+      enabled: true,
+      snapshotInterval: 3,
+      contractIDs: [],
+      markRedactedChanges: false,
+      redactions: [
+        { path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED]' }
+      ]
+    })
     const entries = getEntries(cid)!
     assert.deepStrictEqual(
       (entries[1] as Extract<JournalEntry, { kind: 'patch' }>).patch,
@@ -464,22 +467,15 @@ describe('journal: integration via SBP selectors', () => {
     // nothing derived from them is retained: marker values are cloned out
     // of the redacted projection. Mutating the recorded states afterwards
     // must therefore leave the persisted journal untouched.
-    await sbp('chelonia/configure', {
-      journal: {
-        enabled: true,
-        snapshotInterval: 3,
-        contractIDs: [],
-        redactions: [
-          { path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED]' }
-        ]
-      }
-    })
     const cid = 'cid-redact-no-aliasing'
-    ensureContractMeta(cid)
-    const s1 = mkKeyState('SECRET-1')
-    const s2 = mkKeyState('SECRET-2')
-    record(cid, 'h0', 0, undefined, s1)
-    record(cid, 'h1', 1, s1, s2)
+    const { s1, s2 } = await recordKeyPair(cid, {
+      enabled: true,
+      snapshotInterval: 3,
+      contractIDs: [],
+      redactions: [
+        { path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED]' }
+      ]
+    })
     // Read the raw persisted journal, not the deep clone `journal/get`
     // hands out, so aliasing cannot hide behind the copy.
     const persisted = rootState().contracts[cid]._journal
@@ -608,15 +604,10 @@ describe('journal: integration via SBP selectors', () => {
     // `markRedactedChanges`), so the default must be derived from the
     // active pipeline rather than read from config.
     await sbp('chelonia/configure', { journal: null })
-    await sbp('chelonia/configure', {
-      journal: { enabled: true, snapshotInterval: 3, redactions: [hiddenDataRedaction] }
-    })
     const cid = 'cid-derived-on'
-    ensureContractMeta(cid)
-    const s1 = mkKeyState('SECRET-1')
-    const s2 = mkKeyState('SECRET-2')
-    record(cid, 'h0', 0, undefined, s1)
-    record(cid, 'h1', 1, s1, s2)
+    await recordKeyPair(cid, {
+      enabled: true, snapshotInterval: 3, redactions: [hiddenDataRedaction]
+    })
     assert.ok(
       patchOf(cid).some((p) => p.redacted === true),
       'expected a marker with the built-in pipeline'
@@ -625,21 +616,14 @@ describe('journal: integration via SBP selectors', () => {
 
   it('derives markRedactedChanges=false when a custom pipeline is installed', async () => {
     await sbp('chelonia/configure', { journal: null })
-    await sbp('chelonia/configure', {
-      journal: {
-        enabled: true,
-        snapshotInterval: 3,
-        redactions: [hiddenDataRedaction],
-        diff: customDiff,
-        applyPatch: customApplyPatch
-      }
-    })
     const cid = 'cid-derived-off'
-    ensureContractMeta(cid)
-    const s1 = mkKeyState('SECRET-1')
-    const s2 = mkKeyState('SECRET-2')
-    record(cid, 'h0', 0, undefined, s1)
-    record(cid, 'h1', 1, s1, s2)
+    const { s2 } = await recordKeyPair(cid, {
+      enabled: true,
+      snapshotInterval: 3,
+      redactions: [hiddenDataRedaction],
+      diff: customDiff,
+      applyPatch: customApplyPatch
+    })
     const patch = patchOf(cid)
     assert.ok(!patch.some((p) => p.redacted === true), 'no foreign marker ops expected')
     // Reconstruct still round-trips through the custom applier.
@@ -648,22 +632,15 @@ describe('journal: integration via SBP selectors', () => {
 
   it('honours an explicit markRedactedChanges=true even with a custom pipeline', async () => {
     await sbp('chelonia/configure', { journal: null })
-    await sbp('chelonia/configure', {
-      journal: {
-        enabled: true,
-        snapshotInterval: 3,
-        redactions: [hiddenDataRedaction],
-        diff: customDiff,
-        applyPatch: customApplyPatch,
-        markRedactedChanges: true
-      }
-    })
     const cid = 'cid-explicit-on'
-    ensureContractMeta(cid)
-    const s1 = mkKeyState('SECRET-1')
-    const s2 = mkKeyState('SECRET-2')
-    record(cid, 'h0', 0, undefined, s1)
-    record(cid, 'h1', 1, s1, s2)
+    await recordKeyPair(cid, {
+      enabled: true,
+      snapshotInterval: 3,
+      redactions: [hiddenDataRedaction],
+      diff: customDiff,
+      applyPatch: customApplyPatch,
+      markRedactedChanges: true
+    })
     assert.ok(patchOf(cid).some((p) => p.redacted === true), 'explicit opt-in must win')
   })
 
@@ -681,15 +658,8 @@ describe('journal: integration via SBP selectors', () => {
     })
     // …then hand the built-ins back explicitly. `markRedactedChanges` was
     // never stored, so it re-derives to true.
-    await sbp('chelonia/configure', {
-      journal: { diff: defaultDiff, applyPatch: defaultApplyPatch }
-    })
     const cid = 'cid-revert'
-    ensureContractMeta(cid)
-    const s1 = mkKeyState('SECRET-1')
-    const s2 = mkKeyState('SECRET-2')
-    record(cid, 'h0', 0, undefined, s1)
-    record(cid, 'h1', 1, s1, s2)
+    await recordKeyPair(cid, { diff: defaultDiff, applyPatch: defaultApplyPatch })
     assert.ok(
       patchOf(cid).some((p) => p.redacted === true),
       'derived default flips back on after reverting to built-ins'
@@ -803,9 +773,193 @@ describe('journal: integration via SBP selectors', () => {
       assert.strictEqual(entries[1].kind, 'patch')
       const patch = (entries[1] as Extract<JournalEntry, { kind: 'patch' }>).patch
       assert.deepStrictEqual(patch, [])
+      // `patch: []` alone is also what a no-op event records, so the
+      // failure has to be stated on the entry itself.
+      assert.deepStrictEqual(
+        (entries[1] as Extract<JournalEntry, { kind: 'patch' }>).diffError,
+        { name: 'Error', message: 'diff exploded' }
+      )
+      assert.ok(!('error' in entries[1]), 'a diff failure is not a processing failure')
     } finally {
       console.warn = origWarn
     }
+  })
+
+  it('leaves diffError absent when the diff succeeds on a no-op event', async () => {
+    await sbp('chelonia/configure', {
+      journal: { enabled: true, snapshotInterval: 3, contractIDs: [], redactions: [] }
+    })
+    const cid = 'cid-good-diff'
+    ensureContractMeta(cid)
+    const s = mkState(1)
+    record(cid, 'h0', 0, undefined, s)
+    record(cid, 'h1', 1, s, mkState(1))
+    const entry = getEntries(cid)![1] as Extract<JournalEntry, { kind: 'patch' }>
+    assert.deepStrictEqual(entry.patch, [])
+    assert.strictEqual(entry.diffError, undefined)
+    assert.strictEqual(entry.redactionError, undefined)
+  })
+
+  // --- Redaction failures -------------------------------------------------
+  //
+  // A throwing `redactions` set is a journal-side failure, not a contract
+  // failure. The projection is missing, so the diff is skipped entirely:
+  // diffing against it would fabricate a whole-root `add` (before failed)
+  // or a whole-root replace-to-`null` (after failed) that corrupts
+  // `reconstruct`.
+
+  // A state whose enumerable `boom` getter throws when `cloneValue` reads
+  // it, so `applyRedactions` throws before producing a projection.
+  const mkExplodingState = (): ChelContractState => {
+    const s = { _vm: { authorizedKeys: {} }, counter: 1 }
+    Object.defineProperty(s, 'boom', {
+      get () { throw new Error('redaction boom') },
+      enumerable: true,
+      configurable: true
+    })
+    return s as unknown as ChelContractState
+  }
+
+  const withRedactionConfig = async (snapshotInterval = 3) => {
+    await sbp('chelonia/configure', {
+      journal: {
+        enabled: true,
+        snapshotInterval,
+        contractIDs: [],
+        redactions: [
+          { path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED]' }
+        ]
+      }
+    })
+  }
+
+  const silencingWarnings = async (fn: () => Promise<void> | void) => {
+    const origWarn = console.warn
+    console.warn = () => {}
+    try {
+      await fn()
+    } finally {
+      console.warn = origWarn
+    }
+  }
+
+  it('records redactionError instead of wiping state when the after-projection throws', async () => {
+    await silencingWarnings(async () => {
+      await withRedactionConfig()
+      const cid = 'cid-redaction-after-throws'
+      ensureContractMeta(cid)
+      const s1 = mkState(1)
+      record(cid, 'h0', 0, undefined, s1)
+      record(cid, 'h1', 1, s1, mkExplodingState())
+      const entry = getEntries(cid)![1] as Extract<JournalEntry, { kind: 'patch' }>
+      assert.deepStrictEqual(entry.patch, [], 'no fabricated whole-root replace-to-null')
+      assert.deepStrictEqual(entry.redactionError, {
+        name: 'Error', message: 'redaction boom'
+      })
+      assert.strictEqual(entry.diffError, undefined, 'the diff never ran')
+      assert.strictEqual(entry.error, undefined, 'the event itself processed fine')
+      // Stale, not corrupt: reconstruct still yields the last good state.
+      assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), s1)
+    })
+  })
+
+  it('records redactionError instead of a whole-root add when the before-projection throws', async () => {
+    await silencingWarnings(async () => {
+      await withRedactionConfig()
+      const cid = 'cid-redaction-before-throws'
+      ensureContractMeta(cid)
+      const s1 = mkState(1)
+      record(cid, 'h0', 0, undefined, s1)
+      record(cid, 'h1', 1, mkExplodingState(), mkState(2))
+      const entry = getEntries(cid)![1] as Extract<JournalEntry, { kind: 'patch' }>
+      assert.deepStrictEqual(entry.patch, [], 'no fabricated whole-root add')
+      assert.deepStrictEqual(entry.redactionError, {
+        name: 'Error', message: 'redaction boom'
+      })
+      assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), s1)
+    })
+  })
+
+  it('labels a null-state snapshot when the projection throws on the first event', async () => {
+    await silencingWarnings(async () => {
+      await withRedactionConfig()
+      const cid = 'cid-redaction-snapshot'
+      ensureContractMeta(cid)
+      record(cid, 'h0', 0, undefined, mkExplodingState())
+      const snap = getEntries(cid)![0] as Extract<JournalEntry, { kind: 'snapshot' }>
+      assert.strictEqual(snap.state, null)
+      assert.deepStrictEqual(snap.redactionError, {
+        name: 'Error', message: 'redaction boom'
+      })
+      assert.strictEqual(snap.error, undefined, 'not a processing failure')
+    })
+  })
+
+  it('defers the boundary auto-snapshot when the after-projection throws', async () => {
+    await silencingWarnings(async () => {
+      await withRedactionConfig()
+      const cid = 'cid-redaction-boundary-after'
+      ensureContractMeta(cid)
+      let prev = mkState(0)
+      record(cid, 'h0', 0, undefined, prev)
+      for (let i = 1; i <= 2; i++) {
+        const next = mkState(i)
+        record(cid, `h${i}`, i, prev, next)
+        prev = next
+      }
+      // Lands on the X-th-patch boundary with no usable projection.
+      record(cid, 'h3', 3, prev, mkExplodingState())
+      const entries = getEntries(cid)!
+      assert.strictEqual(
+        entries.filter((e) => e.kind === 'snapshot').length,
+        1,
+        'only the seed snapshot; a null-state snapshot must not anchor the window'
+      )
+      assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), prev)
+    })
+  })
+
+  it('still snapshots at the boundary when only the before-projection throws', async () => {
+    await silencingWarnings(async () => {
+      await withRedactionConfig()
+      const cid = 'cid-redaction-boundary-before'
+      ensureContractMeta(cid)
+      let prev = mkState(0)
+      record(cid, 'h0', 0, undefined, prev)
+      for (let i = 1; i <= 2; i++) {
+        const next = mkState(i)
+        record(cid, `h${i}`, i, prev, next)
+        prev = next
+      }
+      const last = mkState(99)
+      record(cid, 'h3', 3, mkExplodingState(), last)
+      const entries = getEntries(cid)!
+      const snaps = entries.filter(
+        (e): e is Extract<JournalEntry, { kind: 'snapshot' }> => e.kind === 'snapshot'
+      )
+      assert.strictEqual(snaps.length, 2, 'the after-projection was valid and usable')
+      const boundary = snaps[1]
+      assert.deepStrictEqual(boundary.state, last)
+      // Carried forward so trimming cannot orphan the detail.
+      assert.deepStrictEqual(boundary.redactionError, {
+        name: 'Error', message: 'redaction boom'
+      })
+      assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), last)
+    })
+  })
+
+  it('leaves redactionError absent on a healthy redacted event', async () => {
+    await withRedactionConfig()
+    const cid = 'cid-redaction-healthy'
+    ensureContractMeta(cid)
+    const s1 = mkKeyState('SECRET-1')
+    const s2 = mkKeyState('SECRET-2')
+    record(cid, 'h0', 0, undefined, s1)
+    record(cid, 'h1', 1, s1, s2)
+    const entry = getEntries(cid)![1] as Extract<JournalEntry, { kind: 'patch' }>
+    assert.strictEqual(entry.redactionError, undefined)
+    assert.strictEqual(entry.diffError, undefined)
+    assert.ok(entry.patch.some((p) => p.redacted === true), 'normal marking is unaffected')
   })
 
   it('bounds the journal at 2*snapshotInterval even under sustained processing errors', () => {
