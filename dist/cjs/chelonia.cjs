@@ -323,16 +323,28 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 this.config.journal = (0, journal_js_1.defaultJournalConfig)();
             }
             const target = this.config.journal;
-            if (journalOverride.enabled !== undefined) {
-                // `resolveJournalConfig` checks `cfg?.enabled === true` (strict
-                // equality), so any non-boolean truthy value (`"true"`, `1`,
-                // etc.) would silently leave journaling disabled. Fail loudly
-                // instead — same rationale as `rejectNull`.
-                if (typeof journalOverride.enabled !== 'boolean') {
-                    throw new TypeError(`[chelonia][journal] config.journal.enabled must be a boolean; got ${typeof journalOverride.enabled}`);
+            // Assign `name` only if the caller supplied it, and only if it has
+            // the declared type. Wrong types must fail loudly rather than be
+            // coerced, because the read path uses strict comparisons: e.g.
+            // `resolveJournalConfig` checks `cfg?.enabled === true`, so a truthy
+            // `"true"` would silently leave journaling disabled, and it reads
+            // `cfg?.markRedactedChanges ?? (derived)`, so a truthy `"false"`
+            // would silently keep the marking on instead of opting out. Same
+            // rationale as `rejectNull` above.
+            const applyTypedField = (name, type) => {
+                const value = journalOverride[name];
+                if (value === undefined)
+                    return;
+                const actualType = typeof value;
+                if (actualType !== type) {
+                    throw new TypeError(`[chelonia][journal] config.journal.${name} must be a ${type}; got ${actualType}`);
                 }
-                target.enabled = journalOverride.enabled;
-            }
+                target[name] = value;
+            };
+            applyTypedField('enabled', 'boolean');
+            applyTypedField('markRedactedChanges', 'boolean');
+            applyTypedField('diff', 'function');
+            applyTypedField('applyPatch', 'function');
             if (journalOverride.snapshotInterval !== undefined) {
                 // `snapshotInterval` directly bounds journal retention. Reject
                 // non-finite / non-positive / non-integer values that would break
@@ -381,28 +393,6 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // events re-seed with a fresh snapshot under the new
                 // redactions. Mixing entries across redaction sets will leave
                 // `reconstruct` output inconsistent until the next snapshot.
-            }
-            if (journalOverride.markRedactedChanges !== undefined) {
-                // Same strict-boolean rationale as `enabled`: `resolveJournalConfig`
-                // reads this via `cfg?.markRedactedChanges ?? (derived)`, so a
-                // truthy non-boolean like `"false"` would silently keep the marking
-                // on instead of opting out.
-                if (typeof journalOverride.markRedactedChanges !== 'boolean') {
-                    throw new TypeError(`[chelonia][journal] config.journal.markRedactedChanges must be a boolean; got ${typeof journalOverride.markRedactedChanges}`);
-                }
-                target.markRedactedChanges = journalOverride.markRedactedChanges;
-            }
-            if (journalOverride.diff !== undefined) {
-                if (typeof journalOverride.diff !== 'function') {
-                    throw new TypeError(`[chelonia][journal] config.journal.diff must be a function; got ${typeof journalOverride.diff}`);
-                }
-                target.diff = journalOverride.diff;
-            }
-            if (journalOverride.applyPatch !== undefined) {
-                if (typeof journalOverride.applyPatch !== 'function') {
-                    throw new TypeError(`[chelonia][journal] config.journal.applyPatch must be a function; got ${typeof journalOverride.applyPatch}`);
-                }
-                target.applyPatch = journalOverride.applyPatch;
             }
         }
         // using Object.assign here instead of merge to avoid stripping away imported modules

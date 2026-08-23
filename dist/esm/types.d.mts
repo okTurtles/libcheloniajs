@@ -108,6 +108,14 @@ export type JournalEntry = {
         name: string;
         message: string;
     };
+    redactionError?: {
+        name: string;
+        message: string;
+    };
+    diffError?: {
+        name: string;
+        message: string;
+    };
 } | {
     kind: 'patch';
     hash: string;
@@ -116,6 +124,14 @@ export type JournalEntry = {
     description?: string;
     patch: JournalPatch[];
     error?: {
+        name: string;
+        message: string;
+    };
+    diffError?: {
+        name: string;
+        message: string;
+    };
+    redactionError?: {
         name: string;
         message: string;
     };
