@@ -947,7 +947,7 @@ describe('journal: integration via SBP selectors', () => {
     })
   })
 
-  it('defers the boundary auto-snapshot when the after-projection throws', async () => {
+  it('recovers the boundary auto-snapshot by replay when the after-projection throws', async () => {
     await silencingWarnings(async () => {
       await withRedactionConfig()
       const cid = 'cid-redaction-boundary-after'
@@ -959,16 +959,49 @@ describe('journal: integration via SBP selectors', () => {
         record(cid, `h${i}`, i, prev, next)
         prev = next
       }
-      // Lands on the X-th-patch boundary with no usable projection.
+      // Lands on the X-th-patch boundary with no usable projection. The
+      // event's own `null` post-state must not anchor the window, but the
+      // boundary snapshot cannot simply be skipped either: with every
+      // following event failing the same way, nothing would ever be
+      // trimmable and the journal would grow without bound. So the state
+      // is recovered by replaying the window — exactly what `reconstruct`
+      // already returns for it.
       record(cid, 'h3', 3, prev, mkExplodingState())
       const entries = getEntries(cid)!
-      assert.strictEqual(
-        entries.filter((e) => e.kind === 'snapshot').length,
-        1,
-        'only the seed snapshot; a null-state snapshot must not anchor the window'
+      const snaps = entries.filter(
+        (e): e is Extract<JournalEntry, { kind: 'snapshot' }> => e.kind === 'snapshot'
       )
+      assert.strictEqual(snaps.length, 2, 'the boundary snapshot was recovered by replay')
+      const boundary = snaps[1]
+      assert.strictEqual(boundary.replayed, true, 'flagged as a replayed state')
+      assert.deepStrictEqual(
+        boundary.state,
+        prev,
+        'holds the last good state, not this event\'s missing post-state'
+      )
+      assert.deepStrictEqual(boundary.redactionError, {
+        name: 'Error', message: 'redaction boom'
+      })
       assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), prev)
     })
+  })
+
+  it('does not flag a healthy boundary snapshot as replayed', async () => {
+    const cid = 'cid-boundary-not-replayed'
+    ensureContractMeta(cid)
+    let prev = mkState(0)
+    record(cid, 'h0', 0, undefined, prev)
+    for (let i = 1; i <= 3; i++) {
+      const next = mkState(i)
+      record(cid, `h${i}`, i, prev, next)
+      prev = next
+    }
+    const snaps = getEntries(cid)!.filter(
+      (e): e is Extract<JournalEntry, { kind: 'snapshot' }> => e.kind === 'snapshot'
+    )
+    assert.strictEqual(snaps.length, 2)
+    assert.strictEqual(snaps[1].replayed, undefined)
+    assert.deepStrictEqual(snaps[1].state, prev)
   })
 
   it('still snapshots at the boundary when only the before-projection throws', async () => {
@@ -1012,6 +1045,121 @@ describe('journal: integration via SBP selectors', () => {
     assert.strictEqual(entry.redactionError, undefined)
     assert.strictEqual(entry.diffError, undefined)
     assert.ok(entry.patch.some((p) => p.redacted === true), 'normal marking is unaffected')
+  })
+
+  it('bounds the journal at 2*snapshotInterval under sustained after-projection failures', async () => {
+    // Regression: a failed after-projection cannot snapshot the event's own
+    // post-state (it is a placeholder `null`). Skipping the boundary
+    // snapshot outright leaves the window with no snapshot beyond index 0,
+    // so the trim can never fire and an unbroken run of failures grows the
+    // journal without bound. Recovering the boundary state by replay keeps
+    // the documented 2X ceiling.
+    await silencingWarnings(async () => {
+      await withRedactionConfig()
+      const cid = 'cid-redaction-after-bound'
+      ensureContractMeta(cid)
+      let prev = mkState(0)
+      record(cid, 'h0', 0, undefined, prev)
+      // snapshotInterval = 3 in this suite, so 2X = 6.
+      for (let i = 1; i <= 50; i++) {
+        record(cid, `h${i}`, i, prev, mkExplodingState())
+        const entries = getEntries(cid)!
+        assert.ok(
+          entries.length <= 6,
+          `journal grew past 2*snapshotInterval (${entries.length}) at step ${i}`
+        )
+        prev = mkState(i)
+      }
+      // Stale, never corrupt: the last good state is still reconstructible.
+      assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), mkState(0))
+    })
+  })
+
+  it('preserves healthy patches when recovering a boundary snapshot by replay', async () => {
+    // The recovered boundary state must be the *replay* of the window, not
+    // the last seed snapshot's state: the trim that follows discards every
+    // entry before the snapshot, so anchoring on the seed would silently
+    // drop the changes recorded by the healthy patches in between.
+    await silencingWarnings(async () => {
+      await withRedactionConfig()
+      const cid = 'cid-redaction-after-mixed'
+      ensureContractMeta(cid)
+      let prev = mkState(0)
+      record(cid, 'h0', 0, undefined, prev)
+      // Two healthy patches carry the state to counter: 2.
+      for (let i = 1; i <= 2; i++) {
+        const next = mkState(i)
+        record(cid, `h${i}`, i, prev, next)
+        prev = next
+      }
+      const lastGood = sbp('chelonia/journal/reconstruct', cid)
+      assert.deepStrictEqual(lastGood, mkState(2), 'sanity: healthy run reconstructs')
+      // Now a long run of after-projection failures, spanning several
+      // boundary recoveries and trims.
+      for (let i = 3; i <= 40; i++) {
+        record(cid, `h${i}`, i, prev, mkExplodingState())
+        assert.ok(getEntries(cid)!.length <= 6, `unbounded at step ${i}`)
+        assert.deepStrictEqual(
+          sbp('chelonia/journal/reconstruct', cid),
+          lastGood,
+          `reconstruct changed across a recovery/trim at step ${i}`
+        )
+      }
+    })
+  })
+
+  it('keeps the window bounded without corrupting it when replay is impossible', async () => {
+    // If the configured applier rejects a recorded patch, the boundary
+    // state cannot be recovered. Rather than invent one, the recorder
+    // enforces the bound by dropping the oldest no-op entries — replay
+    // equivalent, since an empty patch contributes nothing — and never
+    // materializes a snapshot holding a half-replayed state.
+    await silencingWarnings(async () => {
+      await sbp('chelonia/configure', {
+        journal: {
+          enabled: true,
+          snapshotInterval: 3,
+          contractIDs: [],
+          redactions: [
+            { path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED]' }
+          ],
+          markRedactedChanges: false,
+          applyPatch: () => { throw new Error('applier boom') }
+        }
+      })
+      const cid = 'cid-replay-impossible'
+      ensureContractMeta(cid)
+      const seed = mkState(0)
+      record(cid, 'h0', 0, undefined, seed)
+      record(cid, 'h1', 1, seed, mkState(1))
+      let prev = mkState(1)
+      for (let i = 2; i <= 40; i++) {
+        record(cid, `h${i}`, i, prev, mkExplodingState())
+        const entries = getEntries(cid)!
+        assert.ok(entries.length <= 6, `unbounded at step ${i} (${entries.length})`)
+        prev = mkState(i)
+      }
+      const entries = getEntries(cid)!
+      assert.strictEqual(entries[0].kind, 'snapshot', 'the seed snapshot is never dropped')
+      assert.strictEqual(entries[0].hash, 'h0')
+      assert.strictEqual(
+        entries.filter((e) => e.kind === 'snapshot').length,
+        1,
+        'no snapshot was invented from a state that could not be replayed'
+      )
+      // The healthy patch is load-bearing for replay, so it survives while
+      // the no-op entries around it are dropped oldest-first.
+      assert.ok(
+        entries.some((e) => e.kind === 'patch' && e.patch.length > 0),
+        'the non-empty patch was not dropped'
+      )
+      // The tail still evidences the ongoing failure.
+      const last = entries[entries.length - 1] as Extract<JournalEntry, { kind: 'patch' }>
+      assert.strictEqual(last.hash, 'h40')
+      assert.deepStrictEqual(last.redactionError, {
+        name: 'Error', message: 'redaction boom'
+      })
+    })
   })
 
   it('bounds the journal at 2*snapshotInterval even under sustained processing errors', () => {
@@ -1731,6 +1879,114 @@ describe('journal: integration via SBP selectors', () => {
         `expected configure to reject ${field}=${String(value)}`
       )
     }
+  })
+
+  it('rejects malformed redactions entries in chelonia/configure with a TypeError', async () => {
+    // A malformed directive is not a harmless no-op: a missing `path`
+    // makes the dotted-path parser throw on every projection of every
+    // event, silently reducing the journal to unusable placeholder
+    // entries, and a non-function `redact` sentinel-izes every matched
+    // leaf. Both must fail at configure time.
+    const cases: Array<[unknown, RegExp]> = [
+      [{ redact: () => '[R]' }, /path=undefined/],
+      [{ path: 5, redact: () => '[R]' }, /path=number/],
+      [{ path: 'a.b' }, /redact=undefined/],
+      [{ path: 'a.b', redact: 'nope' }, /redact=string/],
+      [null, /path=undefined/],
+      ['a.b', /path=undefined/],
+      [['a.b', () => '[R]'], /path=undefined/]
+    ]
+    for (const [entry, pattern] of cases) {
+      await assert.rejects(
+        sbp('chelonia/configure', { journal: { redactions: [entry] } }),
+        (err: unknown) => err instanceof TypeError &&
+          /redactions\[0\]/.test((err as Error).message) &&
+          pattern.test((err as Error).message),
+        `expected configure to reject redaction entry ${JSON.stringify(entry)}`
+      )
+    }
+    // The index is reported so the offending entry is identifiable.
+    await assert.rejects(
+      sbp('chelonia/configure', {
+        journal: {
+          redactions: [
+            { path: 'a', redact: () => '[R]' },
+            { path: 'b' } as unknown as { path: string; redact: () => string }
+          ]
+        }
+      }),
+      (err: unknown) => err instanceof TypeError && /redactions\[1\]/.test((err as Error).message)
+    )
+  })
+
+  it('leaves the live redactions in place when a reconfigure is rejected', async () => {
+    // The throw happens while building the replacement array, so the live
+    // config must be untouched — journaling keeps working under the
+    // previously accepted directives.
+    await withRedactionConfig()
+    await assert.rejects(
+      sbp('chelonia/configure', {
+        journal: {
+          redactions: [{ redact: () => '[R]' } as unknown as { path: string; redact: () => string }]
+        }
+      }),
+      TypeError
+    )
+    const cid = 'cid-redactions-rejected'
+    ensureContractMeta(cid)
+    const s1 = mkKeyState('SECRET-1')
+    const s2 = mkKeyState('SECRET-2')
+    record(cid, 'h0', 0, undefined, s1)
+    record(cid, 'h1', 1, s1, s2)
+    const entries = getEntries(cid)!
+    assert.strictEqual(entries.length, 2, 'journaling still works')
+    const json = JSON.stringify(entries)
+    assert.ok(!json.includes('SECRET-'), 'the previous redactions are still applied')
+    assert.ok(json.includes('[REDACTED]'))
+    const entry = entries[1] as Extract<JournalEntry, { kind: 'patch' }>
+    assert.strictEqual(entry.redactionError, undefined, 'no projection failure')
+  })
+
+  it('accepts an empty redactions array and an empty-string path', async () => {
+    // `[]` clears the set; an empty `path` resolves to zero segments and is
+    // skipped by `applyRedactions`, so it is a legal (if pointless) entry.
+    await sbp('chelonia/configure', { journal: { redactions: [] } })
+    await sbp('chelonia/configure', {
+      journal: { redactions: [{ path: '', redact: () => '[R]' }] }
+    })
+    const cid = 'cid-redactions-empty-path'
+    ensureContractMeta(cid)
+    const s1 = mkState(1)
+    record(cid, 'h0', 0, undefined, s1)
+    record(cid, 'h1', 1, s1, mkState(2))
+    const entry = getEntries(cid)![1] as Extract<JournalEntry, { kind: 'patch' }>
+    assert.strictEqual(entry.redactionError, undefined)
+    assert.deepStrictEqual(entry.patch, [
+      { op: 'replace', path: '/counter', value: 2 }
+    ])
+  })
+
+  it('rejects a non-object journal block in chelonia/configure with a TypeError', async () => {
+    // A non-object makes every field lookup come back empty, so the call
+    // would silently do nothing at all. `null` (reset) and `undefined`
+    // (leave alone) remain the only non-object values accepted.
+    for (const value of [42, true, 'yes', [], () => {}]) {
+      await assert.rejects(
+        sbp('chelonia/configure', { journal: value }),
+        (err: unknown) => err instanceof TypeError &&
+          /config\.journal must be an object/.test((err as Error).message),
+        `expected configure to reject journal=${JSON.stringify(value) ?? typeof value}`
+      )
+    }
+    // A rejected call leaves journaling exactly as it was.
+    const cid = 'cid-journal-non-object'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkState(1))
+    assert.ok(getEntries(cid), 'journaling still enabled after the rejected call')
+    // And an explicitly `undefined` block is still treated as omission.
+    await sbp('chelonia/configure', { journal: undefined })
+    record(cid, 'h1', 1, mkState(1), mkState(2))
+    assert.strictEqual(getEntries(cid)!.length, 2)
   })
 
   it('treats top-level journal: null as "stop journaling"', async () => {

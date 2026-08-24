@@ -98,6 +98,20 @@ The first entry is **always** a snapshot, so
 `chelonia/journal/reconstruct` can rebuild HEAD state by replaying
 patches over it.
 
+The `2N` ceiling holds unconditionally, including through runs of events
+that produce no state to check-point (see
+[Failed events](#failed-events) and
+[Journal-side failures](#journal-side-failures)):
+
+- If such an event lands on a snapshot boundary *because its redacted
+  projection failed*, the state is recovered by replaying the window —
+  which is what `chelonia/journal/reconstruct` already returns for it —
+  and the resulting snapshot is flagged `replayed: true`.
+- Otherwise no snapshot is written for that boundary, and the ceiling is
+  enforced by dropping the journal's oldest no-op entries instead. That
+  cannot change what `reconstruct` returns, because an empty patch
+  contributes nothing to a replay.
+
 ---
 
 ## Public selectors
@@ -134,6 +148,9 @@ type JournalEntry =
       redactionError?: { name: string; message: string } // set if `redactions` threw
       diffError?: { name: string; message: string }      // carried forward from the
                                                          // patch entry at a boundary
+      replayed?: true // `state` was recovered by replaying the window
+                      // because this event's own projection failed, so it
+                      // is NOT the state at this entry's `height`
     }
   | {
       kind: 'patch'
@@ -488,10 +505,11 @@ snapshot and no accompanying patch entry.
 A snapshot with `state: null` is a **placeholder**: it records what
 happened but holds nothing to replay from, so
 `chelonia/journal/reconstruct` will not seed from it and the next event
-re-seeds the window with a real snapshot. For the same reason the
-snapshot the recorder would normally insert at a
-[snapshot boundary](#snapshot-cadence) is deferred when the boundary
-event has no post-state, rather than anchoring the window on `null`.
+re-seeds the window with a real snapshot. For the same reason the recorder
+never anchors a [snapshot boundary](#snapshot-cadence) on `null`: when the
+boundary event has no post-state the snapshot is skipped, and the window
+is kept within its `2N` bound by dropping the oldest no-op entries
+instead.
 
 This makes failed events distinguishable from no-op events on every
 path the recorder emits. Changes hidden behind a constant redactor are
@@ -532,13 +550,28 @@ after-projection so the recorder has a state to snapshot from.
 Both are **degradations, not corruptions**: the affected event's changes
 are missing from the patch stream, so `reconstruct` returns the last
 good state until the next snapshot re-seeds the window (bounded by
-`2 * snapshotInterval` entries). Two mechanisms keep a failed projection
-from turning into a `reconstruct` error:
+`2 * snapshotInterval` entries — see
+[Snapshot cadence](#snapshot-cadence)). Three mechanisms keep a failed
+projection from turning into a `reconstruct` error, or into a journal that
+grows without bound:
 
-- When the *after*-projection is the one that failed, the boundary
-  auto-snapshot is deferred — snapshotting the placeholder `null` would
-  anchor the window on a bogus state once trimming discards everything
-  before it.
+- When the *after*-projection is the one that failed, the event's own
+  post-state is a placeholder `null` and must not be snapshotted:
+  anchoring the window on it would corrupt `reconstruct` once trimming
+  discards everything before it. If such an event lands on a snapshot
+  boundary, the state is recovered by replaying the window instead and the
+  snapshot is flagged `replayed: true`. It holds the last good state
+  (which is what `reconstruct` already returned for that window), not the
+  state at its own `height`.
+- If the replay is impossible too — only a custom `applyPatch` rejecting
+  a recorded patch gets here — no snapshot is written at all, and the
+  `2 * snapshotInterval` bound is instead enforced by dropping the oldest
+  no-op entries. That cannot change what `reconstruct` returns, since an
+  empty patch contributes nothing; what it costs is the `error` /
+  `redactionError` detail on the dropped entries, so the newest ones are
+  kept and the tail still evidences the ongoing failure. The same fallback
+  bounds a run of [failed events](#failed-events) that leaves the recorder
+  with no post-state at all.
 - When the failure lands on a snapshot path (first event, resync,
   forward-gap re-seed) there is no prior state to fall back on, so the
   entry is written as a placeholder `state: null` and the next event
@@ -547,7 +580,8 @@ from turning into a `reconstruct` error:
 
 Snapshot entries carry `redactionError` too, which is what distinguishes
 a `state: null` snapshot caused by a failed projection from one caused by
-an undefined post-state.
+an undefined post-state. A snapshot carrying `redactionError` *and* a
+non-null state is a recovered one and is always flagged `replayed: true`.
 
 ### Recording is non-throwing
 

@@ -1009,11 +1009,81 @@ function indexOfLastSeedSnapshot(entries) {
     }
     return -1;
 }
+// Recover a usable boundary state by replaying the window onto its most
+// recent seed snapshot — i.e. exactly what `chelonia/journal/reconstruct`
+// computes for the window's HEAD. Used when the boundary event's own
+// after-projection failed and therefore cannot be snapshotted.
+//
+// This is replay-equivalent by construction: `reconstruct` returns the same
+// value before and after the window is trimmed down to the snapshot this
+// produces, because the snapshot holds the replay of everything the trim
+// discards. Anchoring on the seed snapshot's state *as-is* would not be:
+// any healthy patches recorded between the seed and the boundary would be
+// trimmed away and their changes silently lost.
+//
+// Returns `null` when no replay is possible (no seed snapshot yet, or the
+// configured applier rejected a recorded patch). The caller then skips the
+// snapshot, and `dropOldestNoOpPatches` keeps the window bounded instead.
+function replayBoundaryState(window, applyPatch) {
+    const seedIdx = indexOfLastSeedSnapshot(window);
+    if (seedIdx < 0)
+        return null;
+    const seed = window[seedIdx];
+    let state = seed.state;
+    try {
+        for (let i = seedIdx + 1; i < window.length; i++) {
+            const e = window[i];
+            // Snapshots in the tail are redundant check-points on the same patch
+            // chain, and an empty patch is a no-op, so both are skipped. Mirrors
+            // the walk in `chelonia/journal/reconstruct`.
+            if (e.kind !== 'patch' || e.patch.length === 0)
+                continue;
+            state = applyPatch(state, e.patch);
+        }
+    }
+    catch (e) {
+        logJournalError('boundary snapshot replay failed', e);
+        return null;
+    }
+    if (state == null)
+        return null;
+    // Clone so the new snapshot cannot alias the seed's state object, which
+    // is what `state` still is when the window held no applicable patches.
+    return { state: cloneValue(state), replayed: true };
+}
+// Last-resort bound enforcement: drop the oldest no-op patch entries until
+// the window fits within `maxEntries`.
+//
+// Reached only when the window has no snapshot to trim to, i.e. when every
+// boundary snapshot was skipped for want of a state and
+// `replayBoundaryState` could not recover one either. Removing empty
+// patches is always replay-equivalent: they contribute nothing to
+// `reconstruct`. The trade-off is diagnostic, not correctness — the dropped
+// entries carried `error` / `redactionError` detail, so we drop the oldest
+// and keep the newest, leaving the tail as evidence of an ongoing failure.
+//
+// Entries are only ever removed from index 1 onwards: index 0 is the seed
+// snapshot every replay starts from.
+function dropOldestNoOpPatches(entries, maxEntries) {
+    let excess = entries.length - maxEntries;
+    if (excess <= 0)
+        return;
+    for (let i = 1; i < entries.length && excess > 0;) {
+        const e = entries[i];
+        if (e.kind === 'patch' && e.patch.length === 0) {
+            entries.splice(i, 1);
+            excess--;
+        }
+        else {
+            i++;
+        }
+    }
+}
 function appendAndTrim(entries, entry, snapshotInterval, 
-// When non-null, provides the current redacted state to snapshot at the
+// When non-null, resolves the current redacted state to snapshot at the
 // X-boundary. Passing null skips snapshot insertion (used for the very
 // first entry, which is itself a snapshot).
-postSnapshotState) {
+resolveSnapshotState) {
     // Allocate a fresh array on every call so the array's identity changes
     // in lock-step with the `_journal` wrapper swap performed by
     // `recordEvent` via `reactiveSet`. This means consumers that destructure
@@ -1028,42 +1098,52 @@ postSnapshotState) {
     // If this push reached snapshotInterval patches since the most recent
     // snapshot, append a snapshot entry as well. We derive the identifying
     // fields from `entry` itself so the snapshot can never drift away from
-    // the patch it accompanies. The `postSnapshotState.state != null` gate
-    // keeps us from materializing a placeholder snapshot (see
-    // `isPlaceholderSnapshot`) when an errored event or a failed projection
-    // lands on the boundary; in that case the auto-snapshot is simply
-    // deferred to the next event that has a usable state.
-    if (postSnapshotState &&
-        postSnapshotState.state != null &&
-        entry.kind === 'patch') {
+    // the patch it accompanies.
+    if (resolveSnapshotState && entry.kind === 'patch') {
         const lastSnapIdx = indexOfLastSnapshot(entries);
         const patchesSinceSnap = entries.length - 1 - lastSnapIdx;
         if (patchesSinceSnap >= snapshotInterval) {
-            const snap = Object.create(null);
-            snap.kind = 'snapshot';
-            snap.hash = entry.hash;
-            snap.height = entry.height;
-            snap.opType = entry.opType;
-            snap.description = entry.description;
-            snap.state = postSnapshotState.state;
-            // If the patch entry that triggered this auto-snapshot was itself
-            // an errored event, carry the error detail forward onto the
-            // snapshot too. Otherwise, once `appendAndTrim` collapses the
-            // window past the most recent snapshot, the `error` information
-            // (which currently lives only on the trimmed-away patch entry)
-            // would be lost. Keeping the snapshot and the patch in sync
-            // guarantees error detail survives trimming on every code path.
-            // The journal-side failure fields ride along for the same reason.
-            if (entry.kind === 'patch' && entry.error !== undefined) {
-                snap.error = entry.error;
+            // Resolved lazily: only a boundary needs a state, and the recovery
+            // path (see `replayBoundaryState`) is not free.
+            const resolved = resolveSnapshotState(entries);
+            // The `state != null` gate keeps us from materializing a placeholder
+            // snapshot (see `isPlaceholderSnapshot`) when an errored event or a
+            // failed projection lands on the boundary and no state could be
+            // recovered for it; in that case the auto-snapshot is simply
+            // deferred to the next event that has a usable state.
+            if (resolved && resolved.state != null) {
+                const snap = Object.create(null);
+                snap.kind = 'snapshot';
+                snap.hash = entry.hash;
+                snap.height = entry.height;
+                snap.opType = entry.opType;
+                snap.description = entry.description;
+                snap.state = resolved.state;
+                // Flag a state that was recovered by replay rather than taken from
+                // this event's own post-state, so consumers do not read it as the
+                // state at this event's height. See `replayBoundaryState`.
+                if (resolved.replayed) {
+                    snap.replayed = true;
+                }
+                // If the patch entry that triggered this auto-snapshot was itself
+                // an errored event, carry the error detail forward onto the
+                // snapshot too. Otherwise, once `appendAndTrim` collapses the
+                // window past the most recent snapshot, the `error` information
+                // (which currently lives only on the trimmed-away patch entry)
+                // would be lost. Keeping the snapshot and the patch in sync
+                // guarantees error detail survives trimming on every code path.
+                // The journal-side failure fields ride along for the same reason.
+                if (entry.error !== undefined) {
+                    snap.error = entry.error;
+                }
+                if (entry.diffError !== undefined) {
+                    snap.diffError = entry.diffError;
+                }
+                if (entry.redactionError !== undefined) {
+                    snap.redactionError = entry.redactionError;
+                }
+                entries.push(snap);
             }
-            if (entry.kind === 'patch' && entry.diffError !== undefined) {
-                snap.diffError = entry.diffError;
-            }
-            if (entry.kind === 'patch' && entry.redactionError !== undefined) {
-                snap.redactionError = entry.redactionError;
-            }
-            entries.push(snap);
         }
     }
     // Trim: if total length exceeded 2X, drop everything before the most
@@ -1075,20 +1155,28 @@ postSnapshotState) {
         if (lastSnapIdx > 0) {
             entries.splice(0, lastSnapIdx);
         }
+        else {
+            // No snapshot to trim to: every boundary snapshot in this window was
+            // skipped for want of a state. Enforce the bound the only other way
+            // that cannot change what `reconstruct` returns.
+            dropOldestNoOpPatches(entries, 2 * snapshotInterval);
+        }
     }
     return entries;
 }
 function logJournalError(label, e) {
     console.warn(`[chelonia][journal] ${label}:`, e);
 }
-// Normalize an arbitrary throwable into `{ name, message }`. Mirrors
-// the leniency of the JS `throw` statement: any value can be raised,
-// so the journal must not assume an `Error` instance. We intentionally
-// avoid `JSON.stringify` (cycles, BigInt, Symbol → throws) and use
-// `String(...)` for value coercion. `Symbol` is a special case: its
+// Normalize an arbitrary throwable into `{ name, message }`. Used for
+// every error detail the journal records — the contract's own processing
+// failure as well as journal-side ones (a throwing `diff` or redactor).
+// Mirrors the leniency of the JS `throw` statement: any value can be
+// raised, so the journal must not assume an `Error` instance. We
+// intentionally avoid `JSON.stringify` (cycles, BigInt, Symbol → throws)
+// and use `String(...)` for value coercion. `Symbol` is a special case: its
 // `String()` form is the readable `Symbol(...)` representation, which
 // is exactly what we want for a debug breadcrumb.
-function normalizeProcessingError(e) {
+function normalizeErrorDetail(e) {
     // Object-shaped throwables (Error instances or plain objects).
     if (e !== null && typeof e === 'object') {
         const obj = e;
@@ -1314,7 +1402,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 snap.description = description;
                 snap.state = redactedAfter;
                 if (processingErrored && processingError != null) {
-                    snap.error = normalizeProcessingError(processingError);
+                    snap.error = normalizeErrorDetail(processingError);
                 }
                 // A projection failure leaves `state: null`. Label it, or the
                 // snapshot is indistinguishable from the legitimate "post-state
@@ -1322,7 +1410,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // entry is a placeholder, so the *next* event re-seeds again (see
                 // `reseedAfterPlaceholder`) instead of stacking patches on it.
                 if (redactionError != null) {
-                    snap.redactionError = normalizeProcessingError(redactionError);
+                    snap.redactionError = normalizeErrorDetail(redactionError);
                 }
                 // A resync invalidates everything recorded so far, so the window
                 // collapses to this snapshot alone. Re-seeding after a placeholder
@@ -1398,7 +1486,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // catch site only forwards a value when it actually caught
                 // something, but a paranoid extra check costs nothing.
                 if (processingErrored && processingError != null) {
-                    entry.error = normalizeProcessingError(processingError);
+                    entry.error = normalizeErrorDetail(processingError);
                 }
                 // Journal-side failures. Both mean "the journal could not record
                 // what changed", which `patch: []` alone cannot express — it is
@@ -1412,19 +1500,23 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // materialize a boundary snapshot from — a throwing redactor is
                 // therefore still reachable and labels the entry as well.
                 if (diffError != null) {
-                    entry.diffError = normalizeProcessingError(diffError);
+                    entry.diffError = normalizeErrorDetail(diffError);
                 }
                 if (redactionError != null) {
-                    entry.redactionError = normalizeProcessingError(redactionError);
+                    entry.redactionError = normalizeErrorDetail(redactionError);
                 }
                 nextEntries = appendAndTrim(existing, entry, cfg.snapshotInterval, 
                 // A failed *after*-projection means `redactedAfter` is a
                 // placeholder `null`, not the real state: snapshotting it would
                 // anchor `reconstruct` on a bogus state once trimming discards
-                // everything before it. Skip the boundary snapshot in that case
-                // (same deferral the errored-event path relies on). A failed
-                // before-projection leaves `redactedAfter` valid and usable.
-                redactionAfterFailed ? null : { state: redactedAfter });
+                // everything before it. Recover the boundary state by replaying
+                // the window instead, which check-points exactly what
+                // `reconstruct` already returns and so keeps the window bounded
+                // without inventing a state. A failed before-projection leaves
+                // `redactedAfter` valid and usable.
+                redactionAfterFailed
+                    ? (window) => replayBoundaryState(window, cfg.applyPatch)
+                    : () => ({ state: redactedAfter }));
             }
             const wrapper = Object.create(null);
             wrapper.entries = nextEntries;

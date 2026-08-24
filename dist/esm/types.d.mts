@@ -116,6 +116,7 @@ export type JournalEntry = {
         name: string;
         message: string;
     };
+    replayed?: true;
 } | {
     kind: 'patch';
     hash: string;

@@ -168,6 +168,15 @@ export type JournalEntry =
       // auto-snapshot at a snapshot boundary, so trimming cannot orphan
       // the detail. See the patch variant for the semantics.
       diffError?: { name: string; message: string };
+      // Set when this snapshot's `state` was recovered by replaying the
+      // journal window rather than taken from the event's own post-state,
+      // which happens when that event's redacted projection failed. The
+      // snapshot is still replay-equivalent — `reconstruct` returns the
+      // same value before and after the window is trimmed down to it — but
+      // its `state` predates the events whose projections failed, so it is
+      // NOT the contract state at this entry's `height`. Always accompanied
+      // by `redactionError`.
+      replayed?: true;
     }
   | {
       kind: 'patch';

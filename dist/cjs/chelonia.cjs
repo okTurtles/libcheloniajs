@@ -289,6 +289,17 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             (0, sbp_1.default)('chelonia/journal/clear');
         }
         else if (journalOverride !== undefined) {
+            // The journal block must be an object. Anything else (a number, a
+            // boolean, a string, an array) makes every field lookup below come
+            // back empty, so the call would silently do nothing at all — the
+            // exact "silently surprising effects" the per-field checks that
+            // follow exist to prevent. `null` is already handled above as the
+            // documented reset, so it cannot reach here.
+            if (typeof journalOverride !== 'object' || Array.isArray(journalOverride)) {
+                throw new TypeError('[chelonia][journal] config.journal must be an object, `null` to ' +
+                    'reset the whole block to disabled defaults, or omitted to leave ' +
+                    `it alone; got ${Array.isArray(journalOverride) ? 'array' : typeof journalOverride}`);
+            }
             // Reject `null` per individual field: docs/configure.md documents that
             // only the typed values are accepted and that callers should
             // omit a field (or pass `undefined`) to leave it alone. Silently
@@ -374,10 +385,27 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // `{ path, redact }` objects with the caller, who could then
                 // re-point `path` and silently change the live journal config.
                 // The `redact` function is intentionally shared by reference.
-                target.redactions = journalOverride.redactions.map(r => ({
-                    path: r.path,
-                    redact: r.redact
-                }));
+                //
+                // Validate each entry while copying it. A malformed directive is
+                // not a harmless no-op: a missing `path` makes the dotted-path
+                // parser throw on *every* projection of *every* event, which turns
+                // journaling into a stream of unusable placeholder entries and a
+                // permanently `undefined` `chelonia/journal/reconstruct`, while a
+                // non-function `redact` replaces every matched leaf with the
+                // redaction-error sentinel. Both are silent deaths from a one-key
+                // typo, so fail loudly here instead — same rationale as
+                // `rejectNull` and `applyTypedField` above.
+                target.redactions = journalOverride.redactions.map((r, i) => {
+                    const path = r?.path;
+                    const redact = r?.redact;
+                    if (r === null || typeof r !== 'object' || Array.isArray(r) ||
+                        typeof path !== 'string' || typeof redact !== 'function') {
+                        throw new TypeError(`[chelonia][journal] config.journal.redactions[${i}] must be ` +
+                            '`{ path: string, redact: function }`; got ' +
+                            `path=${typeof path}, redact=${typeof redact}`);
+                    }
+                    return { path: r.path, redact: r.redact };
+                });
                 // We deliberately do NOT auto-clear journals here. Two reasons:
                 //   1. `redactions` contains user functions that cannot be
                 //      stably compared across process restarts (function
