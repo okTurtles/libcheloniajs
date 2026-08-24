@@ -848,10 +848,29 @@ describe('journal: JSON-safety acceptance and normalization agree', () => {
   // linter rejects (`no-sparse-arrays`).
   const sparse: unknown[] = ['a', 'x']
   delete sparse[0]
+  // Dense, but carrying a key `JSON.stringify` throws away.
+  const extraProp: unknown[] & { extra?: string } = [1, 2]
+  extraProp.extra = 'x'
+  // Same stowaway, but non-enumerable: JSON ignores it, so must we.
+  const hiddenProp: unknown[] = [1, 2]
+  Object.defineProperty(hiddenProp, 'extra', { value: 'x', enumerable: false })
 
   // `safe` is stated per fixture rather than derived, so the test cannot
-  // drift along with the implementation it is guarding.
-  const fixtures: Array<{ name: string; value: unknown; safe: boolean }> = [
+  // drift along with the implementation it is guarding. `sentinel` and
+  // `exactRoundTrip` default to the common case and are only spelled out
+  // for the handful of values that legitimately deviate.
+  const fixtures: Array<{
+    name: string;
+    value: unknown;
+    safe: boolean;
+    // Whether normalization is expected to leave a sentinel behind.
+    // Defaults to `!safe`: most rejected values have no JSON equivalent.
+    sentinel?: boolean;
+    // Whether the stored value is expected to survive `JSON.parse(
+    // JSON.stringify(...))` under `deepStrictEqual`. Defaults to true; see
+    // the dedicated test below for the two accepted exceptions.
+    exactRoundTrip?: boolean;
+  }> = [
     { name: 'null', value: null, safe: true },
     { name: 'empty string', value: '', safe: true },
     { name: 'zero', value: 0, safe: true },
@@ -860,8 +879,16 @@ describe('journal: JSON-safety acceptance and normalization agree', () => {
     { name: 'nested plain object', value: { a: { b: [true, 'x'] } }, safe: true },
     // Shared (DAG) references serialize fine; only cycles do not.
     { name: 'shared reference', value: { l: shared, r: shared }, safe: true },
-    { name: 'null-prototype object', value: Object.assign(Object.create(null), { a: 1 }), safe: true },
-    { name: 'negative zero', value: -0, safe: true },
+    {
+      name: 'null-prototype object',
+      value: Object.assign(Object.create(null), { a: 1 }),
+      safe: true,
+      exactRoundTrip: false
+    },
+    { name: 'negative zero', value: -0, safe: true, exactRoundTrip: false },
+    // A non-enumerable stowaway is invisible to `JSON.stringify`, so the
+    // value already round-trips as itself.
+    { name: 'array with a non-enumerable extra property', value: hiddenProp, safe: true },
     { name: 'NaN', value: NaN, safe: false },
     { name: 'Infinity', value: Infinity, safe: false },
     { name: 'undefined', value: undefined, safe: false },
@@ -877,7 +904,21 @@ describe('journal: JSON-safety acceptance and normalization agree', () => {
     { name: 'sparse array', value: sparse, safe: false },
     { name: 'fully sparse array', value: new Array(3), safe: false },
     { name: 'sparse array nested in a safe container', value: { a: [sparse] }, safe: false },
-    { name: 'unsafe leaf in a safe container', value: { ok: 1, bad: undefined }, safe: false }
+    { name: 'unsafe leaf in a safe container', value: { ok: 1, bad: undefined }, safe: false },
+    // Rejected, but repaired by dropping the key rather than by planting a
+    // sentinel: that is precisely what JSON persistence would have done.
+    {
+      name: 'array with an extra non-index property',
+      value: extraProp,
+      safe: false,
+      sentinel: false
+    },
+    {
+      name: 'array with an extra non-index property nested in a safe container',
+      value: { a: [extraProp] },
+      safe: false,
+      sentinel: false
+    }
   ]
 
   const containsSentinel = (v: unknown): boolean => {
@@ -886,32 +927,64 @@ describe('journal: JSON-safety acceptance and normalization agree', () => {
     return Object.values(v as Record<string, unknown>).some(containsSentinel)
   }
 
-  const redactTo = (value: unknown): unknown => {
+  const redactCapturingWarnings = (
+    value: unknown
+  ): { value: unknown; warnings: string[] } => {
+    const warnings: string[] = []
     const orig = console.warn
-    console.warn = () => {}
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')) }
     try {
       const out = applyRedactions(
         { a: 'original' },
         [{ path: 'a', redact: () => value }],
         'test/contract'
       ) as { a: unknown }
-      return out.a
+      return { value: out.a, warnings }
     } finally {
       console.warn = orig
     }
   }
 
-  for (const { name, value, safe } of fixtures) {
-    it(`${safe ? 'accepts' : 'substitutes a sentinel for'} ${name}`, () => {
-      const out = redactTo(value)
-      assert.strictEqual(containsSentinel(out), !safe)
+  const redactTo = (value: unknown): unknown => redactCapturingWarnings(value).value
+
+  for (const { name, value, safe, sentinel, exactRoundTrip } of fixtures) {
+    it(`${safe ? 'accepts' : 'normalizes'} ${name}`, () => {
+      const { value: out, warnings } = redactCapturingWarnings(value)
+      // The acceptance gate itself: an accepted value is stored untouched
+      // and silently, a rejected one always says so exactly once.
+      assert.strictEqual(
+        warnings.length,
+        safe ? 0 : 1,
+        safe ? 'accepted values must not warn' : 'rejected values must warn'
+      )
+      assert.strictEqual(containsSentinel(out), sentinel ?? !safe)
       if (safe) assert.ok(structurallyEqual(out, value))
       // The property that actually matters: whatever is stored must survive
       // persistence as the same value, judged by the journal's own notion of
       // equality (the one `defaultDiff` uses).
       assert.ok(structurallyEqual(JSON.parse(JSON.stringify(out)), out))
+      // `structurallyEqual` compares arrays index by index, so it cannot see
+      // a stowaway non-index key. `deepStrictEqual` can, which is what makes
+      // this the assertion that pins the round-trip end to end.
+      if (exactRoundTrip ?? true) {
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(out)), out)
+      }
     })
   }
+
+  it('drops an array\'s non-index properties and names them in the warning', () => {
+    const input: unknown[] & { extra?: string } = [1, 2]
+    input.extra = 'x'
+    const { value: out, warnings } = redactCapturingWarnings(input)
+    assert.deepStrictEqual(Object.keys(out as object), ['0', '1'])
+    assert.deepStrictEqual(out, [1, 2])
+    assert.ok(
+      warnings[0].includes('array with non-index properties'),
+      `unexpected warning: ${warnings[0]}`
+    )
+    // The input is left alone; only the projection is repaired.
+    assert.strictEqual(input.extra, 'x')
+  })
 
   it('persists accepted values that JSON cannot represent exactly as equivalents', () => {
     // Two accepted shapes come back from JSON differently than they went

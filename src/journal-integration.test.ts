@@ -820,11 +820,11 @@ describe('journal: integration via SBP selectors', () => {
     return s as unknown as ChelContractState
   }
 
-  const withRedactionConfig = async (snapshotInterval = 3) => {
+  const withRedactionConfig = async () => {
     await sbp('chelonia/configure', {
       journal: {
         enabled: true,
-        snapshotInterval,
+        snapshotInterval: 3,
         contractIDs: [],
         redactions: [
           { path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED]' }
@@ -892,6 +892,58 @@ describe('journal: integration via SBP selectors', () => {
         name: 'Error', message: 'redaction boom'
       })
       assert.strictEqual(snap.error, undefined, 'not a processing failure')
+    })
+  })
+
+  it('re-seeds on the next event when the first event\'s projection throws', async () => {
+    await silencingWarnings(async () => {
+      await withRedactionConfig()
+      const cid = 'cid-redaction-first-reseed'
+      ensureContractMeta(cid)
+      record(cid, 'h0', 0, undefined, mkExplodingState())
+      // Nothing to replay from, but a degradation must not present itself
+      // as corruption.
+      assert.strictEqual(
+        sbp('chelonia/journal/reconstruct', cid),
+        undefined,
+        'a null-state snapshot is not a usable seed'
+      )
+      // The window is unusable, so the next event must emit a snapshot
+      // rather than a patch anchored on `null`.
+      const s1 = mkState(1)
+      record(cid, 'h1', 1, mkState(0), s1)
+      const entries = getEntries(cid)!
+      assert.strictEqual(entries.length, 2)
+      assert.strictEqual(entries[1].kind, 'snapshot', 'expected a re-seed, not a patch')
+      // The failed event stays on the record: re-seeding is not a resync.
+      const placeholder = entries[0] as Extract<JournalEntry, { kind: 'snapshot' }>
+      assert.strictEqual(placeholder.state, null)
+      assert.deepStrictEqual(placeholder.redactionError, {
+        name: 'Error', message: 'redaction boom'
+      })
+      assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), s1)
+    })
+  })
+
+  it('re-seeds on the next event when a resync\'s projection throws', async () => {
+    await silencingWarnings(async () => {
+      await withRedactionConfig()
+      const cid = 'cid-redaction-resync-reseed'
+      ensureContractMeta(cid)
+      const s1 = mkState(1)
+      record(cid, 'h0', 0, undefined, s1)
+      record(cid, 'h1', 1, s1, mkState(2))
+      // Resync (height moves backwards) whose projection fails: the prior
+      // window described a chain that no longer applies, so it goes, but
+      // what replaces it cannot be replayed from either.
+      record(cid, 'h0b', 0, undefined, mkExplodingState())
+      assert.deepStrictEqual(getEntries(cid)!.length, 1, 'resync collapses the window')
+      assert.strictEqual(sbp('chelonia/journal/reconstruct', cid), undefined)
+      const s9 = mkState(9)
+      record(cid, 'h1b', 1, mkState(8), s9)
+      const entries = getEntries(cid)!
+      assert.strictEqual(entries[1].kind, 'snapshot', 'expected a re-seed, not a patch')
+      assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), s9)
     })
   })
 
@@ -1314,6 +1366,130 @@ describe('journal: integration via SBP selectors', () => {
     assert.deepStrictEqual(recon, prev)
   })
 
+  // --- Placeholder (null-state) snapshots ---------------------------------
+  //
+  // A snapshot whose `state` is `null` records an event whose post-state
+  // could not be projected: the mutation threw before there was any state
+  // (a contract's first message), or the redactions threw. It is a faithful
+  // record of the event, but it is not a replay seed — patching on top of a
+  // `null` root is rejected by the applier. The recorder therefore re-seeds
+  // on the next event, and `reconstruct` refuses to seed from one.
+
+  it('defers the boundary auto-snapshot when the boundary event has no post-state', () => {
+    const cid = 'cid-null-boundary'
+    ensureContractMeta(cid)
+    let prev = mkState(0)
+    record(cid, 'h0', 0, undefined, prev)
+    for (let i = 1; i <= 2; i++) {
+      const next = mkState(i)
+      record(cid, `h${i}`, i, prev, next)
+      prev = next
+    }
+    // Lands on the X-th-patch boundary with no post-state at all.
+    record(cid, 'h3', 3, prev, undefined, true, new Error('boom'))
+    const entries = getEntries(cid)!
+    assert.strictEqual(
+      entries.filter((e) => e.kind === 'snapshot').length,
+      1,
+      'only the seed snapshot; a placeholder must never anchor the window'
+    )
+    assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), prev)
+  })
+
+  it('re-seeds after a placeholder snapshot instead of patching onto null', () => {
+    const cid = 'cid-null-seed-reseed'
+    ensureContractMeta(cid)
+    // A contract whose very first message fails to process has no state to
+    // snapshot, so the seed is a placeholder.
+    record(cid, 'h0', 0, undefined, undefined, true, new Error('first boom'))
+    const seeded = getEntries(cid)!
+    assert.strictEqual(seeded.length, 1)
+    assert.strictEqual((seeded[0] as Extract<JournalEntry, { kind: 'snapshot' }>).state, null)
+    assert.strictEqual(
+      sbp('chelonia/journal/reconstruct', cid),
+      undefined,
+      'no usable seed, so nothing to reconstruct — but no throw either'
+    )
+    const s1 = mkState(1)
+    record(cid, 'h1', 1, undefined, s1)
+    const entries = getEntries(cid)!
+    assert.strictEqual(entries.length, 2)
+    assert.strictEqual(entries[1].kind, 'snapshot', 'expected a re-seed, not a patch')
+    // The failure detail survives: re-seeding appends, it does not collapse
+    // the window the way a resync does.
+    assert.deepStrictEqual(
+      (entries[0] as Extract<JournalEntry, { kind: 'snapshot' }>).error,
+      { name: 'Error', message: 'first boom' }
+    )
+    assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), s1)
+    // And normal patch recording resumes from the fresh seed.
+    const s2 = mkState(2)
+    record(cid, 'h2', 2, s1, s2)
+    assert.strictEqual(getEntries(cid)![2].kind, 'patch')
+    assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), s2)
+  })
+
+  it('reconstruct skips a placeholder snapshot and seeds from an older one', () => {
+    // Journals written before placeholders were recognized can hold one
+    // mid-window, and a custom `contractIDs` filter toggle can leave one
+    // behind. Patch entries form a single continuous chain across the
+    // window, so an older snapshot still reconstructs.
+    const cid = 'cid-null-seed-legacy'
+    ensureContractMeta(cid)
+    const meta = rootState().contracts[cid] as unknown as {
+      _journal?: { entries: JournalEntry[] };
+    }
+    meta._journal = {
+      entries: [
+        { kind: 'snapshot', hash: 'h0', height: 0, opType: 'ae', state: mkState(1) },
+        {
+          kind: 'snapshot',
+          hash: 'h1',
+          height: 1,
+          opType: 'ae',
+          state: null,
+          error: { name: 'Error', message: 'boom' }
+        },
+        {
+          kind: 'patch',
+          hash: 'h2',
+          height: 2,
+          opType: 'ae',
+          patch: [{ op: 'replace', path: '/counter', value: 5 }]
+        }
+      ] as JournalEntry[]
+    }
+    assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), mkState(5))
+  })
+
+  it('reconstruct returns undefined when every snapshot is a placeholder', () => {
+    const cid = 'cid-null-seed-only'
+    ensureContractMeta(cid)
+    const meta = rootState().contracts[cid] as unknown as {
+      _journal?: { entries: JournalEntry[] };
+    }
+    meta._journal = {
+      entries: [
+        {
+          kind: 'snapshot',
+          hash: 'h0',
+          height: 0,
+          opType: 'ae',
+          state: null,
+          error: { name: 'Error', message: 'boom' }
+        },
+        {
+          kind: 'patch',
+          hash: 'h1',
+          height: 1,
+          opType: 'ae',
+          patch: [{ op: 'replace', path: '/counter', value: 5 }]
+        }
+      ] as JournalEntry[]
+    }
+    assert.strictEqual(sbp('chelonia/journal/reconstruct', cid), undefined)
+  })
+
   it('chelonia/journal/get returns a deep clone', () => {
     const cid = 'cid-clone'
     ensureContractMeta(cid)
@@ -1456,6 +1632,31 @@ describe('journal: integration via SBP selectors', () => {
     const after = getEntries(cid)!
     // Window is unchanged — the duplicate is dropped silently.
     assert.deepStrictEqual(after, before)
+  })
+
+  it('re-seeds when a different event arrives at the height already journalled', () => {
+    // Heights identify positions in the chain, so a second hash at the
+    // height we already recorded means the chain was rewritten under us
+    // (a fork resolved the other way, a resync that replayed a different
+    // branch). The recorded window describes the abandoned branch: its
+    // before-state no longer matches, so patching on top of it produces
+    // operations that either corrupt the reconstruction silently or fail
+    // to apply outright. It has to be dropped like any other resync.
+    const cid = 'cid-same-height-rewrite'
+    ensureContractMeta(cid)
+    const s0 = { _vm: { authorizedKeys: {} }, list: ['x', 'y'] } as unknown as ChelContractState
+    const s1 = { _vm: { authorizedKeys: {} }, list: ['x'] } as unknown as ChelContractState
+    record(cid, 'h0', 0, undefined, s0)
+    record(cid, 'h1', 1, s0, s1)
+    // Same height, different hash: not the duplicate the check above
+    // consumes, and not a benign +1 step either.
+    record(cid, 'h1b', 1, s0, s1)
+    const entries = getEntries(cid)!
+    assert.strictEqual(entries.length, 1, 'the abandoned branch is dropped')
+    assert.strictEqual(entries[0].kind, 'snapshot')
+    assert.strictEqual(entries[0].hash, 'h1b')
+    // Without the re-seed this replayed the same `remove` twice and threw.
+    assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), s1)
   })
 
   it('re-seeds when an incoming event has strictly lower height than the last journalled entry', () => {

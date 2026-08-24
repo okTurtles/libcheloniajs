@@ -162,10 +162,20 @@ the marker is safe to hand to any conformant JSON Patch library.
 
 ### `chelonia/journal/reconstruct(contractID): unknown | undefined`
 
-Replays the journal from its most recent snapshot to recover the
+Replays the journal from its most recent usable snapshot to recover the
 contract's HEAD state, with `redactions` already applied. Returns
 `undefined` if there is no journal for `contractID`, **or** if the
-stored journal is empty / contains no snapshot to seed from.
+stored journal is empty / contains no snapshot with a usable state to
+seed from.
+
+A snapshot's `state` is `null` when the event it records had no
+post-state to project — the contract's first message failed to process,
+or the `redactions` threw (see
+[Journal-side failures](#journal-side-failures)). Such a *placeholder*
+entry keeps the failure on the record but cannot seed a replay, so it is
+skipped: reconstruction falls back to an older snapshot if the window
+still holds one, and returns `undefined` otherwise. The recorder re-seeds
+with a real snapshot on the very next event, so this is transient.
 
 Throws `ChelErrorJournalCorrupt` (with `entryIndex`, `contractID`, and
 `cause`) if a recorded patch fails to apply.
@@ -239,6 +249,14 @@ JSON-safe projection with one unsafe leaf keeps its structure:
 // journal stores   { id: 1, raw: '[REDACTION_NON_JSON_SAFE]' }
 ```
 
+One rejection class is repaired without a sentinel. An array carrying
+own enumerable keys that are not indices (`const a = [1, 2]; a.extra =
+'x'`) still warns, but the keys are simply dropped — which is exactly
+what `JSON.stringify` would have done to them, only now it happens
+once, visibly, instead of silently at persistence time. Non-enumerable
+and symbol-keyed properties are accepted untouched, since JSON ignores
+those too.
+
 Why the strictness: the journal is serialized by whatever persistence
 layer snapshots `state.contracts`, and `JSON.stringify` drops
 `undefined` members, renders `NaN` / `Infinity` as `null`, and throws
@@ -246,7 +264,8 @@ on `BigInt` and cycles. Letting such values in would corrupt
 `chelonia/journal/reconstruct` after a reload. The requirement is a
 *lossless* round-trip rather than a successful `JSON.stringify`, which
 is why values that do serialize but come back reshaped — a `Date`
-becomes a string, an array hole becomes `null` — are rejected as well.
+becomes a string, an array hole becomes `null`, an array's non-index
+key disappears — are rejected as well.
 
 Holes in contract state itself are treated differently: they are data
 rather than caller error, so the journal reads them as `null` (their
@@ -324,6 +343,15 @@ one side only is a difference, and non-plain containers (`Date`, `Map`,
 class instances) are equal only by reference. A custom pipeline that
 substitutes its own equality must keep it in lock-step with its own
 diff, or markers will either invent churn or keep hiding real changes.
+
+#### `cloneValue(value)`
+
+The structural clone the journal itself uses: plain objects (prototype
+preserved, so `Object.create(null)` containers stay that way) and dense
+arrays are copied deeply, everything else is returned by reference. Own
+keys whose value is `undefined` are preserved, array holes are read as
+`null`. Useful when a custom pipeline needs to snapshot state without
+the lossiness of a JSON round-trip.
 
 ### Changes behind a constant redactor
 
@@ -415,15 +443,16 @@ Strip them downstream if leakage is a concern.
 
 ## Resync, gaps, and failed events
 
-The journal recorder watches each event's `height` to decide between
-three cases:
+The journal recorder watches each event's `height` and the entry it last
+recorded to decide between five cases:
 
 | Case | Action |
 |---|---|
 | `height < lastEntry.height` (strict backwards) | Resync detected. Journal is collapsed to a fresh snapshot. |
 | `height > lastEntry.height + 1` (gap) | Also treated as a resync — entries are missing (e.g. journaling was toggled off and back on, or `contractIDs` was widened). Cached `before`-state no longer matches, so producing a patch would corrupt `reconstruct`. Re-seeds with a snapshot. |
-| `height === lastEntry.height` (duplicate) | Ignored; journal unchanged. |
-| `height === lastEntry.height + 1` (normal) | Patch entry recorded. |
+| `height === lastEntry.height`, same `hash` (duplicate) | Ignored; journal unchanged. |
+| `height === lastEntry.height`, different `hash` (rewrite) | Also treated as a resync: two hashes at one height mean the chain was rewritten, so the recorded window describes an abandoned branch. Collapsed to a fresh snapshot. |
+| `height === lastEntry.height + 1` (normal) | Patch entry recorded — unless the last entry is a placeholder snapshot (`state: null`), in which case a fresh snapshot is **appended** instead. The recorded history stays valid, it just needs a usable checkpoint, so nothing is discarded. |
 
 ### Failed events
 
@@ -455,6 +484,14 @@ snapshot and no accompanying patch entry.
   error: { name: 'ChelErrorSignatureError', message: '...' }
 }
 ```
+
+A snapshot with `state: null` is a **placeholder**: it records what
+happened but holds nothing to replay from, so
+`chelonia/journal/reconstruct` will not seed from it and the next event
+re-seeds the window with a real snapshot. For the same reason the
+snapshot the recorder would normally insert at a
+[snapshot boundary](#snapshot-cadence) is deferred when the boundary
+event has no post-state, rather than anchoring the window on `null`.
 
 This makes failed events distinguishable from no-op events on every
 path the recorder emits. Changes hidden behind a constant redactor are
@@ -488,18 +525,29 @@ against a missing projection: doing otherwise would fabricate a
 whole-root `add` of the entire state (before-projection failed) or a
 whole-root replace-to-`null` (after-projection failed), the latter
 corrupting `reconstruct` outright. `diffError` and `redactionError` are
-therefore mutually exclusive.
+therefore mutually exclusive. `error` is orthogonal to both: it can
+accompany `redactionError`, because an errored event still runs the
+after-projection so the recorder has a state to snapshot from.
 
 Both are **degradations, not corruptions**: the affected event's changes
 are missing from the patch stream, so `reconstruct` returns the last
 good state until the next snapshot re-seeds the window (bounded by
-`2 * snapshotInterval` entries). When the *after*-projection is the one
-that failed, the boundary auto-snapshot is deferred — snapshotting the
-placeholder `null` would anchor the window on a bogus state once
-trimming discards everything before it. Snapshot entries carry
-`redactionError` too, which is what distinguishes a `state: null`
-snapshot caused by a failed projection from one caused by an undefined
-post-state.
+`2 * snapshotInterval` entries). Two mechanisms keep a failed projection
+from turning into a `reconstruct` error:
+
+- When the *after*-projection is the one that failed, the boundary
+  auto-snapshot is deferred — snapshotting the placeholder `null` would
+  anchor the window on a bogus state once trimming discards everything
+  before it.
+- When the failure lands on a snapshot path (first event, resync,
+  forward-gap re-seed) there is no prior state to fall back on, so the
+  entry is written as a placeholder `state: null` and the next event
+  re-seeds the window. `reconstruct` returns `undefined` in the
+  meantime rather than replaying onto `null`.
+
+Snapshot entries carry `redactionError` too, which is what distinguishes
+a `state: null` snapshot caused by a failed projection from one caused by
+an undefined post-state.
 
 ### Recording is non-throwing
 

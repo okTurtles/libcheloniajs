@@ -497,9 +497,10 @@ exports.REDACTION_NON_JSON_SAFE_SENTINEL = '[REDACTION_NON_JSON_SAFE]';
 // journal's "plain JSON state" contract passes those through by reference,
 // which persists lossily at best). Holes in a sparse array are rejected too:
 // `JSON.stringify` writes `null` in their place, so the array would come
-// back a different shape. The `seen` set tracks only the current ancestor
-// chain, so shared (DAG-shaped) references remain allowed exactly as they
-// are for `JSON.stringify`.
+// back a different shape. So is an array carrying own enumerable non-index
+// keys, which `JSON.stringify` drops outright. The `seen` set tracks only
+// the current ancestor chain, so shared (DAG-shaped) references remain
+// allowed exactly as they are for `JSON.stringify`.
 //
 // Note the deliberate asymmetry with `readIndex`, which reads a hole in
 // *contract state* as `null`: state is data the journal must record
@@ -527,12 +528,20 @@ function isJSONSafeValue(v, seen) {
     if (Array.isArray(v)) {
         seen.add(v);
         const arr = v;
-        let ok = true;
-        for (let i = 0; i < arr.length; i++) {
+        // An array carrying own enumerable keys that are not indices (e.g.
+        // `const a = [1, 2]; a.extra = 'x'`) is rejected: `JSON.stringify`
+        // serializes arrays index-by-index and silently drops those keys, so
+        // the value would not round-trip. Comparing the own-key count with
+        // the length catches that in O(1) extra allocations, and the
+        // per-index `i in arr` check below still catches an array that is
+        // both sparse and extra-keyed (where the two counts can coincide).
+        // Symbol-keyed and non-enumerable properties are deliberately not
+        // counted — `JSON.stringify` ignores them as well.
+        let ok = Object.keys(arr).length === arr.length;
+        for (let i = 0; ok && i < arr.length; i++) {
             // `every` would skip holes, silently accepting a sparse array.
             if (!(i in arr) || !isJSONSafeValue(arr[i], seen)) {
                 ok = false;
-                break;
             }
         }
         seen.delete(v);
@@ -550,6 +559,11 @@ function isJSONSafeValue(v, seen) {
 // back-references). Only called after `isJSONSafeValue` rejected the value,
 // so allocation here is the exceptional path. MUST stay in agreement with
 // `isJSONSafeValue` on what counts as unsafe (see the note above it).
+//
+// One rejection class is repaired without a sentinel: an array's own
+// enumerable non-index keys are simply dropped, because the array is
+// rebuilt index-by-index — which is exactly what JSON persistence would
+// have done to it, only now it happens once, visibly, and with a warning.
 function normalizeToJSONSafe(v, seen) {
     if (v === null)
         return v;
@@ -596,11 +610,16 @@ function describeNonJSONSafe(v) {
         return 'non-finite number';
     if (typeof v === 'object' && v !== null) {
         if (Array.isArray(v)) {
-            // A hole is a different failure than an unsafe element, and naming it
-            // saves the reader from hunting for a value that looks fine.
-            return v.length !== Object.keys(v).length
-                ? 'sparse array (holes are not JSON values)'
-                : 'array containing a non-JSON-safe value';
+            // A hole and a stowaway non-index key are both different failures
+            // than an unsafe element, and naming them saves the reader from
+            // hunting for a value that looks fine.
+            const keyCount = Object.keys(v).length;
+            if (keyCount < v.length)
+                return 'sparse array (holes are not JSON values)';
+            if (keyCount > v.length) {
+                return 'array with non-index properties (dropped by JSON)';
+            }
+            return 'array containing a non-JSON-safe value';
         }
         if (isPlainObject(v))
             return 'object containing a non-JSON-safe or cyclic value';
@@ -690,7 +709,8 @@ function walkAndRedact(parent, source, segments, i, redact, resolved, contractNa
             }
             if (!isJSONSafeValue(replacement, new Set())) {
                 console.warn(`[chelonia][journal] redactor for path '${fullPath.join('.')}' returned a ` +
-                    `non-JSON-safe value (${describeNonJSONSafe(replacement)}); substituting a sentinel`);
+                    `non-JSON-safe value (${describeNonJSONSafe(replacement)}); ` +
+                    'normalizing it to a JSON-safe equivalent');
                 replacement = normalizeToJSONSafe(replacement, new Set());
             }
             // Write via `safeDefine` on objects: even though `cloneValue`
@@ -957,6 +977,38 @@ function indexOfLastSnapshot(entries) {
     }
     return -1;
 }
+// True for a snapshot that carries no state to seed a replay from.
+//
+// `state` is `null` whenever no projection could be produced for the event:
+// the contract's post-state was `undefined` (a first message whose
+// processing threw), or the configured `redactions` threw while projecting
+// it. Such an entry is a faithful record of the event — it keeps the
+// `error` / `redactionError` detail — but it is *not* a checkpoint: a
+// following patch applied to a `null` root is rejected by
+// `defaultApplyPatch` ("cannot apply … to non-container root"), which would
+// turn a journal-side degradation into a `reconstruct` failure. Contract
+// state is always a container, so a `null` snapshot state is unambiguously
+// a placeholder and never a legitimate value.
+//
+// Both the recorder (which re-seeds instead of emitting a patch on top of
+// one) and `chelonia/journal/reconstruct` (which refuses to seed from one)
+// go through this single predicate, so the two can never disagree.
+function isPlaceholderSnapshot(entry) {
+    return entry.kind === 'snapshot' && entry.state == null;
+}
+// Index of the most recent snapshot usable as a replay seed, or -1.
+// Placeholders are skipped rather than trusted: an older real snapshot
+// still reconstructs to something, since patch entries form one continuous
+// chain across the window and snapshots are redundant checkpoints within
+// it, whereas a placeholder seed reconstructs to nothing at all.
+function indexOfLastSeedSnapshot(entries) {
+    for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i];
+        if (entry.kind === 'snapshot' && !isPlaceholderSnapshot(entry))
+            return i;
+    }
+    return -1;
+}
 function appendAndTrim(entries, entry, snapshotInterval, 
 // When non-null, provides the current redacted state to snapshot at the
 // X-boundary. Passing null skips snapshot insertion (used for the very
@@ -976,12 +1028,13 @@ postSnapshotState) {
     // If this push reached snapshotInterval patches since the most recent
     // snapshot, append a snapshot entry as well. We derive the identifying
     // fields from `entry` itself so the snapshot can never drift away from
-    // the patch it accompanies. The `postSnapshotState.state !== undefined`
-    // gate keeps us from persisting `{ state: undefined }` when an errored
-    // event lands on the boundary; in that case the auto-snapshot is
-    // simply deferred to the next non-errored event.
+    // the patch it accompanies. The `postSnapshotState.state != null` gate
+    // keeps us from materializing a placeholder snapshot (see
+    // `isPlaceholderSnapshot`) when an errored event or a failed projection
+    // lands on the boundary; in that case the auto-snapshot is simply
+    // deferred to the next event that has a usable state.
     if (postSnapshotState &&
-        postSnapshotState.state !== undefined &&
+        postSnapshotState.state != null &&
         entry.kind === 'patch') {
         const lastSnapIdx = indexOfLastSnapshot(entries);
         const patchesSinceSnap = entries.length - 1 - lastSnapIdx;
@@ -1141,7 +1194,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // same height) is *not* a resync — it just means the same event
             // was delivered twice (retry-on-publish, web-socket replay, etc.).
             // We ignore the duplicate so the perfectly valid prior window is
-            // preserved.
+            // preserved. Note how narrow this exemption is: it takes the hash
+            // to match too, because a *different* event at that height is a
+            // rewritten chain (handled as a resync below).
             if (lastEntry !== undefined &&
                 lastEntry.hash === hash &&
                 height === lastEntry.height) {
@@ -1158,10 +1213,28 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // captured by `lastEntry`, so producing a patch on top of it would
             // silently corrupt `reconstruct`. Drop the stale window and re-seed
             // with a fresh snapshot in that case.
+            //
+            // A *different* event at the height we already journalled is the
+            // third variant of the same problem: heights identify positions in
+            // the chain, so two hashes at one height mean the chain was rewritten
+            // under us (the duplicate-arrival check above already consumed the
+            // benign same-hash case). The recorded window describes the abandoned
+            // branch, so it gets dropped rather than patched onto.
             const isBackwards = lastEntry !== undefined && height < lastEntry.height;
             const isForwardGap = lastEntry !== undefined && height > lastEntry.height + 1;
-            const isResync = isBackwards || isForwardGap;
-            const isFirstOrResync = !existing || existing.length === 0 || isResync;
+            const isRewrite = lastEntry !== undefined && height === lastEntry.height;
+            const isResync = isBackwards || isForwardGap || isRewrite;
+            // A placeholder seed cannot carry a patch stream (see
+            // `isPlaceholderSnapshot`), so re-seed with a snapshot on the next
+            // event instead of anchoring patches on `null`. Unlike a resync this
+            // is not a sign that the recorded window is stale, so the placeholder
+            // is kept and the new snapshot appended after it: the failed event
+            // stays on the record with its `error` / `redactionError` detail.
+            const reseedAfterPlaceholder = lastEntry !== undefined &&
+                !isResync &&
+                isPlaceholderSnapshot(lastEntry);
+            const isFirstOrResync = !existing || existing.length === 0 ||
+                isResync || reseedAfterPlaceholder;
             // When the contract errored we will emit an empty-patch entry that
             // doesn't need either redacted projection — skip the work.
             const willEmitEmptyPatch = !isFirstOrResync && processingErrored;
@@ -1245,11 +1318,20 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 }
                 // A projection failure leaves `state: null`. Label it, or the
                 // snapshot is indistinguishable from the legitimate "post-state
-                // was undefined because the mutation threw" null.
+                // was undefined because the mutation threw" null. Either way the
+                // entry is a placeholder, so the *next* event re-seeds again (see
+                // `reseedAfterPlaceholder`) instead of stacking patches on it.
                 if (redactionError != null) {
                     snap.redactionError = normalizeProcessingError(redactionError);
                 }
-                nextEntries = [snap];
+                // A resync invalidates everything recorded so far, so the window
+                // collapses to this snapshot alone. Re-seeding after a placeholder
+                // does not: the recorded history is still valid, we just need a
+                // usable checkpoint, so the snapshot is appended (and the window
+                // trimmed as usual, which bounds a run of failing events).
+                nextEntries = reseedAfterPlaceholder && existing
+                    ? appendAndTrim(existing, snap, cfg.snapshotInterval, null)
+                    : [snap];
             }
             else {
                 let patch;
@@ -1318,13 +1400,17 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 if (processingErrored && processingError != null) {
                     entry.error = normalizeProcessingError(processingError);
                 }
-                // Journal-side failures. Both mean "the event processed fine but
-                // the journal could not record what changed", which `patch: []`
-                // alone cannot express — it is also what a no-op event records.
-                // They are mutually exclusive: a redaction failure skips the diff
-                // entirely. `error` is independent and can co-occur with neither
-                // (an errored event skips both projections and the diff) except
-                // on paths where the before-projection was already attempted.
+                // Journal-side failures. Both mean "the journal could not record
+                // what changed", which `patch: []` alone cannot express — it is
+                // also what a no-op event records. `diffError` and
+                // `redactionError` are mutually exclusive: a redaction failure
+                // skips the diff entirely. `error` is orthogonal and never
+                // co-occurs with `diffError` (an errored event skips the diff),
+                // but it *can* co-occur with `redactionError`: only the
+                // before-projection is skipped for an errored event, while the
+                // after-projection always runs so `appendAndTrim` has a state to
+                // materialize a boundary snapshot from — a throwing redactor is
+                // therefore still reachable and labels the entry as well.
                 if (diffError != null) {
                     entry.diffError = normalizeProcessingError(diffError);
                 }
@@ -1367,7 +1453,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // Public: rebuild the redacted contract state at the journal's HEAD by
     // walking from the most recent snapshot and applying subsequent patches.
     // Returns `undefined` if no journal exists (or the journal exists but is
-    // empty / has no snapshot to seed from). Throws `ChelErrorJournalCorrupt`
+    // empty / has no snapshot with a usable state to seed from — see
+    // `isPlaceholderSnapshot`). Throws `ChelErrorJournalCorrupt`
     // if a recorded patch fails to apply: this is a debugging tool and a
     // self-check, so a loud failure is preferable to silently returning
     // `undefined` (which would be indistinguishable from "no journal"). The
@@ -1379,16 +1466,23 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const entries = rootState?.contracts?.[contractID]?._journal?.entries;
         if (!entries || entries.length === 0)
             return undefined;
-        const startIdx = indexOfLastSnapshot(entries);
+        // Placeholder snapshots are skipped rather than replayed from: their
+        // `null` state would make the very next patch throw
+        // `ChelErrorJournalCorrupt`, reporting corruption for what is only a
+        // recorded gap. Returning the older reconstruction (or `undefined`)
+        // keeps the promised behaviour of a journal-side failure: stale data,
+        // never a spurious error. Journals written by earlier versions of this
+        // module can contain such a snapshot mid-window, hence the search
+        // rather than a check of the last one.
+        const startIdx = indexOfLastSeedSnapshot(entries);
         if (startIdx < 0)
             return undefined;
         const snap = entries[startIdx];
         let state = snap.state;
         for (let i = startIdx + 1; i < entries.length; i++) {
             const e = entries[i];
-            // `indexOfLastSnapshot` returned the index of the latest snapshot,
-            // so the tail (i > startIdx) cannot contain another snapshot by
-            // construction. Skip defensively if it ever does.
+            // Snapshots in the tail are redundant checkpoints on the same patch
+            // chain (or skipped placeholders), so replaying past them is safe.
             if (e.kind !== 'patch')
                 continue;
             try {
