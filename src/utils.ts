@@ -1185,11 +1185,12 @@ export const handleFetchResult = (
 
 // This text ends up in `e.message` and in the logs, and a proxy answering with
 // an HTML error page can send kilobytes of markup, so it is capped.
-const MAX_ERROR_DETAIL_LENGTH = 512
+// Note: the cap applies to the *prefix* length; a truncation suffix is appended.
+const MAX_ERROR_DETAIL_PREFIX_LENGTH = 512
 
 const truncateDetail = (s: string) => {
-  return s.length > MAX_ERROR_DETAIL_LENGTH
-    ? `${s.slice(0, MAX_ERROR_DETAIL_LENGTH)}…[truncated]`
+  return s.length > MAX_ERROR_DETAIL_PREFIX_LENGTH
+    ? `${s.slice(0, MAX_ERROR_DETAIL_PREFIX_LENGTH)}…[truncated]`
     : s
 }
 
