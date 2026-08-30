@@ -562,6 +562,51 @@ describe('journal: applyRedactions', () => {
     }
   })
 
+  it('warns once per projection, not once per offending leaf', () => {
+    // A misbehaving redaction set misbehaves at *every* matched leaf, and
+    // the recorder projects twice per event, so per-leaf logging turned a
+    // large state into a log flood. The aggregate must still be actionable:
+    // it names the count and the first offending path.
+    const warnings: string[] = []
+    const orig = console.warn
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')) }
+    try {
+      const state = { keys: { k1: 'a', k2: 'b', k3: 'c' }, other: { n1: 'd', n2: 'e' } }
+      const out = applyRedactions(
+        state,
+        [
+          { path: 'keys.*', redact: () => { throw new Error('boom') } },
+          { path: 'other.*', redact: () => undefined }
+        ],
+        'test/contract'
+      )
+      assert.deepStrictEqual(out, {
+        keys: {
+          k1: REDACTION_ERROR_SENTINEL,
+          k2: REDACTION_ERROR_SENTINEL,
+          k3: REDACTION_ERROR_SENTINEL
+        },
+        other: {
+          n1: REDACTION_NON_JSON_SAFE_SENTINEL,
+          n2: REDACTION_NON_JSON_SAFE_SENTINEL
+        }
+      })
+      // One warning per failure *category*, not per leaf: 5 offending
+      // leaves, 2 warnings.
+      assert.strictEqual(warnings.length, 2, `unexpected warnings: ${warnings.join(' | ')}`)
+      assert.ok(warnings[0].includes("path 'keys.k1'"), warnings[0])
+      assert.ok(warnings[0].includes('2 more leaves'), warnings[0])
+      assert.ok(warnings[0].includes('boom'), warnings[0])
+      assert.ok(warnings[1].includes("path 'other.n1'"), warnings[1])
+      assert.ok(warnings[1].includes('1 more leaf'), warnings[1])
+      // The value itself is what the redactor was asked to hide, so only
+      // its shape may appear.
+      assert.ok(!warnings.join(' ').includes('"a"'))
+    } finally {
+      console.warn = orig
+    }
+  })
+
   it('substitutes the sentinel for cyclic redactor results', () => {
     const orig = console.warn
     console.warn = () => {}
@@ -709,6 +754,30 @@ describe('journal: applyRedactions', () => {
       ['/keys/k1/data', { original: 'sec1', replacement: 'R' }],
       ['/keys/k2/data', { original: 'sec2', replacement: 'R' }]
     ])
+  })
+
+  it('ignores a literal segment naming an array\'s non-index own property', () => {
+    // `'arr.length'` matches: `length` *is* an own property of an array. But
+    // it has no JSON Pointer location, so writing it would corrupt the
+    // projection (and recording it would report a redaction that never
+    // happened). The `*` glob is unaffected — it enumerates indices only.
+    const sites: RedactionSiteMap = new Map()
+    const out = applyRedactions(
+      { arr: [1, 2, 3] },
+      [{ path: 'arr.length', redact: () => '[R]' }],
+      'test/contract',
+      sites
+    )
+    assert.deepStrictEqual(out, { arr: [1, 2, 3] })
+    assert.strictEqual(sites.size, 0)
+    assert.deepStrictEqual(
+      applyRedactions(
+        { arr: [1, 2, 3] },
+        [{ path: 'arr.*', redact: () => '[R]' }],
+        'test/contract'
+      ),
+      { arr: ['[R]', '[R]', '[R]'] }
+    )
   })
 
   it('escapes site pointers and covers array indices', () => {

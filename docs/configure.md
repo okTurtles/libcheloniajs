@@ -263,6 +263,13 @@ These are stricter than for top-level fields:
   missing `path`, or whose `redact` is not a function, would otherwise
   fail on every projection of every event, leaving the journal alive but
   useless (`chelonia/journal/reconstruct` permanently `undefined`).
+- **A rejected journal reconfigure applies nothing.** The whole override
+  is validated before any of it is applied, so a `TypeError` from any
+  field leaves every live journal field exactly as it was. In
+  particular, journaling does not start, stop, or change redaction
+  semantics on a rejected call — `{ enabled: true, redactions: [<bad
+  entry>] }` throws and leaves journaling off rather than switching it
+  on under the previously accepted redactions.
 - **`journal: null` is an escape hatch.** It resets the block to
   disabled defaults *and* wipes every persisted journal via
   `chelonia/journal/clear`. Use it when you really want to stop

@@ -643,6 +643,59 @@ function describeNonJSONSafe (v: unknown): string {
   return typeof v
 }
 
+// Mutable per-`applyRedactions` state, threaded through the traversal so a
+// projection over a large state neither allocates nor logs per redacted
+// leaf. It carries the optional `sites` out-parameter as well, which keeps
+// the traversal's parameter list from growing.
+type RedactionPass = {
+  // Ancestor-chain scratch set reused by every `isJSONSafeValue` /
+  // `normalizeToJSONSafe` call in this pass instead of allocating one per
+  // redacted leaf. Both functions add and delete symmetrically on every
+  // normal return path, so the set is empty on entry and on exit; a throw
+  // (a getter on a redactor result, say) aborts the whole pass, so a
+  // half-populated set is discarded rather than reused.
+  seen: Set<object>;
+  sites?: RedactionSiteMap;
+  // Warnings are aggregated and emitted once per pass by
+  // `flushRedactionPassWarnings`: a redaction set that misbehaves usually
+  // misbehaves at every matched leaf, and two projections per event turned
+  // that into a log flood proportional to the size of the state.
+  threwCount: number;
+  threwFirstPath?: string;
+  threwFirstError?: unknown;
+  unsafeCount: number;
+  unsafeFirstPath?: string;
+  unsafeFirstShape?: string;
+}
+
+const pluralLeaves = (n: number): string => `${n} more ${n === 1 ? 'leaf' : 'leaves'}`
+
+// Report what went wrong across a whole projection: the count, plus the
+// first offending path (and, for a throwing redactor, the first error) so
+// the failure is still diagnosable. Never names a redacted value — the
+// whole point of a redactor is to keep those out of logs.
+function flushRedactionPassWarnings (pass: RedactionPass): void {
+  if (pass.threwCount > 0) {
+    const more = pass.threwCount > 1
+      ? ` (and ${pluralLeaves(pass.threwCount - 1)} in this projection)`
+      : ''
+    console.warn(
+      `[chelonia][journal] redactor threw for path '${pass.threwFirstPath}'${more}:`,
+      pass.threwFirstError
+    )
+  }
+  if (pass.unsafeCount > 0) {
+    const more = pass.unsafeCount > 1
+      ? ` (and ${pluralLeaves(pass.unsafeCount - 1)} in this projection)`
+      : ''
+    console.warn(
+      `[chelonia][journal] redactor for path '${pass.unsafeFirstPath}' returned a ` +
+      `non-JSON-safe value (${pass.unsafeFirstShape}); ` +
+      `normalizing it to a JSON-safe equivalent${more}`
+    )
+  }
+}
+
 export function applyRedactions<T> (
   state: T,
   redactions: JournalRedaction[] | undefined,
@@ -670,10 +723,24 @@ export function applyRedactions<T> (
   // while costing a second full-state deep clone per projection, i.e. four
   // per journaled event instead of two.
   const source: unknown = sites ? state : undefined
-  for (const r of redactions) {
-    const segments = parseDottedPath(r.path)
-    if (segments.length === 0) continue
-    walkAndRedact(cloned, source, segments, 0, r.redact, [], contractName, sites)
+  const pass: RedactionPass = {
+    seen: new Set(),
+    sites,
+    threwCount: 0,
+    unsafeCount: 0
+  }
+  try {
+    for (const r of redactions) {
+      const segments = parseDottedPath(r.path)
+      if (segments.length === 0) continue
+      walkAndRedact(cloned, source, segments, 0, r.redact, [], contractName, pass)
+    }
+  } finally {
+    // In a `finally` because the pass can still be abandoned mid-way (a
+    // malformed `path` rejected by `parseDottedPath`, a throwing getter in
+    // the state or in a redactor result): whatever went wrong before that
+    // point is diagnostic detail the caller still needs.
+    flushRedactionPassWarnings(pass)
   }
   return cloned
 }
@@ -706,7 +773,7 @@ function walkAndRedact (
   redact: JournalRedaction['redact'],
   resolved: string[],
   contractName: string,
-  sites?: RedactionSiteMap
+  pass: RedactionPass
 ): void {
   if (parent === null || typeof parent !== 'object') return
   const seg = segments[i]
@@ -725,7 +792,7 @@ function walkAndRedact (
     if (isLast) {
       const container = parent as Record<string, unknown>
       const value = container[k]
-      const sourceValue = sites
+      const sourceValue = pass.sites
         ? resolveAtSegments(source, fullPath)
         : undefined
       const original = sourceValue?.found ? sourceValue.value : value
@@ -737,35 +804,40 @@ function walkAndRedact (
         // `fullPath` right below.
         replacement = redact(value, [...fullPath], contractName)
       } catch (e) {
-        console.warn(
-          `[chelonia][journal] redactor threw for path '${fullPath.join('.')}':`,
-          e
-        )
+        pass.threwCount++
+        if (pass.threwFirstPath === undefined) {
+          pass.threwFirstPath = fullPath.join('.')
+          pass.threwFirstError = e
+        }
         replacement = REDACTION_ERROR_SENTINEL
       }
-      if (!isJSONSafeValue(replacement, new Set())) {
-        console.warn(
-          `[chelonia][journal] redactor for path '${fullPath.join('.')}' returned a ` +
-          `non-JSON-safe value (${describeNonJSONSafe(replacement)}); ` +
-          'normalizing it to a JSON-safe equivalent'
-        )
-        replacement = normalizeToJSONSafe(replacement, new Set())
+      if (!isJSONSafeValue(replacement, pass.seen)) {
+        pass.unsafeCount++
+        if (pass.unsafeFirstPath === undefined) {
+          pass.unsafeFirstPath = fullPath.join('.')
+          pass.unsafeFirstShape = describeNonJSONSafe(replacement)
+        }
+        replacement = normalizeToJSONSafe(replacement, pass.seen)
       }
       // Write via `safeDefine` on objects: even though `cloneValue`
       // produced this container, defending against prototype-polluting
       // keys at the write site costs nothing and keeps the invariant
       // local. On arrays we validate the index and use bracket
-      // assignment — arrays don't have string keys in JSON Patch, so a
-      // non-integer key here is a bug, not a write to mishandle.
+      // assignment: a literal path segment matches any own key, and an
+      // array's own non-index keys (`'arr.length'` resolves to one) have
+      // no JSON Patch location, so they must not be written. A leaf that
+      // was not written must not be recorded either, or `sites` would
+      // report a redaction that never happened.
+      let written = true
       if (Array.isArray(container)) {
         const idx = Number(k)
-        if (Number.isInteger(idx) && idx >= 0 && idx < container.length) {
-          container[idx] = replacement
-          if (sites) recordSite(sites, fullPath, original, replacement)
-        }
+        written = Number.isInteger(idx) && idx >= 0 && idx < container.length
+        if (written) container[idx] = replacement
       } else {
         safeDefine(container, k, replacement)
-        if (sites) recordSite(sites, fullPath, original, replacement)
+      }
+      if (pass.sites && written) {
+        recordSite(pass.sites, fullPath, original, replacement)
       }
     } else {
       walkAndRedact(
@@ -776,7 +848,7 @@ function walkAndRedact (
         redact,
         fullPath,
         contractName,
-        sites
+        pass
       )
     }
   }

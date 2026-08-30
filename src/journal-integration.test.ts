@@ -106,6 +106,21 @@ const getEntries = (contractID: string): JournalEntry[] | undefined => {
   return j?.entries
 }
 
+// Run `fn` with `console.warn` silenced. Several paths under test warn by
+// design (a throwing redactor, a failed projection, an invalid
+// snapshotInterval); the tests below assert on the recorded entries, not on
+// the log, so the noise is suppressed rather than captured. Module-scoped so
+// every test in the file uses one pattern for this.
+const silencingWarnings = async (fn: () => Promise<void> | void) => {
+  const origWarn = console.warn
+  console.warn = () => {}
+  try {
+    await fn()
+  } finally {
+    console.warn = origWarn
+  }
+}
+
 // The "configure, seed a contract, then move a redacted value" preamble
 // shared by the redacted-change tests. The journal block is passed
 // verbatim rather than defaulted: several callers exercise *partial*
@@ -370,9 +385,7 @@ describe('journal: integration via SBP selectors', () => {
     // reload, reconstruct rejected the patch as a `replace` without a
     // value. Redactor results are now normalized to a sentinel before they
     // enter the projection.
-    const orig = console.warn
-    console.warn = () => {}
-    try {
+    await silencingWarnings(async () => {
       await sbp('chelonia/configure', {
         journal: {
           enabled: true,
@@ -411,9 +424,7 @@ describe('journal: integration via SBP selectors', () => {
           }
         }
       })
-    } finally {
-      console.warn = orig
-    }
+    })
   })
 
   it('records hidden changes when a leaf redaction precedes an overlapping ancestor', async () => {
@@ -727,9 +738,7 @@ describe('journal: integration via SBP selectors', () => {
   })
 
   it('continues recording when a redactor throws (sentinel value)', async () => {
-    const origWarn = console.warn
-    console.warn = () => {}
-    try {
+    await silencingWarnings(async () => {
       await sbp('chelonia/configure', {
         journal: {
           enabled: true,
@@ -746,15 +755,11 @@ describe('journal: integration via SBP selectors', () => {
       const entries = getEntries(cid)!
       assert.strictEqual(entries.length, 1)
       assert.strictEqual(entries[0].kind, 'snapshot')
-    } finally {
-      console.warn = origWarn
-    }
+    })
   })
 
   it('swallows a throwing diff and emits an empty-patch entry', async () => {
-    const origWarn = console.warn
-    console.warn = () => {}
-    try {
+    await silencingWarnings(async () => {
       await sbp('chelonia/configure', {
         journal: {
           enabled: true,
@@ -780,9 +785,7 @@ describe('journal: integration via SBP selectors', () => {
         { name: 'Error', message: 'diff exploded' }
       )
       assert.ok(!('error' in entries[1]), 'a diff failure is not a processing failure')
-    } finally {
-      console.warn = origWarn
-    }
+    })
   })
 
   it('leaves diffError absent when the diff succeeds on a no-op event', async () => {
@@ -831,16 +834,6 @@ describe('journal: integration via SBP selectors', () => {
         ]
       }
     })
-  }
-
-  const silencingWarnings = async (fn: () => Promise<void> | void) => {
-    const origWarn = console.warn
-    console.warn = () => {}
-    try {
-      await fn()
-    } finally {
-      console.warn = origWarn
-    }
   }
 
   it('records redactionError instead of wiping state when the after-projection throws', async () => {
@@ -1029,6 +1022,11 @@ describe('journal: integration via SBP selectors', () => {
       assert.deepStrictEqual(boundary.redactionError, {
         name: 'Error', message: 'redaction boom'
       })
+      // `redactionError` on a non-null snapshot does NOT imply `replayed`:
+      // this state is the event's own valid post-state, not a recovered
+      // one. Consumers identifying recovered snapshots must key off
+      // `replayed`, never off the presence of `redactionError`.
+      assert.strictEqual(boundary.replayed, undefined, 'not a recovered snapshot')
       assert.deepStrictEqual(sbp('chelonia/journal/reconstruct', cid), last)
     })
   })
@@ -1682,36 +1680,37 @@ describe('journal: integration via SBP selectors', () => {
     // Swap in a deliberately broken applier and watch reconstruct fail
     // loudly rather than silently returning undefined (which a caller
     // could not distinguish from "no journal exists").
-    const origWarn = console.warn
-    console.warn = () => {}
-    try {
-      await sbp('chelonia/configure', {
-        journal: {
-          applyPatch: () => { throw new Error('boom') }
-        }
-      })
-      const cid = 'cid-recon-broken'
-      ensureContractMeta(cid)
-      record(cid, 'h0', 0, undefined, mkState(1))
-      record(cid, 'h1', 1, mkState(1), mkState(2))
-      assert.throws(
-        () => sbp('chelonia/journal/reconstruct', cid),
-        (err: unknown) => {
-          assert.ok(err instanceof ChelErrorJournalCorrupt,
-            `expected ChelErrorJournalCorrupt, got ${(err as Error)?.name}`)
-          const e = err as Error & { entryIndex?: number; contractID?: string; cause?: unknown }
-          assert.strictEqual(e.entryIndex, 1)
-          assert.strictEqual(e.contractID, cid)
-          assert.ok(e.cause instanceof Error)
-          assert.strictEqual((e.cause as Error).message, 'boom')
-          return true
-        }
-      )
-    } finally {
-      // Restore the default applier so subsequent tests are unaffected.
-      await sbp('chelonia/configure', { journal: { applyPatch: defaultApplyPatch } })
-      console.warn = origWarn
-    }
+    await silencingWarnings(async () => {
+      try {
+        await sbp('chelonia/configure', {
+          journal: {
+            applyPatch: () => { throw new Error('boom') }
+          }
+        })
+        const cid = 'cid-recon-broken'
+        ensureContractMeta(cid)
+        record(cid, 'h0', 0, undefined, mkState(1))
+        record(cid, 'h1', 1, mkState(1), mkState(2))
+        assert.throws(
+          () => sbp('chelonia/journal/reconstruct', cid),
+          (err: unknown) => {
+            assert.ok(err instanceof ChelErrorJournalCorrupt,
+              `expected ChelErrorJournalCorrupt, got ${(err as Error)?.name}`)
+            const e = err as Error & {
+              entryIndex?: number; contractID?: string; cause?: unknown;
+            }
+            assert.strictEqual(e.entryIndex, 1)
+            assert.strictEqual(e.contractID, cid)
+            assert.ok(e.cause instanceof Error)
+            assert.strictEqual((e.cause as Error).message, 'boom')
+            return true
+          }
+        )
+      } finally {
+        // Restore the default applier so subsequent tests are unaffected.
+        await sbp('chelonia/configure', { journal: { applyPatch: defaultApplyPatch } })
+      }
+    })
   })
 
   it('reconstruct matches the latest redacted after-state across many events', () => {
@@ -1920,8 +1919,8 @@ describe('journal: integration via SBP selectors', () => {
   })
 
   it('leaves the live redactions in place when a reconfigure is rejected', async () => {
-    // The throw happens while building the replacement array, so the live
-    // config must be untouched — journaling keeps working under the
+    // The whole override is validated before any of it is applied, so the
+    // live config must be untouched — journaling keeps working under the
     // previously accepted directives.
     await withRedactionConfig()
     await assert.rejects(
@@ -1945,6 +1944,97 @@ describe('journal: integration via SBP selectors', () => {
     assert.ok(json.includes('[REDACTED]'))
     const entry = entries[1] as Extract<JournalEntry, { kind: 'patch' }>
     assert.strictEqual(entry.redactionError, undefined, 'no projection failure')
+  })
+
+  it('does not start journaling when a rejected reconfigure asked it to', async () => {
+    // Regression: the typed fields used to be written to the live config as
+    // they were validated, so `{ enabled: true, redactions: [bad] }` threw
+    // *after* switching journaling on. Events then got journaled under the
+    // previously accepted (here: absent) redaction set — exactly the leak
+    // the caller was trying to configure away.
+    await sbp('chelonia/configure', { journal: null })
+    await assert.rejects(
+      sbp('chelonia/configure', {
+        journal: {
+          enabled: true,
+          redactions: [
+            { path: '_vm.authorizedKeys.*.data', redact: () => '[REDACTED]' },
+            { path: 5 } as unknown as { path: string; redact: () => string }
+          ]
+        }
+      }),
+      TypeError
+    )
+    const cid = 'cid-reconfigure-rejected-enable'
+    ensureContractMeta(cid)
+    record(cid, 'h0', 0, undefined, mkKeyState('SECRET-1'))
+    assert.strictEqual(getEntries(cid), undefined, 'journaling must still be off')
+  })
+
+  it('applies no journal field at all when a reconfigure is rejected', async () => {
+    // Every field of a rejected override must stay out of the live config.
+    // Asserted behaviourally rather than by reading `chelonia/config`,
+    // because that is what a consumer actually notices: each field below
+    // leaves a visible trace in the journal if it lands.
+    await withRedactionConfig() // enabled, snapshotInterval 3, redactions
+    const sentinelDiff = () => [{ op: 'add' as const, path: '/sentinel', value: 1 }]
+    const warnings: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')) }
+    try {
+      await assert.rejects(
+        sbp('chelonia/configure', {
+          journal: {
+            enabled: false,
+            markRedactedChanges: false,
+            snapshotInterval: 0,
+            contractIDs: ['cid-some-other-contract'],
+            diff: sentinelDiff,
+            applyPatch: (s: unknown) => s,
+            redactions: [
+              { path: '_vm.authorizedKeys.*.data', redact: () => '[R2]' },
+              { redact: () => '[R]' } as unknown as { path: string; redact: () => string }
+            ]
+          }
+        }),
+        TypeError
+      )
+    } finally {
+      console.warn = origWarn
+    }
+    // A rejected call must not log a fallback it never applied, either.
+    assert.ok(
+      !warnings.some(w => w.includes('invalid snapshotInterval')),
+      `unexpected warning: ${warnings.join(' | ')}`
+    )
+    const cid = 'cid-reconfigure-rejected-atomic'
+    ensureContractMeta(cid)
+    const s1 = mkKeyState('SECRET-1')
+    const s2 = mkKeyState('SECRET-2')
+    record(cid, 'h0', 0, undefined, s1)
+    record(cid, 'h1', 1, s1, s2)
+    record(cid, 'h2', 2, s2, s1)
+    record(cid, 'h3', 3, s1, s2)
+    const entries = getEntries(cid)!
+    // `enabled: false` did not land, and neither did `contractIDs`: this
+    // contract is still journaled though the override listed another one.
+    assert.ok(entries && entries.length > 0, 'enabled / contractIDs must not have landed')
+    const json = JSON.stringify(entries)
+    assert.ok(!json.includes('SECRET-'), 'the previously accepted redactions still apply')
+    assert.ok(json.includes('[REDACTED]'))
+    assert.ok(!json.includes('[R2]'), 'the rejected redactions must not have landed')
+    assert.ok(!json.includes('/sentinel'), 'diff must not have landed')
+    const patch = entries.find(
+      (e): e is Extract<JournalEntry, { kind: 'patch' }> => e.kind === 'patch'
+    )!
+    assert.ok(
+      patch.patch.some((p) => p.redacted === true),
+      'markRedactedChanges must not have landed'
+    )
+    // snapshotInterval is still 3, so the 3rd patch took a boundary
+    // snapshot. Had `0` landed it would have fallen back to 50 and this
+    // window would hold the seed snapshot alone.
+    assert.strictEqual(entries.filter((e) => e.kind === 'snapshot').length, 2)
   })
 
   it('accepts an empty redactions array and an empty-string path', async () => {

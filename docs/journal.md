@@ -104,9 +104,9 @@ that produce no state to check-point (see
 [Journal-side failures](#journal-side-failures)):
 
 - If such an event lands on a snapshot boundary *because its redacted
-  projection failed*, the state is recovered by replaying the window —
-  which is what `chelonia/journal/reconstruct` already returns for it —
-  and the resulting snapshot is flagged `replayed: true`.
+  post-state projection failed*, the state is recovered by replaying the
+  window — which is what `chelonia/journal/reconstruct` already returns
+  for it — and the resulting snapshot is flagged `replayed: true`.
 - Otherwise no snapshot is written for that boundary, and the ceiling is
   enforced by dropping the journal's oldest no-op entries instead. That
   cannot change what `reconstruct` returns, because an empty patch
@@ -288,6 +288,14 @@ Holes in contract state itself are treated differently: they are data
 rather than caller error, so the journal reads them as `null` (their
 exact JSON equivalent) instead of flagging them. See
 [Supported state shape](#supported-state-shape).
+
+Both kinds of misbehaviour (a throwing redactor and a non-JSON-safe
+result) are reported **once per projection**, not once per offending
+leaf: a bad redaction directive usually matches many leaves, and the
+recorder projects twice per event, so per-leaf logging flooded the
+console in proportion to the size of the state. The aggregate names the
+first offending path, its shape, and how many further leaves in that
+projection hit the same problem.
 
 ### Built-in redactors
 
@@ -580,8 +588,12 @@ grows without bound:
 
 Snapshot entries carry `redactionError` too, which is what distinguishes
 a `state: null` snapshot caused by a failed projection from one caused by
-an undefined post-state. A snapshot carrying `redactionError` *and* a
-non-null state is a recovered one and is always flagged `replayed: true`.
+an undefined post-state. `replayed: true` always comes with
+`redactionError`, but not the other way around: when only the event's
+*before*-projection failed, the boundary snapshot holds the event's own
+valid post-state, keeps the carried-forward `redactionError`, and is
+*not* flagged `replayed`. Use `replayed`, not the presence of
+`redactionError`, to identify a recovered snapshot.
 
 ### Recording is non-throwing
 
