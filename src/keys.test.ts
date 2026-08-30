@@ -30,6 +30,7 @@ import {
   resolveGeneratedKeyReference,
   resolveStateKeyReference
 } from './keys.js'
+import type { KeySpec } from './keys.js'
 import type { SPKeyMeta, SPKeyUpdate } from './SPMessage.js'
 import type { ChelContractKey, ChelContractState } from './types.js'
 import { SPMessage } from './SPMessage.js'
@@ -235,6 +236,31 @@ describe('keys: expandKeySpecs defaults and conventions', () => {
     )
   })
 
+  it('rejects near misses of the conventional reserved names', () => {
+    // A key called `#sak-1` or `#krrk` would be treated as an ordinary key by
+    // expansion, but none of the convention handling elsewhere in the library
+    // matches those names, so the spec is almost certainly a typo.
+    for (const name of ['#sak-1', '#sak-foo', '#krrk', '#krrk2']) {
+      assert.throws(
+        () => expandKeySpecs({ keys: { k: { name, purpose: ['sig'], ringLevel: 3 } } }),
+        /reserved key name/,
+        `expected '${name}' to be rejected`
+      )
+    }
+    // The documented forms stay accepted
+    assert.ok(expandKeySpecs({ keys: { s: { name: '#sak' } } }).s)
+    assert.ok(
+      expandKeySpecs({
+        keys: { i: { name: '#inviteKey-foo', ringLevel: 3, quantity: 1 } }
+      }).i
+    )
+    assert.ok(
+      expandKeySpecs({
+        keys: { r: { name: '#krrk-abc', purpose: ['enc'], ringLevel: 3 } }
+      }).r
+    )
+  })
+
   it('rejects duplicate final wire names and duplicate ids', () => {
     assert.throws(
       () => expandKeySpecs({
@@ -274,6 +300,24 @@ describe('keys: expandKeySpecs validation rules', () => {
     assert.throws(
       () => expandKeySpecs({ keys: { a: { ringLevel: 0 } } }),
       /nothing to derive/
+    )
+  })
+
+  it('rejects data+type, whose type would be silently discarded', () => {
+    // The type is always derived from the supplied public material, so a
+    // `type` alongside `data` is either redundant or a contradiction. It used
+    // to be accepted and ignored, including for a mismatched curve.
+    assert.throws(
+      () => expandKeySpecs({
+        keys: {
+          a: {
+            data: serializeKey(keygen(CURVE25519XSALSA20POLY1305), false),
+            type: EDWARDS25519SHA512BATCH,
+            ringLevel: 2
+          }
+        }
+      }),
+      /mutually exclusive/
     )
   })
 
@@ -502,7 +546,6 @@ describe('keys: metadata merging', () => {
             quantity: 999, // cannot override generated
             ...({ custom: 'keep-me' } as Record<string, unknown>),
             private: {
-              content: 'attacker-controlled' as never, // cannot override generated
               oldKeys: 'old-keys-blob'
             }
           }
@@ -516,9 +559,48 @@ describe('keys: metadata merging', () => {
     const content = meta.private!.content as unknown as {
       serialize: (ad?: string) => [string, string]
     }
-    assert.notStrictEqual(content, 'attacker-controlled')
     assert.strictEqual(content.serialize('')[0], keyId(rawWrapper))
     assert.strictEqual(meta.private!.oldKeys, 'old-keys-blob')
+  })
+
+  it("rejects caller-supplied meta.private.content in favor of 'encryptWith'", () => {
+    // Content supplied here would bypass the wrapper purpose checks, the
+    // in-set/contract resolution and the cycle detection that `encryptWith`
+    // runs, and is never validated against the key it is attached to.
+    const cases: KeySpec[] = [
+      // ...alongside a wrapper, where the generated content would win anyway
+      {
+        purpose: ['sig'],
+        ringLevel: 1,
+        encryptWith: { key: keygen(CURVE25519XSALSA20POLY1305) },
+        meta: { private: { content: 'attacker-controlled' as never } }
+      },
+      // ...without a wrapper, where it used to pass through verbatim
+      {
+        purpose: ['sig'],
+        ringLevel: 1,
+        meta: { private: { content: 'attacker-controlled' as never } }
+      },
+      // ...on a transient key, which also has no generated content
+      {
+        purpose: ['sig'],
+        ringLevel: 0,
+        transient: true,
+        meta: { private: { content: 'attacker-controlled' as never } }
+      },
+      // ...on a public-material-only entry, which has no secret at all
+      {
+        data: serializeKey(keygen(EDWARDS25519SHA512BATCH), false),
+        ringLevel: 2,
+        meta: { private: { content: 'attacker-controlled' as never } }
+      }
+    ]
+    for (const spec of cases) {
+      assert.throws(
+        () => expandKeySpecs({ keys: { a: spec } }),
+        ChelErrorKeySpecInvalid
+      )
+    }
   })
 
   it('marks transient and shareable keys', () => {
@@ -905,6 +987,27 @@ describe('keys: reference resolution', () => {
     )
     // nullable reference (not required)
     assert.strictEqual(resolveGeneratedKeyReference(K, null, null, 't', false), null)
+  })
+
+  it('resolves a name the same way as encryptWith does (wire name first)', () => {
+    // A name that is one key's alias and another key's wire name used to
+    // resolve to the alias here but to the wire name in `encryptWith`.
+    const K = expandKeySpecs({
+      keys: {
+        cek: { name: 'other', purpose: ['enc'], ringLevel: 1 },
+        wrapper: { name: 'cek', purpose: ['enc'], ringLevel: 1 },
+        wrapped: { purpose: ['sig'], ringLevel: 2, encryptWith: 'cek' }
+      }
+    })
+    // Both paths agree on the key whose *wire* name is 'cek'
+    assert.strictEqual(resolveGeneratedKeyReference(K, undefined, 'cek', 't'), K.wrapper.id)
+    const content = K.wrapped.spkey.meta!.private!.content as unknown as {
+      serialize: (ad?: string) => [string, string]
+    }
+    assert.strictEqual(content.serialize('')[0], K.wrapper.id)
+    // The alias is still the fallback when it is not any key's wire name
+    assert.strictEqual(resolveGeneratedKeyReference(K, undefined, 'wrapper', 't'), K.wrapper.id)
+    assert.strictEqual(resolveGeneratedKeyReference(K, undefined, 'other', 't'), K.cek.id)
   })
 
   it('resolveStateKeyReference: active names and revocation awareness', () => {

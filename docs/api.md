@@ -99,10 +99,10 @@ All publish to the relay via `chelonia/private/out/publishEvent` once
 | `chelonia/out/keyDel` | `src/chelonia.ts` | `OP_KEY_DEL` | Remove authorized key(s). Accepts `signingKeyName`. |
 | `chelonia/out/keyUpdate` | `src/chelonia.ts` | `OP_KEY_UPDATE` | Rotate a key and/or update `permissions` / `purpose`. Accepts raw updates, marked `keyUpdateSpec()` entries, or a `KeyUpdateSpecMap`. |
 | `chelonia/out/keyShare` | `src/chelonia.ts` | `OP_KEY_SHARE` | Share secret key material with another contract. Accepts `signingKeyName`. |
-| `chelonia/out/shareKeys` | `src/chelonia.ts` | `OP_KEY_SHARE` | Share a subject contract's active recoverable keys with a destination contract (`keyNames` / `keyIds`, `'*'` allowed), re-encrypting under the destination CEK. `atomic: true` returns the unpublished message. |
+| `chelonia/out/shareKeys` | `src/chelonia.ts` | `OP_KEY_SHARE` | Share a subject contract's active recoverable keys with a destination contract (`keyNames` / `keyIds`, `'*'` allowed), re-encrypting under the destination CEK. `atomic: true` returns the unpublished message. Inside `chelonia/out/atomic` the destination must be the batch contract. |
 | `chelonia/out/keyRequest` | `src/chelonia.ts` | `OP_KEY_REQUEST` | Request keys from another contract. Each name reference resolves against its real owner: outer `signingKeyName` / `innerEncryptionKeyName` against the destination contract, `innerSigningKeyName` / `encryptionKeyName` against the originating contract. |
 | `chelonia/out/keyRequestResponse` | `src/chelonia.ts` | `OP_KEY_REQUEST_SEEN` | Acknowledge / respond to a key request. Accepts `signingKeyName`. |
-| `chelonia/out/atomic` | `src/chelonia.ts` | `OP_ATOMIC` | Bundle multiple operations into one published message. The outer `signingKeyName` applies to the outer message only; nested invocations keep their own key references. `chelonia/out/shareKeys` is allowed in the batch. |
+| `chelonia/out/atomic` | `src/chelonia.ts` | `OP_ATOMIC` | Bundle multiple operations into one published message. The outer `signingKeyName` applies to the outer message only; nested invocations keep their own key references. Because an `OP_ATOMIC` is a single message on a single contract, every nested operation must target the contract the batch is published to; a nested `contractID` / `contractName` naming a different contract is rejected. `chelonia/out/keyShare` and `chelonia/out/shareKeys` are allowed in the batch, but only to share keys **into** the batch contract (the batch contract is the destination; `subjectContractID` / `originatingContractID` may point elsewhere). `originatingContractID` / `originatingContractName` are not accepted on the batch itself — pass them to the nested operation that needs them. |
 | `chelonia/out/encryptedOrUnencryptedPubMessage` | `src/chelonia.ts` | n/a | Build a signed (and optionally encrypted) pub message without publishing it. |
 | `chelonia/out/ownResources` | `src/chelonia.ts` | HTTP | Fetch the calling contract's billable resources from the relay. |
 | `chelonia/out/deleteContract` | `src/chelonia.ts` | HTTP | Permanently delete one or more contracts (requires token or billable-contract id). |
@@ -290,7 +290,7 @@ The most useful exported types and values (re-exported from the package root):
 | `ChelKeyShareParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/keyShare`. |
 | `ChelKeyRequestParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/keyRequest`. |
 | `ChelKeyRequestResponseParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/keyRequestResponse`. |
-| `ChelAtomicParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/atomic`. Each entry's params are pre-validated by the inner selector. |
+| `ChelAtomicParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/atomic`. Each entry's params are pre-validated by the inner selector. `originatingContractID` / `originatingContractName` are not part of it: they belong to the individual nested operation, and passing them here is rejected. |
 | `ChelContractProcessMessageObject` | `src/types.ts` | First argument to a contract action's `process(...)`. |
 | `ChelContractSideeffectMutationObject` | `src/types.ts` | First argument to a contract action's `sideEffect(...)`. |
 | `CheloniaContractCtx` | `src/types.ts` | Shape accepted by `chelonia/defineContract`. |

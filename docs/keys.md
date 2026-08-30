@@ -66,7 +66,12 @@ more distinct keys throw `ChelErrorKeyWrapCycle`; **self-wrap**
 is encrypted under itself, a common CEK pattern.
 
 Omitting `encryptWith` means the contract stores only the public half —
-exactly today's meaning of omitting `meta.private.content`.
+exactly today's meaning of omitting `meta.private.content`. Setting
+`meta.private.content` on a spec directly is rejected: it would bypass the
+wrapper purpose check, the in-set/contract resolution and the cycle
+detection, and it is never validated against the key it is attached to.
+Hand-crafted entries belong in the raw `SPKey` form that
+`chelonia/out/keyAdd` still accepts.
 
 ### Conventions as defaults
 
@@ -81,8 +86,11 @@ Curve type is inferred: purpose containing only `enc` →
 you supply `key` or public `data`, the type comes from the key and the
 purpose is validated against it.
 
-The `#` namespace is reserved (`#sak`, `#inviteKey-*`, `#krrk-*`); unknown
-`#`-prefixed names are rejected.
+The `#` namespace is reserved and only the exact conventional names and their
+documented suffixed forms are accepted: `#sak`, `#inviteKey`, `#inviteKey-*`
+and `#krrk-*`. Every other `#`-prefixed name is rejected, including near
+misses such as `#sak-1` or a bare `#krrk` — accepting those would quietly
+produce an ordinary key that none of the convention handling matches.
 
 ### The secret-key lifecycle
 
@@ -294,7 +302,17 @@ operation to `chelonia/out/keyShare`. Sharing a contract's keys with itself
 does nothing. The same applies when `keyIds`/`keyNames` is explicitly empty,
 or when `'*'` matches no recoverable key: nothing is published and the
 selector resolves to `undefined`. `atomic: true` returns the unpublished
-`SPMessage`, and the selector is allowed inside `chelonia/out/atomic`.
+`SPMessage`.
+
+The selector is allowed inside `chelonia/out/atomic`, with one restriction:
+an `OP_ATOMIC` is a single message on a single contract, so the destination
+must be the batch contract. In other words a batch can pull *other*
+contracts' keys **into** the contract it is published to (leave `contractID`
+off, or set it to the batch contract, and point `subjectContractID`
+elsewhere), but it cannot push its own keys **out** to other contracts —
+those need one published `OP_KEY_SHARE` per destination. A nested
+`contractID` naming a different contract is rejected rather than silently
+retargeted.
 
 ## Updates and rotation
 
@@ -351,7 +369,7 @@ const result = await sbp('chelonia/key/rotate', {
                                     // auto-selected at the minimum ringLevel
                                     // of the rotated set
   additionalOperations: async (newKeys, { lastAttempt }) => ({
-    after: [['chelonia/out/shareKeys', { ... }]]   // bundled via OP_ATOMIC
+    after: [['chelonia/out/keyAdd', { ... }]]      // bundled via OP_ATOMIC
   }),
   lastAttempt,                      // forwarded to the callback
   hooks, publishOptions
@@ -370,14 +388,27 @@ publishing when every old key has already been revoked (stale update).
 Retry/persistence policy stays with the application (e.g. the persistent
 action queue): `chelonia/key/rotate` performs exactly one attempt.
 
+An `OP_ATOMIC` is one message on one contract, so every operation returned by
+`additionalOperations` must target the contract being rotated; one naming a
+different `contractID` is rejected rather than silently retargeted.
+Distributing the new keys to *other* contracts therefore cannot be part of
+the same atomic message — each destination needs its own `OP_KEY_SHARE` on
+that destination. Await the rotation, then issue one
+`chelonia/out/shareKeys` per destination; `newKeys` is handed to
+`additionalOperations` (and returned) precisely so the caller can do this.
+
 ## Validation (authoring-time)
 
 Expansion fails fast, with pointed errors, on:
 
 - `ringLevel` missing for a non-conventional name
 - `purpose`/`type`/`key` inconsistency (e.g. `enc` purpose with an edwards key)
-- both `key` and `type`; both `key` and `data`; neither `key`, `type`,
-  `purpose` nor `data`
+- both `key` and `type`; both `key` and `data`; both `data` and `type` (the
+  type is always derived from the supplied key material); neither `key`,
+  `type`, `purpose` nor `data`
+- `meta.private.content` set directly on a spec — `encryptWith` is the only
+  declared way to wrap a secret, and it is the only one that validates the
+  wrapper
 - `encryptWith` referencing an unknown name (in set *and* contract), a
   non-`enc` key, or producing a multi-node cycle
 - a `#sak` spec with any non-default policy field
@@ -385,7 +416,8 @@ Expansion fails fast, with pointed errors, on:
 - a replacement key (`rotate` / `key`) for a key with no wrapped secret and
   no `encryptWith`, unless the key is `transient` (then the caller keeps the
   secret, as with invite links and password-derived roots)
-- unknown `#`-prefixed names
+- unknown `#`-prefixed names, including near misses of the conventional ones
+  (`#sak-1`, a bare `#krrk`)
 - duplicate aliases or duplicate final wire names / key ids
 
 Invalid *invocations* (missing both id and name on a reference) throw plain

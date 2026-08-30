@@ -1337,6 +1337,136 @@ describe('keys integration', () => {
     })
   })
 
+  describe('chelonia/out/atomic', () => {
+    // An OP_ATOMIC is a single message on a single contract and every nested
+    // operation is applied to that contract's state, so a nested operation
+    // targeting a different contract cannot be honored. It used to be
+    // silently rewritten to the batch contract, which either dropped the
+    // operation (`shareKeys` short-circuits when subject === destination) or
+    // applied it to the wrong contract.
+    it('rejects a nested operation that targets another contract', async () => {
+      const batch = await registerIdentity()
+      const batchID = batch.contractID()
+      const other = await registerIdentity()
+      const otherID = other.contractID()
+      const eventsBefore = fixture.eventsByContract().get(batchID)!.length
+
+      await assert.rejects(
+        () => sbp('chelonia/out/atomic', {
+          contractID: batchID,
+          contractName: CONTRACT_NAME,
+          signingKeyName: 'csk',
+          data: [
+            ['chelonia/out/shareKeys', {
+              // Destination is not the batch contract: not expressible.
+              contractID: otherID,
+              contractName: CONTRACT_NAME,
+              subjectContractID: batchID,
+              keyNames: ['csk']
+            }]
+          ]
+        }),
+        (err: Error) =>
+          err instanceof TypeError && /must target the contract/.test(err.message)
+      )
+      // Nothing was published, on either contract
+      assert.strictEqual(fixture.eventsByContract().get(batchID)!.length, eventsBefore)
+    })
+
+    it("shares another contract's keys into the batch contract", async () => {
+      // The expressible direction: the batch contract is the destination and
+      // the subject contract is somebody else.
+      const dest = await registerIdentity()
+      const destID = dest.contractID()
+      const subject = await registerIdentity()
+      const subjectID = subject.contractID()
+
+      const msg = (await sbp('chelonia/out/atomic', {
+        contractID: destID,
+        contractName: CONTRACT_NAME,
+        signingKeyName: 'csk',
+        data: [
+          ['chelonia/out/actionEncrypted', {
+            action: `${CONTRACT_NAME}/act`,
+            data: { atomic: true },
+            encryptionKeyName: 'pek',
+            innerSigningKeyName: 'csk'
+          }],
+          ['chelonia/out/shareKeys', {
+            subjectContractID: subjectID,
+            keyNames: ['csk']
+          }]
+        ]
+      })) as SPMessage
+      assert.strictEqual(msg.opType(), SPMessage.OP_ATOMIC)
+      const opTypes = (msg.opValue() as unknown as [string, unknown][]).map((e) => e[0])
+      assert.deepStrictEqual(
+        opTypes,
+        [SPMessage.OP_ACTION_ENCRYPTED, SPMessage.OP_KEY_SHARE]
+      )
+
+      await applyRemote(destID)
+      const destState = contractState(destID)
+      const subjectCskId = Object.values(contractState(subjectID)._vm.authorizedKeys)
+        .find((k) => k.name === 'csk')!.id
+      // The nested OP_KEY_SHARE really applied to the batch contract
+      assert.ok(destState._vm.sharedKeyIds?.some((s) => s.id === subjectCskId))
+      assert.strictEqual(destState.count, 1)
+    })
+
+    it('accepts a nested contractID equal to the batch contract', async () => {
+      const batch = await registerIdentity()
+      const batchID = batch.contractID()
+      const msg = (await sbp('chelonia/out/atomic', {
+        contractID: batchID,
+        contractName: CONTRACT_NAME,
+        signingKeyName: 'csk',
+        data: [
+          ['chelonia/out/actionEncrypted', {
+            contractID: batchID,
+            contractName: CONTRACT_NAME,
+            action: `${CONTRACT_NAME}/act`,
+            data: { atomic: true },
+            encryptionKeyName: 'pek',
+            innerSigningKeyName: 'csk'
+          }]
+        ]
+      })) as SPMessage
+      assert.strictEqual(msg.opType(), SPMessage.OP_ATOMIC)
+    })
+
+    // Removed from `ChelAtomicParams`: the originating contract belongs to the
+    // individual keyShare/shareKeys operation, not to the batch. Rejected
+    // rather than ignored, so callers relying on the old inheritance find out.
+    it('rejects originatingContractID / originatingContractName on the batch', async () => {
+      const batch = await registerIdentity()
+      const batchID = batch.contractID()
+      const other = await registerIdentity()
+      const otherID = other.contractID()
+
+      for (const extra of [
+        { originatingContractID: otherID },
+        { originatingContractName: CONTRACT_NAME }
+      ]) {
+        await assert.rejects(
+          () => sbp('chelonia/out/atomic', {
+            contractID: batchID,
+            contractName: CONTRACT_NAME,
+            signingKeyName: 'csk',
+            ...extra,
+            data: [
+              ['chelonia/out/keyShare', {
+                data: { contractID: otherID, keys: [] },
+                signingKeyName: 'ipk'
+              }]
+            ]
+          }),
+          (err: Error) => err instanceof TypeError && /originatingContract/.test(err.message)
+        )
+      }
+    })
+  })
+
   // ---------------------------------------------------------------------
   // Work package 7: update specs and rotation
   // ---------------------------------------------------------------------

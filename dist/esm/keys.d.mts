@@ -73,8 +73,6 @@ export declare const keySpec: (alias: string, spec?: KeySpec) => MarkedKeySpec;
 export declare const isKeySpec: (value: unknown) => value is MarkedKeySpec;
 export declare const keyUpdateSpec: (alias: string, spec?: KeyUpdateSpec) => MarkedKeyUpdateSpec;
 export declare const isKeyUpdateSpec: (value: unknown) => value is MarkedKeyUpdateSpec;
-export declare const SAK_NAME = "#sak";
-export declare const INVITE_KEY_NAME = "#inviteKey";
 export type NormalizedKeySpec = {
     alias: string;
     spec: KeySpec;

@@ -1862,13 +1862,15 @@ export default sbp('sbp/selectors/register', {
                 : resolveStateKeyReference(destState, null, 'cek', 'encryptionKey'));
             // Destination signing key: explicit id/name (validated as a pair,
             // §2.7), or auto-select a suitable key with OP_KEY_SHARE permission.
-            let signingKey = signingKeyId != null || signingKeyName != null
+            // This is a key *id*; `signingKey` is reserved for raw `Key` objects.
+            let resolvedSigningKeyId = signingKeyId != null || signingKeyName != null
                 ? resolveStateKeyReference(destState, signingKeyId ?? null, signingKeyName ?? null, 'signingKey')
                 : undefined;
-            if (signingKey == null) {
-                signingKey = findSuitableSecretKeyId(destState, [SPMessage.OP_KEY_SHARE], ['sig']) ?? undefined;
+            if (resolvedSigningKeyId == null) {
+                resolvedSigningKeyId =
+                    findSuitableSecretKeyId(destState, [SPMessage.OP_KEY_SHARE], ['sig']) ?? undefined;
             }
-            if (!signingKey) {
+            if (!resolvedSigningKeyId) {
                 throw new Error('chelonia/out/shareKeys: no suitable signing key with OP_KEY_SHARE ' +
                     `permission in ${contractID}`);
             }
@@ -1940,7 +1942,7 @@ export default sbp('sbp/selectors/register', {
                 originatingContractID: subjectContractID,
                 originatingContractName: subjectContractTypeName,
                 data: encryptedOutgoingData(contractID, destEncryptionKeyId, payload),
-                signingKeyId: signingKey,
+                signingKeyId: resolvedSigningKeyId,
                 hooks,
                 publishOptions,
                 atomic: !!atomic
@@ -1957,7 +1959,7 @@ export default sbp('sbp/selectors/register', {
             throw new Error('Contract name not found');
         }
         const state = contract.state(contractID);
-        const signingKeyId = resolveRef.call(this, contractID, { id: params.signingKeyId, name: params.signingKeyName }, 'signingKey');
+        const signingKeyId = resolveSigningKeyId.call(this, contractID, params);
         // Expand spec entries against the live contract state before the
         // duplicate-key filtering, splicing generated keys back into the
         // original array order. Raw and encrypted entries stay untouched.
@@ -2016,7 +2018,7 @@ export default sbp('sbp/selectors/register', {
             throw new Error('Contract name not found');
         }
         const state = contract.state(contractID);
-        const signingKeyId = resolveRef.call(this, contractID, { id: params.signingKeyId, name: params.signingKeyName }, 'signingKey');
+        const signingKeyId = resolveSigningKeyId.call(this, contractID, params);
         const payload = data
             .map((keyId) => {
             if (isEncryptedData(keyId))
@@ -2054,7 +2056,7 @@ export default sbp('sbp/selectors/register', {
             throw new Error('Contract name not found');
         }
         const state = contract.state(contractID);
-        const signingKeyId = resolveRef.call(this, contractID, { id: params.signingKeyId, name: params.signingKeyName }, 'signingKey');
+        const signingKeyId = resolveSigningKeyId.call(this, contractID, params);
         // Expand marked update specs against the live contract state before the
         // privacy-wrapper logic below. The expansion does not double-encrypt
         // `meta.private.content`: it stays an inner EncryptedData object bound
@@ -2134,7 +2136,7 @@ export default sbp('sbp/selectors/register', {
             // Deliberately not using `resolveMessageKeyRefs`: it resolves the whole
             // trio against one contract, but here the inner signing and encryption
             // keys belong to the originating contract.
-            const signingKeyId = resolveRef.call(this, contractID, { id: params.signingKeyId, name: params.signingKeyName }, 'signingKey');
+            const signingKeyId = resolveSigningKeyId.call(this, contractID, params);
             const innerSigningKeyId = resolveRef.call(this, originatingContractID, { id: params.innerSigningKeyId, name: params.innerSigningKeyName }, 'innerSigningKey');
             const encryptionKeyId = resolveRef.call(this, originatingContractID, { id: params.encryptionKeyId, name: params.encryptionKeyName }, 'encryptionKey');
             const innerEncryptionKeyId = resolveRef.call(this, contractID, { id: params.innerEncryptionKeyId, name: params.innerEncryptionKeyName }, 'innerEncryptionKey');
@@ -2254,7 +2256,7 @@ export default sbp('sbp/selectors/register', {
         if (!contract) {
             throw new Error('Contract name not found');
         }
-        const signingKeyId = resolveRef.call(this, contractID, { id: params.signingKeyId, name: params.signingKeyName }, 'signingKey');
+        const signingKeyId = resolveSigningKeyId.call(this, contractID, params);
         const payload = data;
         let message = SPMessage.createV1_0({
             contractID,
@@ -2276,9 +2278,19 @@ export default sbp('sbp/selectors/register', {
         if (!contract) {
             throw new Error('Contract name not found');
         }
+        // The originating contract is a property of the individual
+        // `keyShare`/`shareKeys` operation, not of the batch, so it is no longer
+        // accepted here. Silently ignoring it would skip the originating-contract
+        // validation in the nested operation that used to inherit it.
+        if (params.originatingContractID != null ||
+            params.originatingContractName != null) {
+            throw new TypeError('chelonia/out/atomic no longer accepts originatingContractID / ' +
+                'originatingContractName: pass them in the params of the nested ' +
+                'operation that needs them');
+        }
         // The outer message's signing key. Nested invocations carry their own key
         // references and are never overwritten by this one.
-        const signingKeyId = resolveRef.call(this, contractID, { id: params.signingKeyId, name: params.signingKeyName }, 'signingKey');
+        const signingKeyId = resolveSigningKeyId.call(this, contractID, params);
         const payload = (await Promise.all(data.map(([selector, opParams]) => {
             if (![
                 'chelonia/out/actionEncrypted',
@@ -2299,10 +2311,33 @@ export default sbp('sbp/selectors/register', {
             // selector). Signer-less nested operations inherit the outer
             // signing reference, preserving the legacy inheritance behavior.
             // Nested operations keep their own originating-contract context:
-            // `keyShare`/`shareKeys` pass it in their own params, and
-            // `...opParams` below preserves it. The outer batch does not use it.
+            // `keyShare`/`shareKeys` pass it in their own params. The outer
+            // batch rejects one outright (checked at selector entry above).
             const op = opParams;
             const hasOwnSigner = op.signingKeyId != null || op.signingKeyName != null || op.signingKey != null;
+            // An OP_ATOMIC is a single message on a single contract, and every
+            // nested operation is applied to that contract's state (see the
+            // OP_ATOMIC handler in `internals.ts`). A nested operation
+            // therefore cannot target a different contract, and silently
+            // rewriting the reference below would either drop the operation or
+            // apply it to the wrong contract. This matters most for
+            // `keyShare`/`shareKeys`, where `contractID` is the *destination*
+            // rather than the contract being modified: sharing keys *into* the
+            // batch contract is expressible (`contractID` equal to the batch
+            // contract, with `subjectContractID`/`originatingContractID`
+            // pointing elsewhere), sharing them *out of* it is not.
+            if (op.contractID != null && op.contractID !== params.contractID) {
+                throw new TypeError(`Nested ${selector} in OP_ATOMIC targets contract ` +
+                    `${String(op.contractID)}, but every operation in an OP_ATOMIC ` +
+                    'must target the contract the batch is published to ' +
+                    `(${params.contractID})`);
+            }
+            if (op.contractName != null && op.contractName !== params.contractName) {
+                throw new TypeError(`Nested ${selector} in OP_ATOMIC targets contract name ` +
+                    `${String(op.contractName)}, but every operation in an OP_ATOMIC ` +
+                    'must target the contract the batch is published to ' +
+                    `(${params.contractName})`);
+            }
             return sbp(selector, {
                 hooks: params.hooks,
                 publishOptions: params.publishOptions,
@@ -2723,11 +2758,16 @@ const resolveRef = function (contractID, ref, label, required = true) {
     const state = sbp(this.config.stateSelector)[contractID];
     return resolveStateKeyReference(state, ref.id ?? null, ref.name ?? null, label, required);
 };
+// The signing-key reference every outgoing selector resolves at entry. Split
+// out because the pair is spelled out identically in a dozen places.
+const resolveSigningKeyId = function (contractID, params) {
+    return resolveRef.call(this, contractID, { id: params.signingKeyId, name: params.signingKeyName }, 'signingKey');
+};
 // Resolves the signing / inner-signing / encryption trio used by the action
 // and pub-message selectors. Only signing is required.
 const resolveMessageKeyRefs = function (contractID, params) {
     return {
-        signingKeyId: resolveRef.call(this, contractID, { id: params.signingKeyId, name: params.signingKeyName }, 'signingKey'),
+        signingKeyId: resolveSigningKeyId.call(this, contractID, params),
         innerSigningKeyId: resolveRef.call(this, contractID, { id: params.innerSigningKeyId, name: params.innerSigningKeyName }, 'innerSigningKey', false),
         encryptionKeyId: resolveRef.call(this, contractID, { id: params.encryptionKeyId, name: params.encryptionKeyName }, 'encryptionKey', false)
     };
