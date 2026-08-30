@@ -4,8 +4,7 @@ How to define a contract's keys in one declarative, name-addressed structure
 and let Chelonia do the `keygen` / `keyId` / `serializeKey` / wrapping /
 assembly — plus name-addressed references, generic sharing, and rotation.
 
-- Design document: [`specs/KEYS-API.md`](./specs/KEYS-API.md)
-- Implementation plan: [`specs/KEYS-API-IMPLEMENTATION.md`](./specs/KEYS-API-IMPLEMENTATION.md)
+- Selector reference: [`api.md`](./api.md#key-api)
 - Source: [`src/keys.ts`](../src/keys.ts) (pure engine + selectors),
   [`src/chelonia.ts`](../src/chelonia.ts) (selector integration)
 
@@ -246,6 +245,13 @@ For every `fooKeyId` / `fooKeyName` pair:
 Resolution happens once at selector entry. The lower-level
 `signedOutgoingData` / `encryptedOutgoingData` primitives remain id-only.
 
+TypeScript enforces the same rule at compile time: a required pair accepts
+`{ id }`, `{ name }` or `{ id, name }`, but not an empty pair. Plain
+JavaScript callers still get the runtime `TypeError`.
+
+Inside `chelonia/out/atomic` the signing pair is optional per entry, because
+a signer-less nested operation inherits the batch's signing reference.
+
 ## Spec-based `keyAdd`
 
 `chelonia/out/keyAdd` accepts a mixed array of `SPKey`,
@@ -423,7 +429,53 @@ Expansion fails fast, with pointed errors, on:
 Invalid *invocations* (missing both id and name on a reference) throw plain
 `TypeError`; structurally valid declarations that cannot be resolved throw
 `ChelErrorKeyNameNotFound` / `ChelErrorKeySpecInvalid` /
-`ChelErrorKeyWrapCycle`.
+`ChelErrorKeyWrapCycle`. A key declaration that is not an object at all
+(a `null`/`undefined` entry left behind by a conditional) is rejected as
+`ChelErrorKeySpecInvalid` naming the offending alias.
+
+## Migrating existing callers
+
+Everything in this guide is additive except one change to
+`chelonia/out/atomic`.
+
+**Originating contracts now belong to the operation, not the batch.**
+Previously the batch's `originatingContractID` / `originatingContractName`
+were copied into every nested operation. That spread also overwrote a nested
+operation's own `signingKeyId`, so per-operation signers were silently
+ignored. Both fields are now rejected on the batch, and each nested
+operation keeps its own references:
+
+```js
+// Before: batch-level originating contract, inherited by the nested keyShare
+await sbp('chelonia/out/atomic', {
+  contractID: groupID,
+  contractName: 'gi.contracts/group',
+  originatingContractID: identityID,        // no longer accepted
+  originatingContractName: 'gi.contracts/identity',
+  signingKeyId,
+  data: [['chelonia/out/keyShare', { data: payload }]]
+})
+
+// After: the operation that needs it carries it
+await sbp('chelonia/out/atomic', {
+  contractID: groupID,
+  contractName: 'gi.contracts/group',
+  signingKeyId,
+  data: [['chelonia/out/keyShare', {
+    originatingContractID: identityID,
+    originatingContractName: 'gi.contracts/identity',
+    data: payload
+  }]]
+})
+```
+
+Passing them on the batch throws `TypeError` rather than being ignored:
+silently dropping them would also skip the originating-contract validation
+in the nested operation, publishing an `OP_KEY_SHARE` with the wrong
+provenance.
+
+A nested operation that omits its signing reference still inherits the
+batch's, so signer-less batches keep working unchanged.
 
 ## Selector reference
 
@@ -445,7 +497,8 @@ Exported from `@chelonia/lib` / `@chelonia/lib/keys` (`src/keys.ts`):
 
 Registration selector-parameter types live in `src/chelonia.ts`:
 `ChelRegParams` (legacy ∪ spec forms), `RegistrationKeyReferences`,
-`ChelShareKeysParams`, and the widened `ChelActionParams` /
+`ChelShareKeysParams`, `NestedInvocationParams` (the shape of an entry in an
+`OP_ATOMIC` batch), and the widened `ChelActionParams` /
 `ChelKeyAddParams` / `ChelKeyUpdateParams` / `ChelAtomicParams`.
 
 ## Security notes

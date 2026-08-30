@@ -2,7 +2,7 @@
 //
 // This module layers a spec-driven vocabulary on top of the existing
 // `chelonia/out/*` key operations without changing the Shelter wire format
-// (see docs/specs/KEYS-API.md and docs/specs/KEYS-API-IMPLEMENTATION.md).
+// (see docs/keys.md for the guide).
 //
 // Everything in the first half of this file (types, markers, normalization,
 // `expandKeySpecs`, `expandKeyUpdateSpecs`, reference resolution) is pure
@@ -60,7 +60,8 @@ import type {
   ChelKeyRequestResponseParams,
   ChelKeyShareParams,
   ChelKeyUpdateParams,
-  ChelShareKeysParams
+  ChelShareKeysParams,
+  NestedInvocationParams
 } from './chelonia.js'
 
 // ---------------------------------------------------------------------------
@@ -195,16 +196,21 @@ export type KeyUpdateExpansionResult = {
   newKeys: RotationKeyMap
 }
 
-// A `[selector, params]` pair allowed inside `chelonia/out/atomic`.
+// A `[selector, params]` pair allowed inside `chelonia/out/atomic`. The batch
+// supplies the target contract, and signer-less entries inherit the batch's
+// signing reference, so those fields are optional per entry.
 export type AtomicInvocation =
-  | ['chelonia/out/actionEncrypted', ChelActionParams]
-  | ['chelonia/out/actionUnencrypted', ChelActionParams]
-  | ['chelonia/out/keyAdd', ChelKeyAddParams]
-  | ['chelonia/out/keyDel', ChelKeyDelParams]
-  | ['chelonia/out/keyUpdate', ChelKeyUpdateParams]
-  | ['chelonia/out/keyRequestResponse', ChelKeyRequestResponseParams]
-  | ['chelonia/out/keyShare', ChelKeyShareParams]
-  | ['chelonia/out/shareKeys', ChelShareKeysParams]
+  | ['chelonia/out/actionEncrypted', NestedInvocationParams<ChelActionParams>]
+  | ['chelonia/out/actionUnencrypted', NestedInvocationParams<ChelActionParams>]
+  | ['chelonia/out/keyAdd', NestedInvocationParams<ChelKeyAddParams>]
+  | ['chelonia/out/keyDel', NestedInvocationParams<ChelKeyDelParams>]
+  | ['chelonia/out/keyUpdate', NestedInvocationParams<ChelKeyUpdateParams>]
+  | [
+    'chelonia/out/keyRequestResponse',
+    NestedInvocationParams<ChelKeyRequestResponseParams>
+  ]
+  | ['chelonia/out/keyShare', NestedInvocationParams<ChelKeyShareParams>]
+  | ['chelonia/out/shareKeys', NestedInvocationParams<ChelShareKeysParams>]
 
 // ---------------------------------------------------------------------------
 // Markers (prototype tags, same technique as EncryptedData — never instanceof)
@@ -337,6 +343,15 @@ const normalizeSpecs = <S>(
     if (!alias) {
       throw new ChelErrorKeySpecInvalid(`Empty ${kind.noun} alias`)
     }
+    // Without this, a `null` / `undefined` entry (easy to produce from a
+    // conditional in an object literal) would reach field access during
+    // expansion and surface as a bare 'cannot read properties of undefined'
+    // instead of one of the pointed errors this API otherwise produces.
+    if (spec == null || typeof spec !== 'object') {
+      throw new ChelErrorKeySpecInvalid(
+        `${kind.paramName}: '${alias}' must be a ${kind.noun} object`
+      )
+    }
     // Object input cannot yield duplicate aliases, so this only ever fires
     // for the array form. Applied to both so they behave identically.
     if (seen.has(alias)) {
@@ -399,7 +414,8 @@ export const normalizeKeyUpdateSpecs = (
   )
 
 // ---------------------------------------------------------------------------
-// Key-reference resolution (§2.7 of the implementation plan)
+// Key-reference resolution: every `*KeyId` parameter has a `*KeyName` twin,
+// and at least one of each pair is required (see docs/keys.md).
 // ---------------------------------------------------------------------------
 
 const findGeneratedKeyByAliasOrName = (
@@ -831,10 +847,12 @@ export const expandKeySpecs = (params: {
       // rotation contexts).
       if (context?.contractID != null) {
         const state = context.contractState ?? getContractState?.(context.contractID)
-        const wrapperId = state && findKeyIdByName(state, wrapWith)
-        if (wrapperId && state) {
-          assertEncPurpose(state._vm?.authorizedKeys?.[wrapperId], wrapWith)
-          return { kind: 'contract', contractID: context.contractID, keyId: wrapperId }
+        if (state) {
+          const wrapperId = findKeyIdByName(state, wrapWith)
+          if (wrapperId != null) {
+            assertEncPurpose(state._vm?.authorizedKeys?.[wrapperId], wrapWith)
+            return { kind: 'contract', contractID: context.contractID, keyId: wrapperId }
+          }
         }
       }
       throw new ChelErrorKeyNameNotFound(
@@ -1356,7 +1374,7 @@ export default sbp('sbp/selectors/register', {
     return keyMap
   },
   // Generic key rotation, promoted from Group Income's rotateKeysInternal.
-  // See docs/keys.md and docs/specs/KEYS-API-IMPLEMENTATION.md §10.3.
+  // See docs/keys.md.
   'chelonia/key/rotate': async function (
     this: CheloniaContext,
     params: {
@@ -1437,9 +1455,8 @@ export default sbp('sbp/selectors/register', {
       ) as string | undefined
       : undefined
     if (signingKeyId == null) {
-      // KEYS-API.md §4.6 step 4: sign at the minimum ringLevel of the rotated
-      // set so the OP_KEY_UPDATE passes validateKeyAddPermissions for every
-      // rotated key.
+      // Sign at the minimum ringLevel of the rotated set so the
+      // OP_KEY_UPDATE passes validateKeyAddPermissions for every rotated key.
       const minRingLevel = Math.min(...selected.map((k) => k.ringLevel))
       signingKeyId = findSuitableSecretKeyId(
         state,

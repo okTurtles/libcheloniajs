@@ -1,7 +1,7 @@
 // Integration tests for the declarative key API (`src/keys.ts` selectors
 // and their `chelonia/out/*` integration), run in their own Node process
 // (Chelonia's global SBP context and domain lock make in-runner isolation
-// fragile — see docs/specs/KEYS-API-IMPLEMENTATION.md §3).
+// fragile).
 //
 // Uses the test-only in-memory Shelter transport in `src/test-utils/`.
 
@@ -27,7 +27,8 @@ import {
 import { SPMessage } from './SPMessage.js'
 import { createShelterServerFixture } from './test-utils/shelter-server.js'
 import type { ChelContractState, ChelRootState } from './types.js'
-import type { KeyMap, RotationKeyMap } from './keys.js'
+import type { AtomicInvocation, KeyMap, RotationKeyMap } from './keys.js'
+import type { ChelKeyDelParams } from './chelonia.js'
 
 // Test contract state shape (custom action fields live alongside _vm).
 type TestContractState = ChelContractState & {
@@ -477,7 +478,7 @@ describe('keys integration', () => {
       assert.strictEqual(saks.length, 1)
     })
 
-    it('autoSak without an explicit encryptWith fails loudly (§2.6)', async () => {
+    it('autoSak without an explicit encryptWith fails loudly', async () => {
       // The type requires `{ encryptWith: string }`, but JS callers bypass
       // types. A malformed opt-in must throw instead of silently appending
       // an unwrapped (unrecoverable) SAK.
@@ -613,7 +614,7 @@ describe('keys integration', () => {
       )
     })
 
-    it('missing required key references throw TypeError (§7)', async () => {
+    it('missing required key references throw TypeError', async () => {
       const eventsBefore = fixture.eventsByContract().get(contractID)!.length
       const probeKey = keygen(EDWARDS25519SHA512BATCH)
       // Neither id nor name: a required reference is missing on every
@@ -641,7 +642,7 @@ describe('keys integration', () => {
             }
           ]
         }),
-        // Same pointed error as every other selector (§2.7), not the opaque
+        // Same pointed error as every other selector, not the opaque
         // 'Invalid invocation' from deep inside signedOutgoingData
         {
           constructor: TypeError,
@@ -719,7 +720,7 @@ describe('keys integration', () => {
       assert.strictEqual(contractState(contractID).lastData?.atomic, true)
     })
 
-    it('atomic never mixes outer and nested key references (§7.3)', async () => {
+    it('atomic never mixes outer and nested key references', async () => {
       const state = contractState(contractID)
       const ipkId = Object.values(state._vm.authorizedKeys).find((k) => k.name === 'ipk')!.id
       const cskId = Object.values(state._vm.authorizedKeys).find((k) => k.name === 'csk')!.id
@@ -995,7 +996,7 @@ describe('keys integration', () => {
       assert.strictEqual(fixture.eventsByContract().get(contractID)!.length, eventsBefore)
     })
 
-    it('adds a self-wrapped key end-to-end (§2.5)', async () => {
+    it('adds a self-wrapped key end-to-end', async () => {
       const msg = (await sbp('chelonia/out/keyAdd', {
         contractID,
         contractName: CONTRACT_NAME,
@@ -1263,7 +1264,7 @@ describe('keys integration', () => {
       )
     })
 
-    it('validates signingKeyId/signingKeyName pairs (§2.7)', async () => {
+    it('validates signingKeyId/signingKeyName pairs', async () => {
       const subject = await registerIdentity()
       const subjectID = subject.contractID()
       const dest = await registerIdentity()
@@ -1301,7 +1302,7 @@ describe('keys integration', () => {
   })
 
   describe('chelonia/out/keyShare', () => {
-    it('validates signingKeyId/signingKeyName pairs (§2.7)', async () => {
+    it('validates signingKeyId/signingKeyName pairs', async () => {
       const dest = await registerIdentity()
       const destID = dest.contractID()
       const destIpkId = Object.values(contractState(destID)._vm.authorizedKeys)
@@ -1901,7 +1902,7 @@ describe('keys integration', () => {
       assert.strictEqual(fixture.eventsByContract().get(contractID)!.length, eventsBefore)
     })
 
-    it('validates explicit signingKeyId/signingKeyName pairs (§2.7)', async () => {
+    it('validates explicit signingKeyId/signingKeyName pairs', async () => {
       const reg = await registerIdentity()
       const contractID = reg.contractID()
       const ipkId = Object.values(contractState(contractID)._vm.authorizedKeys)
@@ -1967,6 +1968,48 @@ describe('keys integration', () => {
       sbp('chelonia/clearTransientSecretKeys', [ipk.id])
       assert.strictEqual(sbp('chelonia/haveSecretKey', ipk.id), false)
       assert.ok(sbp('chelonia/haveSecretKey', csk.id, true))
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // Compile-time counterpart of the runtime pair validation above. These
+  // assertions are checked when ts-node loads this file: a `@ts-expect-error`
+  // that stops erroring fails the whole run, so the types cannot silently
+  // stop requiring a key reference.
+  // ---------------------------------------------------------------------
+
+  describe('key reference types', () => {
+    it('requires at least one of each id/name pair', () => {
+      // @ts-expect-error - a signing reference is required
+      const noSigner: ChelKeyDelParams = {
+        contractID: 'c', contractName: CONTRACT_NAME, data: [], atomic: true
+      }
+      const byId: ChelKeyDelParams = {
+        contractID: 'c', contractName: CONTRACT_NAME, data: [], atomic: true, signingKeyId: 'k'
+      }
+      const byName: ChelKeyDelParams = {
+        contractID: 'c', contractName: CONTRACT_NAME, data: [], atomic: true, signingKeyName: 'csk'
+      }
+      const byBoth: ChelKeyDelParams = {
+        contractID: 'c',
+        contractName: CONTRACT_NAME,
+        data: [],
+        atomic: true,
+        signingKeyId: 'k',
+        signingKeyName: 'csk'
+      }
+      assert.ok(noSigner && byId && byName && byBoth)
+    })
+
+    it('lets nested atomic operations omit the batch-supplied fields', () => {
+      // Signer-less nested operations inherit the batch signing reference and
+      // always target the batch contract, so both are optional per entry.
+      const inherited: AtomicInvocation = ['chelonia/out/keyDel', { data: [] }]
+      const explicit: AtomicInvocation = [
+        'chelonia/out/keyDel',
+        { data: [], signingKeyName: 'csk' }
+      ]
+      assert.ok(inherited && explicit)
     })
   })
 })

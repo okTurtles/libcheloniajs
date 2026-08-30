@@ -18,6 +18,41 @@ type OutgoingHooks = {
     prepublish?: (msg: SPMessage) => Promise<void> | void;
     postpublish?: (msg: SPMessage) => Promise<void> | void;
 };
+type SigningKeyRef = {
+    signingKeyId: string;
+    signingKeyName?: string;
+} | {
+    signingKeyId?: undefined;
+    signingKeyName: string;
+};
+type InnerSigningKeyRef = {
+    innerSigningKeyId: string;
+    innerSigningKeyName?: string;
+} | {
+    innerSigningKeyId?: undefined;
+    innerSigningKeyName: string;
+};
+type EncryptionKeyRef = {
+    encryptionKeyId: string;
+    encryptionKeyName?: string;
+} | {
+    encryptionKeyId?: undefined;
+    encryptionKeyName: string;
+};
+type InnerEncryptionKeyRef = {
+    innerEncryptionKeyId: string;
+    innerEncryptionKeyName?: string;
+} | {
+    innerEncryptionKeyId?: undefined;
+    innerEncryptionKeyName: string;
+};
+export type NestedInvocationParams<T> = Omit<T, 'signingKeyId' | 'signingKeyName' | 'contractID' | 'contractName' | 'atomic'> & {
+    signingKeyId?: string;
+    signingKeyName?: string;
+    contractID?: string;
+    contractName?: string;
+    atomic?: boolean;
+};
 export type RegistrationKeyReferences = {
     signingKeyId?: string;
     signingKeyName?: string;
@@ -60,66 +95,42 @@ export type ChelRegParamsSpec = RegistrationKeyReferences & {
     publishOptions?: PublishOptions;
 };
 export type ChelRegParams = ChelRegParamsLegacy | ChelRegParamsSpec;
-export type ChelActionParams = {
+export type ChelActionParams = SigningKeyRef & {
     action: string;
     server?: string;
     contractID: string;
     data: object;
-    signingKeyId?: string;
-    signingKeyName?: string;
     innerSigningKeyId?: string | null;
     innerSigningKeyName?: string | null;
     encryptionKeyId?: string | null | undefined;
     encryptionKeyName?: string | null | undefined;
     encryptionKey?: Key | null | undefined;
-    hooks?: {
-        prepublishContract?: (msg: SPMessage) => void;
-        prepublish?: (msg: SPMessage) => Promise<void> | void;
-        postpublish?: (msg: SPMessage) => Promise<void> | void;
-    };
+    hooks?: OutgoingHooks;
     publishOptions?: PublishOptions;
     atomic?: boolean;
 };
-export type ChelKeyAddParams = {
+export type ChelKeyAddParams = SigningKeyRef & {
     contractName: string;
     contractID: string;
     data: (SPKey | EncryptedData<SPKey> | MarkedKeySpec)[] | KeySpecMap;
-    signingKeyId?: string;
-    signingKeyName?: string;
-    hooks?: {
-        prepublishContract?: (msg: SPMessage) => void;
-        prepublish?: (msg: SPMessage) => Promise<void> | void;
-        postpublish?: (msg: SPMessage) => Promise<void> | void;
-    };
+    hooks?: OutgoingHooks;
     publishOptions?: PublishOptions;
     atomic: boolean;
     skipExistingKeyCheck?: boolean;
 };
-export type ChelKeyDelParams = {
+export type ChelKeyDelParams = SigningKeyRef & {
     contractName: string;
     contractID: string;
     data: SPOpKeyDel;
-    signingKeyId?: string;
-    signingKeyName?: string;
-    hooks?: {
-        prepublishContract?: (msg: SPMessage) => void;
-        prepublish?: (msg: SPMessage) => Promise<void>;
-        postpublish?: (msg: SPMessage) => Promise<void>;
-    };
+    hooks?: OutgoingHooks;
     publishOptions?: PublishOptions;
     atomic: boolean;
 };
-export type ChelKeyUpdateParams = {
+export type ChelKeyUpdateParams = SigningKeyRef & {
     contractName: string;
     contractID: string;
     data: (SPKeyUpdate | EncryptedData<SPKeyUpdate> | MarkedKeyUpdateSpec)[] | KeyUpdateSpecMap;
-    signingKeyId?: string;
-    signingKeyName?: string;
-    hooks?: {
-        prepublishContract?: (msg: SPMessage) => void;
-        prepublish?: (msg: SPMessage) => Promise<void>;
-        postpublish?: (msg: SPMessage) => Promise<void>;
-    };
+    hooks?: OutgoingHooks;
     publishOptions?: PublishOptions;
     atomic: boolean;
 };
@@ -132,27 +143,15 @@ export type ChelKeyShareParams = {
     signingKeyId?: string;
     signingKeyName?: string;
     signingKey?: Key;
-    hooks?: {
-        prepublishContract?: (msg: SPMessage) => void;
-        prepublish?: (msg: SPMessage) => Promise<void>;
-        postpublish?: (msg: SPMessage) => Promise<void>;
-    };
+    hooks?: OutgoingHooks;
     publishOptions?: PublishOptions;
     atomic: boolean;
 };
-export type ChelKeyRequestParams = {
+export type ChelKeyRequestParams = SigningKeyRef & InnerSigningKeyRef & EncryptionKeyRef & InnerEncryptionKeyRef & {
     originatingContractID: string;
     originatingContractName: string;
     contractName: string;
     contractID: string;
-    signingKeyId?: string;
-    signingKeyName?: string;
-    innerSigningKeyId?: string;
-    innerSigningKeyName?: string;
-    encryptionKeyId?: string;
-    encryptionKeyName?: string;
-    innerEncryptionKeyId?: string;
-    innerEncryptionKeyName?: string;
     encryptKeyRequestMetadata?: boolean;
     permissions?: '*' | string[];
     allowedActions?: '*' | string[];
@@ -160,39 +159,23 @@ export type ChelKeyRequestParams = {
     request?: string;
     keyRequestResponseId?: string;
     skipInviteAccounting?: boolean;
-    hooks?: {
-        prepublishContract?: (msg: SPMessage) => void;
-        prepublish?: (msg: SPMessage) => Promise<void>;
-        postpublish?: (msg: SPMessage) => Promise<void>;
-    };
+    hooks?: OutgoingHooks;
     publishOptions?: PublishOptions;
     atomic: boolean;
 };
-export type ChelKeyRequestResponseParams = {
+export type ChelKeyRequestResponseParams = SigningKeyRef & {
     contractName: string;
     contractID: string;
     data: SPOpKeyRequestSeen;
-    signingKeyId?: string;
-    signingKeyName?: string;
-    hooks?: {
-        prepublishContract?: (msg: SPMessage) => void;
-        prepublish?: (msg: SPMessage) => Promise<void>;
-        postpublish?: (msg: SPMessage) => Promise<void>;
-    };
+    hooks?: OutgoingHooks;
     publishOptions?: PublishOptions;
     atomic: boolean;
 };
-export type ChelAtomicParams = {
+export type ChelAtomicParams = SigningKeyRef & {
     contractName: string;
     contractID: string;
-    signingKeyId?: string;
-    signingKeyName?: string;
     data: AtomicInvocation[];
-    hooks?: {
-        prepublishContract?: (msg: SPMessage) => void;
-        prepublish?: (msg: SPMessage) => Promise<void>;
-        postpublish?: (msg: SPMessage) => Promise<void>;
-    };
+    hooks?: OutgoingHooks;
     publishOptions?: PublishOptions;
 };
 export type ChelShareKeysParams = {

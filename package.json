@@ -274,6 +274,7 @@
     "build:cjs": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' buildHelper.ts cjs",
     "build": "npm run build:esm && npm run build:cjs",
     "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "clean": "rm -f dist/*"
   },
   "repository": {

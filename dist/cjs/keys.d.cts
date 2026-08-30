@@ -1,7 +1,7 @@
 import type { Key } from '@chelonia/crypto';
 import type { SPKey, SPKeyMeta, SPKeyPurpose, SPKeyType, SPOpKeyUpdate } from './SPMessage.cjs';
 import type { ChelContractState, CheloniaContext } from './types.cjs';
-import type { ChelActionParams, ChelKeyAddParams, ChelKeyDelParams, ChelKeyRequestResponseParams, ChelKeyShareParams, ChelKeyUpdateParams, ChelShareKeysParams } from './chelonia.cjs';
+import type { ChelActionParams, ChelKeyAddParams, ChelKeyDelParams, ChelKeyRequestResponseParams, ChelKeyShareParams, ChelKeyUpdateParams, ChelShareKeysParams, NestedInvocationParams } from './chelonia.cjs';
 export type KeySpecWrapTarget = string | {
     contractID: string;
     name: string;
@@ -68,7 +68,10 @@ export type KeyUpdateExpansionResult = {
     updates: SPOpKeyUpdate;
     newKeys: RotationKeyMap;
 };
-export type AtomicInvocation = ['chelonia/out/actionEncrypted', ChelActionParams] | ['chelonia/out/actionUnencrypted', ChelActionParams] | ['chelonia/out/keyAdd', ChelKeyAddParams] | ['chelonia/out/keyDel', ChelKeyDelParams] | ['chelonia/out/keyUpdate', ChelKeyUpdateParams] | ['chelonia/out/keyRequestResponse', ChelKeyRequestResponseParams] | ['chelonia/out/keyShare', ChelKeyShareParams] | ['chelonia/out/shareKeys', ChelShareKeysParams];
+export type AtomicInvocation = ['chelonia/out/actionEncrypted', NestedInvocationParams<ChelActionParams>] | ['chelonia/out/actionUnencrypted', NestedInvocationParams<ChelActionParams>] | ['chelonia/out/keyAdd', NestedInvocationParams<ChelKeyAddParams>] | ['chelonia/out/keyDel', NestedInvocationParams<ChelKeyDelParams>] | ['chelonia/out/keyUpdate', NestedInvocationParams<ChelKeyUpdateParams>] | [
+    'chelonia/out/keyRequestResponse',
+    NestedInvocationParams<ChelKeyRequestResponseParams>
+] | ['chelonia/out/keyShare', NestedInvocationParams<ChelKeyShareParams>] | ['chelonia/out/shareKeys', NestedInvocationParams<ChelShareKeysParams>];
 export declare const keySpec: (alias: string, spec?: KeySpec) => MarkedKeySpec;
 export declare const isKeySpec: (value: unknown) => value is MarkedKeySpec;
 export declare const keyUpdateSpec: (alias: string, spec?: KeyUpdateSpec) => MarkedKeyUpdateSpec;

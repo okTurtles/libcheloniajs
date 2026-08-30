@@ -3,7 +3,7 @@
 //
 // This module layers a spec-driven vocabulary on top of the existing
 // `chelonia/out/*` key operations without changing the Shelter wire format
-// (see docs/specs/KEYS-API.md and docs/specs/KEYS-API-IMPLEMENTATION.md).
+// (see docs/keys.md for the guide).
 //
 // Everything in the first half of this file (types, markers, normalization,
 // `expandKeySpecs`, `expandKeyUpdateSpecs`, reference resolution) is pure
@@ -115,6 +115,13 @@ const normalizeSpecs = (input, isMarked, kind) => {
         if (!alias) {
             throw new errors_js_1.ChelErrorKeySpecInvalid(`Empty ${kind.noun} alias`);
         }
+        // Without this, a `null` / `undefined` entry (easy to produce from a
+        // conditional in an object literal) would reach field access during
+        // expansion and surface as a bare 'cannot read properties of undefined'
+        // instead of one of the pointed errors this API otherwise produces.
+        if (spec == null || typeof spec !== 'object') {
+            throw new errors_js_1.ChelErrorKeySpecInvalid(`${kind.paramName}: '${alias}' must be a ${kind.noun} object`);
+        }
         // Object input cannot yield duplicate aliases, so this only ever fires
         // for the array form. Applied to both so they behave identically.
         if (seen.has(alias)) {
@@ -160,7 +167,8 @@ const normalizeKeyUpdateSpecs = (input) => normalizeSpecs(input, exports.isKeyUp
 });
 exports.normalizeKeyUpdateSpecs = normalizeKeyUpdateSpecs;
 // ---------------------------------------------------------------------------
-// Key-reference resolution (§2.7 of the implementation plan)
+// Key-reference resolution: every `*KeyId` parameter has a `*KeyName` twin,
+// and at least one of each pair is required (see docs/keys.md).
 // ---------------------------------------------------------------------------
 const findGeneratedKeyByAliasOrName = (keyMap, name, label) => {
     // Wire name first, so that a name resolves to the same key here as it does
@@ -471,10 +479,12 @@ const expandKeySpecs = (params) => {
             // rotation contexts).
             if (context?.contractID != null) {
                 const state = context.contractState ?? getContractState?.(context.contractID);
-                const wrapperId = state && (0, utils_js_1.findKeyIdByName)(state, wrapWith);
-                if (wrapperId && state) {
-                    assertEncPurpose(state._vm?.authorizedKeys?.[wrapperId], wrapWith);
-                    return { kind: 'contract', contractID: context.contractID, keyId: wrapperId };
+                if (state) {
+                    const wrapperId = (0, utils_js_1.findKeyIdByName)(state, wrapWith);
+                    if (wrapperId != null) {
+                        assertEncPurpose(state._vm?.authorizedKeys?.[wrapperId], wrapWith);
+                        return { kind: 'contract', contractID: context.contractID, keyId: wrapperId };
+                    }
                 }
             }
             throw new errors_js_1.ChelErrorKeyNameNotFound(`Key spec '${alias}': encryptWith references '${wrapWith}', which is ` +
@@ -914,7 +924,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         return keyMap;
     },
     // Generic key rotation, promoted from Group Income's rotateKeysInternal.
-    // See docs/keys.md and docs/specs/KEYS-API-IMPLEMENTATION.md §10.3.
+    // See docs/keys.md.
     'chelonia/key/rotate': async function (params) {
         const { contractID, contractName, names, additionalOperations } = params;
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
@@ -966,9 +976,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             ? (0, exports.resolveStateKeyReference)(state, params.signingKeyId ?? null, params.signingKeyName ?? null, 'chelonia/key/rotate signingKey')
             : undefined;
         if (signingKeyId == null) {
-            // KEYS-API.md §4.6 step 4: sign at the minimum ringLevel of the rotated
-            // set so the OP_KEY_UPDATE passes validateKeyAddPermissions for every
-            // rotated key.
+            // Sign at the minimum ringLevel of the rotated set so the
+            // OP_KEY_UPDATE passes validateKeyAddPermissions for every rotated key.
             const minRingLevel = Math.min(...selected.map((k) => k.ringLevel));
             signingKeyId = (0, utils_js_1.findSuitableSecretKeyId)(state, usesAdditionalOps
                 ? [SPMessage_js_1.SPMessage.OP_ATOMIC, SPMessage_js_1.SPMessage.OP_KEY_UPDATE]

@@ -116,6 +116,27 @@ describe('keys: markers and normalization', () => {
       ChelErrorKeySpecInvalid
     )
   })
+
+  it('rejects non-object spec values with a pointed error', () => {
+    // A conditional inside an object literal easily yields `undefined`; that
+    // must fail here rather than during field access in the expansion.
+    for (const bad of [undefined, null, 'csk', 42]) {
+      assert.throws(
+        () => normalizeKeySpecs({ csk: bad as never }),
+        {
+          constructor: ChelErrorKeySpecInvalid,
+          message: /keys: 'csk' must be a key spec object/
+        }
+      )
+      assert.throws(
+        () => normalizeKeyUpdateSpecs({ csk: bad as never }),
+        {
+          constructor: ChelErrorKeySpecInvalid,
+          message: /updates: 'csk' must be a key update spec object/
+        }
+      )
+    }
+  })
 })
 
 describe('keys: expandKeySpecs defaults and conventions', () => {
@@ -213,9 +234,9 @@ describe('keys: expandKeySpecs defaults and conventions', () => {
     })
     assert.notStrictEqual(two.a.name, two.b.name)
 
-    // Array form has the same expressiveness (plan §2.2): the alias is a
-    // label, the spec's `name` is the wire name, and multiple `#inviteKey`
-    // entries are allowed.
+    // Array form has the same expressiveness as the object form: the alias
+    // is a label, the spec's `name` is the wire name, and multiple
+    // `#inviteKey` entries are allowed.
     const arrayForm = expandKeySpecs({
       keys: [
         keySpec('creatorInvite', { name: '#inviteKey', quantity: 1 }),

@@ -1860,8 +1860,8 @@ export default sbp('sbp/selectors/register', {
             const destEncryptionKeyId = (encryptionKeyId != null || encryptionKeyName != null
                 ? resolveStateKeyReference(destState, encryptionKeyId ?? null, encryptionKeyName ?? null, 'encryptionKey')
                 : resolveStateKeyReference(destState, null, 'cek', 'encryptionKey'));
-            // Destination signing key: explicit id/name (validated as a pair,
-            // §2.7), or auto-select a suitable key with OP_KEY_SHARE permission.
+            // Destination signing key: explicit id/name (validated as a pair), or
+            // auto-select a suitable key with OP_KEY_SHARE permission.
             // This is a key *id*; `signingKey` is reserved for raw `Key` objects.
             let resolvedSigningKeyId = signingKeyId != null || signingKeyName != null
                 ? resolveStateKeyReference(destState, signingKeyId ?? null, signingKeyName ?? null, 'signingKey')
@@ -2173,8 +2173,11 @@ export default sbp('sbp/selectors/register', {
                 const keyRequestReplyKeyId = keyId(keyRequestReplyKey);
                 const keyRequestReplyKeyP = serializeKey(keyRequestReplyKey, false);
                 keyRequestReplyKeyS = serializeKey(keyRequestReplyKey, true);
-                const signingKeyId = findSuitableSecretKeyId(originatingState, [SPMessage.OP_KEY_ADD], ['sig']);
-                if (!signingKeyId) {
+                // The originating contract's OP_KEY_ADD signing key, which is a
+                // different key from the destination contract's OP_KEY_REQUEST
+                // signing key resolved at selector entry.
+                const keyAddSigningKeyId = findSuitableSecretKeyId(originatingState, [SPMessage.OP_KEY_ADD], ['sig']);
+                if (!keyAddSigningKeyId) {
                     throw new ChelErrorUnexpected(`Unable to send key request. Originating contract is missing a key with OP_KEY_ADD permission. contractID=${contractID} originatingContractID=${originatingContractID}`);
                 }
                 keyAddOp = () => sbp('chelonia/out/keyAdd', {
@@ -2211,7 +2214,7 @@ export default sbp('sbp/selectors/register', {
                             data: keyRequestReplyKeyP
                         }
                     ],
-                    signingKeyId
+                    signingKeyId: keyAddSigningKeyId
                 }).catch((e) => {
                     console.error(`[chelonia] Error sending OP_KEY_ADD for ${originatingContractID} during key request to ${contractID}`, e);
                     throw e;
@@ -2307,7 +2310,7 @@ export default sbp('sbp/selectors/register', {
             // Only shared operation context is passed down. Each nested
             // invocation keeps its own key references untouched: outer key
             // references are never mixed with nested ones (a cross-bred
-            // id/name pair would fail §2.7 pair validation in the nested
+            // id/name pair would fail pair validation in the nested
             // selector). Signer-less nested operations inherit the outer
             // signing reference, preserving the legacy inheritance behavior.
             // Nested operations keep their own originating-contract context:
@@ -2326,21 +2329,21 @@ export default sbp('sbp/selectors/register', {
             // batch contract is expressible (`contractID` equal to the batch
             // contract, with `subjectContractID`/`originatingContractID`
             // pointing elsewhere), sharing them *out of* it is not.
-            if (op.contractID != null && op.contractID !== params.contractID) {
-                throw new TypeError(`Nested ${selector} in OP_ATOMIC targets contract ` +
-                    `${String(op.contractID)}, but every operation in an OP_ATOMIC ` +
-                    'must target the contract the batch is published to ' +
-                    `(${params.contractID})`);
-            }
-            if (op.contractName != null && op.contractName !== params.contractName) {
-                throw new TypeError(`Nested ${selector} in OP_ATOMIC targets contract name ` +
-                    `${String(op.contractName)}, but every operation in an OP_ATOMIC ` +
-                    'must target the contract the batch is published to ' +
-                    `(${params.contractName})`);
-            }
+            const assertBatchTarget = (field) => {
+                const nested = op[field];
+                if (nested != null && nested !== params[field]) {
+                    throw new TypeError(`Nested ${selector} in OP_ATOMIC targets ${field} ` +
+                        `${String(nested)}, but every operation in an OP_ATOMIC ` +
+                        'must target the contract the batch is published to ' +
+                        `(${String(params[field])})`);
+                }
+            };
+            assertBatchTarget('contractID');
+            assertBatchTarget('contractName');
+            // No `hooks` / `publishOptions`: nested operations are invoked with
+            // `atomic: true` and never publish, so only the outer message's
+            // hooks and publish options are ever used.
             return sbp(selector, {
-                hooks: params.hooks,
-                publishOptions: params.publishOptions,
                 ...(!hasOwnSigner && {
                     ...(params.signingKeyId != null && { signingKeyId: params.signingKeyId }),
                     ...(params.signingKeyName != null && { signingKeyName: params.signingKeyName })
@@ -2732,7 +2735,7 @@ const isSpecRegistration = (params) => {
 const expandRegistrationKeys = async function (params) {
     let keys = params.keys;
     if (params.autoSak) {
-        // Plan §2.6: when enabled, autoSak requires an explicit wrapper. The
+        // When enabled, autoSak requires an explicit wrapper. The
         // type says so, but JS callers bypass types — enforce it at runtime so a
         // malformed opt-in fails loudly instead of silently generating an
         // unrecoverable server-accounting key (no `meta.private.content`).
