@@ -20,36 +20,25 @@
 //
 // Each block below is separated by a blank line; the comment above
 // each block records the constraint that pins its placement.
-
 // Pure-unit tests that do not load chelonia.ts. Safe to run first.
-import './encryptedData.test.js'
-
+import './encryptedData.test.mjs';
 // MUST run before journal-integration.test.ts: registers stub
 // `chelonia/contract/fullState` and exercises
 // `chelonia/externalStateSetup`, both of which require the `chelonia`
 // SBP domain to be unlocked.
-import './local-selectors/index.test.js'
-
+import './local-selectors/index.test.mjs';
 // Journal unit tests — pull in journal.ts but not chelonia.ts.
-import './journal.test.js'
-
-// Key API unit tests — pure, must run before anything that locks the
-// chelonia SBP domain (keys.test.js asserts expansion purity, which
-// requires an unlocked environment).
-import './keys.test.js'
-
+import './journal.test.mjs';
 // First test that imports `./chelonia.js` (transitively locks the
 // `chelonia` SBP domain). Everything after this point cannot register
 // `chelonia/*` selectors.
-import './journal-integration.test.js'
-import './chelonia-kv-set.test.js'
-
+import './journal-integration.test.mjs';
+import './chelonia-kv-set.test.mjs';
 // Depends on `chelonia.js` being loaded (locked domain), same as the
 // tests above.
-import './name-lookup.test.js'
-
-import './persistent-actions.test.js'
-import './pubsub/index.test.js'
-import './reingestTracker.test.js'
-import './reingestTracker-integration.test.js'
-import './utils.test.js'
+import './name-lookup.test.mjs';
+import './persistent-actions.test.mjs';
+import './pubsub/index.test.mjs';
+import './reingestTracker.test.mjs';
+import './reingestTracker-integration.test.mjs';
+import './utils.test.mjs';

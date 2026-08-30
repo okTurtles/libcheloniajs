@@ -108,6 +108,7 @@ All publish to the relay via `chelonia/private/out/publishEvent` once
 | `chelonia/out/deleteContract` | `src/chelonia.ts` | HTTP | Permanently delete one or more contracts (requires token or billable-contract id). |
 | `chelonia/out/fetchResource` | `src/chelonia.ts` | HTTP | Fetch a CID from `${connectionURL}/file/${cid}` and verify the CID hash before caching/returning it. Used by higher-level readers. |
 | `chelonia/out/latestHEADInfo` | `src/chelonia.ts` | HTTP | Latest known HEAD info for a contract, from the relay. |
+| `chelonia/out/nameToContractID` | `src/chelonia.ts` | HTTP | Resolve a registered name (e.g. a username) to a contract ID via `GET ${connectionURL}/name/:name`; resolves to `null` when there is no current mapping. See [Name registration and lookup](./contracts.md#name-registration-and-lookup). |
 | `chelonia/out/deserializedHEAD` | `src/chelonia.ts` | HTTP | Fetch and deserialize a single message hash. Asserts that it matches the expected contractID. |
 | `chelonia/out/eventsAfter` | `src/chelonia.ts` | HTTP | Stream events with `height >= sinceHeight` for a contract. |
 | `chelonia/out/eventsBefore` | `src/chelonia.ts` | HTTP | Stream the `limit` events ending at `beforeHeight`. |

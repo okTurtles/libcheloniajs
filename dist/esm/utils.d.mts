@@ -37,6 +37,7 @@ export declare const reactiveClearObject: <T extends object>(o: T, fn: (o: T, k:
 export declare const checkCanBeGarbageCollected: (this: CheloniaContext, id: string) => boolean;
 export declare const collectEventStream: <T>(s: ReadableStream<T>) => Promise<T[]>;
 export declare const logEvtError: (msg: SPMessage, ...args: unknown[]) => void;
+export declare const httpErrorMessage: (r: Response) => string;
 export declare const handleFetchResult: (type: "text" | "json" | "blob") => ((r: Response) => Promise<string | JSONType | Blob>);
 /**
  * Helper function to delete keys from the state and clear related pending revocations.

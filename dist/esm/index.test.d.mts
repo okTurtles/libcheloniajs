@@ -1,0 +1,11 @@
+import './encryptedData.test.mjs';
+import './local-selectors/index.test.mjs';
+import './journal.test.mjs';
+import './journal-integration.test.mjs';
+import './chelonia-kv-set.test.mjs';
+import './name-lookup.test.mjs';
+import './persistent-actions.test.mjs';
+import './pubsub/index.test.mjs';
+import './reingestTracker.test.mjs';
+import './reingestTracker-integration.test.mjs';
+import './utils.test.mjs';
