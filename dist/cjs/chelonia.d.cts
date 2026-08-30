@@ -183,8 +183,6 @@ export type ChelKeyRequestResponseParams = {
     atomic: boolean;
 };
 export type ChelAtomicParams = {
-    originatingContractID: string;
-    originatingContractName: string;
     contractName: string;
     contractID: string;
     signingKeyId?: string;

@@ -263,22 +263,69 @@ describe('keys integration', () => {
     })
 
     it('supports signing by final wire name and by id with matching names', async () => {
-      // Alias form is already covered above; exercise id+name pair.
+      // The alias form is covered above; this exercises id+name pairs. The
+      // specs reuse the pre-generated raw keys (`KeySpec.key`), so the ids are
+      // known before the call but the spec path is still used. A raw `spkey`
+      // array would take the legacy branch, which ignores all `*Name` fields.
+      const K = sbp('chelonia/key/generate', {
+        keys: identitySpecs()
+      }) as KeyMap
+      const specs = Object.fromEntries(
+        Object.entries(identitySpecs()).map(([alias, spec]) => [
+          alias,
+          { ...spec, key: K[alias].key }
+        ])
+      )
+      const msg = await sbp('chelonia/out/registerContract', {
+        contractName: CONTRACT_NAME,
+        signingKeyId: K.ipk.id,
+        signingKeyName: 'ipk',
+        actionSigningKeyName: 'csk',
+        actionEncryptionKeyName: 'pek',
+        keys: specs,
+        data: {}
+      }) as SPMessage
+      await applyRemote(msg.contractID())
+      const state = contractState(msg.contractID())
+      assert.strictEqual(state.initialized, true)
+      // Reusing the raw keys kept their ids, which proves the pair was really
+      // resolved against these keys
+      assert.ok(state._vm.authorizedKeys[K.ipk.id])
+      assert.ok(state._vm.authorizedKeys[K.csk.id])
+
+      // The pair is validated: a name that resolves to a different id fails
+      // before anything is published.
+      await assert.rejects(
+        () => sbp('chelonia/out/registerContract', {
+          contractName: CONTRACT_NAME,
+          signingKeyId: K.ipk.id,
+          signingKeyName: 'csk',
+          actionSigningKeyName: 'csk',
+          keys: specs,
+          data: {}
+        }),
+        ChelErrorKeyNameNotFound
+      )
+    })
+
+    it('ignores name references in the legacy raw-array form', async () => {
+      // Raw `SPKey` arrays are unmarked, so `isSpecRegistration` takes the
+      // legacy branch and silently ignores `*Name` fields. This test pins that
+      // behaviour: it is why the test above must use the spec form.
       const K = sbp('chelonia/key/generate', {
         keys: identitySpecs()
       }) as KeyMap
       const msg = await sbp('chelonia/out/registerContract', {
         contractName: CONTRACT_NAME,
         signingKeyId: K.ipk.id,
-        signingKeyName: 'ipk',
-        actionSigningKeyName: 'csk',
-        actionEncryptionKeyName: null,
+        signingKeyName: 'not-a-key-name',
+        actionSigningKeyId: K.csk.id,
+        actionSigningKeyName: 'also-not-a-key-name',
         keys: Object.values(K).map((k) => k.spkey),
         data: {}
       }) as SPMessage
       await applyRemote(msg.contractID())
-      const state = contractState(msg.contractID())
-      assert.strictEqual(state.initialized, true)
+      assert.strictEqual(contractState(msg.contractID()).initialized, true)
     })
 
     it('rejects id/name mismatches before publishing', async () => {
@@ -1006,6 +1053,93 @@ describe('keys integration', () => {
       assert.ok(sharedIds.includes(subjectCskId))
     })
 
+    it('rejects when a selected key\'s secret is missing locally', async () => {
+      const subject = await registerIdentity()
+      const subjectID = subject.contractID()
+      const dest = await registerIdentity()
+      const destID = dest.contractID()
+      const csk = Object.values(contractState(subjectID)._vm.authorizedKeys)
+        .find((k) => k.name === 'csk')!
+
+      // Remove the secret from both places the transient-key proxy reads
+      sbp('chelonia/clearTransientSecretKeys', [csk.id])
+      delete rootState().secretKeys[csk.id]
+      assert.strictEqual(sbp('chelonia/haveSecretKey', csk.id), false)
+
+      const eventsBefore = fixture.eventsByContract().get(destID)!.length
+      await assert.rejects(
+        () => sbp('chelonia/out/shareKeys', {
+          contractID: destID,
+          contractName: CONTRACT_NAME,
+          subjectContractID: subjectID,
+          keyNames: ['csk']
+        }),
+        /missing secret for key/
+      )
+      assert.strictEqual(
+        fixture.eventsByContract().get(destID)!.length,
+        eventsBefore
+      )
+    })
+
+    it('publishes nothing when the selection is empty', async () => {
+      const subject = await registerIdentity()
+      const subjectID = subject.contractID()
+      const dest = await registerIdentity()
+      const destID = dest.contractID()
+      const eventsBefore = fixture.eventsByContract().get(destID)!.length
+
+      for (const selector of [{ keyNames: [] }, { keyIds: [] }]) {
+        const msg = await sbp('chelonia/out/shareKeys', {
+          contractID: destID,
+          contractName: CONTRACT_NAME,
+          subjectContractID: subjectID,
+          ...selector
+        })
+        assert.strictEqual(msg, undefined)
+      }
+      assert.strictEqual(
+        fixture.eventsByContract().get(destID)!.length,
+        eventsBefore
+      )
+      await applyRemote(destID)
+      assert.strictEqual(contractState(destID)._vm.sharedKeyIds, undefined)
+    })
+
+    it("publishes nothing when '*' matches no recoverable key", async () => {
+      // A subject with only wrapper-less keys: nothing is selectable.
+      const subject = await registerIdentity({
+        keys: {
+          ipk: {
+            purpose: ['sig' as const],
+            ringLevel: 0,
+            permissions: '*',
+            allowedActions: '*',
+            transient: true
+          }
+        },
+        signingKeyName: 'ipk',
+        actionSigningKeyName: 'ipk',
+        actionEncryptionKeyName: null
+      })
+      const subjectID = subject.contractID()
+      const dest = await registerIdentity()
+      const destID = dest.contractID()
+      const eventsBefore = fixture.eventsByContract().get(destID)!.length
+
+      const msg = await sbp('chelonia/out/shareKeys', {
+        contractID: destID,
+        contractName: CONTRACT_NAME,
+        subjectContractID: subjectID,
+        keyNames: '*'
+      })
+      assert.strictEqual(msg, undefined)
+      assert.strictEqual(
+        fixture.eventsByContract().get(destID)!.length,
+        eventsBefore
+      )
+    })
+
     it("keyNames: '*' selects only active recoverable keys", async () => {
       const subject = await registerIdentity()
       const subjectID = subject.contractID()
@@ -1021,9 +1155,16 @@ describe('keys integration', () => {
       assert.ok(msg)
       await applyRemote(destID)
       const destState = contractState(destID)
-      // ipk/iek are transient but recoverable (present transiently) so they
-      // are shareable; all shared keys are active with content
-      assert.ok((destState._vm.sharedKeyIds?.length ?? 0) > 0)
+      // ipk/iek have no wrapper (no `meta.private.content`), so '*' skips
+      // them even though their secrets exist transiently.
+      const subjectState = contractState(subjectID)
+      const nameById = Object.fromEntries(
+        Object.values(subjectState._vm.authorizedKeys).map((k) => [k.id, k.name])
+      )
+      const sharedNames = (destState._vm.sharedKeyIds ?? [])
+        .map((s) => nameById[s.id])
+        .sort()
+      assert.deepStrictEqual(sharedNames, ['#sak', 'cek', 'csk', 'pek'])
     })
 
     it('shares transient-only subject keys', async () => {
@@ -1419,6 +1560,55 @@ describe('keys integration', () => {
         .find((k) => k.name === '#sak' && k._notAfterHeight == null)!
       assert.ok(sak.purpose.length === 1 && sak.purpose[0] === 'sak')
       assert.ok(sbp('chelonia/haveSecretKey', sak.id, true))
+    })
+
+    it('rejects rotating a wrapper-less key that would lose its secret', async () => {
+      const reg = await registerIdentity()
+      const contractID = reg.contractID()
+      // Add a key without `encryptWith`: its secret is never wrapped, so a
+      // replacement could not be recovered after reload.
+      await sbp('chelonia/out/keyAdd', {
+        contractID,
+        contractName: CONTRACT_NAME,
+        signingKeyName: 'csk',
+        data: {
+          bare: { purpose: ['sig'], ringLevel: 2, permissions: [] }
+        }
+      })
+      await applyRemote(contractID)
+      const bare = Object.values(contractState(contractID)._vm.authorizedKeys)
+        .find((k) => k.name === 'bare')!
+      assert.strictEqual(bare.meta?.private?.content, undefined)
+
+      const eventsBefore = fixture.eventsByContract().get(contractID)!.length
+      await assert.rejects(
+        () => sbp('chelonia/out/keyUpdate', {
+          contractID,
+          contractName: CONTRACT_NAME,
+          signingKeyName: 'ipk',
+          data: { bare: { oldKeyName: 'bare', rotate: true } }
+        }),
+        ChelErrorKeySpecInvalid
+      )
+      // Nothing is published: expansion fails before the message is created
+      assert.strictEqual(
+        fixture.eventsByContract().get(contractID)!.length,
+        eventsBefore
+      )
+
+      // With `transient: true`, the same rotation is valid
+      const msg = (await sbp('chelonia/out/keyUpdate', {
+        contractID,
+        contractName: CONTRACT_NAME,
+        signingKeyName: 'ipk',
+        data: { bare: { oldKeyName: 'bare', rotate: true, transient: true } }
+      })) as SPMessage
+      assert.strictEqual(msg.opType(), SPMessage.OP_KEY_UPDATE)
+      await applyRemote(contractID)
+      const rotated = Object.values(contractState(contractID)._vm.authorizedKeys)
+        .find((k) => k.name === 'bare' && k._notAfterHeight == null)!
+      assert.notStrictEqual(rotated.id, bare.id)
+      assert.strictEqual(rotated.meta?.private?.content, undefined)
     })
 
     it('policy-only update specs augment permissions without replacing keys', async () => {

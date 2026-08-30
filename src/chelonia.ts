@@ -135,10 +135,10 @@ type OutgoingHooks = {
   postpublish?: (msg: SPMessage) => Promise<void> | void;
 };
 
-// An id-or-name key reference. At most one is resolved against the relevant
-// contract state (or the generated `KeyMap` at registration time): exactly
-// one is required unless noted; when both are given they must agree
-// (a mismatch is almost certainly a stale key or a programming bug).
+// Key references by id or name, resolved against the contract state (or the
+// generated `KeyMap` at registration time). At least one of the pair is
+// required unless noted. When both are given, the name is resolved and must
+// match the id. A mismatch usually means a stale key or a bug.
 export type RegistrationKeyReferences = {
   signingKeyId?: string;
   signingKeyName?: string;
@@ -364,8 +364,6 @@ export type ChelKeyRequestResponseParams = {
 };
 
 export type ChelAtomicParams = {
-  originatingContractID: string;
-  originatingContractName: string;
   contractName: string;
   contractID: string;
   // An id-or-name pair (§2.7): at least one is required; when both are
@@ -2336,13 +2334,13 @@ export default sbp('sbp/selectors/register', {
         specParams.signingKeyId ?? null,
         specParams.signingKeyName ?? null,
         'signingKey'
-      )! as string
+      )!
       actionSigningKeyId = resolveGeneratedKeyReference(
         keyMap,
         specParams.actionSigningKeyId ?? null,
         specParams.actionSigningKeyName ?? null,
         'actionSigningKey'
-      )! as string
+      )!
       actionEncryptionKeyId = specParams.actionEncryptionKeyId != null ||
         specParams.actionEncryptionKeyName != null
         ? resolveGeneratedKeyReference(
@@ -2526,13 +2524,14 @@ export default sbp('sbp/selectors/register', {
 
     const payload = data as SPOpKeyShare
 
+    // Resolution is optional here because the caller may pass a raw
+    // `signingKey` instead.
     const hasExplicitSigner = params.signingKeyId != null || params.signingKeyName != null
     const signingKeyId = hasExplicitSigner
-      ? resolveKeyIdOrName.call(
+      ? resolveRef.call(
         this,
         contractID,
-        params.signingKeyId ?? null,
-        params.signingKeyName ?? null,
+        { id: params.signingKeyId, name: params.signingKeyName },
         'signingKey',
         false
       ) as string | undefined
@@ -2673,16 +2672,13 @@ export default sbp('sbp/selectors/register', {
         selected = activeKeys
       }
 
+      // Nothing selected, so do not publish an empty OP_KEY_SHARE. Same rule
+      // as the `payload.length === 0` guard in `chelonia/out/keyAdd`.
+      if (selected.length === 0) return
+
       const sharedKeys: SPKey[] = selected.map((k) => {
-        // Availability through the canonical primitive; retrieval through
-        // the transient-key proxy, which falls back to persistent storage
-        // (transient-only secrets are covered in both directions).
-        if (!sbp('chelonia/haveSecretKey', k.id)) {
-          throw new Error(
-            `chelonia/out/shareKeys: missing secret for key ${k.id} (${k.name}) in ` +
-              subjectContractID
-          )
-        }
+        // The transient-key proxy falls back to persistent `secretKeys`, so
+        // this one lookup covers both transient-only and persisted secrets.
         const rawKey = this.transientSecretKeys[k.id]
         if (!rawKey) {
           throw new Error(
@@ -2751,11 +2747,10 @@ export default sbp('sbp/selectors/register', {
     }
     const state = contract.state(contractID)
 
-    const signingKeyId = resolveKeyIdOrName.call(
+    const signingKeyId = resolveRef.call(
       this,
       contractID,
-      params.signingKeyId ?? null,
-      params.signingKeyName ?? null,
+      { id: params.signingKeyId, name: params.signingKeyName },
       'signingKey'
     ) as string
 
@@ -2829,11 +2824,10 @@ export default sbp('sbp/selectors/register', {
       throw new Error('Contract name not found')
     }
     const state = contract.state(contractID)
-    const signingKeyId = resolveKeyIdOrName.call(
+    const signingKeyId = resolveRef.call(
       this,
       contractID,
-      params.signingKeyId ?? null,
-      params.signingKeyName ?? null,
+      { id: params.signingKeyId, name: params.signingKeyName },
       'signingKey'
     ) as string
     const payload = (data as SPOpKeyDel)
@@ -2883,11 +2877,10 @@ export default sbp('sbp/selectors/register', {
       throw new Error('Contract name not found')
     }
     const state = contract.state(contractID)
-    const signingKeyId = resolveKeyIdOrName.call(
+    const signingKeyId = resolveRef.call(
       this,
       contractID,
-      params.signingKeyId ?? null,
-      params.signingKeyName ?? null,
+      { id: params.signingKeyId, name: params.signingKeyName },
       'signingKey'
     ) as string
 
@@ -2989,32 +2982,31 @@ export default sbp('sbp/selectors/register', {
       //   outer signing + inner encryption keys live in the DESTINATION
       //   contract; inner signing + encryption keys live in the ORIGINATING
       //   contract.
-      const signingKeyId = resolveKeyIdOrName.call(
+      // Deliberately not using `resolveMessageKeyRefs`: it resolves the whole
+      // trio against one contract, but here the inner signing and encryption
+      // keys belong to the originating contract.
+      const signingKeyId = resolveRef.call(
         this,
         contractID,
-        params.signingKeyId ?? null,
-        params.signingKeyName ?? null,
+        { id: params.signingKeyId, name: params.signingKeyName },
         'signingKey'
       ) as string
-      const innerSigningKeyId = resolveKeyIdOrName.call(
+      const innerSigningKeyId = resolveRef.call(
         this,
         originatingContractID,
-        params.innerSigningKeyId ?? null,
-        params.innerSigningKeyName ?? null,
+        { id: params.innerSigningKeyId, name: params.innerSigningKeyName },
         'innerSigningKey'
       ) as string
-      const encryptionKeyId = resolveKeyIdOrName.call(
+      const encryptionKeyId = resolveRef.call(
         this,
         originatingContractID,
-        params.encryptionKeyId ?? null,
-        params.encryptionKeyName ?? null,
+        { id: params.encryptionKeyId, name: params.encryptionKeyName },
         'encryptionKey'
       ) as string
-      const innerEncryptionKeyId = resolveKeyIdOrName.call(
+      const innerEncryptionKeyId = resolveRef.call(
         this,
         contractID,
-        params.innerEncryptionKeyId ?? null,
-        params.innerEncryptionKeyName ?? null,
+        { id: params.innerEncryptionKeyId, name: params.innerEncryptionKeyName },
         'innerEncryptionKey'
       ) as string
 
@@ -3178,11 +3170,10 @@ export default sbp('sbp/selectors/register', {
     if (!contract) {
       throw new Error('Contract name not found')
     }
-    const signingKeyId = resolveKeyIdOrName.call(
+    const signingKeyId = resolveRef.call(
       this,
       contractID,
-      params.signingKeyId ?? null,
-      params.signingKeyName ?? null,
+      { id: params.signingKeyId, name: params.signingKeyName },
       'signingKey'
     ) as string
     const payload = data
@@ -3216,11 +3207,10 @@ export default sbp('sbp/selectors/register', {
     }
     // The outer message's signing key. Nested invocations carry their own key
     // references and are never overwritten by this one.
-    const signingKeyId = resolveKeyIdOrName.call(
+    const signingKeyId = resolveRef.call(
       this,
       contractID,
-      params.signingKeyId ?? null,
-      params.signingKeyName ?? null,
+      { id: params.signingKeyId, name: params.signingKeyName },
       'signingKey'
     ) as string
     const payload = (
@@ -3246,6 +3236,9 @@ export default sbp('sbp/selectors/register', {
           // id/name pair would fail §2.7 pair validation in the nested
           // selector). Signer-less nested operations inherit the outer
           // signing reference, preserving the legacy inheritance behavior.
+          // Nested operations keep their own originating-contract context:
+          // `keyShare`/`shareKeys` pass it in their own params, and
+          // `...opParams` below preserves it. The outer batch does not use it.
           const op = opParams as Record<string, unknown>
           const hasOwnSigner =
             op.signingKeyId != null || op.signingKeyName != null || op.signingKey != null
@@ -3291,16 +3284,7 @@ export default sbp('sbp/selectors/register', {
   'chelonia/out/propDel': async function () {},
   'chelonia/out/encryptedOrUnencryptedPubMessage': function (
     this: CheloniaContext,
-    {
-      contractID,
-      innerSigningKeyId,
-      innerSigningKeyName,
-      encryptionKeyId,
-      encryptionKeyName,
-      signingKeyId,
-      signingKeyName,
-      data
-    }: {
+    params: {
       contractID: string;
       innerSigningKeyId?: string | null | undefined;
       innerSigningKeyName?: string | null | undefined;
@@ -3311,37 +3295,17 @@ export default sbp('sbp/selectors/register', {
       data: JSONType;
     }
   ) {
+    const { contractID, data } = params
     // Resolve name references once, at selector entry (same id/name rules as
     // every other outgoing selector); the lower-level message builder stays
     // id-based.
-    const resolvedSigningKeyId = resolveKeyIdOrName.call(
-      this,
-      contractID,
-      signingKeyId ?? null,
-      signingKeyName ?? null,
-      'signingKey'
-    ) as string
-    const resolvedInnerSigningKeyId = resolveKeyIdOrName.call(
-      this,
-      contractID,
-      innerSigningKeyId ?? null,
-      innerSigningKeyName ?? null,
-      'innerSigningKey',
-      false
-    )
-    const resolvedEncryptionKeyId = resolveKeyIdOrName.call(
-      this,
-      contractID,
-      encryptionKeyId ?? null,
-      encryptionKeyName ?? null,
-      'encryptionKey',
-      false
-    )
+    const { signingKeyId, innerSigningKeyId, encryptionKeyId } =
+      resolveMessageKeyRefs.call(this, contractID, params)
     const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
       contractID,
-      innerSigningKeyId: resolvedInnerSigningKeyId,
-      encryptionKeyId: resolvedEncryptionKeyId,
-      signingKeyId: resolvedSigningKeyId,
+      innerSigningKeyId,
+      encryptionKeyId,
+      signingKeyId,
       data
     })
     this.pubsub.pub(contractID, serializedData)
@@ -3756,21 +3720,60 @@ const expandRegistrationKeys = async function (
   return await sbp('chelonia/key/generate', { keys })
 }
 
-// Resolve an id/name pair against a contract's current state. Called at
-// selector entry; the resolved id is used for all downstream (id-based)
-// crypto primitives.
-const resolveKeyIdOrName = function (
+// An id/name pair, as used in outgoing selector params.
+type KeyRefPair = { id?: string | null; name?: string | null };
+
+// Resolve an id/name pair against the contract's current state. Called at
+// selector entry; everything downstream uses the resolved id.
+const resolveRef = function (
   this: CheloniaContext,
   contractID: string,
-  id: string | null | undefined,
-  name: string | null | undefined,
+  ref: KeyRefPair,
   label: string,
   required = true
 ): string | null | undefined {
   const state = (sbp(this.config.stateSelector) as ChelRootState)[contractID] as
     | ChelContractState
     | undefined
-  return resolveStateKeyReference(state, id, name, label, required)
+  return resolveStateKeyReference(state, ref.id ?? null, ref.name ?? null, label, required)
+}
+
+// Resolves the signing / inner-signing / encryption trio used by the action
+// and pub-message selectors. Only signing is required.
+const resolveMessageKeyRefs = function (
+  this: CheloniaContext,
+  contractID: string,
+  params: {
+    signingKeyId?: string | null;
+    signingKeyName?: string | null;
+    innerSigningKeyId?: string | null;
+    innerSigningKeyName?: string | null;
+    encryptionKeyId?: string | null;
+    encryptionKeyName?: string | null;
+  }
+) {
+  return {
+    signingKeyId: resolveRef.call(
+      this,
+      contractID,
+      { id: params.signingKeyId, name: params.signingKeyName },
+      'signingKey'
+    ) as string,
+    innerSigningKeyId: resolveRef.call(
+      this,
+      contractID,
+      { id: params.innerSigningKeyId, name: params.innerSigningKeyName },
+      'innerSigningKey',
+      false
+    ),
+    encryptionKeyId: resolveRef.call(
+      this,
+      contractID,
+      { id: params.encryptionKeyId, name: params.encryptionKeyName },
+      'encryptionKey',
+      false
+    )
+  }
 }
 
 function outputEncryptedOrUnencryptedMessage (
@@ -3959,29 +3962,8 @@ async function outEncryptedOrUnencryptedAction (
   const state = contract.state(contractID)
   // Resolve name references once, at selector entry; everything below is
   // id-based. The lower-level crypto primitives never see names.
-  const signingKeyId = resolveKeyIdOrName.call(
-    this,
-    contractID,
-    params.signingKeyId ?? null,
-    params.signingKeyName ?? null,
-    'signingKey'
-  ) as string
-  const innerSigningKeyId = resolveKeyIdOrName.call(
-    this,
-    contractID,
-    params.innerSigningKeyId ?? null,
-    params.innerSigningKeyName ?? null,
-    'innerSigningKey',
-    false
-  )
-  const encryptionKeyId = resolveKeyIdOrName.call(
-    this,
-    contractID,
-    params.encryptionKeyId ?? null,
-    params.encryptionKeyName ?? null,
-    'encryptionKey',
-    false
-  )
+  const { signingKeyId, innerSigningKeyId, encryptionKeyId } =
+    resolveMessageKeyRefs.call(this, contractID, params)
   const meta = await contract.metadata.create()
   const unencMessage = { action, data, meta } as SPOpActionUnencrypted
   const signedMessage = innerSigningKeyId

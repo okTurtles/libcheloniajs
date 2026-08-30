@@ -182,7 +182,7 @@ describe('keys: expandKeySpecs defaults and conventions', () => {
     )
   })
 
-  it('suffixed invite names and requires quantity', () => {
+  it('suffixes invite names and requires quantity', () => {
     const K = expandKeySpecs({
       keys: {
         generalInvite: {
@@ -538,9 +538,20 @@ describe('keys: update-spec expansion', () => {
   const wrapperKey = keygen(CURVE25519XSALSA20POLY1305)
   const cskKey = keygen(EDWARDS25519SHA512BATCH)
 
-  // Build a processed-looking contract state with a wrapped csk
+  // Build a contract state that looks like processed state: cek is wrapped
+  // under itself and csk is wrapped under cek. Like a real contract, every
+  // rotatable key has a recoverable `meta.private.content`.
   const buildState = (): ChelContractState => {
-    const cek = activeKey(wrapperKey, { name: 'cek', purpose: ['enc'] })
+    const cek = activeKey(wrapperKey, {
+      name: 'cek',
+      purpose: ['enc'],
+      meta: {
+        private: {
+          content: ['cek-self-wrapper-tuple', 'ciphertext']
+        }
+      }
+    })
+    ;(cek.meta!.private!.content as [string, string])[0] = keyId(wrapperKey)
     const csk = activeKey(cskKey, {
       name: 'csk',
       permissions: ['ae'],
@@ -654,6 +665,97 @@ describe('keys: update-spec expansion', () => {
     assert.strictEqual(u.meta!.private!.oldKeys, 'blob')
   })
 
+  it('rejects unrecoverable replacements for wrapper-less keys', () => {
+    // A key with no `meta.private.content`: its secret has no wrapper.
+    const bare = activeKey(keygen(EDWARDS25519SHA512BATCH), { name: 'bare' })
+    const state = stateWith([bare])
+
+    assert.throws(
+      () => expandKeyUpdateSpecs({
+        updates: { bare: { rotate: true } },
+        contractID: 'cid',
+        contractState: state
+      }),
+      (e: Error) =>
+        e instanceof ChelErrorKeySpecInvalid && /unrecoverable after reload/.test(e.message)
+    )
+
+    // `transient: true` opts out: the caller keeps the secret
+    const viaSpec = expandKeyUpdateSpecs({
+      updates: { bare: { rotate: true, transient: true } },
+      contractID: 'cid',
+      contractState: state
+    })
+    const uSpec = (viaSpec.updates as SPKeyUpdate[])[0]!
+    assert.ok(uSpec.id)
+    assert.ok(uSpec.data)
+    assert.strictEqual(uSpec.meta!.private!.transient, true)
+    assert.strictEqual(uSpec.meta!.private!.content, undefined)
+
+    // Already transient in contract state: no flag in the spec is needed
+    // (the shape of password-derived ipk/iek keys)
+    const transientKey = activeKey(keygen(EDWARDS25519SHA512BATCH), {
+      name: 'ipk',
+      meta: { private: { transient: true } }
+    })
+    const viaState = expandKeyUpdateSpecs({
+      updates: { ipk: { rotate: true } },
+      contractID: 'cid',
+      contractState: stateWith([transientKey])
+    })
+    assert.ok((viaState.updates as SPKeyUpdate[])[0]!.id)
+
+    // An explicit `encryptWith: { key }` wrapper also satisfies the rule
+    const wrapper = keygen(CURVE25519XSALSA20POLY1305)
+    const viaWrapper = expandKeyUpdateSpecs({
+      updates: { bare: { rotate: true, encryptWith: { key: wrapper } } },
+      contractID: 'cid',
+      contractState: state
+    })
+    const uWrapped = (viaWrapper.updates as SPKeyUpdate[])[0]!
+    const content = uWrapped.meta!.private!.content as unknown as {
+      serialize: (ad?: string) => [string, string]
+    }
+    assert.strictEqual(content.serialize('')[0], keyId(wrapper))
+
+    // Policy-only updates make no secret, so they are still allowed
+    const policyOnly = expandKeyUpdateSpecs({
+      updates: { bare: { permissions: ['ae'] } },
+      contractID: 'cid',
+      contractState: state
+    })
+    const uPolicy = (policyOnly.updates as SPKeyUpdate[])[0]!
+    assert.strictEqual(uPolicy.id, undefined)
+    assert.deepStrictEqual(uPolicy.permissions, ['ae'])
+  })
+
+  it('rejects rotation of keys with unusable wrapper metadata', () => {
+    // Content that is not a `[keyId, ciphertext]` tuple yields no wrapper id.
+    // Rotation must throw instead of emitting a replacement with an
+    // unrecoverable secret.
+    const badShape = activeKey(keygen(EDWARDS25519SHA512BATCH), {
+      name: 'badShape',
+      meta: { private: { content: { nope: true } as unknown as [string, string] } }
+    })
+    assert.throws(() => expandKeyUpdateSpecs({
+      updates: { badShape: { rotate: true } },
+      contractID: 'cid',
+      contractState: stateWith([badShape])
+    }))
+
+    // An empty wrapper id must also fail: encryption rejects an empty
+    // reference.
+    const emptyRef = activeKey(keygen(EDWARDS25519SHA512BATCH), {
+      name: 'emptyRef',
+      meta: { private: { content: ['', 'ciphertext'] } }
+    })
+    assert.throws(() => expandKeyUpdateSpecs({
+      updates: { emptyRef: { rotate: true } },
+      contractID: 'cid',
+      contractState: stateWith([emptyRef])
+    }))
+  })
+
   it('rejects missing/revoked old keys and name mismatches', () => {
     const state = buildState()
     assert.throws(
@@ -699,7 +801,13 @@ describe('keys: update-spec expansion', () => {
     const state = stateWith([invite])
     const { updates: rawUpdates, newKeys } = expandKeyUpdateSpecs({
       updates: [
-        keyUpdateSpec('creatorInvite', { oldKeyName: '#inviteKey-abc', rotate: true })
+        // Invite keys have no wrapper: the secret travels in the invite link,
+        // so the caller manages it (`transient`).
+        keyUpdateSpec('creatorInvite', {
+          oldKeyName: '#inviteKey-abc',
+          rotate: true,
+          transient: true
+        })
       ],
       contractID: 'cid',
       contractState: state
@@ -708,6 +816,9 @@ describe('keys: update-spec expansion', () => {
     assert.strictEqual(u.name, '#inviteKey-abc')
     assert.strictEqual(u.oldKeyId, invite.id)
     assert.ok(u.id)
+    // Wrapper-less by design: transient, no content
+    assert.strictEqual(u.meta!.private!.transient, true)
+    assert.strictEqual(u.meta!.private!.content, undefined)
     // RotationKeyMap is keyed by the existing wire name, not the alias
     assert.strictEqual(newKeys['#inviteKey-abc']!.id, u.id)
 
@@ -823,32 +934,40 @@ describe('keys: reference resolution', () => {
 describe('keys: purity', () => {
   it('makes no SBP calls during expansion', () => {
     const calls: string[] = []
+    // sbp cannot remove filters, so this one stays installed for the rest of
+    // the process. The flag disables it after this test; without it, `calls`
+    // would grow forever.
+    let recording = true
     sbp('sbp/filters/global/add', (_domain: string, selector: string) => {
-      calls.push(selector)
+      if (recording) calls.push(selector)
       return true
     })
-    expandKeySpecs({
-      keys: {
-        iek: { purpose: ['enc'], ringLevel: 0 },
-        csk: { purpose: ['sig'], ringLevel: 1, encryptWith: 'iek' }
-      }
-    })
-    expandKeyUpdateSpecs({
-      updates: {},
-      contractID: 'cid',
-      contractState: stateWith([])
-    })
-    // Serialize the lazy raw-key wrappers: encryption must not need SBP
-    // either. (By-id wrapping defers its state lookup to serialization time
-    // and is exercised in the integration tests instead.)
-    const K = expandKeySpecs({
-      keys: {
-        cek: { purpose: ['enc'], ringLevel: 0, encryptWith: 'cek' }
-      }
-    })
-    ;(K.cek.spkey.meta!.private!.content as unknown as {
-      serialize: (ad?: string) => [string, string]
-    }).serialize('')
+    try {
+      expandKeySpecs({
+        keys: {
+          iek: { purpose: ['enc'], ringLevel: 0 },
+          csk: { purpose: ['sig'], ringLevel: 1, encryptWith: 'iek' }
+        }
+      })
+      expandKeyUpdateSpecs({
+        updates: {},
+        contractID: 'cid',
+        contractState: stateWith([])
+      })
+      // Serialize the lazy raw-key wrappers: encryption must not need SBP
+      // either. (By-id wrapping defers its state lookup to serialization time
+      // and is exercised in the integration tests instead.)
+      const K = expandKeySpecs({
+        keys: {
+          cek: { purpose: ['enc'], ringLevel: 0, encryptWith: 'cek' }
+        }
+      })
+      ;(K.cek.spkey.meta!.private!.content as unknown as {
+        serialize: (ad?: string) => [string, string]
+      }).serialize('')
+    } finally {
+      recording = false
+    }
     assert.deepStrictEqual(calls, [])
   })
 })

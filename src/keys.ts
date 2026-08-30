@@ -328,6 +328,8 @@ export const normalizeKeySpecs = (input: KeySpecMap | MarkedKeySpec[]): Normaliz
       if (!alias) {
         throw new ChelErrorKeySpecInvalid('Empty key spec alias')
       }
+      // Object input cannot yield duplicate aliases, so this can never run.
+      // Kept so both branches run the same check.
       if (seen.has(alias)) {
         throw new ChelErrorKeySpecInvalid(`Duplicate key spec alias: ${alias}`)
       }
@@ -370,6 +372,7 @@ export const normalizeKeyUpdateSpecs = (
       if (!alias) {
         throw new ChelErrorKeySpecInvalid('Empty key update spec alias')
       }
+      // Unreachable for object input; see the note in `normalizeKeySpecs`.
       if (seen.has(alias)) {
         throw new ChelErrorKeySpecInvalid(`Duplicate key update spec alias: ${alias}`)
       }
@@ -637,6 +640,7 @@ export const expandKeySpecs = (params: {
             "so 'encryptWith' cannot be used"
         )
       }
+      const foreignType = deserializeTypeOf(spec.data, alias)
       const m: MaterializedSpec = {
         alias,
         spec,
@@ -644,8 +648,8 @@ export const expandKeySpecs = (params: {
         finalName: wireName,
         isSak: false,
         isInvite: false,
-        type: deserializeTypeOf(spec.data, alias),
-        purpose: spec.purpose ?? defaultPurposeForType(deserializeTypeOf(spec.data, alias)),
+        type: foreignType,
+        purpose: spec.purpose ?? defaultPurposeForType(foreignType),
         ringLevel: requireRingLevel(spec, alias, false, false),
         permissions: spec.permissions ?? [],
         allowedActions: spec.allowedActions ?? [],
@@ -1186,14 +1190,37 @@ export const expandKeyUpdateSpecs = (params: {
       if (shareable) priv.shareable = true
       else delete priv.shareable
 
+      let wrapped = false
       if (explicitRawWrapper != null) {
         priv.content = encryptedOutgoingDataWithRawKey(explicitRawWrapper, secret)
+        wrapped = true
       } else {
         const rotatingWrapper = wrapperId != null ? oldIdToNewKey.get(wrapperId) : undefined
         if (rotatingWrapper != null) {
           priv.content = encryptedOutgoingDataWithRawKey(rotatingWrapper, secret)
+          wrapped = true
         } else if (wrapperId != null) {
           priv.content = encryptedOutgoingData(contractID, wrapperId, secret)
+          wrapped = true
+        }
+      }
+      if (!wrapped) {
+        // No wrapper was applied, so any `content` copied from the existing
+        // key would encrypt the old secret. Drop it.
+        delete priv.content
+        // Without a wrapper the new secret lives only in transient storage.
+        // Nothing goes on-chain, and `keyAdditionProcessor` only persists
+        // secrets it can decrypt from `meta.private.content`, so the key
+        // would be lost after reload. Transient keys (password-derived
+        // roots, invite keys whose secret travels out of band) legitimately
+        // have no wrapper.
+        if (!transient) {
+          throw new ChelErrorKeySpecInvalid(
+            `Key update spec '${r.alias}': the existing key has no wrapped secret. A ` +
+              "replacement requires 'encryptWith: { key }', or the new secret becomes " +
+              "unrecoverable after reload. Set 'transient: true' if the secret is managed " +
+              'by the caller (e.g. an invite link).'
+          )
         }
       }
       if (Object.keys(priv).length > 0) mergedMeta!.private = priv
