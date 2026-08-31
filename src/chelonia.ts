@@ -2594,7 +2594,18 @@ export default sbp('sbp/selectors/register', {
     // Income's behavior for same-subject/destination calls).
     if (subjectContractID === contractID) return
 
-    return await sbp('chelonia/contract/withRetained', [contractID, subjectContractID], async () => {
+    // `chelonia/contract/retain` waits on each contract's event queue even
+    // when already subscribed, so retaining a contract whose lane we are
+    // already running on (a contract side effect, or a nested `atomic` entry
+    // built from one) would wait on ourselves. Contracts already loaded need
+    // no sync and every read below is synchronous.
+    const preState = sbp(this.config.stateSelector) as ChelRootState
+    const idsToRetain = [contractID, subjectContractID].filter((id) => {
+      const st = preState[id] as ChelContractState | undefined
+      return st?._vm?.authorizedKeys == null || st._volatile?.dirty === true
+    })
+
+    const run = async (): Promise<SPMessage | void> => {
       const rootState = sbp(this.config.stateSelector) as ChelRootState
       const destState = rootState[contractID] as ChelContractState | undefined
       const subjectState = rootState[subjectContractID] as ChelContractState | undefined
@@ -2732,7 +2743,11 @@ export default sbp('sbp/selectors/register', {
         publishOptions,
         atomic: !!atomic
       })
-    })
+    }
+
+    return idsToRetain.length > 0
+      ? await sbp('chelonia/contract/withRetained', idsToRetain, run)
+      : await run()
   },
   'chelonia/out/keyAdd': async function (
     this: CheloniaContext,
@@ -3228,8 +3243,6 @@ export default sbp('sbp/selectors/register', {
           // `keyShare`/`shareKeys` pass it in their own params. The outer
           // batch rejects one outright (checked at selector entry above).
           const op = opParams as Record<string, unknown>
-          const hasOwnSigner =
-            op.signingKeyId != null || op.signingKeyName != null || op.signingKey != null
           // An OP_ATOMIC is a single message on a single contract, and every
           // nested operation is applied to that contract's state (see the
           // OP_ATOMIC handler in `internals.ts`). A nested operation
@@ -3257,17 +3270,22 @@ export default sbp('sbp/selectors/register', {
           // No `hooks` / `publishOptions`: nested operations are invoked with
           // `atomic: true` and never publish, so only the outer message's
           // hooks and publish options are ever used.
-          return sbp(selector, {
-            ...(!hasOwnSigner && {
-              ...(params.signingKeyId != null && { signingKeyId: params.signingKeyId }),
-              ...(params.signingKeyName != null && { signingKeyName: params.signingKeyName })
-            }),
+          const invocation: Record<string, unknown> = {
             ...opParams,
             contractID: params.contractID,
             contractName: params.contractName,
-            data: (opParams as { data?: unknown }).data,
             atomic: true
-          })
+          }
+          // Inherit the batch signer only when the nested op names none.
+          // Checked after the spread so an explicit `signingKeyId: undefined`
+          // (easy to produce from a conditional) inherits instead of
+          // clobbering the inherited value back to undefined.
+          if (invocation.signingKeyId == null && invocation.signingKeyName == null &&
+              invocation.signingKey == null) {
+            if (params.signingKeyId != null) invocation.signingKeyId = params.signingKeyId
+            if (params.signingKeyName != null) invocation.signingKeyName = params.signingKeyName
+          }
+          return sbp(selector, invocation)
         })
       )
     )
@@ -3716,12 +3734,10 @@ const expandRegistrationKeys = async function (
       ({ alias, spec }) => (spec.name ?? alias) === '#sak'
     )
     if (!hasSak) {
-      const sakSpec: KeySpecMap = {
-        '#sak': { encryptWith: params.autoSak.encryptWith }
-      }
+      const sak = { encryptWith: params.autoSak.encryptWith }
       keys = Array.isArray(keys)
-        ? [...(keys as MarkedKeySpec[]), markKeySpec('#sak', sakSpec['#sak'])]
-        : { ...(keys as KeySpecMap), ...sakSpec }
+        ? [...(keys as MarkedKeySpec[]), markKeySpec('#sak', sak)]
+        : { ...(keys as KeySpecMap), '#sak': sak }
     }
   }
   return await sbp('chelonia/key/generate', { keys })

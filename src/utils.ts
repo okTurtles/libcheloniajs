@@ -519,16 +519,31 @@ export const keyAdditionProcessor = function (
     // accounting
     if (key.name.startsWith('#inviteKey-')) {
       if (!state._vm.invites) state._vm.invites = Object.create(null)
+      const quantity = key.meta?.quantity
+      // An invite without a numeric quantity is not merely cosmetic: the
+      // `OP_KEY_REQUEST` handler treats a missing quantity as 'unlimited', so
+      // such a key would be honoured forever. Key specs reject this shape at
+      // authoring time, but raw `SPKey` additions and hostile remote messages
+      // can still produce it, so fail closed here. Recording it as revoked
+      // (rather than throwing) keeps processing deterministic and does not
+      // break existing chains that already contain such a key.
+      const malformed = typeof quantity !== 'number' || !Number.isFinite(quantity)
+      if (malformed) {
+        console.error(
+          `[chelonia] invite key ${key.id} has no numeric meta.quantity; recording as revoked`,
+          { contractID }
+        )
+      }
       const inviteSecret =
         decryptedKey ||
         (has(this.transientSecretKeys, key.id)
           ? serializeKey(this.transientSecretKeys[key.id], true)
           : undefined)
       state._vm.invites![key.id] = {
-        status: INVITE_STATUS.VALID,
-        initialQuantity: key.meta!.quantity!,
-        quantity: key.meta!.quantity!,
-        expires: key.meta!.expires!,
+        status: malformed ? INVITE_STATUS.REVOKED : INVITE_STATUS.VALID,
+        initialQuantity: quantity!,
+        quantity: quantity!,
+        expires: key.meta?.expires as number,
         inviteSecret: inviteSecret!,
         responses: []
       }

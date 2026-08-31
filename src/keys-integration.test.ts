@@ -786,6 +786,47 @@ describe('keys integration', () => {
       assert.strictEqual(contractState(contractID).lastData?.atomic, 'inherited')
     })
 
+    it('atomic inheritance survives a nested explicit undefined signer', async () => {
+      // `{ ...template, signingKeyId: cond ? id : undefined }` is easy to
+      // produce; the explicit `undefined` must not defeat inheritance.
+      const state = contractState(contractID)
+      const cskId = Object.values(state._vm.authorizedKeys).find((k) => k.name === 'csk')!.id
+      const cekId = Object.values(state._vm.authorizedKeys).find((k) => k.name === 'cek')!.id
+      const build = (nested: object) => sbp('chelonia/out/atomic', {
+        contractID,
+        contractName: CONTRACT_NAME,
+        signingKeyId: cskId,
+        data: [
+          ['chelonia/out/actionEncrypted', {
+            action: `${CONTRACT_NAME}/act`,
+            contractID,
+            innerSigningKeyId: cskId,
+            encryptionKeyId: cekId,
+            data: { atomic: 'explicit-undefined' },
+            ...nested
+          }]
+        ]
+      }) as Promise<SPMessage>
+
+      const omitted = await build({})
+      const explicitUndefined = await build({
+        signingKeyId: undefined,
+        signingKeyName: undefined
+      })
+      await applyRemote(contractID)
+      assert.strictEqual(explicitUndefined.signingKeyId(), cskId)
+      // Same shape as omitting the fields entirely (ciphertexts differ by
+      // nonce, so compare the substantive parts).
+      const nestedOf = (msg: SPMessage) => {
+        const [opType, opValue] = atomicFirstEntry(msg)
+        return [opType, (opValue as { encryptionKeyId: string }).encryptionKeyId]
+      }
+      assert.deepStrictEqual(nestedOf(explicitUndefined), [SPMessage.OP_ACTION_ENCRYPTED, cekId])
+      assert.deepStrictEqual(nestedOf(explicitUndefined), nestedOf(omitted))
+      assert.strictEqual(omitted.signingKeyId(), cskId)
+      assert.strictEqual(contractState(contractID).lastData?.atomic, 'explicit-undefined')
+    })
+
     it('atomic does not override a nested raw signing key with outer references', async () => {
       // Add a dedicated signing key with OP_KEY_SHARE permission, then use
       // it as a RAW signing key inside an atomic batch whose outer message
@@ -1299,6 +1340,42 @@ describe('keys integration', () => {
       )
       assert.strictEqual(fixture.eventsByContract().get(destID)!.length, eventsBefore + 1)
     })
+
+    it('does not wait on a lane it is already running on', async () => {
+      // Retaining an already-loaded contract still awaits its event queue, so
+      // running from inside either contract's lane (a contract side effect, or
+      // a nested `atomic` entry built from one) used to wait on itself.
+      const subject = await registerIdentity()
+      const subjectID = subject.contractID()
+      const dest = await registerIdentity()
+      const destID = dest.contractID()
+
+      const withTimeout = <T>(p: Promise<T>) => {
+        let timer: ReturnType<typeof setTimeout>
+        return Promise.race([
+          p,
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('shareKeys deadlocked on its own lane')),
+              2000
+            )
+          })
+        ]).finally(() => clearTimeout(timer!))
+      }
+
+      for (const lane of [subjectID, destID]) {
+        const result = await withTimeout(sbp('chelonia/private/queueEvent', lane, () =>
+          sbp('chelonia/out/shareKeys', {
+            contractID: destID,
+            contractName: CONTRACT_NAME,
+            subjectContractID: subjectID,
+            keyNames: ['csk'],
+            atomic: true
+          })
+        ) as Promise<SPMessage>)
+        assert.strictEqual(result.opType(), SPMessage.OP_KEY_SHARE)
+      }
+    })
   })
 
   describe('chelonia/out/keyShare', () => {
@@ -1584,6 +1661,94 @@ describe('keys integration', () => {
       assert.strictEqual(
         contractState(contractID).lastData?.rotated,
         'csk'
+      )
+    })
+
+    it('only requires batch permission when the callback returns operations', async () => {
+      // No key in this layout carries OP_ATOMIC, so signer auto-selection is
+      // only satisfiable for a bare OP_KEY_UPDATE. Supplying a callback that
+      // returns nothing must not demand batch permission.
+      const noAtomicKeys = () => ({
+        ipk: {
+          purpose: ['sig' as const],
+          ringLevel: 0,
+          permissions: [
+            SPMessage.OP_CONTRACT,
+            SPMessage.OP_KEY_ADD,
+            SPMessage.OP_KEY_UPDATE,
+            SPMessage.OP_ACTION_ENCRYPTED,
+            SPMessage.OP_ACTION_UNENCRYPTED
+          ],
+          allowedActions: '*',
+          transient: true
+        },
+        iek: { purpose: ['enc' as const], ringLevel: 0, permissions: [], transient: true },
+        csk: {
+          purpose: ['sig' as const],
+          ringLevel: 1,
+          permissions: [
+            SPMessage.OP_KEY_UPDATE,
+            SPMessage.OP_ACTION_ENCRYPTED,
+            SPMessage.OP_ACTION_UNENCRYPTED
+          ],
+          allowedActions: '*',
+          encryptWith: 'iek'
+        },
+        cek: {
+          purpose: ['enc' as const],
+          ringLevel: 1,
+          permissions: [SPMessage.OP_ACTION_ENCRYPTED],
+          encryptWith: 'iek'
+        }
+      })
+      const register = async () => {
+        const msg = await sbp('chelonia/out/registerContract', {
+          contractName: CONTRACT_NAME,
+          signingKeyName: 'ipk',
+          actionSigningKeyName: 'csk',
+          actionEncryptionKeyName: 'cek',
+          keys: noAtomicKeys(),
+          data: {}
+        }) as SPMessage
+        await applyRemote(msg.contractID())
+        await sbp('chelonia/contract/retain', msg.contractID())
+        return msg.contractID()
+      }
+
+      // A callback that returns nothing publishes a bare OP_KEY_UPDATE.
+      const okID = await register()
+      const okResult = await sbp('chelonia/key/rotate', {
+        contractID: okID,
+        contractName: CONTRACT_NAME,
+        names: ['cek'],
+        additionalOperations: () => undefined
+      })
+      assert.ok(okResult)
+      assert.strictEqual(okResult.msg!.opType(), SPMessage.OP_KEY_UPDATE)
+      await applyRemote(okID)
+
+      // A callback that returns operations needs a signer with both ops.
+      const failID = await register()
+      await assert.rejects(
+        sbp('chelonia/key/rotate', {
+          contractID: failID,
+          contractName: CONTRACT_NAME,
+          names: ['cek'],
+          additionalOperations: () => ({
+            after: [
+              ['chelonia/out/actionUnencrypted', {
+                action: `${CONTRACT_NAME}/act`,
+                contractID: failID,
+                signingKeyName: 'csk',
+                data: { atomic: true }
+              }]
+            ] as AtomicInvocation[]
+          })
+        }),
+        (e: Error) =>
+          /no suitable signing key/.test(e.message) &&
+          e.message.includes(SPMessage.OP_ATOMIC) &&
+          e.message.includes(SPMessage.OP_KEY_UPDATE)
       )
     })
 

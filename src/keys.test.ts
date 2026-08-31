@@ -548,6 +548,75 @@ describe('keys: foreign keys', () => {
       ChelErrorKeySpecInvalid
     )
   })
+
+  it('rejects reserved conventional names on foreign specs', () => {
+    const originKey = keygen(EDWARDS25519SHA512BATCH)
+    const state = stateWith([activeKey(originKey, { name: 'csk', purpose: ['sig'] })])
+    const ctx = { getContractState: () => state }
+    const pub = serializeKey(originKey, false)
+
+    // Direct `foreignKey` + `data`, named '#sak': would otherwise reach the
+    // chain with permissions/ringLevel that only fail at processing time.
+    assert.throws(
+      () => expandKeySpecs({
+        keys: {
+          sak: {
+            name: '#sak',
+            foreignKey: 'shelter:c?keyName=csk',
+            data: pub,
+            purpose: ['sak'],
+            permissions: ['c'],
+            ringLevel: 3
+          }
+        },
+        context: ctx
+      }),
+      ChelErrorKeySpecInvalid
+    )
+
+    // `foreignKeyFrom` form, named '#sak'.
+    assert.throws(
+      () => expandKeySpecs({
+        keys: { sak: { name: '#sak', foreignKeyFrom: ['c', 'csk'], ringLevel: 0 } },
+        context: ctx
+      }),
+      ChelErrorKeySpecInvalid
+    )
+
+    // Invite names previously expanded with `quantity: undefined`, which
+    // processing treats as an unlimited invite.
+    assert.throws(
+      () => expandKeySpecs({
+        keys: {
+          inv: {
+            name: '#inviteKey-foo',
+            foreignKey: 'shelter:c?keyName=csk',
+            data: pub,
+            purpose: ['sig'],
+            ringLevel: 1
+          }
+        },
+        context: ctx
+      }),
+      ChelErrorKeySpecInvalid
+    )
+    assert.throws(
+      () => expandKeySpecs({
+        keys: {
+          inv: { name: '#inviteKey-foo', foreignKeyFrom: ['c', 'csk'], ringLevel: 1 }
+        },
+        context: ctx
+      }),
+      ChelErrorKeySpecInvalid
+    )
+
+    // Regression guard: non-reserved foreign specs still expand.
+    const K = expandKeySpecs({
+      keys: { fk: { foreignKeyFrom: ['c', 'csk'], purpose: ['sig'], ringLevel: 1 } },
+      context: ctx
+    })
+    assert.strictEqual(K.fk.spkey.id, keyId(originKey))
+  })
 })
 
 describe('keys: metadata merging', () => {
@@ -766,6 +835,27 @@ describe('keys: update-spec expansion', () => {
     assert.strictEqual(u.meta!.expires, 99)
     assert.strictEqual(u.meta!.private!.shareable, true)
     assert.strictEqual(u.meta!.private!.oldKeys, 'blob')
+  })
+
+  it('rejects hand-crafted meta.private.content in update specs', () => {
+    for (const rotate of [true, false]) {
+      assert.throws(
+        () => expandKeyUpdateSpecs({
+          updates: {
+            csk: {
+              ...(rotate && { rotate: true }),
+              permissions: ['ae'],
+              meta: { private: { content: 'hand-crafted' as never } }
+            }
+          },
+          contractID: 'cid',
+          contractState: buildState()
+        }),
+        (e: Error) =>
+          e instanceof ChelErrorKeySpecInvalid &&
+          /'meta\.private\.content' cannot be set on an update spec/.test(e.message)
+      )
+    }
   })
 
   it('rejects unrecoverable replacements for wrapper-less keys', () => {

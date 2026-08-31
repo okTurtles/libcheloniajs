@@ -70,7 +70,7 @@ import type {
 
 // What `encryptWith` may reference:
 //   - a plain string: another key in the same spec set (alias or final wire
-//     name), or — in `keyAdd`/rotation contexts — an active key name in the
+//     name), or — in `keyAdd` contexts — an active key name in the
 //     target contract
 //   - `{ contractID, name }`: an active key in a specific loaded contract
 //   - `{ key }`: a raw key (e.g. a just-derived replacement wrapper)
@@ -618,6 +618,18 @@ export const expandKeySpecs = (params: {
       )
     }
 
+    // Conventional names carry processing-time invariants a foreign key can
+    // never satisfy: '#sak' must be a contract-local, policy-free accounting
+    // key, and invite accounting needs a local secret plus 'meta.quantity'.
+    // Both foreign branches return before the convention checks below, so
+    // reject the combination here rather than emitting a key that only
+    // misbehaves once every client processes it.
+    if (isReservedName(wireName) && (spec.foreignKey != null || spec.foreignKeyFrom != null)) {
+      throw new ChelErrorKeySpecInvalid(
+        `Key spec '${alias}': reserved name '${wireName}' cannot be declared as a foreign key`
+      )
+    }
+
     // ---- foreign key built from another contract ---------------------------
     if (spec.foreignKeyFrom != null) {
       const [originID, originKeyName] = spec.foreignKeyFrom
@@ -843,8 +855,8 @@ export const expandKeySpecs = (params: {
         )
         return { kind: 'set', target: inSet }
       }
-      // Not in the set: an active key in the target contract (keyAdd /
-      // rotation contexts).
+      // Not in the set: an active key in the target contract (keyAdd
+      // contexts; update specs only accept `{ key }`).
       if (context?.contractID != null) {
         const state = context.contractState ?? getContractState?.(context.contractID)
         if (state) {
@@ -1234,6 +1246,15 @@ export const expandKeyUpdateSpecs = (params: {
           "('rotate' or 'key')"
       )
     }
+    // Mirrors the addition-spec rejection: `encryptWith` is the only declared
+    // way to produce wrapped secret material, and content supplied here is
+    // never validated against the key it is attached to.
+    if (spec.meta?.private?.content != null) {
+      throw new ChelErrorKeySpecInvalid(
+        `Key update spec '${r.alias}': 'meta.private.content' cannot be set on an ` +
+          "update spec; use 'encryptWith: { key }' to wrap the replacement secret"
+      )
+    }
 
     const mergedMeta = { ...existing.meta, ...(spec.meta ?? {}) } as SPKeyUpdate['meta']
     if (secret != null) {
@@ -1297,10 +1318,8 @@ export const expandKeyUpdateSpecs = (params: {
       // processing (keyAdditionProcessor) would treat it as fresh content
       // and throw when the sender lacks the target key's secret — the
       // legacy raw path avoids this by omitting `meta` entirely. Symbols
-      // don't serialize, so remote receivers are unaffected. Only mark when
-      // the content was actually copied: caller-supplied fresh content must
-      // still be processed normally.
-      if (spec.meta?.private?.content == null && existingPriv?.content != null) {
+      // don't serialize, so remote receivers are unaffected.
+      if (existingPriv?.content != null) {
         Object.defineProperty(mergedMeta, copiedExistingData, { value: true })
       }
     }
@@ -1443,8 +1462,23 @@ export default sbp('sbp/selectors/register', {
     })
     storeGeneratedSecretKeys(this, Object.values(newKeys))
 
-    // --- choose the signing key ---------------------------------------------
-    const usesAdditionalOps = typeof additionalOperations === 'function'
+    // --- extra operations around the OP_KEY_UPDATE -------------------------
+    // Invoked before signer selection so the required permissions match what
+    // is actually published: a callback that returns nothing publishes a bare
+    // OP_KEY_UPDATE, which a key without OP_ATOMIC can sign. The callback only
+    // builds invocations (nothing is published), so running it before the
+    // signer is validated is safe.
+    const extraOps = await additionalOperations?.(newKeys, {
+      ...(params.lastAttempt != null && { lastAttempt: params.lastAttempt })
+    })
+    const extraBefore = extraOps?.before ?? []
+    const extraAfter = extraOps?.after ?? []
+    const hasExtraOps = extraBefore.length > 0 || extraAfter.length > 0
+
+    // --- choose the signing key (for what will actually be published) ------
+    const requiredOps = hasExtraOps
+      ? [SPMessage.OP_ATOMIC, SPMessage.OP_KEY_UPDATE]
+      : [SPMessage.OP_KEY_UPDATE]
     const hasExplicitSigner = params.signingKeyId != null || params.signingKeyName != null
     let signingKeyId: string | undefined = hasExplicitSigner
       ? resolveStateKeyReference(
@@ -1460,27 +1494,17 @@ export default sbp('sbp/selectors/register', {
       const minRingLevel = Math.min(...selected.map((k) => k.ringLevel))
       signingKeyId = findSuitableSecretKeyId(
         state,
-        usesAdditionalOps
-          ? [SPMessage.OP_ATOMIC, SPMessage.OP_KEY_UPDATE]
-          : [SPMessage.OP_KEY_UPDATE],
+        requiredOps,
         ['sig'],
         minRingLevel
       ) ?? undefined
     }
     if (!signingKeyId) {
       throw new Error(
-        'chelonia/key/rotate: no suitable signing key with OP_KEY_UPDATE ' +
+        `chelonia/key/rotate: no suitable signing key with ${requiredOps.join(' + ')} ` +
           `permission in ${contractID}`
       )
     }
-
-    // --- extra operations around the OP_KEY_UPDATE -------------------------
-    const extraOps = await additionalOperations?.(newKeys, {
-      ...(params.lastAttempt != null && { lastAttempt: params.lastAttempt })
-    })
-    const extraBefore = extraOps?.before ?? []
-    const extraAfter = extraOps?.after ?? []
-    const hasExtraOps = extraBefore.length > 0 || extraAfter.length > 0
 
     // --- publish -------------------------------------------------------------
     const oldKeyIds = updates.map((u) => (u as SPKeyUpdate).oldKeyId)

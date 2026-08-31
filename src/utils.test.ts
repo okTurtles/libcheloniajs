@@ -2,7 +2,8 @@ import * as assert from 'node:assert'
 import { describe, it } from 'node:test'
 
 import * as utils from './utils.js'
-import type { CheloniaContext } from './types.js'
+import { INVITE_STATUS } from './constants.js'
+import type { ChelContractKey, ChelContractState, CheloniaContext } from './types.js'
 import { SPKey, SPKeyUpdate, SPMessage } from './SPMessage.js'
 
 const context = {
@@ -131,5 +132,48 @@ describe('Chelonia utils', () => {
     assert.throws(() => {
       validateKeyUpdatePermissions(updatedKey)
     }, /^Error: Signing key has ringLevel/, 'Ring level is not being enforced')
+  })
+
+  it('records invite keys without a numeric quantity as revoked', () => {
+    // A missing quantity means 'unlimited' to the OP_KEY_REQUEST handler, so
+    // processing must fail closed rather than mint an unlimited invite.
+    const inviteKey = {
+      id: 'invite_id',
+      name: '#inviteKey-broken',
+      data: 'data',
+      purpose: ['sig' as const],
+      ringLevel: 1,
+      permissions: [SPMessage.OP_KEY_REQUEST],
+      _notBeforeHeight: 0
+    }
+    const inviteContext = { ...context, transientSecretKeys: {} } as CheloniaContext
+    const process = (key: SPKey, state: ChelContractState) =>
+      utils.keyAdditionProcessor.call(
+        inviteContext,
+        {} as SPMessage,
+        'hash',
+        [key],
+        state,
+        'cid',
+        inviteKey as unknown as ChelContractKey
+      )
+
+    const state = { _vm: { type: 'type', authorizedKeys: {} } } as unknown as ChelContractState
+    const errors: unknown[][] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { errors.push(args) }
+    try {
+      assert.doesNotThrow(() => process(inviteKey as unknown as SPKey, state))
+    } finally {
+      console.error = originalError
+    }
+    assert.strictEqual(state._vm.invites!.invite_id.status, INVITE_STATUS.REVOKED)
+    assert.strictEqual(errors.length, 1)
+
+    // A well-formed invite is still recorded as valid.
+    const ok = { _vm: { type: 'type', authorizedKeys: {} } } as unknown as ChelContractState
+    process({ ...inviteKey, meta: { quantity: 2 } } as unknown as SPKey, ok)
+    assert.strictEqual(ok._vm.invites!.invite_id.status, INVITE_STATUS.VALID)
+    assert.strictEqual(ok._vm.invites!.invite_id.quantity, 2)
   })
 })

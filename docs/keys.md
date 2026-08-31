@@ -26,8 +26,10 @@ keys: {
   cek: { purpose: ['enc'], ringLevel: 1, permissions: [SPMessage.OP_ACTION_ENCRYPTED], encryptWith: 'iek' }
 }
 
-// Array form, for mixing specs with pre-built SPKey objects
-keys: [keySpec('csk', { ... }), existingSpKey, keySpec('cek', { ... })]
+// Array form, when order or duplication of aliases matters. Every entry must
+// be a `keySpec()`; raw SPKey objects are mixed in at the selector level
+// (`chelonia/out/keyAdd`'s `data`), not inside `keys:`.
+keys: [keySpec('csk', { ... }), keySpec('cek', { ... })]
 ```
 
 Array entries **must** be created with `keySpec(alias, spec)`; the prototype
@@ -56,7 +58,7 @@ the key named `<name>`". The target is one of:
 - `{ contractID, name }` (spec generation only) → an active key in a loaded
   contract, wrapped by id so a concurrent rotation of the wrapper still
   decrypts
-- a plain string that is not in the set, **in `keyAdd`/rotation contexts**
+- a plain string that is not in the set, **in `keyAdd` contexts**
   → an active key in the target contract, wrapped by id
 
 The set of specs forms a DAG which Chelonia resolves. Cycles between two or
@@ -320,6 +322,17 @@ those need one published `OP_KEY_SHARE` per destination. A nested
 `contractID` naming a different contract is rejected rather than silently
 retargeted.
 
+Both contracts are retained for the duration of the call, but only when they
+actually need syncing: a contract that is already loaded and not marked dirty
+is read directly. This matters because retaining a contract waits on its
+event queue even when it is already subscribed, so re-retaining a contract
+whose queue you are already running on (a contract side effect, or a nested
+`atomic` entry built from one) would wait on itself. Two caveats remain:
+
+- a contract marked **dirty** still syncs, so it can still self-wait
+- **publishing** into your own lane deadlocks regardless: from a side effect,
+  use `atomic: true` and fold the result into a batch, or defer the call
+
 ## Updates and rotation
 
 ### Update specs
@@ -394,6 +407,15 @@ publishing when every old key has already been revoked (stale update).
 Retry/persistence policy stays with the application (e.g. the persistent
 action queue): `chelonia/key/rotate` performs exactly one attempt.
 
+`additionalOperations` is invoked **before** the signing key is selected, so
+the auto-selected signer is only required to carry `OP_ATOMIC` when the
+callback actually returns operations; a callback that returns nothing needs
+nothing beyond `OP_KEY_UPDATE`. The consequence is that a rotation with no
+eligible signer runs the callback first and fails afterwards — harmless,
+since the callback only builds invocations and publishes nothing. Extra
+operations that need permissions the auto-selected signer lacks require an
+explicit `signingKeyId` / `signingKeyName`.
+
 An `OP_ATOMIC` is one message on one contract, so every operation returned by
 `additionalOperations` must target the contract being rotated; one naming a
 different `contractID` is rejected rather than silently retargeted.
@@ -414,11 +436,16 @@ Expansion fails fast, with pointed errors, on:
   `type`, `purpose` nor `data`
 - `meta.private.content` set directly on a spec — `encryptWith` is the only
   declared way to wrap a secret, and it is the only one that validates the
-  wrapper
+  wrapper. The same applies to an *update* spec, where `encryptWith: { key }`
+  wraps the replacement secret
 - `encryptWith` referencing an unknown name (in set *and* contract), a
   non-`enc` key, or producing a multi-node cycle
 - a `#sak` spec with any non-default policy field
 - `#inviteKey*` without `quantity`
+- a reserved conventional name (`#sak`, `#inviteKey*`, `#krrk-*`) declared as
+  a foreign key — the processing-time invariants those names carry (a
+  contract-local, policy-free accounting key; an invite with a local secret
+  and a usage quantity) can never be satisfied by a key owned elsewhere
 - a replacement key (`rotate` / `key`) for a key with no wrapped secret and
   no `encryptWith`, unless the key is `transient` (then the caller keeps the
   secret, as with invite links and password-derived roots)
@@ -435,8 +462,8 @@ Invalid *invocations* (missing both id and name on a reference) throw plain
 
 ## Migrating existing callers
 
-Everything in this guide is additive except one change to
-`chelonia/out/atomic`.
+Everything in this guide is additive except one behavioral change to
+`chelonia/out/atomic` and one TypeScript-only change to the key types.
 
 **Originating contracts now belong to the operation, not the batch.**
 Previously the batch's `originatingContractID` / `originatingContractName`
@@ -475,7 +502,29 @@ in the nested operation, publishing an `OP_KEY_SHARE` with the wrong
 provenance.
 
 A nested operation that omits its signing reference still inherits the
-batch's, so signer-less batches keep working unchanged.
+batch's, so signer-less batches keep working unchanged. An explicit
+`signingKeyId: undefined` / `signingKeyName: undefined` (easy to produce from
+a conditional) counts as omitted and inherits too.
+
+**Authored key literals no longer carry the processing-time fields.**
+`SPKey` — the shape you *author* — lost `_notBeforeHeight`,
+`_notAfterHeight` and `_private`; those are computed while a message is
+processed and now live on `ChelContractKey`, the shape you *read* out of
+`state._vm.authorizedKeys`. Under the old type `_notBeforeHeight` was
+required, so essentially every downstream `SPKey` literal sets it, and
+object literals now fail TypeScript's excess-property check. Remove those
+three fields from authored literals; keep reading them from contract state
+via `ChelContractKey`. (Literals assigned to an untyped `const` first still
+compile, which is why this can go unnoticed until a literal is passed
+directly to a selector.)
+
+Two related type widenings can also surface:
+
+- `SPKeyUpdate.meta.private.content` is now `string | EncryptedData<string>`
+  (policy-only updates copy the serialized tuple from contract state
+  verbatim). Consumers that read it as `string` need a narrowing check.
+- `SPKeyUpdate.permissions` is now `'*' | string[]`, matching `SPKey`. This
+  is harmless for writers and only affects code that assumed an array.
 
 ## Selector reference
 
