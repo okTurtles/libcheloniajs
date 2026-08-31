@@ -1188,19 +1188,57 @@ export const handleFetchResult = (
 // Note: the cap applies to the *prefix* length; a truncation suffix is appended.
 const MAX_ERROR_DETAIL_PREFIX_LENGTH = 512
 
+// Reading has a budget of its own, larger than the one above because JSON has
+// to be read whole to be parsed. Without it a hostile relay or proxy could make
+// the client buffer an arbitrarily large "error page" for a string that is
+// about to be cut down to 512 characters anyway. A body over the budget is kept
+// only up to it: text is then truncated as usual, and JSON no longer parses,
+// which is reported as no detail.
+const MAX_ERROR_BODY_LENGTH = 8192
+
 const truncateDetail = (s: string) => {
   return s.length > MAX_ERROR_DETAIL_PREFIX_LENGTH
     ? `${s.slice(0, MAX_ERROR_DETAIL_PREFIX_LENGTH)}…[truncated]`
     : s
 }
 
+// The body is written by whoever answered the request, so it can carry
+// newlines, ANSI escapes or NULs, and it is about to go into a log line and
+// into `e.message`. Control characters become spaces so a hostile response
+// cannot forge log entries.
+const cleanDetail = (s: string) =>
+  // eslint-disable-next-line no-control-regex
+  truncateDetail(s.replace(/[\u0000-\u001F\u007F]+/g, ' ').trim())
+
+// `Response.text()` and `.json()` both read to the end, so the cap is applied
+// while reading instead. Nothing past the budget is kept, and the transfer is
+// cancelled as soon as it is reached, so the peak is one chunk rather than the
+// whole body. `body` is null for a bodyless response, and some environments do
+// not expose it at all.
+const readCappedBody = async (r: Response): Promise<string> => {
+  if (!r.body?.getReader) return (await r.text()).slice(0, MAX_ERROR_BODY_LENGTH)
+  const reader = r.body.getReader()
+  const decoder = new TextDecoder()
+  let text = ''
+  try {
+    while (text.length < MAX_ERROR_BODY_LENGTH) {
+      const { done, value } = await reader.read()
+      if (done) break
+      text += decoder.decode(value, { stream: true })
+    }
+    return (text + decoder.decode()).slice(0, MAX_ERROR_BODY_LENGTH)
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+}
+
 /**
  * Companion to the `${status}: ${statusText}` line from `httpErrorMessage`.
- * A relay may answer with JSON (`{ message }`) or with plain text, so the
- * `Content-Type` decides how the body is read rather than guessing by trying to
- * parse it. Reading must never throw: the status code is the useful part of a
- * failed response, and a body that does not match its declared type should not
- * hide it.
+ * A relay may answer with JSON (`message`, `detail` or `error`) or with plain
+ * text, so the `Content-Type` decides how the body is read rather than guessing
+ * by trying to parse it. Reading must never throw: the status code is the
+ * useful part of a failed response, and a body that does not match its declared
+ * type should not hide it.
  *
  * Returns an empty string when there is no usable detail.
  */
@@ -1212,13 +1250,15 @@ export const httpErrorDetail = async (r: Response): Promise<string> => {
     // something like `text/x+json` is read as text.
     const isJson = mediaType === 'application/json' ||
       (mediaType.startsWith('application/') && mediaType.endsWith('+json'))
-    if (isJson) {
-      const body = await r.json()
-      // RFC 7807 problem documents carry the text in `detail`, not `message`.
-      const detail = typeof body?.message === 'string' ? body.message : body?.detail
-      return typeof detail === 'string' ? truncateDetail(detail.trim()) : ''
-    }
-    return truncateDetail((await r.text()).trim())
+    const body = await readCappedBody(r)
+    if (!isJson) return cleanDetail(body)
+    const parsed = JSON.parse(body)
+    // `message` is what chel sends. RFC 7807 problem documents use `detail`,
+    // and `error` is common enough elsewhere to be worth reading.
+    const detail = ['message', 'detail', 'error']
+      .map((field) => parsed?.[field])
+      .find((value) => typeof value === 'string')
+    return detail === undefined ? '' : cleanDetail(detail)
   } catch (e) {
     console.warn('[chelonia] Could not read the body of a failed response', e)
     return ''

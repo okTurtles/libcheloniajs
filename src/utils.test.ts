@@ -227,14 +227,68 @@ describe('httpErrorDetail', () => {
     }
   })
 
+  // `message` is what chel sends, `detail` is RFC 7807, and `error` is common
+  // enough elsewhere to be worth reading.
+  it('reads the error field when there is no message or detail', async () => {
+    assert.strictEqual(
+      await utils.httpErrorDetail(response('{"error":"Rate limit exceeded"}', 'application/json')),
+      'Rate limit exceeded'
+    )
+    // `message` still wins over both
+    assert.strictEqual(
+      await utils.httpErrorDetail(
+        response('{"message":"from message","error":"from error"}', 'application/json')
+      ),
+      'from message'
+    )
+  })
+
   it('reports no detail when a JSON body has no usable message', async () => {
     assert.strictEqual(
-      await utils.httpErrorDetail(response('{"error":"nope"}', 'application/json')),
+      await utils.httpErrorDetail(response('{"code":"nope"}', 'application/json')),
       ''
     )
     assert.strictEqual(
       await utils.httpErrorDetail(response('{"message":42}', 'application/json')),
       ''
     )
+  })
+
+  // The detail goes straight into a log line, so a body that carries newlines
+  // or escapes cannot be allowed to forge one.
+  it('replaces control characters with spaces', async () => {
+    assert.strictEqual(
+      await utils.httpErrorDetail(response('first\nERROR: forged\u0000line')),
+      'first ERROR: forged line'
+    )
+    assert.strictEqual(
+      await utils.httpErrorDetail(
+        response(JSON.stringify({ message: '\u001b[31mred\u001b[0m' }), 'application/json')
+      ),
+      '[31mred [0m'
+    )
+  })
+
+  // Reading is capped too, so a hostile relay cannot make the client buffer a
+  // huge "error page" for a string that is about to be cut to 512 characters.
+  it('stops reading a body that is far over the cap', async () => {
+    const huge = 'y'.repeat(100_000)
+    assert.strictEqual(
+      await utils.httpErrorDetail(response(huge)),
+      `${'y'.repeat(512)}\u2026[truncated]`
+    )
+  })
+
+  // A JSON body has to be read whole to be parsed, so one over the read budget
+  // is reported as no detail rather than as a partial message.
+  it('reports no detail for a JSON body over the read budget', async () => {
+    const originalWarn = console.warn
+    console.warn = () => {}
+    try {
+      const body = JSON.stringify({ message: 'z'.repeat(20_000) })
+      assert.strictEqual(await utils.httpErrorDetail(response(body, 'application/json')), '')
+    } finally {
+      console.warn = originalWarn
+    }
   })
 })

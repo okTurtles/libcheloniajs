@@ -666,8 +666,9 @@ await sbp('chelonia/out/actionEncrypted', {
 
 A publish that the relay rejects throws
 `ChelErrorUnexpectedHttpResponseCode` with the HTTP status on `.cause`, so an
-app can tell the user why instead of showing one generic message. Only that
-class carries the status, so check the type before reading `.cause`:
+app can tell the user why instead of showing a generic message. Check the type
+before reading `.cause`, because other error classes put other things there,
+for example `ChelErrorKvMaxAttempts` stores an object:
 
 ```js
 import { ChelErrorUnexpectedHttpResponseCode } from '@chelonia/lib/errors'
@@ -684,9 +685,10 @@ try {
 ```
 
 The detail in the message comes from the response body, read as JSON
-(`{ message }`, or `detail` for `application/problem+json`) or as text
-according to the response's `Content-Type`. A body that cannot be read is
-skipped rather than masking the status, and a long one is truncated.
+(`message`, `detail` or `error`) or as text according to the response's
+`Content-Type`. A body that cannot be read is skipped rather than masking the
+status, and one that is long, or carries control characters, is cut down before
+it reaches the message and the logs.
 
 ---
 

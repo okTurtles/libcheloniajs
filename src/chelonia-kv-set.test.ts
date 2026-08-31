@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
-import { ChelErrorInvalidMessageHeight } from './errors.js'
+import {
+  ChelErrorInvalidMessageHeight,
+  ChelErrorUnexpectedHttpResponseCode
+} from './errors.js'
 import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import type { ChelRootState, CheloniaConfig, JSONType } from './types.js'
 
@@ -392,6 +395,23 @@ describe('chelonia/kv/get', () => {
       () => sbp('chelonia/kv/get', contractID, 'settings'),
       (e: unknown) => e instanceof ChelErrorInvalidMessageHeight &&
         (e as Error).message.includes('sync the contract and retry')
+    )
+  })
+
+  // Same reason as the publish path: an app should be able to branch on the
+  // status without parsing it back out of the message.
+  it('reports the HTTP status on `cause`', async () => {
+    const { contractID } = setupContract()
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async () => new Response('', { status: 503, statusText: 'Service Unavailable' })
+    } as Partial<CheloniaConfig>)
+
+    await assert.rejects(
+      () => sbp('chelonia/kv/get', contractID, 'settings'),
+      (e: unknown) => e instanceof ChelErrorUnexpectedHttpResponseCode &&
+        (e as Error).cause === 503 &&
+        (e as Error).message === '[kv/get] 503: Service Unavailable'
     )
   })
 })

@@ -2246,7 +2246,10 @@ export default sbp('sbp/selectors/register', {
     })
     if (!response.ok) {
       console.error('Unable to fetch own resources', contractID, response.status)
-      throw new Error(`Unable to fetch own resources for ${contractID}: ${response.status}`)
+      throw new ChelErrorUnexpectedHttpResponseCode(
+        `Unable to fetch own resources for ${contractID}: ${httpErrorMessage(response)}`,
+        { cause: response.status }
+      )
     }
 
     return response.json()
@@ -3067,7 +3070,9 @@ export default sbp('sbp/selectors/register', {
       return null
     }
     if (!response.ok) {
-      throw new Error('Invalid response status: ' + response.status)
+      throw new ChelErrorUnexpectedHttpResponseCode(
+        `[kv/get] ${httpErrorMessage(response)}`, { cause: response.status }
+      )
     }
     const etag = response.headers.get('x-cid') || response.headers.get('etag')
     const data = await response.json()
