@@ -1210,11 +1210,11 @@ const cleanDetail = (s: string) =>
   // eslint-disable-next-line no-control-regex
   truncateDetail(s.replace(/[\u0000-\u001F\u007F]+/g, ' ').trim())
 
-// `Response.text()` and `.json()` both read to the end, so the cap is applied
-// while reading instead. Nothing past the budget is kept, and the transfer is
-// cancelled as soon as it is reached, so the peak is one chunk rather than the
-// whole body. `body` is null for a bodyless response, and some environments do
-// not expose it at all.
+// `Response.text()` and `.json()` both read to the end, so (when streaming is
+// available) the cap is applied while reading instead. Nothing past the budget
+// is kept, and the transfer is cancelled as soon as it is reached (peak: one
+// chunk). Some environments do not expose `body`/`getReader()`, so we fall back
+// to `text()` and can only slice after buffering the full body.
 const readCappedBody = async (r: Response): Promise<string> => {
   if (!r.body?.getReader) return (await r.text()).slice(0, MAX_ERROR_BODY_LENGTH)
   const reader = r.body.getReader()
