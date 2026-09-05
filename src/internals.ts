@@ -36,6 +36,7 @@ import {
   ChelErrorForkedChain,
   ChelErrorKeyAlreadyExists,
   ChelErrorResourceGone,
+  ChelErrorUnexpectedHttpResponseCode,
   ChelErrorUnrecoverable,
   ChelErrorWarning
 } from './errors.js'
@@ -75,6 +76,8 @@ import {
   findSuitableSecretKeyId,
   getContractIDfromKeyId,
   handleFetchResult,
+  httpErrorDetail,
+  httpErrorMessage,
   keyAdditionProcessor,
   logEvtError,
   recreateEvent,
@@ -878,7 +881,12 @@ export default sbp('sbp/selectors/register', {
                 `[chelonia] failed to publish ${entry.description()} after ${attempt} attempts`,
                 entry
               )
-              throw new Error(`publishEvent: ${r.status} - ${r.statusText}. attempt ${attempt}`)
+              // The body is deliberately not read here: a 409 means the HEAD
+              // raced, which the attempt count already explains.
+              throw new ChelErrorUnexpectedHttpResponseCode(
+                `publishEvent: ${httpErrorMessage(r)}. attempt ${attempt}`,
+                { cause: r.status }
+              )
             }
             // create new entry
             const randDelay = randomIntFromRange(0, 1500)
@@ -895,12 +903,17 @@ export default sbp('sbp/selectors/register', {
               await sbp('chelonia/private/in/sync', contractID, { force: true })
             }
           } else {
-            const message = (await r.json())?.message
+            // The same line the rest of the library raises HTTP errors with,
+            // plus whatever the body explains.
+            const detail = await httpErrorDetail(r)
+            const description = `${httpErrorMessage(r)}${detail ? ` - ${detail}` : ''}`
             console.error(
-              `[chelonia] ERROR: failed to publish ${entry.description()}: ${r.status} - ${r.statusText}: ${message}`,
+              `[chelonia] ERROR: failed to publish ${entry.description()}: ${description}`,
               entry
             )
-            throw new Error(`publishEvent: ${r.status} - ${r.statusText}: ${message}`)
+            throw new ChelErrorUnexpectedHttpResponseCode(`publishEvent: ${description}`, {
+              cause: r.status
+            })
           }
         } catch (e) {
           sbp('okTurtles.events/off', EVENT_HANDLED, onreceivedHandler)
