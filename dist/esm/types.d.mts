@@ -378,7 +378,7 @@ export type ChelContractKey = {
         expires?: number;
         private?: {
             transient?: boolean;
-            content?: string;
+            content?: [string, string] | EncryptedData<string>;
             shareable?: boolean;
             oldKeys?: string;
         };

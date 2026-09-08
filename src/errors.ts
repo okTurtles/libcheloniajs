@@ -54,6 +54,23 @@ export const ChelErrorResourceGone = ChelErrorGenerator(
   ChelErrorUnexpectedHttpResponseCode
 )
 export const ChelErrorJournalCorrupt = ChelErrorGenerator('ChelErrorJournalCorrupt')
+// Key-spec API (src/keys.ts). Structural problems in a key declaration
+// (invalid type/purpose combination, missing ringLevel on an ordinary key,
+// forbidden field combinations, duplicate names) fail with the base error.
+export const ChelErrorKeySpecInvalid = ChelErrorGenerator('ChelErrorKeySpecInvalid')
+// A wrapping graph (`encryptWith`) that cycles between two or more distinct
+// keys and therefore cannot be resolved.
+export const ChelErrorKeyWrapCycle = ChelErrorGenerator(
+  'ChelErrorKeyWrapCycle',
+  ChelErrorKeySpecInvalid
+)
+// A structurally valid name reference that cannot be resolved against the
+// generated key set or the contract state (unknown or revoked key name, or an
+// id/name pair that does not match).
+export const ChelErrorKeyNameNotFound = ChelErrorGenerator(
+  'ChelErrorKeyNameNotFound',
+  ChelErrorKeySpecInvalid
+)
 export const ChelErrorKvSlotUnknown = ChelErrorGenerator('ChelErrorKvSlotUnknown')
 export const ChelErrorKvSlotInvalid = ChelErrorGenerator('ChelErrorKvSlotInvalid')
 export const ChelErrorKvUpdateInvalid = ChelErrorGenerator('ChelErrorKvUpdateInvalid')

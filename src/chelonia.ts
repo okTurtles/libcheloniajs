@@ -17,8 +17,10 @@ import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, createClient } from '
 import { clearReingestTrackerAll } from './reingestTracker.js'
 import type {
   ProtoSPOpKeyRequestInnerV2,
+  ProtoSPOpKeyShare,
   SPKey,
   SPKeyPurpose,
+  SPKeyUpdate,
   SPOpActionUnencrypted,
   SPOpContract,
   SPOpKeyAdd,
@@ -38,6 +40,8 @@ import {
 } from '@chelonia/crypto'
 import {
   ChelErrorInvalidMessageHeight,
+  ChelErrorKeyNameNotFound,
+  ChelErrorKeySpecInvalid,
   ChelErrorResourceGone,
   ChelErrorUnexpected,
   ChelErrorUnexpectedHttpResponseCode,
@@ -48,6 +52,28 @@ import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './event
 import { SPMessage } from './SPMessage.js'
 import type { Secret } from './Secret.js'
 import './chelonia-utils.js'
+// './keys.js' registers the key API selectors; it must be imported before
+// the `sbp('sbp/domains/lock', ['chelonia'])` call at the bottom of this
+// module so that direct `@chelonia/lib/chelonia` imports register them too.
+import './keys.js'
+import {
+  ATOMIC_ALLOWED_SELECTORS,
+  expandKeyUpdateSpecs,
+  isAtomicSelector,
+  isKeySpec,
+  isKeyUpdateSpec,
+  keySpec as markKeySpec,
+  normalizeKeySpecs,
+  resolveGeneratedKeyReference,
+  resolveStateKeyReference,
+  storeGeneratedSecretKeys,
+  type AtomicInvocation,
+  type KeyMap,
+  type KeySpecMap,
+  type MarkedKeySpec,
+  type MarkedKeyUpdateSpec,
+  type KeyUpdateSpecMap
+} from './keys.js'
 import { DEFAULT_SNAPSHOT_INTERVAL } from './journal.js'
 import type { EncryptedData } from './encryptedData.js'
 import {
@@ -104,7 +130,62 @@ import type { Options as PubSubOptions, PubSubClient } from './pubsub/index.js'
 
 export type { PublishOptions }
 
-export type ChelRegParams = {
+// Shared hook/publish-option blocks for the outgoing selectors below.
+type OutgoingHooks = {
+  prepublishContract?: (msg: SPMessage) => void;
+  prepublish?: (msg: SPMessage) => Promise<void> | void;
+  postpublish?: (msg: SPMessage) => Promise<void> | void;
+};
+
+// Key references by id or name, resolved against the contract state (or the
+// generated `KeyMap` at registration time). At least one of the pair is
+// required unless noted. When both are given, the name is resolved and must
+// match the id. A mismatch usually means a stale key or a bug.
+//
+// The selectors below reject a missing pair at runtime, so each pair is also
+// required at compile time: `{ id }`, `{ name }` and `{ id, name }` are all
+// accepted, an empty pair is not. JS callers still get the runtime error.
+type SigningKeyRef =
+  | { signingKeyId: string; signingKeyName?: string }
+  | { signingKeyId?: undefined; signingKeyName: string };
+
+type InnerSigningKeyRef =
+  | { innerSigningKeyId: string; innerSigningKeyName?: string }
+  | { innerSigningKeyId?: undefined; innerSigningKeyName: string };
+
+type EncryptionKeyRef =
+  | { encryptionKeyId: string; encryptionKeyName?: string }
+  | { encryptionKeyId?: undefined; encryptionKeyName: string };
+
+type InnerEncryptionKeyRef =
+  | { innerEncryptionKeyId: string; innerEncryptionKeyName?: string }
+  | { innerEncryptionKeyId?: undefined; innerEncryptionKeyName: string };
+
+// Params of an operation nested in an `OP_ATOMIC`. The batch supplies the
+// target contract and, for signer-less operations, the signing reference, so
+// those fields are optional here.
+export type NestedInvocationParams<T> = Omit<
+  T,
+  'signingKeyId' | 'signingKeyName' | 'contractID' | 'contractName' | 'atomic'
+> & {
+  signingKeyId?: string;
+  signingKeyName?: string;
+  contractID?: string;
+  contractName?: string;
+  atomic?: boolean;
+};
+
+export type RegistrationKeyReferences = {
+  signingKeyId?: string;
+  signingKeyName?: string;
+  actionSigningKeyId?: string;
+  actionSigningKeyName?: string;
+  // `null` still means "unencrypted action" for the actionEncryption fields.
+  actionEncryptionKeyId?: string | null | undefined;
+  actionEncryptionKeyName?: string | null | undefined;
+};
+
+export type ChelRegParamsLegacy = {
   contractName: string;
   server?: string; // TODO: implement!
   data: object;
@@ -125,34 +206,78 @@ export type ChelRegParams = {
   publishOptions?: PublishOptions;
 };
 
-export type ChelActionParams = {
+// Spec form: declarative keys plus name-addressed references.
+//
+// `onKeysReady` and the `data` factory receive the generated `KeyMap`, which
+// holds raw secret keys and lazy `EncryptedData` wrappers. That object cannot
+// cross a serialization boundary: secret halves are dropped, wrapped secrets
+// collapse, and the transfer detaches the sender's own key buffers. Functions
+// themselves survive serdes (as async proxies), so the constraint is on the
+// argument, not the callback — both callbacks must run in the context that
+// owns Chelonia. See the service-worker caveat in docs/keys.md.
+export type ChelRegParamsSpec = RegistrationKeyReferences & {
+  contractName: string;
+  server?: string; // TODO: implement!
+  data: object | ((K: KeyMap) => object | Promise<object>);
+  keys: KeySpecMap | MarkedKeySpec[];
+  // Opt-in SAK generation for spec-form registrations. Requires an explicit
+  // `encryptWith`; a silently generated server-accounting key is too
+  // consequential to default. Ignored when a `#sak` spec is present.
+  autoSak?: false | { encryptWith: string };
+  onKeysReady?: (K: KeyMap) => void | Promise<void>;
+  namespaceRegistration?: string | null | undefined;
+  hooks?: ChelRegParamsLegacy['hooks'];
+  publishOptions?: PublishOptions;
+};
+
+export type ChelRegParams = ChelRegParamsLegacy | ChelRegParamsSpec;
+
+// The inner-signing / encryption references shared by the action and
+// pub-message selectors. Declared once so the selector params and the
+// resolver cannot drift apart. Both pairs are optional: the resolver treats
+// them as such, and a missing encryption pair means an unencrypted payload.
+type OptionalMessageKeyReferences = {
+  innerSigningKeyId?: string | null;
+  innerSigningKeyName?: string | null;
+  encryptionKeyId?: string | null;
+  encryptionKeyName?: string | null;
+};
+
+// What `resolveMessageKeyRefs` accepts. The signing pair is optional here
+// because the resolver is the thing that rejects an empty one.
+type MessageKeyReferences = OptionalMessageKeyReferences & {
+  signingKeyId?: string | null;
+  signingKeyName?: string | null;
+};
+
+export type ChelActionParams = SigningKeyRef & {
   action: string;
   server?: string; // TODO: implement!
   contractID: string;
   data: object;
-  signingKeyId: string;
-  innerSigningKeyId: string | null;
+  innerSigningKeyId?: string | null;
+  // Name twin of `innerSigningKeyId`, resolved against the target contract
+  // state.
+  innerSigningKeyName?: string | null;
   encryptionKeyId?: string | null | undefined;
+  // Name twin of `encryptionKeyId` (`null` = unencrypted payload), resolved
+  // against the target contract state.
+  encryptionKeyName?: string | null | undefined;
   encryptionKey?: Key | null | undefined;
-  hooks?: {
-    prepublishContract?: (msg: SPMessage) => void;
-    prepublish?: (msg: SPMessage) => Promise<void> | void;
-    postpublish?: (msg: SPMessage) => Promise<void> | void;
-  };
+  hooks?: OutgoingHooks;
   publishOptions?: PublishOptions;
   atomic?: boolean;
 };
 
-export type ChelKeyAddParams = {
+export type ChelKeyAddParams = SigningKeyRef & {
   contractName: string;
   contractID: string;
-  data: SPOpKeyAdd;
-  signingKeyId: string;
-  hooks?: {
-    prepublishContract?: (msg: SPMessage) => void;
-    prepublish?: (msg: SPMessage) => Promise<void> | void;
-    postpublish?: (msg: SPMessage) => Promise<void> | void;
-  };
+  // Raw entries stay untouched; marked specs are expanded against the target
+  // contract state (existing-contract `encryptWith`, `foreignKeyFrom`) and
+  // spliced back into the original order. A `KeySpecMap` object is accepted
+  // when every entry is a spec.
+  data: (SPKey | EncryptedData<SPKey> | MarkedKeySpec)[] | KeySpecMap;
+  hooks?: OutgoingHooks;
   publishOptions?: PublishOptions;
   atomic: boolean;
   // Usually `keyAdd` will ignore calls for keys that already exist in the
@@ -161,30 +286,22 @@ export type ChelKeyAddParams = {
   skipExistingKeyCheck?: boolean;
 };
 
-export type ChelKeyDelParams = {
+export type ChelKeyDelParams = SigningKeyRef & {
   contractName: string;
   contractID: string;
   data: SPOpKeyDel;
-  signingKeyId: string;
-  hooks?: {
-    prepublishContract?: (msg: SPMessage) => void;
-    prepublish?: (msg: SPMessage) => Promise<void>;
-    postpublish?: (msg: SPMessage) => Promise<void>;
-  };
+  hooks?: OutgoingHooks;
   publishOptions?: PublishOptions;
   atomic: boolean;
 };
 
-export type ChelKeyUpdateParams = {
+export type ChelKeyUpdateParams = SigningKeyRef & {
   contractName: string;
   contractID: string;
-  data: SPOpKeyUpdate;
-  signingKeyId: string;
-  hooks?: {
-    prepublishContract?: (msg: SPMessage) => void;
-    prepublish?: (msg: SPMessage) => Promise<void>;
-    postpublish?: (msg: SPMessage) => Promise<void>;
-  };
+  // Raw `SPKeyUpdate` / `EncryptedData<SPKeyUpdate>` entries stay untouched;
+  // marked update specs are expanded against the target contract state.
+  data: (SPKeyUpdate | EncryptedData<SPKeyUpdate> | MarkedKeyUpdateSpec)[] | KeyUpdateSpecMap;
+  hooks?: OutgoingHooks;
   publishOptions?: PublishOptions;
   atomic: boolean;
 };
@@ -195,78 +312,104 @@ export type ChelKeyShareParams = {
   contractID: string;
   contractName: string;
   data: SPOpKeyShare;
+  // Either one of this id/name pair or a raw `signingKey`; the pair is
+  // optional here because the raw-key path is an alternative to it.
   signingKeyId?: string;
+  // Name twin of `signingKeyId` (mutually exclusive with the raw
+  // `signingKey` path), resolved against the destination contract state.
+  signingKeyName?: string;
   signingKey?: Key;
-  hooks?: {
-    prepublishContract?: (msg: SPMessage) => void;
-    prepublish?: (msg: SPMessage) => Promise<void>;
-    postpublish?: (msg: SPMessage) => Promise<void>;
-  };
+  hooks?: OutgoingHooks;
   publishOptions?: PublishOptions;
   atomic: boolean;
 };
 
-export type ChelKeyRequestParams = {
-  originatingContractID: string;
-  originatingContractName: string;
-  contractName: string;
-  contractID: string;
-  signingKeyId: string;
-  innerSigningKeyId: string;
-  encryptionKeyId: string;
-  innerEncryptionKeyId: string;
-  encryptKeyRequestMetadata?: boolean;
-  permissions?: '*' | string[];
-  allowedActions?: '*' | string[];
-  // Arbitrary data the requester can use as reference (e.g., the hash
-  // of the user-initiated action that triggered this key request)
-  reference?: string;
-  // Contract-defined string describing which keys are being requested
-  // The special value '*' (default) means that all 'shareable' keys will be
-  // shared. Otherwise, this value is passed on to a contract-defined handler
-  // for processing. For example, this string could be something like 'missing'
-  // or it could be a comma-separated list of key names to share.
-  request?: string;
-  // Use an existing #krrk key instead of creating a new one
-  keyRequestResponseId?: string;
-  // Mark request as not consuming invites (this will be enforced by the responder)
-  skipInviteAccounting?: boolean;
-  hooks?: {
-    prepublishContract?: (msg: SPMessage) => void;
-    prepublish?: (msg: SPMessage) => Promise<void>;
-    postpublish?: (msg: SPMessage) => Promise<void>;
+// Every id/name pair below is required: at least one of each must be given,
+// and when both are given they must agree. Names resolve against the contract
+// noted in the comment (this flow is easy to invert).
+export type ChelKeyRequestParams =
+  // Resolved against the *destination* contract (`contractID`).
+  SigningKeyRef &
+  // Resolved against the *originating* contract (`originatingContractID`).
+  InnerSigningKeyRef &
+  // Resolved against the *originating* contract (`originatingContractID`).
+  EncryptionKeyRef &
+  // Resolved against the *destination* contract (`contractID`).
+  InnerEncryptionKeyRef & {
+    originatingContractID: string;
+    originatingContractName: string;
+    contractName: string;
+    contractID: string;
+    encryptKeyRequestMetadata?: boolean;
+    permissions?: '*' | string[];
+    allowedActions?: '*' | string[];
+    // Arbitrary data the requester can use as reference (e.g., the hash
+    // of the user-initiated action that triggered this key request)
+    reference?: string;
+    // Contract-defined string describing which keys are being requested
+    // The special value '*' (default) means that all 'shareable' keys will be
+    // shared. Otherwise, this value is passed on to a contract-defined handler
+    // for processing. For example, this string could be something like
+    // 'missing' or it could be a comma-separated list of key names to share.
+    request?: string;
+    // Use an existing #krrk key instead of creating a new one
+    keyRequestResponseId?: string;
+    // Mark request as not consuming invites (enforced by the responder)
+    skipInviteAccounting?: boolean;
+    hooks?: OutgoingHooks;
+    publishOptions?: PublishOptions;
+    atomic: boolean;
   };
-  publishOptions?: PublishOptions;
-  atomic: boolean;
-};
 
-export type ChelKeyRequestResponseParams = {
+export type ChelKeyRequestResponseParams = SigningKeyRef & {
   contractName: string;
   contractID: string;
   data: SPOpKeyRequestSeen;
-  signingKeyId: string;
-  hooks?: {
-    prepublishContract?: (msg: SPMessage) => void;
-    prepublish?: (msg: SPMessage) => Promise<void>;
-    postpublish?: (msg: SPMessage) => Promise<void>;
-  };
+  hooks?: OutgoingHooks;
   publishOptions?: PublishOptions;
   atomic: boolean;
 };
 
-export type ChelAtomicParams = {
-  originatingContractID: string;
-  originatingContractName: string;
+// The signing reference applies to the outer message; each nested invocation
+// carries its own key references and they are never mixed with the outer ones
+// (signer-less nested operations inherit the outer signing reference).
+export type ChelAtomicParams = SigningKeyRef & {
   contractName: string;
   contractID: string;
-  signingKeyId: string;
-  data: [sel: string, data: ChelActionParams | ChelKeyRequestParams | ChelKeyShareParams][];
-  hooks?: {
-    prepublishContract?: (msg: SPMessage) => void;
-    prepublish?: (msg: SPMessage) => Promise<void>;
-    postpublish?: (msg: SPMessage) => Promise<void>;
-  };
+  // Every entry must target `contractID`: an OP_ATOMIC is a single message on
+  // a single contract. `originatingContractID`/`originatingContractName` are
+  // deliberately absent — they describe an individual `keyShare`/`shareKeys`
+  // operation, so they belong in that operation's params. Passing them here
+  // is rejected rather than ignored.
+  data: AtomicInvocation[];
+  hooks?: OutgoingHooks;
   publishOptions?: PublishOptions;
+};
+
+// Generic cross-contract key sharing (`OP_KEY_SHARE`), promoted from Group
+// Income's shareVolatileKeys. Shares the subject contract's active
+// recoverable keys with a destination contract.
+export type ChelShareKeysParams = {
+  // Destination contract (receives the OP_KEY_SHARE).
+  contractID: string;
+  contractName: string;
+  // Whose keys are being shared.
+  subjectContractID: string;
+  // Exactly one of keyIds / keyNames may be given ('*' allowed).
+  keyIds?: string[] | '*';
+  keyNames?: string[] | '*';
+  // Destination encryption key for both the payload and each inner secret.
+  // Defaults to the destination's current key named 'cek'.
+  encryptionKeyId?: string;
+  encryptionKeyName?: string;
+  // Destination signing key; defaults to auto-selecting a suitable key with
+  // OP_KEY_SHARE permission.
+  signingKeyId?: string;
+  signingKeyName?: string;
+  foreignContractID?: string;
+  hooks?: OutgoingHooks;
+  publishOptions?: PublishOptions;
+  atomic?: boolean;
 };
 
 export { SPMessage }
@@ -2172,18 +2315,63 @@ export default sbp('sbp/selectors/register', {
   },
   // 'chelonia/out' - selectors that send data out to the server
   'chelonia/out/registerContract': async function (this: CheloniaContext, params: ChelRegParams) {
-    const {
-      contractName,
-      keys,
-      hooks,
-      publishOptions,
-      signingKeyId,
-      actionSigningKeyId,
-      actionEncryptionKeyId
-    } = params
+    const { contractName, hooks, publishOptions } = params
     const manifestHash = this.config.contracts.manifests[contractName]
     const contractInfo = this.manifestToContract[manifestHash]
     if (!contractInfo) throw new Error(`contract not defined: ${contractName}`)
+
+    // Spec form is detected by a non-array `keys` record or marked array
+    // entries; plain raw arrays keep the exact legacy behavior (no auto-SAK,
+    // no callbacks, no expansion).
+    const specParams = isSpecRegistration(params) ? (params as ChelRegParamsSpec) : undefined
+
+    let keys: (SPKey | EncryptedData<SPKey>)[]
+    let signingKeyId: string
+    let actionSigningKeyId: string
+    let actionEncryptionKeyId: string | null | undefined
+    let data: object
+
+    if (specParams != null) {
+      const keyMap = await expandRegistrationKeys.call(this, specParams)
+      signingKeyId = resolveGeneratedKeyReference(
+        keyMap,
+        specParams.signingKeyId ?? null,
+        specParams.signingKeyName ?? null,
+        'signingKey'
+      )!
+      actionSigningKeyId = resolveGeneratedKeyReference(
+        keyMap,
+        specParams.actionSigningKeyId ?? null,
+        specParams.actionSigningKeyName ?? null,
+        'actionSigningKey'
+      )!
+      actionEncryptionKeyId = specParams.actionEncryptionKeyId != null ||
+        specParams.actionEncryptionKeyName != null
+        ? resolveGeneratedKeyReference(
+          keyMap,
+          specParams.actionEncryptionKeyId ?? null,
+          specParams.actionEncryptionKeyName ?? null,
+          'actionEncryptionKey'
+        ) as string | null
+        : undefined
+      // `onKeysReady` runs after transient registration and before the
+      // payload/message is created; a callback error prevents publication.
+      // Both callbacks are awaited, so an `async` factory works the same as
+      // a synchronous one (and a promise never leaks into the payload).
+      await specParams.onKeysReady?.(keyMap)
+      data = typeof specParams.data === 'function'
+        ? await specParams.data(keyMap)
+        : specParams.data
+      keys = Object.values(keyMap).map((k) => k.spkey)
+    } else {
+      const legacy = params as ChelRegParamsLegacy
+      signingKeyId = legacy.signingKeyId
+      actionSigningKeyId = legacy.actionSigningKeyId
+      actionEncryptionKeyId = legacy.actionEncryptionKeyId
+      data = legacy.data
+      keys = legacy.keys
+    }
+
     const signingKey = this.transientSecretKeys[signingKeyId]
     if (!signingKey) throw new Error(`Signing key ${signingKeyId} is not defined`)
     const payload = {
@@ -2223,7 +2411,7 @@ export default sbp('sbp/selectors/register', {
       {
         action: contractName,
         contractID,
-        data: params.data,
+        data,
         signingKeyId: actionSigningKeyId ?? signingKeyId,
         encryptionKeyId: actionEncryptionKeyId,
         hooks,
@@ -2347,18 +2535,31 @@ export default sbp('sbp/selectors/register', {
 
     const payload = data as SPOpKeyShare
 
-    if (!params.signingKeyId && !params.signingKey) {
-      throw new TypeError('Either signingKeyId or signingKey must be specified')
+    // Resolution is optional here because the caller may pass a raw
+    // `signingKey` instead.
+    const hasExplicitSigner = params.signingKeyId != null || params.signingKeyName != null
+    const signingKeyId = hasExplicitSigner
+      ? resolveRef.call(
+        this,
+        contractID,
+        { id: params.signingKeyId, name: params.signingKeyName },
+        'signingKey',
+        false
+      ) as string | undefined
+      : undefined
+
+    if (!signingKeyId && !params.signingKey) {
+      throw new TypeError('Either signingKeyId, signingKeyName or signingKey must be specified')
     }
 
     let msg = SPMessage.createV1_0({
       contractID,
       op: [
         SPMessage.OP_KEY_SHARE,
-        params.signingKeyId
+        signingKeyId
           ? signedOutgoingData<SPOpValue>(
             contractID,
-            params.signingKeyId,
+            signingKeyId,
             payload,
             this.transientSecretKeys
           )
@@ -2371,13 +2572,203 @@ export default sbp('sbp/selectors/register', {
     }
     return msg
   },
+  // Generic cross-contract key sharing, promoted from Group Income's
+  // `gi.actions/out/shareVolatileKeys`. Selects the subject contract's
+  // active recoverable keys, re-encrypts each secret under the destination
+  // contract's encryption key (default: its current 'cek'), encrypts the
+  // whole OP_KEY_SHARE payload under that same key, and delegates the
+  // wire operation to `chelonia/out/keyShare`.
+  'chelonia/out/shareKeys': async function (
+    this: CheloniaContext,
+    params: ChelShareKeysParams
+  ): Promise<SPMessage | void> {
+    const {
+      contractID,
+      contractName,
+      subjectContractID,
+      keyIds,
+      keyNames,
+      encryptionKeyId,
+      encryptionKeyName,
+      signingKeyId,
+      signingKeyName,
+      foreignContractID,
+      hooks,
+      publishOptions,
+      atomic
+    } = params
+
+    if (keyIds != null && keyNames != null) {
+      throw new TypeError(
+        'chelonia/out/shareKeys: provide either keyIds or keyNames, not both'
+      )
+    }
+    // Sharing a contract's keys with itself is a no-op (matches Group
+    // Income's behavior for same-subject/destination calls).
+    if (subjectContractID === contractID) return
+
+    // `chelonia/contract/retain` waits on each contract's event queue even
+    // when already subscribed, so retaining a contract whose lane we are
+    // already running on (a contract side effect, or a nested `atomic` entry
+    // built from one) would wait on ourselves. Contracts already loaded need
+    // no sync and every read below is synchronous.
+    const preState = sbp(this.config.stateSelector) as ChelRootState
+    const idsToRetain = [contractID, subjectContractID].filter((id) => {
+      const st = preState[id] as ChelContractState | undefined
+      return st?._vm?.authorizedKeys == null || st._volatile?.dirty === true
+    })
+
+    const run = async (): Promise<SPMessage | void> => {
+      const rootState = sbp(this.config.stateSelector) as ChelRootState
+      const destState = rootState[contractID] as ChelContractState | undefined
+      const subjectState = rootState[subjectContractID] as ChelContractState | undefined
+      if (!destState?._vm?.authorizedKeys) {
+        throw new Error(`chelonia/out/shareKeys: destination contract ${contractID} is not loaded`)
+      }
+      if (!subjectState?._vm?.authorizedKeys) {
+        throw new Error(`chelonia/out/shareKeys: subject contract ${subjectContractID} is not loaded`)
+      }
+
+      // Destination encryption key: explicit id/name, defaulting to the
+      // destination's current 'cek'.
+      const destEncryptionKeyId = (encryptionKeyId != null || encryptionKeyName != null
+        ? resolveStateKeyReference(
+          destState,
+          encryptionKeyId ?? null,
+          encryptionKeyName ?? null,
+          'encryptionKey'
+        )
+        : resolveStateKeyReference(destState, null, 'cek', 'encryptionKey')) as string
+
+      // Destination signing key: explicit id/name (validated as a pair), or
+      // auto-select a suitable key with OP_KEY_SHARE permission.
+      // This is a key *id*; `signingKey` is reserved for raw `Key` objects.
+      let resolvedSigningKeyId: string | undefined =
+        signingKeyId != null || signingKeyName != null
+          ? resolveStateKeyReference(
+            destState,
+            signingKeyId ?? null,
+            signingKeyName ?? null,
+            'signingKey'
+          ) as string | undefined
+          : undefined
+      if (resolvedSigningKeyId == null) {
+        resolvedSigningKeyId =
+          findSuitableSecretKeyId(destState, [SPMessage.OP_KEY_SHARE], ['sig']) ?? undefined
+      }
+      if (!resolvedSigningKeyId) {
+        throw new Error(
+          'chelonia/out/shareKeys: no suitable signing key with OP_KEY_SHARE ' +
+            `permission in ${contractID}`
+        )
+      }
+
+      // Select only active subject keys with recoverable secrets
+      // (`meta.private.content`).
+      const isSelectable = (k: ChelContractKey) =>
+        k._notAfterHeight == null && k.meta?.private?.content != null
+      const activeKeys = Object.values(subjectState._vm.authorizedKeys).filter(isSelectable)
+
+      let selected: ChelContractKey[]
+      if (keyNames != null && keyNames !== '*') {
+        selected = keyNames.map((name) => {
+          const keyId = findKeyIdByName(subjectState, name)
+          const k = keyId != null ? subjectState._vm.authorizedKeys[keyId] : undefined
+          if (!k || !isSelectable(k)) {
+            throw new ChelErrorKeyNameNotFound(
+              `chelonia/out/shareKeys: no active recoverable key named '${name}' ` +
+                `in subject contract ${subjectContractID}`
+            )
+          }
+          return k
+        })
+      } else if (keyIds != null && keyIds !== '*') {
+        selected = keyIds.map((id) => {
+          const k = subjectState._vm.authorizedKeys[id]
+          if (!k || !isSelectable(k)) {
+            throw new ChelErrorKeyNameNotFound(
+              `chelonia/out/shareKeys: no active recoverable key with ID '${id}' ` +
+                `in subject contract ${subjectContractID}`
+            )
+          }
+          return k
+        })
+      } else {
+        selected = activeKeys
+      }
+
+      // Nothing selected, so do not publish an empty OP_KEY_SHARE. Same rule
+      // as the `payload.length === 0` guard in `chelonia/out/keyAdd`.
+      if (selected.length === 0) return
+
+      const sharedKeys: SPKey[] = selected.map((k) => {
+        // The transient-key proxy falls back to persistent `secretKeys`, so
+        // this one lookup covers both transient-only and persisted secrets.
+        const rawKey = this.transientSecretKeys[k.id]
+        if (!rawKey) {
+          throw new Error(
+            `chelonia/out/shareKeys: missing secret for key ${k.id} (${k.name}) in ` +
+              subjectContractID
+          )
+        }
+        const secret = serializeKey(rawKey, true)
+        // Minimal share entry: OP_KEY_SHARE processing only consumes `id`
+        // and `meta.private.content`.
+        return {
+          id: k.id,
+          meta: {
+            private: {
+              content: encryptedOutgoingData(
+                contractID,
+                destEncryptionKeyId,
+                secret
+              )
+            }
+          }
+        } as unknown as SPKey
+      })
+
+      const subjectContractTypeName = rootState.contracts[subjectContractID]?.type
+      if (!subjectContractTypeName) {
+        throw new Error(
+          `chelonia/out/shareKeys: unknown contract type for ${subjectContractID}`
+        )
+      }
+
+      const payload: ProtoSPOpKeyShare = {
+        contractID: subjectContractID,
+        keys: sharedKeys,
+        ...(foreignContractID != null && { foreignContractID })
+      }
+
+      return await sbp('chelonia/out/keyShare', {
+        contractID,
+        contractName,
+        originatingContractID: subjectContractID,
+        originatingContractName: subjectContractTypeName,
+        data: encryptedOutgoingData(
+          contractID,
+          destEncryptionKeyId,
+          payload
+        ),
+        signingKeyId: resolvedSigningKeyId,
+        hooks,
+        publishOptions,
+        atomic: !!atomic
+      })
+    }
+
+    return idsToRetain.length > 0
+      ? await sbp('chelonia/contract/withRetained', idsToRetain, run)
+      : await run()
+  },
   'chelonia/out/keyAdd': async function (
     this: CheloniaContext,
     params: ChelKeyAddParams
   ): Promise<SPMessage | void> {
     // TODO: For foreign keys, recalculate the key id
     // TODO: Make this a noop if the key already exsits with the given permissions
-    const { atomic, contractID, contractName, data, hooks, publishOptions } = params
+    const { atomic, contractID, contractName, hooks, publishOptions } = params
     const manifestHash = this.config.contracts.manifests[contractName]
     const contract = this.manifestToContract[manifestHash]?.contract
     if (!contract) {
@@ -2385,19 +2776,47 @@ export default sbp('sbp/selectors/register', {
     }
     const state = contract.state(contractID)
 
-    const payload = params.skipExistingKeyCheck
-      ? (data as SPOpKeyAdd)
-      : (data as SPOpKeyAdd).filter((wk) => {
-          const k = (isEncryptedData(wk) ? wk.valueOf() : wk) as SPKey
-          if (has(state._vm.authorizedKeys, k.id)) {
-            if (state._vm.authorizedKeys[k.id]._notAfterHeight == null) {
-              // Can't add a key that exists
-              return false
-            }
-          }
+    const signingKeyId = resolveSigningKeyId.call(this, contractID, params)
 
-          return true
-        })
+    // Expand spec entries against the live contract state before the
+    // duplicate-key filtering, splicing generated keys back into the
+    // original array order. Raw and encrypted entries stay untouched.
+    let data: SPOpKeyAdd
+    if (!Array.isArray(params.data)) {
+      // KeySpecMap object form: every entry is a spec
+      const keyMap = (await sbp('chelonia/key/generate', {
+        contractID,
+        keys: params.data as KeySpecMap
+      })) as KeyMap
+      data = Object.values(keyMap).map((k) => k.spkey) as SPOpKeyAdd
+    } else if (params.data.some((entry) => isKeySpec(entry))) {
+      const markedSpecs = params.data.filter((entry): entry is MarkedKeySpec =>
+        isKeySpec(entry)
+      )
+      const keyMap = (await sbp('chelonia/key/generate', {
+        contractID,
+        keys: markedSpecs
+      })) as KeyMap
+      data = params.data.map((entry) =>
+        isKeySpec(entry) ? keyMap[entry.alias].spkey : entry
+      ) as SPOpKeyAdd
+    } else {
+      data = params.data as SPOpKeyAdd
+    }
+
+    const payload = params.skipExistingKeyCheck
+      ? data
+      : data.filter((wk) => {
+        const k = (isEncryptedData(wk) ? wk.valueOf() : wk) as SPKey
+        if (has(state._vm.authorizedKeys, k.id)) {
+          if (state._vm.authorizedKeys[k.id]._notAfterHeight == null) {
+            // Can't add a key that exists
+            return false
+          }
+        }
+
+        return true
+      })
 
     if (payload.length === 0) return
     let msg = SPMessage.createV1_0({
@@ -2406,7 +2825,7 @@ export default sbp('sbp/selectors/register', {
         SPMessage.OP_KEY_ADD,
         signedOutgoingData<SPOpValue>(
           contractID,
-          params.signingKeyId,
+          signingKeyId,
           payload,
           this.transientSecretKeys
         )
@@ -2429,6 +2848,7 @@ export default sbp('sbp/selectors/register', {
       throw new Error('Contract name not found')
     }
     const state = contract.state(contractID)
+    const signingKeyId = resolveSigningKeyId.call(this, contractID, params)
     const payload = (data as SPOpKeyDel)
       .map((keyId) => {
         if (isEncryptedData(keyId)) return keyId
@@ -2453,7 +2873,7 @@ export default sbp('sbp/selectors/register', {
         SPMessage.OP_KEY_DEL,
         signedOutgoingData<SPOpValue>(
           contractID,
-          params.signingKeyId,
+          signingKeyId,
           payload as SPOpValue,
           this.transientSecretKeys
         )
@@ -2469,13 +2889,49 @@ export default sbp('sbp/selectors/register', {
     this: CheloniaContext,
     params: ChelKeyUpdateParams
   ): Promise<SPMessage> {
-    const { atomic, contractID, contractName, data, hooks, publishOptions } = params
+    const { atomic, contractID, contractName, hooks, publishOptions } = params
     const manifestHash = this.config.contracts.manifests[contractName]
     const contract = this.manifestToContract[manifestHash]?.contract
     if (!contract) {
       throw new Error('Contract name not found')
     }
     const state = contract.state(contractID)
+    const signingKeyId = resolveSigningKeyId.call(this, contractID, params)
+
+    // Expand marked update specs against the live contract state before the
+    // privacy-wrapper logic below. The expansion does not double-encrypt
+    // `meta.private.content`: it stays an inner EncryptedData object bound
+    // to the message's additional data at serialization time.
+    let data: SPOpKeyUpdate
+    if (!Array.isArray(params.data)) {
+      const { updates, newKeys } = expandKeyUpdateSpecs({
+        updates: params.data as KeyUpdateSpecMap,
+        contractID,
+        contractState: state
+      })
+      storeGeneratedSecretKeys(this, Object.values(newKeys))
+      data = updates
+    } else if (params.data.some((entry) => isKeyUpdateSpec(entry))) {
+      const markedSpecs = params.data.filter((entry): entry is MarkedKeyUpdateSpec =>
+        isKeyUpdateSpec(entry)
+      )
+      const { updates, newKeys } = expandKeyUpdateSpecs({
+        updates: markedSpecs,
+        contractID,
+        contractState: state
+      })
+      storeGeneratedSecretKeys(this, Object.values(newKeys))
+      // Splice expanded updates back into the original array order
+      let specIndex = 0
+      data = params.data.map((entry) =>
+        isKeyUpdateSpec(entry)
+          ? updates[specIndex++]
+          : (entry as SPKeyUpdate | EncryptedData<SPKeyUpdate>)
+      )
+    } else {
+      data = params.data as SPOpKeyUpdate
+    }
+
     const payload = (data as SPOpKeyUpdate).map((key) => {
       if (isEncryptedData(key)) return key
       const { oldKeyId } = key
@@ -2491,7 +2947,7 @@ export default sbp('sbp/selectors/register', {
         SPMessage.OP_KEY_UPDATE,
         signedOutgoingData<SPOpValue>(
           contractID,
-          params.signingKeyId,
+          signingKeyId,
           payload,
           this.transientSecretKeys
         )
@@ -2514,9 +2970,6 @@ export default sbp('sbp/selectors/register', {
       contractName,
       hooks,
       publishOptions,
-      innerSigningKeyId,
-      encryptionKeyId,
-      innerEncryptionKeyId,
       encryptKeyRequestMetadata,
       reference,
       request,
@@ -2538,6 +2991,33 @@ export default sbp('sbp/selectors/register', {
       const rootState = sbp(this.config.stateSelector)
       const state = contract.state(contractID)
       const originatingState = originatingContract.state(originatingContractID)
+
+      // Name resolution, each against its real owner (easy to invert):
+      //   outer signing + inner encryption keys live in the DESTINATION
+      //   contract; inner signing + encryption keys live in the ORIGINATING
+      //   contract.
+      // Deliberately not using `resolveMessageKeyRefs`: it resolves the whole
+      // trio against one contract, but here the inner signing and encryption
+      // keys belong to the originating contract.
+      const signingKeyId = resolveSigningKeyId.call(this, contractID, params)
+      const innerSigningKeyId = resolveRef.call(
+        this,
+        originatingContractID,
+        { id: params.innerSigningKeyId, name: params.innerSigningKeyName },
+        'innerSigningKey'
+      ) as string
+      const encryptionKeyId = resolveRef.call(
+        this,
+        originatingContractID,
+        { id: params.encryptionKeyId, name: params.encryptionKeyName },
+        'encryptionKey'
+      ) as string
+      const innerEncryptionKeyId = resolveRef.call(
+        this,
+        contractID,
+        { id: params.innerEncryptionKeyId, name: params.innerEncryptionKeyName },
+        'innerEncryptionKey'
+      ) as string
 
       const havePendingKeyRequest =
         Object.values(originatingState._vm.authorizedKeys).some((k: ChelContractKey) => {
@@ -2582,12 +3062,15 @@ export default sbp('sbp/selectors/register', {
         const keyRequestReplyKeyP = serializeKey(keyRequestReplyKey, false)
         keyRequestReplyKeyS = serializeKey(keyRequestReplyKey, true)
 
-        const signingKeyId = findSuitableSecretKeyId(
+        // The originating contract's OP_KEY_ADD signing key, which is a
+        // different key from the destination contract's OP_KEY_REQUEST
+        // signing key resolved at selector entry.
+        const keyAddSigningKeyId = findSuitableSecretKeyId(
           originatingState,
           [SPMessage.OP_KEY_ADD],
           ['sig']
         )
-        if (!signingKeyId) {
+        if (!keyAddSigningKeyId) {
           throw new ChelErrorUnexpected(
           `Unable to send key request. Originating contract is missing a key with OP_KEY_ADD permission. contractID=${contractID} originatingContractID=${originatingContractID}`
           )
@@ -2632,7 +3115,7 @@ export default sbp('sbp/selectors/register', {
                 data: keyRequestReplyKeyP
               }
             ],
-            signingKeyId
+            signingKeyId: keyAddSigningKeyId
           }).catch((e: Error) => {
             console.error(
             `[chelonia] Error sending OP_KEY_ADD for ${originatingContractID} during key request to ${contractID}`,
@@ -2665,7 +3148,7 @@ export default sbp('sbp/selectors/register', {
           SPMessage.OP_KEY_REQUEST,
           signedOutgoingData<SPOpValue>(
             contractID,
-            params.signingKeyId,
+            signingKeyId,
             {
               ...(skipInviteAccounting && { skipInviteAccounting: true }),
               innerData: encryptKeyRequestMetadata
@@ -2699,6 +3182,7 @@ export default sbp('sbp/selectors/register', {
     if (!contract) {
       throw new Error('Contract name not found')
     }
+    const signingKeyId = resolveSigningKeyId.call(this, contractID, params)
     const payload = data
     let message = SPMessage.createV1_0({
       contractID,
@@ -2706,7 +3190,7 @@ export default sbp('sbp/selectors/register', {
         SPMessage.OP_KEY_REQUEST_SEEN,
         signedOutgoingData<SPOpValue>(
           contractID,
-          params.signingKeyId,
+          signingKeyId,
           payload,
           this.transientSecretKeys
         )
@@ -2728,28 +3212,85 @@ export default sbp('sbp/selectors/register', {
     if (!contract) {
       throw new Error('Contract name not found')
     }
+    // The originating contract is a property of the individual
+    // `keyShare`/`shareKeys` operation, not of the batch, so it is no longer
+    // accepted here. Silently ignoring it would skip the originating-contract
+    // validation in the nested operation that used to inherit it.
+    if (
+      (params as Record<string, unknown>).originatingContractID != null ||
+      (params as Record<string, unknown>).originatingContractName != null
+    ) {
+      throw new TypeError(
+        'chelonia/out/atomic no longer accepts originatingContractID / ' +
+          'originatingContractName: pass them in the params of the nested ' +
+          'operation that needs them'
+      )
+    }
+    // The outer message's signing key. Nested invocations carry their own key
+    // references and are never overwritten by this one.
+    const signingKeyId = resolveSigningKeyId.call(this, contractID, params)
     const payload = (
       await Promise.all(
         data.map(([selector, opParams]) => {
-          if (
-            ![
-              'chelonia/out/actionEncrypted',
-              'chelonia/out/actionUnencrypted',
-              'chelonia/out/keyAdd',
-              'chelonia/out/keyDel',
-              'chelonia/out/keyUpdate',
-              'chelonia/out/keyRequestResponse',
-              'chelonia/out/keyShare'
-            ].includes(selector)
-          ) {
-            throw new Error('Selector not allowed in OP_ATOMIC: ' + selector)
+          if (!isAtomicSelector(selector)) {
+            throw new Error(
+              'Selector not allowed in OP_ATOMIC: ' + selector + ' (allowed: ' +
+                ATOMIC_ALLOWED_SELECTORS.join(', ') + ')'
+            )
           }
-          return sbp(selector, {
+          // Only shared operation context is passed down. Each nested
+          // invocation keeps its own key references untouched: outer key
+          // references are never mixed with nested ones (a cross-bred
+          // id/name pair would fail pair validation in the nested
+          // selector). Signer-less nested operations inherit the outer
+          // signing reference, preserving the legacy inheritance behavior.
+          // Nested operations keep their own originating-contract context:
+          // `keyShare`/`shareKeys` pass it in their own params. The outer
+          // batch rejects one outright (checked at selector entry above).
+          const op = opParams as Record<string, unknown>
+          // An OP_ATOMIC is a single message on a single contract, and every
+          // nested operation is applied to that contract's state (see the
+          // OP_ATOMIC handler in `internals.ts`). A nested operation
+          // therefore cannot target a different contract, and silently
+          // rewriting the reference below would either drop the operation or
+          // apply it to the wrong contract. This matters most for
+          // `keyShare`/`shareKeys`, where `contractID` is the *destination*
+          // rather than the contract being modified: sharing keys *into* the
+          // batch contract is expressible (`contractID` equal to the batch
+          // contract, with `subjectContractID`/`originatingContractID`
+          // pointing elsewhere), sharing them *out of* it is not.
+          const assertBatchTarget = (field: 'contractID' | 'contractName') => {
+            const nested = op[field]
+            if (nested != null && nested !== params[field]) {
+              throw new TypeError(
+                `Nested ${selector} in OP_ATOMIC targets ${field} ` +
+                  `${String(nested)}, but every operation in an OP_ATOMIC ` +
+                  'must target the contract the batch is published to ' +
+                  `(${String(params[field])})`
+              )
+            }
+          }
+          assertBatchTarget('contractID')
+          assertBatchTarget('contractName')
+          // No `hooks` / `publishOptions`: nested operations are invoked with
+          // `atomic: true` and never publish, so only the outer message's
+          // hooks and publish options are ever used.
+          const invocation: Record<string, unknown> = {
             ...opParams,
-            ...params,
-            data: (opParams as ChelActionParams).data,
+            contractID: params.contractID,
+            contractName: params.contractName,
             atomic: true
-          })
+          }
+          // Inherit the batch signer only when the nested op names none.
+          // Checked after the spread so an explicit `signingKeyId: undefined`
+          // (easy to produce from a conditional) inherits instead of
+          // clobbering the inherited value back to undefined.
+          if (invocation.signingKeyId == null && invocation.signingKeyName == null &&
+              invocation.signingKey == null) {
+            if (params.signingKeyId != null) invocation.signingKeyId = params.signingKeyId
+            if (params.signingKeyName != null) invocation.signingKeyName = params.signingKeyName
+          }
+          return sbp(selector, invocation)
         })
       )
     )
@@ -2764,7 +3305,7 @@ export default sbp('sbp/selectors/register', {
         SPMessage.OP_ATOMIC,
         signedOutgoingData<SPOpValue>(
           contractID,
-          params.signingKeyId,
+          signingKeyId,
           payload as SPOpValue,
           this.transientSecretKeys
         )
@@ -2779,20 +3320,17 @@ export default sbp('sbp/selectors/register', {
   'chelonia/out/propDel': async function () {},
   'chelonia/out/encryptedOrUnencryptedPubMessage': function (
     this: CheloniaContext,
-    {
-      contractID,
-      innerSigningKeyId,
-      encryptionKeyId,
-      signingKeyId,
-      data
-    }: {
+    params: OptionalMessageKeyReferences & SigningKeyRef & {
       contractID: string;
-      innerSigningKeyId?: string | null | undefined;
-      encryptionKeyId?: string | null | undefined;
-      signingKeyId: string;
       data: JSONType;
     }
   ) {
+    const { contractID, data } = params
+    // Resolve name references once, at selector entry (same id/name rules as
+    // every other outgoing selector); the lower-level message builder stays
+    // id-based.
+    const { signingKeyId, innerSigningKeyId, encryptionKeyId } =
+      resolveMessageKeyRefs.call(this, contractID, params)
     const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
       contractID,
       innerSigningKeyId,
@@ -3172,6 +3710,105 @@ function contractNameFromAction (action: string): string {
   return contractName
 }
 
+// A registration is in spec form when `keys` is a `KeySpecMap` record or an
+// array containing at least one marked `keySpec()` entry. Empty and raw-only
+// arrays are legacy form.
+const isSpecRegistration = (params: ChelRegParams): boolean => {
+  const keys = params.keys as unknown
+  if (Array.isArray(keys)) return keys.some((k) => isKeySpec(k))
+  return keys != null && typeof keys === 'object'
+}
+
+// Expand registration keys: append the opt-in auto-SAK spec when explicitly
+// enabled and absent, then generate + transiently store every raw key.
+const expandRegistrationKeys = async function (
+  this: CheloniaContext,
+  params: ChelRegParamsSpec
+): Promise<KeyMap> {
+  let keys: KeySpecMap | MarkedKeySpec[] = params.keys
+  if (params.autoSak) {
+    // When enabled, autoSak requires an explicit wrapper. The
+    // type says so, but JS callers bypass types — enforce it at runtime so a
+    // malformed opt-in fails loudly instead of silently generating an
+    // unrecoverable server-accounting key (no `meta.private.content`).
+    if (typeof params.autoSak.encryptWith !== 'string' || !params.autoSak.encryptWith) {
+      throw new ChelErrorKeySpecInvalid(
+        'autoSak requires an explicit encryptWith wrapper name'
+      )
+    }
+    const entries = normalizeKeySpecs(keys)
+    const hasSak = entries.some(
+      ({ alias, spec }) => (spec.name ?? alias) === '#sak'
+    )
+    if (!hasSak) {
+      const sak = { encryptWith: params.autoSak.encryptWith }
+      keys = Array.isArray(keys)
+        ? [...(keys as MarkedKeySpec[]), markKeySpec('#sak', sak)]
+        : { ...(keys as KeySpecMap), '#sak': sak }
+    }
+  }
+  return await sbp('chelonia/key/generate', { keys })
+}
+
+// An id/name pair, as used in outgoing selector params.
+type KeyRefPair = { id?: string | null; name?: string | null };
+
+// Resolve an id/name pair against the contract's current state. Called at
+// selector entry; everything downstream uses the resolved id.
+const resolveRef = function (
+  this: CheloniaContext,
+  contractID: string,
+  ref: KeyRefPair,
+  label: string,
+  required = true
+): string | null | undefined {
+  const state = (sbp(this.config.stateSelector) as ChelRootState)[contractID] as
+    | ChelContractState
+    | undefined
+  return resolveStateKeyReference(state, ref.id ?? null, ref.name ?? null, label, required)
+}
+
+// The signing-key reference every outgoing selector resolves at entry. Split
+// out because the pair is spelled out identically in a dozen places.
+const resolveSigningKeyId = function (
+  this: CheloniaContext,
+  contractID: string,
+  params: { signingKeyId?: string | null; signingKeyName?: string | null }
+): string {
+  return resolveRef.call(
+    this,
+    contractID,
+    { id: params.signingKeyId, name: params.signingKeyName },
+    'signingKey'
+  ) as string
+}
+
+// Resolves the signing / inner-signing / encryption trio used by the action
+// and pub-message selectors. Only signing is required.
+const resolveMessageKeyRefs = function (
+  this: CheloniaContext,
+  contractID: string,
+  params: MessageKeyReferences
+) {
+  return {
+    signingKeyId: resolveSigningKeyId.call(this, contractID, params),
+    innerSigningKeyId: resolveRef.call(
+      this,
+      contractID,
+      { id: params.innerSigningKeyId, name: params.innerSigningKeyName },
+      'innerSigningKey',
+      false
+    ),
+    encryptionKeyId: resolveRef.call(
+      this,
+      contractID,
+      { id: params.encryptionKeyId, name: params.encryptionKeyName },
+      'encryptionKey',
+      false
+    )
+  }
+}
+
 function outputEncryptedOrUnencryptedMessage (
   this: CheloniaContext,
   {
@@ -3356,29 +3993,40 @@ async function outEncryptedOrUnencryptedAction (
   const manifestHash = this.config.contracts.manifests[contractName]
   const { contract } = this.manifestToContract[manifestHash]
   const state = contract.state(contractID)
+  // Resolve name references once, at selector entry; everything below is
+  // id-based. The lower-level crypto primitives never see names.
+  const { signingKeyId, innerSigningKeyId, encryptionKeyId } =
+    resolveMessageKeyRefs.call(this, contractID, params)
   const meta = await contract.metadata.create()
   const unencMessage = { action, data, meta } as SPOpActionUnencrypted
-  const signedMessage = params.innerSigningKeyId
-    ? state._vm.authorizedKeys[params.innerSigningKeyId] &&
-      state._vm.authorizedKeys[params.innerSigningKeyId]?._notAfterHeight == null
+  const signedMessage = innerSigningKeyId
+    ? state._vm.authorizedKeys[innerSigningKeyId] &&
+      state._vm.authorizedKeys[innerSigningKeyId]?._notAfterHeight == null
       ? signedOutgoingData(
         contractID,
-        params.innerSigningKeyId,
+        innerSigningKeyId,
         unencMessage,
         this.transientSecretKeys
       )
       : signedOutgoingDataWithRawKey(
-        this.transientSecretKeys[params.innerSigningKeyId],
+        this.transientSecretKeys[innerSigningKeyId],
         unencMessage
       )
     : unencMessage
-  if (opType === SPMessage.OP_ACTION_ENCRYPTED && !params.encryptionKeyId) {
+  if (opType === SPMessage.OP_ACTION_ENCRYPTED && !encryptionKeyId && !params.encryptionKey) {
     throw new Error('OP_ACTION_ENCRYPTED requires an encryption key ID be given')
   }
-  if (params.encryptionKey) {
-    if (params.encryptionKeyId !== keyId(params.encryptionKey)) {
-      throw new Error('OP_ACTION_ENCRYPTED raw encryption key does not match encryptionKeyId')
-    }
+  // A raw `encryptionKey` needs no reference of its own: the payload below is
+  // encrypted with it directly and carries its key ID, so it may be given
+  // alone. When an id or a name is *also* given, the two must agree — a
+  // mismatch means the caller believes it is encrypting to a different key
+  // than it actually is.
+  if (
+    params.encryptionKey &&
+    encryptionKeyId != null &&
+    encryptionKeyId !== keyId(params.encryptionKey)
+  ) {
+    throw new Error('OP_ACTION_ENCRYPTED raw encryption key does not match encryptionKeyId')
   }
 
   const payload =
@@ -3386,14 +4034,14 @@ async function outEncryptedOrUnencryptedAction (
       ? signedMessage
       : params.encryptionKey
         ? encryptedOutgoingDataWithRawKey(params.encryptionKey, signedMessage)
-        : encryptedOutgoingData(contractID, params.encryptionKeyId!, signedMessage)
+        : encryptedOutgoingData(contractID, encryptionKeyId!, signedMessage)
   let message = SPMessage.createV1_0({
     contractID,
     op: [
       opType,
       signedOutgoingData(
         contractID,
-        params.signingKeyId,
+        signingKeyId,
         payload as SPOpValue,
         this.transientSecretKeys
       )

@@ -6,6 +6,20 @@ import type { SignedData } from './signedData.cjs';
 import type { ChelContractState, JSONObject, JSONType } from './types.cjs';
 export type SPKeyType = typeof EDWARDS25519SHA512BATCH | typeof CURVE25519XSALSA20POLY1305 | typeof XSALSA20POLY1305;
 export type SPKeyPurpose = 'enc' | 'sig' | 'sak';
+export type SPKeyMeta = {
+    quantity?: number;
+    expires?: number;
+    private?: {
+        transient?: boolean;
+        content?: EncryptedData<string>;
+        shareable?: boolean;
+        oldKeys?: string;
+    };
+    keyRequest?: {
+        contractID?: string;
+        reference?: string | EncryptedData<string>;
+    };
+};
 export type SPKey = {
     id: string;
     name: string;
@@ -13,25 +27,9 @@ export type SPKey = {
     ringLevel: number;
     permissions: '*' | string[];
     allowedActions?: '*' | string[];
-    meta?: {
-        quantity?: number;
-        expires?: number;
-        private?: {
-            transient?: boolean;
-            content?: EncryptedData<string>;
-            shareable?: boolean;
-            oldKeys?: string;
-        };
-        keyRequest?: {
-            contractID?: string;
-            reference?: string | EncryptedData<string>;
-        };
-    };
+    meta?: SPKeyMeta;
     data: string;
     foreignKey?: string;
-    _notBeforeHeight: number;
-    _notAfterHeight?: number;
-    _private?: string;
 };
 export type SPOpContract = {
     type: string;
@@ -98,14 +96,14 @@ export type SPKeyUpdate = {
     oldKeyId: string;
     data?: string;
     purpose?: string[];
-    permissions?: string[];
+    permissions?: '*' | string[];
     allowedActions?: '*' | string[];
     meta?: {
         quantity?: number;
         expires?: number;
         private?: {
             transient?: boolean;
-            content?: string;
+            content?: string | EncryptedData<string>;
             shareable?: boolean;
             oldKeys?: string;
         };

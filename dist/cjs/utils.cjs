@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.updateKey = exports.deleteKeyHelper = exports.handleFetchResult = exports.httpErrorMessage = exports.logEvtError = exports.collectEventStream = exports.checkCanBeGarbageCollected = exports.reactiveClearObject = exports.clearObject = exports.getContractIDfromKeyId = exports.recreateEvent = exports.subscribeToForeignKeyContracts = exports.keyAdditionProcessor = exports.validateKeyUpdatePermissions = exports.validateKeyDelPermissions = exports.validateKeyAddPermissions = exports.validateKeyPermissions = exports.findSuitablePublicKeyIds = exports.findContractIDByForeignKeyId = exports.findSuitableSecretKeyId = exports.findRevokedKeyIdsByName = exports.findForeignKeysByContractID = exports.findKeyIdByName = void 0;
+exports.updateKey = exports.deleteKeyHelper = exports.handleFetchResult = exports.httpErrorMessage = exports.logEvtError = exports.collectEventStream = exports.checkCanBeGarbageCollected = exports.reactiveClearObject = exports.clearObject = exports.getContractIDfromKeyId = exports.recreateEvent = exports.subscribeToForeignKeyContracts = exports.keyAdditionProcessor = exports.validateKeyUpdatePermissions = exports.validateKeyDelPermissions = exports.validateKeyAddPermissions = exports.validateKeyPermissions = exports.findSuitablePublicKeyIds = exports.findContractIDByForeignKeyId = exports.findSuitableSecretKeyId = exports.findRevokedKeyIdsByName = exports.findForeignKeysByContractID = exports.findKeyIdByName = exports.copiedExistingData = void 0;
 exports.eventsAfter = eventsAfter;
 exports.buildShelterAuthorizationHeader = buildShelterAuthorizationHeader;
 exports.verifyShelterAuthorizationHeader = verifyShelterAuthorizationHeader;
@@ -19,7 +19,12 @@ const events_js_1 = require("./events.cjs");
 const functions_js_1 = require("./functions.cjs");
 const signedData_js_1 = require("./signedData.cjs");
 const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10) || Infinity;
-const copiedExistingData = Symbol('copiedExistingData');
+// Marker for key metadata copied verbatim from an existing key on
+// OP_KEY_UPDATE (as opposed to freshly authored content). Symbols don't
+// serialize, so this only affects local (sender-side) processing: copied
+// content must not be re-decrypted/persisted as if it were new. Exported so
+// the spec-form update expansion (src/keys.ts) can apply the same protection.
+exports.copiedExistingData = Symbol('copiedExistingData');
 const findKeyIdByName = (state, name) => state._vm?.authorizedKeys &&
     Object.values(state._vm.authorizedKeys).find((k) => k.name === name && k._notAfterHeight == null)
         ?.id;
@@ -270,7 +275,7 @@ const validateKeyUpdatePermissions = function (contractID, signingKey, state, v)
             updatedKey.meta = uk.meta;
         }
         else if (updatedKey.meta) {
-            Object.defineProperty(updatedKey.meta, copiedExistingData, { value: true });
+            Object.defineProperty(updatedKey.meta, exports.copiedExistingData, { value: true });
         }
         if (uk.id) {
             updatedKey.id = uk.id;
@@ -313,8 +318,13 @@ const keyAdditionProcessor = function (_msg, hash, keys, state, contractID, _sig
         // Does the key have key.meta?.private? If so, attempt to decrypt it
         // copiedExistingData refers to key data that have been copied from an
         // existing key on OP_KEY_UPDATE. These shouldn't be processed.
-        if (key.meta?.private?.content && !(0, turtledash_1.has)(key.meta, copiedExistingData)) {
+        if (key.meta?.private?.content && !(0, turtledash_1.has)(key.meta, exports.copiedExistingData)) {
             if (key.id && !(0, sbp_1.default)('chelonia/haveSecretKey', key.id, !key.meta.private.transient)) {
+                // At this point `content` is a live `EncryptedData` wrapper: freshly
+                // authored outgoing data, or incoming data re-wrapped by the
+                // deserializer. Copied-from-state tuples are excluded above by the
+                // `copiedExistingData` marker, so the serialized form never reaches
+                // `unwrapMaybeEncryptedData` here.
                 const decryptedKeyResult = this.config.unwrapMaybeEncryptedData(key.meta.private.content);
                 // Ignore data that couldn't be decrypted
                 if (decryptedKeyResult) {

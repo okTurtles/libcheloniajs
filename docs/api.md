@@ -6,7 +6,8 @@ registers everything below into the global SBP registry as a
 side-effect.
 
 For the prose guides, see [`configure.md`](./configure.md),
-[`contracts.md`](./contracts.md), and [`journal.md`](./journal.md).
+[`contracts.md`](./contracts.md), [`journal.md`](./journal.md), and
+[`keys.md`](./keys.md).
 For the authoritative signatures, follow the source links.
 
 > Internal selectors (`chelonia/private/*`, `chelonia/private/in/*`,
@@ -45,6 +46,16 @@ For the authoritative signatures, follow the source links.
 | `chelonia/clearTransientSecretKeys` | `src/chelonia.ts` | Clear specific transient keys (`string[]`) or all of them. |
 | `chelonia/haveSecretKey` | `src/chelonia.ts` | `(keyId, persistent?) => boolean`. |
 
+## Key API
+
+Declarative, name-addressed key definitions. Full guide:
+[`keys.md`](./keys.md).
+
+| Selector | Source | Purpose |
+|---|---|---|
+| `chelonia/key/generate` | `src/keys.ts` | Expand a `KeySpecMap` (or marked array) against the optional target contract, transiently store every raw key, and return the `KeyMap`. No messages are created or sent. |
+| `chelonia/key/rotate` | `src/keys.ts` | Bulk key rotation (`'*'`, `'pending'`, or explicit names) with the two-case wrapper rule, optional atomic before/after operations, and stale-update suppression. `additionalOperations` runs before signer selection, so batch permission is only required when it returns operations. Only keys with a wrapped, locally available secret can be rotated: the bulk forms skip the rest, while an explicitly named key that cannot be rotated throws `ChelErrorKeyNameNotFound`. Returns `{ updates, newKeys, msg }` or `undefined`. |
+
 ## Contract lifecycle
 
 | Selector | Source | Purpose |
@@ -81,16 +92,17 @@ All publish to the relay via `chelonia/private/out/publishEvent` once
 
 | Selector | Source | Op | Purpose |
 |---|---|---|---|
-| `chelonia/out/registerContract` | `src/chelonia.ts` | `OP_CONTRACT` + initial action | Create a new contract on-chain. Returns the initial-action `SPMessage`. |
-| `chelonia/out/actionEncrypted` | `src/chelonia.ts` | `OP_ACTION_ENCRYPTED` | Publish an encrypted state mutation. |
-| `chelonia/out/actionUnencrypted` | `src/chelonia.ts` | `OP_ACTION_UNENCRYPTED` | Publish an unencrypted state mutation. |
-| `chelonia/out/keyAdd` | `src/chelonia.ts` | `OP_KEY_ADD` | Add authorized key(s). |
-| `chelonia/out/keyDel` | `src/chelonia.ts` | `OP_KEY_DEL` | Remove authorized key(s). |
-| `chelonia/out/keyUpdate` | `src/chelonia.ts` | `OP_KEY_UPDATE` | Rotate a key and/or update `permissions` / `purpose`. |
-| `chelonia/out/keyShare` | `src/chelonia.ts` | `OP_KEY_SHARE` | Share secret key material with another contract. |
-| `chelonia/out/keyRequest` | `src/chelonia.ts` | `OP_KEY_REQUEST` | Request keys from another contract. |
-| `chelonia/out/keyRequestResponse` | `src/chelonia.ts` | `OP_KEY_REQUEST_SEEN` | Acknowledge / respond to a key request. |
-| `chelonia/out/atomic` | `src/chelonia.ts` | `OP_ATOMIC` | Bundle multiple operations into one published message. |
+| `chelonia/out/registerContract` | `src/chelonia.ts` | `OP_CONTRACT` + initial action | Create a new contract on-chain. Returns the initial-action `SPMessage`. Accepts raw `SPKey[]` arrays (legacy) or declarative `KeySpecMap` / marked `keySpec()` entries with name-addressed signing/action references, a `data(K)` factory, `onKeysReady`, and opt-in `autoSak`. Both callbacks are awaited and must run in the context that owns Chelonia, because a `KeyMap` cannot cross a serialization boundary. See [`keys.md`](./keys.md). |
+| `chelonia/out/actionEncrypted` | `src/chelonia.ts` | `OP_ACTION_ENCRYPTED` | Publish an encrypted state mutation. Accepts `signingKeyName` / `innerSigningKeyName` / `encryptionKeyName` twins of the id fields. |
+| `chelonia/out/actionUnencrypted` | `src/chelonia.ts` | `OP_ACTION_UNENCRYPTED` | Publish an unencrypted state mutation. Same name twins as above. |
+| `chelonia/out/keyAdd` | `src/chelonia.ts` | `OP_KEY_ADD` | Add authorized key(s). Accepts raw `SPKey` / `EncryptedData<SPKey>` entries, marked `keySpec()` entries (expanded against the live contract, incl. `foreignKeyFrom`), or a `KeySpecMap`. |
+| `chelonia/out/keyDel` | `src/chelonia.ts` | `OP_KEY_DEL` | Remove authorized key(s). Accepts `signingKeyName`. |
+| `chelonia/out/keyUpdate` | `src/chelonia.ts` | `OP_KEY_UPDATE` | Rotate a key and/or update `permissions` / `purpose`. Accepts raw updates, marked `keyUpdateSpec()` entries, or a `KeyUpdateSpecMap`. |
+| `chelonia/out/keyShare` | `src/chelonia.ts` | `OP_KEY_SHARE` | Share secret key material with another contract. Accepts `signingKeyName`. |
+| `chelonia/out/shareKeys` | `src/chelonia.ts` | `OP_KEY_SHARE` | Share a subject contract's active recoverable keys with a destination contract (`keyNames` / `keyIds`, `'*'` allowed), re-encrypting under the destination CEK. `atomic: true` returns the unpublished message. Inside `chelonia/out/atomic` the destination must be the batch contract. Contracts that are already loaded and not dirty are not re-retained, so the call is safe from a contract side effect; a dirty contract still syncs, and publishing into your own lane always deadlocks (use `atomic: true` or defer). |
+| `chelonia/out/keyRequest` | `src/chelonia.ts` | `OP_KEY_REQUEST` | Request keys from another contract. Each name reference resolves against its real owner: outer `signingKeyName` / `innerEncryptionKeyName` against the destination contract, `innerSigningKeyName` / `encryptionKeyName` against the originating contract. |
+| `chelonia/out/keyRequestResponse` | `src/chelonia.ts` | `OP_KEY_REQUEST_SEEN` | Acknowledge / respond to a key request. Accepts `signingKeyName`. |
+| `chelonia/out/atomic` | `src/chelonia.ts` | `OP_ATOMIC` | Bundle multiple operations into one published message. The outer `signingKeyName` applies to the outer message only; nested invocations keep their own key references. Because an `OP_ATOMIC` is a single message on a single contract, every nested operation must target the contract the batch is published to; a nested `contractID` / `contractName` naming a different contract is rejected. `chelonia/out/keyShare` and `chelonia/out/shareKeys` are allowed in the batch, but only to share keys **into** the batch contract (the batch contract is the destination; `subjectContractID` / `originatingContractID` may point elsewhere). `originatingContractID` / `originatingContractName` are not accepted on the batch itself — pass them to the nested operation that needs them. |
 | `chelonia/out/encryptedOrUnencryptedPubMessage` | `src/chelonia.ts` | n/a | Build a signed (and optionally encrypted) pub message without publishing it. |
 | `chelonia/out/ownResources` | `src/chelonia.ts` | HTTP | Fetch the calling contract's billable resources from the relay. |
 | `chelonia/out/deleteContract` | `src/chelonia.ts` | HTTP | Permanently delete one or more contracts (requires token or billable-contract id). |
@@ -271,14 +283,15 @@ The most useful exported types and values (re-exported from the package root):
 | `CheloniaConfig` | `src/types.ts` | Top-level configuration object passed to `chelonia/configure`. |
 | `PublishOptions` | `src/internals.ts` (re-exported from `src/chelonia.ts`, reachable from the package root and the `./chelonia` subpath) | Per-call `/out/*` options: `maxAttempts`, `headers`, `billableContractID`, `bearer`, `disableAutoDedup`. |
 | `ChelRegParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/registerContract`. |
-| `ChelActionParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/actionEncrypted` / `actionUnencrypted`. |
+| `ChelActionParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/actionEncrypted` / `actionUnencrypted`. At least one of `signingKeyId` / `signingKeyName` is required by the type, not just at runtime. |
 | `ChelKeyAddParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/keyAdd`. |
 | `ChelKeyDelParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/keyDel`. |
 | `ChelKeyUpdateParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/keyUpdate`. |
 | `ChelKeyShareParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/keyShare`. |
 | `ChelKeyRequestParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/keyRequest`. |
 | `ChelKeyRequestResponseParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/keyRequestResponse`. |
-| `ChelAtomicParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/atomic`. Each entry's params are pre-validated by the inner selector. |
+| `ChelAtomicParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/atomic`. Each entry's params are pre-validated by the inner selector. `originatingContractID` / `originatingContractName` are not part of it: they belong to the individual nested operation, and passing them here is rejected. |
+| `NestedInvocationParams` | `src/chelonia.ts` | The params of one entry in an `OP_ATOMIC` batch: the same shape as the standalone selector, with the batch-supplied target contract and signing reference made optional. |
 | `ChelContractProcessMessageObject` | `src/types.ts` | First argument to a contract action's `process(...)`. |
 | `ChelContractSideeffectMutationObject` | `src/types.ts` | First argument to a contract action's `sideEffect(...)`. |
 | `CheloniaContractCtx` | `src/types.ts` | Shape accepted by `chelonia/defineContract`. |
@@ -322,6 +335,9 @@ All errors are generated by `ChelErrorGenerator` in `src/errors.ts`.
 | `ChelErrorUnexpectedHttpResponseCode` | Server returned an unexpected HTTP status. The status is on `.cause` as a number. |
 | `ChelErrorResourceGone` | Server signalled the resource is permanently gone (HTTP 410). |
 | `ChelErrorJournalCorrupt` | `chelonia/journal/reconstruct` could not apply a stored patch. Has `entryIndex` and `contractID`. |
+| `ChelErrorKeySpecInvalid` | A key declaration (spec) is structurally invalid: not an object at all, bad type/purpose combination, missing `ringLevel` on an ordinary name, forbidden field combinations, duplicate names, `#sak` convention violations, or an unresolvable/invalid `foreignKeyFrom`. |
+| `ChelErrorKeyWrapCycle` | Extends `ChelErrorKeySpecInvalid`. A wrapping graph (`encryptWith`) that cycles between two or more distinct keys. Self-wrap is valid. |
+| `ChelErrorKeyNameNotFound` | Extends `ChelErrorKeySpecInvalid`. A structurally valid id/name reference that cannot be resolved: unknown or revoked key name, an id/name pair that does not match, or an update targeting a revoked old key. |
 | `ChelErrorKvSlotUnknown` | Unknown/inactive slot or unsynced contract. Thrown by `read`, `update`, `clear`, and single-slot `sync`; aggregate `sync` and `status` do not throw for this. |
 | `ChelErrorKvSlotInvalid` | Malformed `KvSlotDefinition` (bad key, schema, or defaultValue). Thrown by `defineSlot`. |
 | `ChelErrorKvUpdateInvalid` | Invalid `update` arguments or reducer/`defaultUpdater` contract violations, including throws, non-function reducers, unexpected symbols, or `null`/`undefined` outputs. |

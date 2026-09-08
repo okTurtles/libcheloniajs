@@ -444,6 +444,14 @@ operation-specific `data` payload. Each can also be embedded in
 `chelonia/out/atomic` (see next section) by setting `atomic: true` and
 letting the atomic call publish.
 
+Every `signingKeyId` below also accepts a `signingKeyName` twin (resolved
+against the contract's current unrevoked keys), and `chelonia/out/keyAdd`
+additionally accepts declarative `keySpec()` entries — including
+`foreignKeyFrom` construction — expanded against the live contract. For
+generating keys from specs, name-addressed references throughout, generic
+sharing (`chelonia/out/shareKeys`), and rotation
+(`chelonia/key/rotate`), see [`keys.md`](./keys.md).
+
 ### `chelonia/out/keyAdd`
 
 ```js
@@ -600,10 +608,12 @@ await sbp('chelonia/out/atomic', {
 Each inner entry MUST set `atomic: true` so the inner selector returns
 an op rather than publishing on its own. Only
 `chelonia/out/actionEncrypted`, `actionUnencrypted`, `keyAdd`,
-`keyDel`, `keyUpdate`, `keyShare`, and `keyRequestResponse` are
-accepted inside atomic batches (see the whitelist in
-`src/chelonia.ts`); anything else — including
-`chelonia/out/keyRequest` — throws.
+`keyDel`, `keyUpdate`, `keyShare`, `shareKeys`, and
+`keyRequestResponse` are accepted inside atomic batches; anything
+else — including `chelonia/out/keyRequest` — throws. The library
+exports the list as `ATOMIC_ALLOWED_SELECTORS`, and it is tied to the
+`AtomicInvocation` type, so what the batch accepts and what the types
+promise cannot drift apart.
 
 ---
 
@@ -797,6 +807,8 @@ await sbp('chelonia/reset', async () => {
 - [`configure.md`](./configure.md) — config surface, hooks, reconfigure
   semantics.
 - [`journal.md`](./journal.md) — per-contract state-change journal.
+- [`keys.md`](./keys.md) — the declarative key API: specs, wrapping,
+  names, sharing, rotation.
 - [`api.md`](./api.md) — flat selector / type / error index.
 - `src/chelonia.ts` — authoritative source for every selector listed
   here.

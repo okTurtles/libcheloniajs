@@ -2,6 +2,7 @@ import type { SPKey, SPKeyPurpose, SPKeyUpdate, SPOpValue } from './SPMessage.cj
 import { SPMessage } from './SPMessage.cjs';
 import type { EncryptedData } from './encryptedData.cjs';
 import { ChelContractKey, ChelContractState, ChelRootState, CheloniaConfig, CheloniaContext, JSONType } from './types.cjs';
+export declare const copiedExistingData: unique symbol;
 export declare const findKeyIdByName: (state: ChelContractState, name: string) => string | null | undefined;
 export declare const findForeignKeysByContractID: (state: ChelContractState, contractID: string) => string[] | undefined;
 export declare const findRevokedKeyIdsByName: (state: ChelContractState, name: string) => string[];

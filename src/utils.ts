@@ -18,7 +18,7 @@ import type {
 } from './SPMessage.js'
 import { SPMessage } from './SPMessage.js'
 import { Secret } from './Secret.js'
-import { INVITE_STATUS } from './constants.js'
+import { INVITE_STATUS, isValidInviteQuantity } from './constants.js'
 import type { EncryptedData } from './encryptedData.js'
 import {
   ChelErrorForkedChain,
@@ -41,7 +41,12 @@ import {
 
 const MAX_EVENTS_AFTER = Number.parseInt(process.env.MAX_EVENTS_AFTER || '', 10) || Infinity
 
-const copiedExistingData = Symbol('copiedExistingData')
+// Marker for key metadata copied verbatim from an existing key on
+// OP_KEY_UPDATE (as opposed to freshly authored content). Symbols don't
+// serialize, so this only affects local (sender-side) processing: copied
+// content must not be re-decrypted/persisted as if it were new. Exported so
+// the spec-form update expansion (src/keys.ts) can apply the same protection.
+export const copiedExistingData = Symbol('copiedExistingData')
 
 export const findKeyIdByName = (
   state: ChelContractState,
@@ -405,7 +410,7 @@ export const validateKeyUpdatePermissions = function (
         updatedKey.purpose = uk.purpose as SPKeyPurpose[]
       }
       if (uk.meta) {
-        updatedKey.meta = uk.meta
+        updatedKey.meta = uk.meta as ChelContractKey['meta']
       } else if (updatedKey.meta) {
         Object.defineProperty(updatedKey.meta, copiedExistingData, { value: true })
       }
@@ -471,7 +476,14 @@ export const keyAdditionProcessor = function (
     // existing key on OP_KEY_UPDATE. These shouldn't be processed.
     if (key.meta?.private?.content && !has(key.meta, copiedExistingData)) {
       if (key.id && !sbp('chelonia/haveSecretKey', key.id, !key.meta.private.transient)) {
-        const decryptedKeyResult = this.config.unwrapMaybeEncryptedData(key.meta.private.content)
+        // At this point `content` is a live `EncryptedData` wrapper: freshly
+        // authored outgoing data, or incoming data re-wrapped by the
+        // deserializer. Copied-from-state tuples are excluded above by the
+        // `copiedExistingData` marker, so the serialized form never reaches
+        // `unwrapMaybeEncryptedData` here.
+        const decryptedKeyResult = this.config.unwrapMaybeEncryptedData(
+          key.meta.private.content as EncryptedData<string>
+        )
         // Ignore data that couldn't be decrypted
         if (decryptedKeyResult) {
           // Data aren't encrypted
@@ -507,16 +519,38 @@ export const keyAdditionProcessor = function (
     // accounting
     if (key.name.startsWith('#inviteKey-')) {
       if (!state._vm.invites) state._vm.invites = Object.create(null)
+      const quantity = key.meta?.quantity
+      // No `meta.quantity` means an invite with unlimited uses: the
+      // `OP_KEY_REQUEST` handler only decrements and exhausts invites that
+      // carry one, and unlimited invites are a supported feature (e.g. a
+      // public join link), so this shape is recorded as valid.
+      //
+      // A quantity that *is* present but cannot be honoured (`0`, negative,
+      // fractional, `NaN`) is a different story: key specs reject it at
+      // authoring time, so it can only come from a hand-built `SPKey` or a
+      // hostile message. Fail closed there. Recording it as revoked (rather
+      // than throwing) keeps processing deterministic and does not break
+      // existing chains that already contain such a key.
+      const malformed = quantity != null && !isValidInviteQuantity(quantity)
+      if (malformed) {
+        console.error(
+          `[chelonia] invite key ${key.id} has an unusable meta.quantity ` +
+            `(${String(quantity)}); recording as revoked`,
+          { contractID }
+        )
+      }
       const inviteSecret =
         decryptedKey ||
         (has(this.transientSecretKeys, key.id)
           ? serializeKey(this.transientSecretKeys[key.id], true)
           : undefined)
       state._vm.invites![key.id] = {
-        status: INVITE_STATUS.VALID,
-        initialQuantity: key.meta!.quantity!,
-        quantity: key.meta!.quantity!,
-        expires: key.meta!.expires!,
+        status: malformed ? INVITE_STATUS.REVOKED : INVITE_STATUS.VALID,
+        // Left `undefined` for an unlimited invite, which is what the
+        // `OP_KEY_REQUEST` handler checks for.
+        initialQuantity: isValidInviteQuantity(quantity) ? quantity : undefined,
+        quantity: isValidInviteQuantity(quantity) ? quantity : undefined,
+        expires: key.meta?.expires as number,
         inviteSecret: inviteSecret!,
         responses: []
       }

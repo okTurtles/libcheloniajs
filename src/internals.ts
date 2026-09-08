@@ -151,10 +151,13 @@ const keysToMap = function (
     .map((key) => {
       const data = this.config.unwrapMaybeEncryptedData(key)
       if (!data) return undefined
+      // `data.data` is authored as `SPKey` but gains processed-only fields
+      // (`_private`) here, so widen it to `ChelContractKey`.
+      const processedKey = data.data as ChelContractKey
       if (data.encryptionKeyId) {
-        data.data._private = data.encryptionKeyId
+        processedKey._private = data.encryptionKeyId
       }
-      return data.data
+      return processedKey
     })
     // eslint-disable-next-line no-use-before-define
     .filter(Boolean as unknown as (v: unknown) => v is ChelContractKey) as ChelContractKey[]
