@@ -1,23 +1,26 @@
 # Keys: declarative key definitions and derivation
 
-How to define a contract's keys in one declarative, name-addressed structure
-and let Chelonia do the `keygen` / `keyId` / `serializeKey` / wrapping /
-assembly — plus name-addressed references, generic sharing, and rotation.
+This guide shows how to define the keys of a contract in one declarative,
+name-addressed structure. Chelonia then does the `keygen`, the `keyId`, the
+`serializeKey`, the wrapping, and the assembly. The guide also covers
+name-addressed references, generic sharing, and rotation.
 
 - Selector reference: [`api.md`](./api.md#key-api)
 - Source: [`src/keys.ts`](../src/keys.ts) (pure engine + selectors),
   [`src/chelonia.ts`](../src/chelonia.ts) (selector integration)
 
-Everything here is additive: raw `SPKey[]` arrays, `EncryptedData<SPKey>`
-entries, and every existing `*KeyId` parameter keep working unchanged.
+Everything here is additive. Raw `SPKey[]` arrays, `EncryptedData<SPKey>`
+entries, and every existing `*KeyId` parameter continue to work without
+change.
 
 ## Concepts
 
 ### Key specs: name-addressed declarations
 
-The unit of the API is a **key spec** — a partial description of a key,
-keyed by (or carrying) a name. Everything else — `id`, `data`,
-`meta.private.content`, curve type — is derived. Two equivalent forms:
+The unit of the API is a **key spec**. A key spec is a partial description
+of a key, and it carries a name. Chelonia derives all other fields: `id`,
+`data`, `meta.private.content`, and the curve type. Two equivalent forms
+exist:
 
 ```js
 // Object form (recommended): the record key is the caller alias
@@ -32,93 +35,157 @@ keys: {
 keys: [keySpec('csk', { ... }), keySpec('cek', { ... })]
 ```
 
-Array entries **must** be created with `keySpec(alias, spec)`; the prototype
-marker distinguishes a spec from a raw `SPKey` (specs are never inferred from
-missing fields).
+You must make each array entry with `keySpec(alias, spec)`. A prototype
+marker tells a spec from a raw `SPKey`. The library never infers a spec from
+missing fields.
 
-### Aliases vs wire names
+### Aliases and wire names
 
-The **alias** (object-form key, or `keySpec()` first argument) is what you
-use in `KeyMap`, `encryptWith`, and name-based registration fields. The
-**wire name** (`GeneratedKey.name`, `SPKey.name`) is what lands on chain.
-They are the same unless the spec sets `name` explicitly — in both forms:
-`keySpec(alias, spec)` keeps the alias and a caller-provided `spec.name`
-separate, exactly like the object form — or the key is an invite key, whose
-wire name is suffixed with its id: `#inviteKey` → `#inviteKey-<id>`. Two
-invite specs with the same `name` therefore don't collide, including
-multiple `keySpec()` entries in array form.
+The **alias** is the record key in object form. It is also the first
+argument of `keySpec()`. You use the alias in the `KeyMap`, in
+`encryptWith`, and in the name-based registration fields.
+
+The **wire name** (`GeneratedKey.name`, `SPKey.name`) is the name on the
+chain. Alias and wire name are the same in the normal case. They differ in
+two cases:
+
+1. The spec sets `name` explicitly. Then `keySpec(alias, spec)` keeps the
+   alias and the given `spec.name` separate, exactly like the object form.
+2. The key is an invite key. The wire name then gets the id as a suffix:
+   `#inviteKey` becomes `#inviteKey-<id>`.
+
+For this reason, two invite specs with the same `name` do not collide. This
+is also true for multiple `keySpec()` entries in array form.
 
 ### The wrapping graph (`encryptWith`)
 
-`encryptWith: '<name>'` declares "this key's secret half is encrypted under
-the key named `<name>`". The target is one of:
+The field `encryptWith: '<name>'` makes this declaration: the secret half
+of this key is encrypted under the key named `<name>`. The target is one
+of:
 
-- another key **in the same spec set** → wrapped with the raw key
-- `{ key }` → a raw key you already hold (e.g. a just-derived password key)
-- `{ contractID, name }` (spec generation only) → an active key in a loaded
-  contract, wrapped by id so a concurrent rotation of the wrapper still
-  decrypts
-- a plain string that is not in the set, **in `keyAdd` contexts**
-  → an active key in the target contract, wrapped by id
+- A different key in the same spec set. Chelonia wraps with the raw key.
+- `{ key }`: a raw key that you already hold (for example, a password key
+  from a fresh derivation).
+- `{ contractID, name }` (spec generation only): an active key in a loaded
+  contract, wrapped by id. For this reason, a concurrent rotation of the
+  wrapper still decrypts.
+- A plain string that is not in the set, in `keyAdd` contexts: an active
+  key in the target contract, wrapped by id.
 
-The set of specs forms a DAG which Chelonia resolves. Cycles between two or
-more distinct keys throw `ChelErrorKeyWrapCycle`; **self-wrap**
-(`encryptWith: 'cek'` on the `cek` spec itself) is valid — the key's secret
-is encrypted under itself, a common CEK pattern.
+The specs form a directed acyclic graph (DAG). Chelonia resolves this
+graph. A cycle between two or more different keys throws
+`ChelErrorKeyWrapCycle`. Self-wrap means `encryptWith: 'cek'` on the `cek`
+spec itself. It is correct: the secret of the key is encrypted under the
+key itself. This is a common CEK pattern.
 
-Omitting `encryptWith` means the contract stores only the public half —
-exactly today's meaning of omitting `meta.private.content`. Setting
-`meta.private.content` on a spec directly is rejected: it would bypass the
-wrapper purpose check, the in-set/contract resolution and the cycle
-detection, and it is never validated against the key it is attached to.
-Hand-crafted entries belong in the raw `SPKey` form that
-`chelonia/out/keyAdd` still accepts.
+If you omit `encryptWith`, the contract stores only the public half. This
+is exactly the current meaning of an omitted `meta.private.content`. The
+library gives an error for a `meta.private.content` that you set directly
+on a spec.
+Such a value bypasses three mechanisms: the wrapper purpose check, the
+in-set or in-contract resolution, and the cycle detection. The library also
+never validates the value against the key that it is attached to. Put
+hand-crafted entries in the raw `SPKey` form. The selector
+`chelonia/out/keyAdd` still takes this form.
 
 ### Conventions as defaults
 
 | Name pattern | Defaults |
 |---|---|
-| `#sak` | `purpose: ['sak']`, `ringLevel: 0`, `permissions: []`, `allowedActions: []`, edwards key — the invariants `keyAdditionProcessor` enforces, now checked at authoring time |
-| `#inviteKey` (or `#inviteKey-*`) | `ringLevel: Number.MAX_SAFE_INTEGER`, `purpose: ['sig']`; `quantity` **required**. Only the exact name `#inviteKey` is suffixed with the id; a name like `#inviteKey-foo` is recognized as an invite (same defaults, invite accounting) but keeps its name verbatim |
-| anything else | `permissions: []`, `allowedActions: []` (fail-closed); `ringLevel` **required** — it is a security decision |
+| `#sak` | `purpose: ['sak']`, `ringLevel: 0`, `permissions: []`, `allowedActions: []`, edwards key. These are the invariants that `keyAdditionProcessor` enforces. Chelonia now checks them at authoring time. |
+| `#inviteKey` (or `#inviteKey-*`) | `ringLevel: Number.MAX_SAFE_INTEGER`, `purpose: ['sig']`. The field `quantity` is optional (see [Invite quantity](#invite-quantity)). Only the exact name `#inviteKey` gets the id suffix. A name like `#inviteKey-foo` is also an invite. It gets the same defaults and the same invite accounting, but it keeps its name without change. |
+| anything else | `permissions: []`, `allowedActions: []` (fail-closed). The field `ringLevel` is necessary. It is a security decision. |
 
-Curve type is inferred: purpose containing only `enc` →
-`CURVE25519XSALSA20POLY1305`; `sig`/`sak` → `EDWARDS25519SHA512BATCH`. If
-you supply `key` or public `data`, the type comes from the key and the
-purpose is validated against it.
+Chelonia infers the curve type. A purpose with only `enc` means the type
+`CURVE25519XSALSA20POLY1305`. A purpose with `sig` or `sak` means the type
+`EDWARDS25519SHA512BATCH`. If you supply `key` or public `data`, the type
+comes from the key. Chelonia then makes sure that the purpose agrees with
+the type.
 
-The `#` namespace is reserved and only the exact conventional names and their
-documented suffixed forms are accepted: `#sak`, `#inviteKey`, `#inviteKey-*`
-and `#krrk-*`. Every other `#`-prefixed name is rejected, including near
-misses such as `#sak-1` or a bare `#krrk` — accepting those would quietly
-produce an ordinary key that none of the convention handling matches.
+The `#` namespace is reserved. Only these exact names and their documented
+suffix forms pass: `#sak`, `#inviteKey`, `#inviteKey-*`, and `#krrk-*`.
+Every other name with the `#` prefix gets an error. This includes near
+misses, for example `#sak-1` or a bare `#krrk`. Such a name makes an
+ordinary key, and no convention handling matches it.
+
+### Invite quantity
+
+The field `quantity` on an invite spec gives the number of times that a
+person can use the invite. If you do not set it, the invite has unlimited
+uses. This is a feature, not an omission.
+
+The `OP_KEY_REQUEST` processing decreases a quantity only when
+`meta.quantity` is present. Only such an invite can become used up. An
+invite without a quantity stays correct until its revocation, or until its
+`expires` time passes.
+
+Because an omitted quantity has a large effect, the explicit form is a
+symbol:
+
+```js
+import { UNLIMITED_INVITE_USES } from '@chelonia/lib/keys'
+
+keys: {
+  memberInvite: { name: '#inviteKey', quantity: 60 },
+  publicInvite: { name: '#inviteKey', quantity: UNLIMITED_INVITE_USES }
+}
+```
+
+`UNLIMITED_INVITE_USES` and an omitted `quantity` give the same wire form:
+no `meta.quantity`. The symbol only documents the intent at the call site.
+A numeric `quantity` must be a positive safe integer. The values `0`, `NaN`,
+fractions, and negative numbers get an error at authoring time. Such a key
+is not usable. On the wire, you cannot tell it from a damaged key.
+
+The processing works in the same way. `keyAdditionProcessor` records an
+invite with no `meta.quantity` as correct and unlimited. It fails closed
+only when `meta.quantity` is present and is not a positive safe integer. It
+then records the invite as revoked. Only a hand-built `SPKey` or a message
+from an attacker can have this shape.
 
 ### The secret-key lifecycle
 
-1. Expansion registers every generated/provided raw key as **transient**
-   (`chelonia/storeSecretKeys`, `transient: true`) — required anyway so the
-   outgoing message can be signed and processed locally.
-2. `transient: true` on a spec sets `meta.private.transient`, which makes
-   `keyAdditionProcessor` skip persisting it (password-derived keys like
-   IPK/IEK).
-3. Every *non-transient* wrapped key is persisted automatically when the
-   outgoing `OP_CONTRACT` / `OP_KEY_ADD` is processed — a manual
-   "store persistent keys" call after registration is a no-op safety net.
+1. Expansion registers each raw key as **transient**
+   (`chelonia/storeSecretKeys`, `transient: true`). The outgoing message
+   needs this registration for its signature and for local processing.
+2. `transient: true` on a spec sets `meta.private.transient`. This field
+   makes `keyAdditionProcessor` skip the persistence step.
+   Password-derived keys like IPK and IEK use it.
+3. Chelonia stores every non-transient wrapped key automatically. This
+   happens when it processes the outgoing `OP_CONTRACT` or `OP_KEY_ADD`. A
+   manual "store persistent keys" call after registration has no effect.
+   It is only a safety net.
 
-Clearing password-derived keys after registration remains an explicit call,
-addressed by the returned `KeyMap`:
+The clearing of password-derived keys after registration stays an explicit
+call. Use the ids from the `KeyMap` that the selector returns:
 
 ```js
 await sbp('chelonia/clearTransientSecretKeys', [K.ipk.id, K.iek.id])
 ```
 
-Generated keys stay transient after a failed publish (matching today's
-manual workflow). Automatic rollback is unsafe because an id may already
-have been present in the transient store before generation.
+Keys that Chelonia made stay transient after a failed publish. This matches
+the current manual workflow. There is no automatic rollback:
+
+- A publish failure does not prove a rejection. The server can store the
+  event, and then the response can be lost. The secret of a live on-chain
+  key is then gone.
+- A spec set is not always fresh material. An entry with an explicit `key`
+  can be in the secret-key store before expansion. Examples are
+  password-derived roots and keys that the caller holds. The entry can even
+  be there on purpose, stored permanently. The selector
+  `chelonia/storeSecretKeys` keeps this existing entry. A complete rollback
+  can clear key material that the caller owns and still needs.
+- The publish can fail after the caller uses the `KeyMap`. Examples are
+  invite links, recovery metadata, and `onKeysReady` side effects.
+
+Note: an id collision is not the concern. A fresh id comes from random key
+material, so the store cannot have this id in it already. For this reason,
+the clearing stays an explicit call, with the ids from the returned
+`KeyMap`.
 
 ## Generating keys: `chelonia/key/generate`
 
-The composable, two-phase entry point:
+The composable entry point with two phases:
 
 ```js
 const K = sbp('chelonia/key/generate', {
@@ -128,7 +195,7 @@ const K = sbp('chelonia/key/generate', {
 })
 ```
 
-Returns a `KeyMap`: `Record<alias, GeneratedKey>` where
+The result is a `KeyMap`: `Record<alias, GeneratedKey>`, where
 
 ```ts
 type GeneratedKey = {
@@ -140,25 +207,26 @@ type GeneratedKey = {
 }
 ```
 
-Side effects: transient registration of every raw key. That is the *only*
-side effect — no messages are created or sent. `serializeKey(k.key, true)`
-gives the serialized secret when a consumer genuinely needs it (invite
-links, recovery metadata).
+Side effects: the selector registers every raw key as transient. This is
+the only side effect. The selector makes no messages and sends none. Use
+`serializeKey(k.key, true)` when a consumer really needs the serialized
+secret. Examples are invite links and recovery metadata.
 
-`KeyMap` is sensitive: never log it, never serialize it into state.
+CAUTION: Never log a `KeyMap`. Never put a serialized `KeyMap` into state.
+A `KeyMap` is secret material.
 
 ### Purity
 
-`expandKeySpecs` (and `expandKeyUpdateSpecs`) are pure with respect to
-Chelonia/SBP: contract state is passed through an explicit
-`KeyExpansionContext`, and no selector is called during expansion. The
-`EncryptedData` wrappers are lazy — encryption happens at serialization
-time, not expansion time.
+The functions `expandKeySpecs` and `expandKeyUpdateSpecs` are pure. They
+use no Chelonia or SBP state. All contract state goes in through an
+explicit `KeyExpansionContext`. Expansion calls no selector. The
+`EncryptedData` wrappers are lazy. The encryption happens at serialization
+time, not at expansion time.
 
 ## Spec-based registration
 
-`chelonia/out/registerContract` accepts the spec form when `keys` is a
-`KeySpecMap` (or an array containing marked specs):
+`chelonia/out/registerContract` takes the spec form when `keys` is a
+`KeySpecMap` (or an array with marked specs):
 
 ```js
 await sbp('chelonia/out/registerContract', {
@@ -183,91 +251,134 @@ await sbp('chelonia/out/registerContract', {
 
 Semantics:
 
-1. Spec-form `keys` are expanded via `chelonia/key/generate` (same tick).
-2. The `*KeyName` fields resolve against the generated `KeyMap` (alias or
-   wire name).
-3. `data` as a function receives the `KeyMap` — how an application embeds
-   invite secrets into the join payload without pre-generating.
-4. `onKeysReady` runs after transient storage, before payload/message
-   creation; an error in it (or in the data factory) prevents publication.
-5. Everything after expansion is today's code path: same `SPMessage`,
-   same publish, same sync. The return value is unchanged (the
-   initial-action `SPMessage`).
+1. Chelonia expands spec-form `keys` through `chelonia/key/generate`, in
+   the same tick.
+2. The `*KeyName` fields resolve against the `KeyMap` (an alias or a wire
+   name).
+3. A function `data` gets the `KeyMap`. In this way, an application puts
+   invite secrets into the join payload, and it does not need to make the
+   keys first. The function can be `async`. Chelonia awaits the result
+   before it builds the payload.
+4. `onKeysReady` runs after the transient storage and before the creation
+   of the payload or message. Chelonia awaits it too. An error in
+   `onKeysReady`, or in the data factory, stops the publication.
+5. Everything after the expansion uses the current code path: the same
+   `SPMessage`, the same publish, the same sync. The return value does not
+   change. It is the initial-action `SPMessage`.
 
-`autoSak` is **opt-in** for the first release (default off). When enabled it
-requires an explicit wrapper — a silently generated server-accounting key is
-too consequential to guess:
+The option `autoSak` is opt-in for the first release. The default is off.
+When you enable it, you must give an explicit wrapper. The wrapper is a
+security decision, and the library does not guess it:
 
 ```js
 autoSak: { encryptWith: 'iek' }  // or declare '#sak' explicitly
 ```
 
-Raw-array calls keep the exact legacy behavior: no auto-SAK, no callbacks,
-no expansion.
+Calls with raw arrays keep the exact legacy behavior: no auto-SAK, no
+callbacks, no expansion.
 
 ### Service-worker caveat
 
-`onKeysReady` and the `data` factory are local JavaScript callbacks.
-Callers that construct operations on one side of a serialization boundary
-(e.g. a UI tab invoking a service worker via message passing) must use the
-two-phase form instead — generate with `chelonia/key/generate`, pass the
-resulting raw `SPKey`s — since functions are not transport-serializable.
+The functions themselves are transport-serializable. `@chelonia/serdes`
+changes a function into a `MessagePort`. On the far side, serdes assembles
+an async proxy again. Selector calls cross a tab-to-service-worker boundary
+in this way today. But the `KeyMap` that these callbacks receive cannot
+cross this boundary:
+
+- `Key` objects keep the secret half in non-enumerable storage. The
+  serialized copy carries only the public half. On the far side,
+  `serializeKey(K.x.key, true)` throws `no secret key to export`. But an
+  invite link or a recovery blob needs exactly this secret.
+- The field `spkey.meta.private.content` is a lazy `EncryptedData` wrapper.
+  It has no serdes tag. After the serialization, only `{ encryptionKeyId }`
+  stays. The wrapped secret is gone.
+- There is also a third problem, and it is serious. Serialization moves the
+  typed arrays that back the keys. This transfer detaches the arrays in the
+  sender. After one proxied call, the local `KeyMap` is not usable:
+  `keyId()` throws on a detached buffer. A second call fails with `Cannot
+  transfer object of unsupported type`.
+
+For this reason, `onKeysReady` and the `data` factory must run in the
+context that owns Chelonia. This is the same context that made the keys.
+Chelonia awaits both callbacks, so an `async` callback is correct locally.
+But do not send the callbacks across a boundary. Do not send a `KeyMap`
+back from a remote `chelonia/key/generate` call either.
+
+Callers across a boundary have two options:
+
+1. Do the complete registration on the Chelonia side. Expose one
+   application-level selector there. This selector builds the specs and the
+   callbacks locally. Call it from the tab with plain serializable
+   arguments.
+2. Move key material explicitly as strings, never as `Key` objects. Make
+   the keys where the secret is necessary. Send `serializeKey(key, true)`
+   in a `Secret`, which is serdes-registered. Give it back through
+   `spec.key` or `spec.data` on the other side.
+
+The test `src/keys-integration.test.ts` has the name "KeyMap does not
+survive a serdes boundary". It pins this behavior. It makes sure that this
+caveat stays correct.
 
 ## Name references across outgoing operations
 
-Every `*KeyId` parameter on the out-selectors has a `*KeyName` twin that
-resolves against the **target contract's** current state (aliases at
-registration time; `findKeyIdByName` afterwards):
+Every `*KeyId` parameter on the out-selectors has a `*KeyName` twin. To
+resolve a name means: change the name into the id of the current key. The
+name twin resolves against the current state of the target contract. At
+registration time, the aliases resolve. After that, the function
+`findKeyIdByName` does the work:
 
 | Selector | Name twins |
 |---|---|
 | `chelonia/out/actionEncrypted` / `actionUnencrypted` | `signingKeyName`, `innerSigningKeyName`, `encryptionKeyName` |
 | `chelonia/out/keyAdd`, `keyDel`, `keyUpdate`, `keyShare`, `keyRequestResponse` | `signingKeyName` |
 | `chelonia/out/keyRequest` | `signingKeyName`, `innerSigningKeyName`, `encryptionKeyName`, `innerEncryptionKeyName` |
-| `chelonia/out/atomic` | `signingKeyName` (outer message only; nested invocations keep their own references) |
+| `chelonia/out/atomic` | `signingKeyName` (the outer message only, and nested invocations keep their own references) |
 | `chelonia/out/encryptedOrUnencryptedPubMessage` | same as the action selectors |
 
-For `chelonia/out/keyRequest`, each name resolves against its **real owner**:
-outer `signingKeyName` and `innerEncryptionKeyName` live in the *destination*
-contract; `innerSigningKeyName` and `encryptionKeyName` live in the
-*originating* contract. This flow is easy to invert — the types say which is
-which.
+For `chelonia/out/keyRequest`, each name resolves against its real owner.
+The outer `signingKeyName` and the `innerEncryptionKeyName` live in the
+destination contract. The `innerSigningKeyName` and the `encryptionKeyName`
+live in the originating contract. This flow is easy to get wrong. The types
+show which name belongs where.
 
 ### id/name pair semantics
 
 For every `fooKeyId` / `fooKeyName` pair:
 
-- neither provided when required → `TypeError`
-- only id → current behavior
-- only name → resolved to the current unrevoked key by that name
-- both → resolved and required equal; a mismatch throws
-  `ChelErrorKeyNameNotFound` (a mismatch is almost certainly a stale key or
-  a bug — the id never silently wins)
+- Neither field, when the pair is necessary → `TypeError`
+- Only an id → the current behavior
+- Only a name → resolution to the current, not-revoked key with that name
+- Both fields → resolution, and the two values must be equal. A mismatch
+  throws `ChelErrorKeyNameNotFound`. A mismatch is almost certainly a
+  stale key or a bug. The id never wins automatically.
 
-Resolution happens once at selector entry. The lower-level
-`signedOutgoingData` / `encryptedOutgoingData` primitives remain id-only.
+The resolution happens one time, at selector entry. The lower-level
+primitives `signedOutgoingData` and `encryptedOutgoingData` stay id-only.
 
-TypeScript enforces the same rule at compile time: a required pair accepts
-`{ id }`, `{ name }` or `{ id, name }`, but not an empty pair. Plain
+TypeScript enforces the same rule at compile time. A necessary pair takes
+`{ id }`, `{ name }`, or `{ id, name }`, but not an empty pair. Plain
 JavaScript callers still get the runtime `TypeError`.
 
-Inside `chelonia/out/atomic` the signing pair is optional per entry, because
-a signer-less nested operation inherits the batch's signing reference.
+Inside `chelonia/out/atomic`, the signing pair is optional for each entry.
+A nested operation without a signer gets the signing reference of the
+batch.
 
 ## Spec-based `keyAdd`
 
-`chelonia/out/keyAdd` accepts a mixed array of `SPKey`,
-`EncryptedData<SPKey>`, and marked `keySpec()` entries (or a `KeySpecMap`
-when every entry is a spec). Spec entries are expanded against the **live
-contract state**:
+`chelonia/out/keyAdd` takes a mixed array of `SPKey`,
+`EncryptedData<SPKey>`, and marked `keySpec()` entries. It also takes a
+`KeySpecMap` when every entry is a spec. The library expands spec entries
+against the live contract state:
 
-- `encryptWith: 'pek'` first looks for a local alias in the same expansion,
-  then an active key named `pek` in the target contract (wrapped by id).
-- `foreignKeyFrom: [otherContractID, 'csk']` builds the whole foreign-key
-  entry: the `shelter:` URI, public `data` copied from the origin contract,
-  and a default wire name of `<originContractID>/<originKeyId>` — the
-  pattern applications previously assembled by hand. The origin contract
-  must be loaded (retain and sync it first); no secret material is copied.
+- For `encryptWith: 'pek'`, Chelonia first looks for a local alias in the
+  same expansion. Then it looks for an active key named `pek` in the
+  target contract. This key wraps by id.
+- `foreignKeyFrom: [otherContractID, 'csk']` builds the complete
+  foreign-key entry. It makes the `shelter:` URI and copies the public
+  `data` from the origin contract. The default wire name is
+  `<originContractID>/<originKeyId>`. Before, applications assembled this
+  pattern by hand. The origin contract must be loaded: retain and sync it
+  first. No secret material is copied.
 
 ```js
 await sbp('chelonia/out/keyAdd', {
@@ -302,49 +413,56 @@ await sbp('chelonia/out/shareKeys', {
 })
 ```
 
-Selects the subject's active keys that have recoverable secrets
-(`meta.private.content`) and a locally available secret key (transient
-first), re-encrypts each secret under the destination encryption key,
-encrypts the whole payload under that same key, and delegates the wire
-operation to `chelonia/out/keyShare`. Sharing a contract's keys with itself
-does nothing. The same applies when `keyIds`/`keyNames` is explicitly empty,
-or when `'*'` matches no recoverable key: nothing is published and the
-selector resolves to `undefined`. `atomic: true` returns the unpublished
-`SPMessage`.
+The selector selects the active keys of the subject with two properties: a
+recoverable secret (`meta.private.content`) and a locally available secret
+key. A transient local copy comes first. The selector encrypts each secret
+again under the destination encryption key. It encrypts the whole payload
+under the same key. Then it gives the wire operation to
+`chelonia/out/keyShare`.
 
-The selector is allowed inside `chelonia/out/atomic`, with one restriction:
-an `OP_ATOMIC` is a single message on a single contract, so the destination
-must be the batch contract. In other words a batch can pull *other*
-contracts' keys **into** the contract it is published to (leave `contractID`
-off, or set it to the batch contract, and point `subjectContractID`
-elsewhere), but it cannot push its own keys **out** to other contracts —
-those need one published `OP_KEY_SHARE` per destination. A nested
-`contractID` naming a different contract is rejected rather than silently
-retargeted.
+If the destination and the subject are the same contract, the selector does
+nothing. The same is true when `keyIds` or `keyNames` is explicitly empty.
+It is also true when `'*'` matches no recoverable key. In all these cases,
+nothing is published, and the selector resolves to `undefined`. With
+`atomic: true`, the result is the unpublished `SPMessage`.
 
-Both contracts are retained for the duration of the call, but only when they
-actually need syncing: a contract that is already loaded and not marked dirty
-is read directly. This matters because retaining a contract waits on its
-event queue even when it is already subscribed, so re-retaining a contract
-whose queue you are already running on (a contract side effect, or a nested
-`atomic` entry built from one) would wait on itself. Two caveats remain:
+You can use the selector inside `chelonia/out/atomic`, with one
+restriction. An `OP_ATOMIC` is a single message on a single contract. For
+this reason, the destination must be the batch contract. In other words, a
+batch can pull the keys of other contracts into its own contract. To do
+this, leave `contractID` off, or set it to the batch contract, and point
+`subjectContractID` elsewhere. But a batch cannot push its own keys out to
+other contracts. Those contracts need one published `OP_KEY_SHARE` per
+destination. A nested `contractID` that names a different contract gets an
+error. The library does not retarget the operation.
 
-- a contract marked **dirty** still syncs, so it can still self-wait
-- **publishing** into your own lane deadlocks regardless: from a side effect,
-  use `atomic: true` and fold the result into a batch, or defer the call
+The selector retains both contracts for the duration of the call, but only
+when a sync is really necessary. A contract that is loaded and not marked
+dirty is read directly. The difference matters for this reason: a retain
+waits on the event queue of the contract, even when the contract is
+already subscribed. A second retain of a contract whose queue you are
+already running on can wait on itself. Two examples: a contract side
+effect, and a nested `atomic` entry built from one. Two caveats still
+exist:
+
+- A contract with the dirty mark still syncs. It can still wait on itself.
+- A publish into your own event queue deadlocks in every case. From a side
+  effect, use `atomic: true` and put the result into a batch. Or send the
+  call at a later time.
 
 ## Updates and rotation
 
 ### Update specs
 
-`chelonia/out/keyUpdate` accepts marked `keyUpdateSpec(alias, spec)` entries
-(or a `KeyUpdateSpecMap`). The alias (record key in map form) is a
-caller-chosen label used for deduplication and as the default `oldKeyName` —
-it does not have to equal the key's wire name, which is convenient for
-`#inviteKey-*` keys. Exactly one of `oldKeyId` / `oldKeyName` selects
-the key (in map form, the alias is the default `oldKeyName`); when both are
-given they must agree. `name`, when given explicitly, is a consistency
-assertion that must equal the existing wire name (names cannot be updated):
+`chelonia/out/keyUpdate` takes marked `keyUpdateSpec(alias, spec)` entries,
+or a `KeyUpdateSpecMap`. The alias is the record key in map form. The
+caller selects this label. Chelonia uses it for deduplication and as the
+default `oldKeyName`. The alias does not have to equal the wire name of the
+key. This is useful for `#inviteKey-*` keys. Exactly one of `oldKeyId` and
+`oldKeyName` selects the key. In map form, the alias is the default
+`oldKeyName`. If you give both fields, they must agree. An explicit `name`
+is a consistency assertion. It must equal the current wire name. You cannot
+update a name:
 
 ```js
 await sbp('chelonia/out/keyUpdate', {
@@ -358,25 +476,29 @@ await sbp('chelonia/out/keyUpdate', {
 })
 ```
 
-- `rotate: true` generates a same-type replacement (`keygenOfSameType`).
-- `key` supplies the replacement directly (type must match).
-- Neither → policy/meta-only update that emits no `id`/`data`.
-- Rotation preserves the wire name, purpose, ring level, permissions,
-  allowed actions, `meta.quantity`, `expires`, `keyRequest`, and
-  `private.transient` / `shareable` / `oldKeys`; only
-  `meta.private.content` is replaced.
-- The **two-case wrapper rule** has one implementation: if the key's current
-  wrapper is itself being replaced in the same set, the secret is
-  re-encrypted with the *new raw* wrapper; otherwise it is encrypted *by
-  id* so a concurrent rotation of the wrapper still decrypts. An explicit
-  `encryptWith: { key }` overrides both.
-- Replacing a key that has **no** wrapped secret requires
+- `rotate: true` makes a replacement of the same type
+  (`keygenOfSameType`).
+- `key` supplies the replacement directly. The type must match.
+- Neither field: a policy-only or meta-only update. The operation emits no
+  `id` and no `data`.
+- A rotation keeps most properties: the wire name, the purpose, the ring
+  level, the permissions, and the allowed actions. It also keeps
+  `meta.quantity`, `expires`, `keyRequest`, `private.transient`,
+  `private.shareable`, and `private.oldKeys`. Only `meta.private.content`
+  is replaced.
+- The two-case wrapper rule has one implementation. Case 1: the same set
+  also replaces the current wrapper of the key. Chelonia then encrypts the
+  secret again with the new raw wrapper. Case 2: every other situation.
+  Chelonia encrypts by id. For this reason, a concurrent rotation of the
+  wrapper still decrypts. An explicit `encryptWith: { key }` overrides both
+  cases.
+- The replacement of a key with no wrapped secret needs
   `encryptWith: { key }` or `transient: true`. Without a wrapper, the new
-  secret is lost after reload.
+  secret is lost after a reload.
 
 ### `chelonia/key/rotate`
 
-Bulk rotation (the promotion of Group Income's `rotateKeysInternal`):
+Bulk rotation. It comes from `rotateKeysInternal` in Group Income:
 
 ```js
 const result = await sbp('chelonia/key/rotate', {
@@ -396,81 +518,93 @@ const result = await sbp('chelonia/key/rotate', {
 // => { updates, newKeys, msg } — or undefined when no keys qualify
 ```
 
-Only active keys whose secret is recoverable and locally available are
-rotated. Rotation **fails fast before publishing** when no signing key at
-the minimum ring level of the rotated set is locally available (e.g. a
-cleared transient root key) — pass `signingKeyName` explicitly in that case.
-When `additionalOperations` returns operations, the update and the
-extra invocations are published as one `OP_ATOMIC`; otherwise a direct
-`OP_KEY_UPDATE` is published. A composed `preSendCheck` suppresses
-publishing when every old key has already been revoked (stale update).
-Retry/persistence policy stays with the application (e.g. the persistent
-action queue): `chelonia/key/rotate` performs exactly one attempt.
+The selector rotates only active keys with a recoverable, locally available
+secret. Rotation fails fast before publishing in one case: no signing key
+at the minimum ring level of the rotated set is locally available. For
+example, a cleared transient root key causes this condition. In that case,
+give `signingKeyName` explicitly.
 
-`additionalOperations` is invoked **before** the signing key is selected, so
-the auto-selected signer is only required to carry `OP_ATOMIC` when the
-callback actually returns operations; a callback that returns nothing needs
-nothing beyond `OP_KEY_UPDATE`. The consequence is that a rotation with no
-eligible signer runs the callback first and fails afterwards — harmless,
-since the callback only builds invocations and publishes nothing. Extra
-operations that need permissions the auto-selected signer lacks require an
-explicit `signingKeyId` / `signingKeyName`.
+If `additionalOperations` returns operations, the update and the extra
+invocations are published as one `OP_ATOMIC`. If the callback returns
+nothing, a direct `OP_KEY_UPDATE` is published. A composed `preSendCheck`
+suppresses a stale update. A stale update is one where every old key is
+revoked already. The retry and persistence policy stays with the
+application, for example the persistent action queue. The selector
+`chelonia/key/rotate` tries exactly one time.
 
-An `OP_ATOMIC` is one message on one contract, so every operation returned by
-`additionalOperations` must target the contract being rotated; one naming a
-different `contractID` is rejected rather than silently retargeted.
-Distributing the new keys to *other* contracts therefore cannot be part of
-the same atomic message — each destination needs its own `OP_KEY_SHARE` on
-that destination. Await the rotation, then issue one
-`chelonia/out/shareKeys` per destination; `newKeys` is handed to
-`additionalOperations` (and returned) precisely so the caller can do this.
+Chelonia invokes `additionalOperations` before the selection of the signing
+key. For this reason, the auto-selected signer must carry `OP_ATOMIC` only
+when the callback really returns operations. A callback without a result
+needs nothing more than `OP_KEY_UPDATE`. One consequence: a rotation with
+no eligible signer runs the callback first and fails after it. This causes
+no damage. The callback only builds invocations and publishes nothing.
+Extra operations can need permissions that the auto-selected signer does
+not have. In that case, give an explicit `signingKeyId` or
+`signingKeyName`.
+
+An `OP_ATOMIC` is one message on one contract. Every operation from
+`additionalOperations` must target the contract under rotation. An
+operation with a different `contractID` gets an error. The library does not
+retarget the operation. For this reason, the distribution of the new keys
+to other contracts cannot be part of the same atomic message. Each
+destination needs its own `OP_KEY_SHARE` on that destination. Await the
+rotation. Then send one `chelonia/out/shareKeys` call per destination. The
+selector gives `newKeys` to `additionalOperations` and returns it for
+exactly this purpose.
 
 ## Validation (authoring-time)
 
-Expansion fails fast, with pointed errors, on:
+Expansion fails fast, with exact errors, in these cases:
 
-- `ringLevel` missing for a non-conventional name
-- `purpose`/`type`/`key` inconsistency (e.g. `enc` purpose with an edwards key)
-- both `key` and `type`; both `key` and `data`; both `data` and `type` (the
-  type is always derived from the supplied key material); neither `key`,
-  `type`, `purpose` nor `data`
-- `meta.private.content` set directly on a spec — `encryptWith` is the only
-  declared way to wrap a secret, and it is the only one that validates the
-  wrapper. The same applies to an *update* spec, where `encryptWith: { key }`
-  wraps the replacement secret
-- `encryptWith` referencing an unknown name (in set *and* contract), a
-  non-`enc` key, or producing a multi-node cycle
-- a `#sak` spec with any non-default policy field
-- `#inviteKey*` without `quantity`
-- a reserved conventional name (`#sak`, `#inviteKey*`, `#krrk-*`) declared as
-  a foreign key — the processing-time invariants those names carry (a
-  contract-local, policy-free accounting key; an invite with a local secret
-  and a usage quantity) can never be satisfied by a key owned elsewhere
-- a replacement key (`rotate` / `key`) for a key with no wrapped secret and
-  no `encryptWith`, unless the key is `transient` (then the caller keeps the
-  secret, as with invite links and password-derived roots)
-- unknown `#`-prefixed names, including near misses of the conventional ones
-  (`#sak-1`, a bare `#krrk`)
-- duplicate aliases or duplicate final wire names / key ids
+- `ringLevel` is missing for a name without a convention.
+- `purpose`, `type`, and `key` do not agree (for example, an `enc` purpose
+  with an edwards key).
+- `key` together with `type`, `key` together with `data`, or `data`
+  together with `type`. The type always comes from the key material that
+  you supply.
+- None of `key`, `type`, `purpose`, and `data`.
+- A `meta.private.content` set directly on a spec. `encryptWith` is the
+  only declared way to wrap a secret, and it is the only way that validates
+  the wrapper. The same rule applies to an update spec. There,
+  `encryptWith: { key }` wraps the replacement secret.
+- An `encryptWith` reference to an unknown name, in the set and in the
+  contract. The same is true for a reference to a non-`enc` key, or for a
+  multi-node cycle.
+- A `#sak` spec with a policy field that is not a default.
+- A `#inviteKey*` spec with a `quantity` that is neither
+  `UNLIMITED_INVITE_USES` nor a positive safe integer. An omitted
+  `quantity` is correct and means unlimited uses.
+- A reserved conventional name (`#sak`, `#inviteKey*`, `#krrk-*`) declared
+  as a foreign key. A `#sak` is a contract-local, policy-free accounting
+  key. An invite has a local secret and locally tracked accounting. A key
+  owned elsewhere can never satisfy these invariants.
+- A replacement key (`rotate` or `key`) for a key with no wrapped secret
+  and no `encryptWith`. Exception: the key is `transient`. Then the caller
+  keeps the secret, as with invite links and password-derived roots.
+- An unknown `#`-prefixed name. This includes near misses of the
+  conventional names, for example `#sak-1` or a bare `#krrk`.
+- Duplicate aliases, or duplicate final wire names or key ids.
 
-Invalid *invocations* (missing both id and name on a reference) throw plain
-`TypeError`; structurally valid declarations that cannot be resolved throw
-`ChelErrorKeyNameNotFound` / `ChelErrorKeySpecInvalid` /
-`ChelErrorKeyWrapCycle`. A key declaration that is not an object at all
-(a `null`/`undefined` entry left behind by a conditional) is rejected as
-`ChelErrorKeySpecInvalid` naming the offending alias.
+An invalid invocation, with no id and no name on a reference, throws a
+plain `TypeError`. A structurally correct declaration that does not resolve
+throws `ChelErrorKeyNameNotFound`, `ChelErrorKeySpecInvalid`, or
+`ChelErrorKeyWrapCycle`. A declaration that is not an object at all also
+fails. A conditional can leave a `null` or `undefined` entry behind. The
+error is `ChelErrorKeySpecInvalid`, and it names the offending alias.
 
 ## Migrating existing callers
 
-Everything in this guide is additive except one behavioral change to
-`chelonia/out/atomic` and one TypeScript-only change to the key types.
+All features in this guide are additive, with two exceptions: one behavior
+change in `chelonia/out/atomic`, and one TypeScript-only change in the key
+types.
 
-**Originating contracts now belong to the operation, not the batch.**
-Previously the batch's `originatingContractID` / `originatingContractName`
-were copied into every nested operation. That spread also overwrote a nested
-operation's own `signingKeyId`, so per-operation signers were silently
-ignored. Both fields are now rejected on the batch, and each nested
-operation keeps its own references:
+**Originating contracts now belong to the operation, not to the batch.**
+Before, Chelonia copied the fields `originatingContractID` and
+`originatingContractName` of the batch into every nested operation. This
+copy also overwrote a `signingKeyId` of a nested operation. For this
+reason, the library ignored the per-operation signers without an error. Now
+both fields get an error on the batch. Each nested operation keeps its own
+references:
 
 ```js
 // Before: batch-level originating contract, inherited by the nested keyShare
@@ -496,69 +630,80 @@ await sbp('chelonia/out/atomic', {
 })
 ```
 
-Passing them on the batch throws `TypeError` rather than being ignored:
-silently dropping them would also skip the originating-contract validation
-in the nested operation, publishing an `OP_KEY_SHARE` with the wrong
+Both fields on the batch throw `TypeError`. The library does not ignore
+them. A silent drop also skips the originating-contract validation in the
+nested operation. The result is an `OP_KEY_SHARE` with the wrong
 provenance.
 
-A nested operation that omits its signing reference still inherits the
-batch's, so signer-less batches keep working unchanged. An explicit
-`signingKeyId: undefined` / `signingKeyName: undefined` (easy to produce from
-a conditional) counts as omitted and inherits too.
+A nested operation without a signing reference gets the reference of the
+batch. For this reason, batches without a signer continue to work without
+change. An explicit `signingKeyId: undefined` or
+`signingKeyName: undefined` also counts as omitted. It inherits too. A
+conditional can easily produce this value.
 
 **Authored key literals no longer carry the processing-time fields.**
-`SPKey` — the shape you *author* — lost `_notBeforeHeight`,
-`_notAfterHeight` and `_private`; those are computed while a message is
-processed and now live on `ChelContractKey`, the shape you *read* out of
-`state._vm.authorizedKeys`. Under the old type `_notBeforeHeight` was
-required, so essentially every downstream `SPKey` literal sets it, and
-object literals now fail TypeScript's excess-property check. Remove those
-three fields from authored literals; keep reading them from contract state
-via `ChelContractKey`. (Literals assigned to an untyped `const` first still
-compile, which is why this can go unnoticed until a literal is passed
-directly to a selector.)
+`SPKey` is the shape that you author. It lost `_notBeforeHeight`,
+`_notAfterHeight`, and `_private`. Chelonia computes these fields during
+message processing. They now live on `ChelContractKey`. That is the shape
+that you read from `state._vm.authorizedKeys`. Under the old type,
+`_notBeforeHeight` was necessary. For this reason, almost every downstream
+`SPKey` literal sets it. Object literals now fail the TypeScript
+excess-property check. Remove these three fields from authored literals.
+Keep reading them from contract state through `ChelContractKey`.
 
-Two related type widenings can also surface:
+Note: a literal on an untyped `const` still compiles. For this reason, the
+problem can stay unseen until you pass the literal directly to a selector.
 
-- `SPKeyUpdate.meta.private.content` is now `string | EncryptedData<string>`
-  (policy-only updates copy the serialized tuple from contract state
-  verbatim). Consumers that read it as `string` need a narrowing check.
-- `SPKeyUpdate.permissions` is now `'*' | string[]`, matching `SPKey`. This
-  is harmless for writers and only affects code that assumed an array.
+You can also see two related type widenings:
+
+- The type of `SPKeyUpdate.meta.private.content` is now `string |
+  EncryptedData<string>`. Policy-only updates copy the serialized tuple
+  from contract state without change. Consumers that read it as `string`
+  need a narrowing check.
+- The type of `SPKeyUpdate.permissions` is now `'*' | string[]`, like
+  `SPKey`. This is harmless for writers. It affects only code that assumed
+  an array.
 
 ## Selector reference
 
 | Selector | Source | Purpose |
 |---|---|---|
-| `chelonia/key/generate` | `src/keys.ts` | Expand a spec set against the optional target contract, store raw keys transiently, return the `KeyMap`. No messages are created. |
-| `chelonia/key/rotate` | `src/keys.ts` | Bulk rotation with two-case re-wrapping, optional atomic before/after operations, stale-update suppression. |
+| `chelonia/key/generate` | `src/keys.ts` | Expands a spec set against the optional target contract. Stores raw keys as transient. Returns the `KeyMap`. Makes no messages. |
+| `chelonia/key/rotate` | `src/keys.ts` | Does a bulk rotation with the two-case wrapper rule. Adds optional atomic operations before and after. Suppresses stale updates. |
 
 ## Types
 
-Exported from `@chelonia/lib` / `@chelonia/lib/keys` (`src/keys.ts`):
-`KeySpecWrapTarget`, `KeySpec`, `MarkedKeySpec`, `KeySpecMap`, `GeneratedKey`,
-`KeyMap`, `KeyExpansionContext`, `KeyUpdateSpec`, `MarkedKeyUpdateSpec`,
-`KeyUpdateSpecMap`, `RotationKeyMap`, `AtomicInvocation`, plus helpers
-`keySpec`, `isKeySpec`, `keyUpdateSpec`, `isKeyUpdateSpec`,
-`normalizeKeySpecs`, `normalizeKeyUpdateSpecs`,
+These types are exported from `@chelonia/lib` and `@chelonia/lib/keys`
+(`src/keys.ts`): `KeySpecWrapTarget`, `KeySpec`, `MarkedKeySpec`,
+`KeySpecMap`, `GeneratedKey`, `KeyMap`, `KeyExpansionContext`,
+`KeyUpdateSpec`, `MarkedKeyUpdateSpec`, `KeyUpdateSpecMap`,
+`RotationKeyMap`, `AtomicInvocation`. The module also exports these
+helpers: `keySpec`, `isKeySpec`, `keyUpdateSpec`, `isKeyUpdateSpec`,
+`UNLIMITED_INVITE_USES`, `normalizeKeySpecs`, `normalizeKeyUpdateSpecs`,
 `resolveGeneratedKeyReference`, `resolveStateKeyReference`,
 `expandKeySpecs`, `expandKeyUpdateSpecs`.
 
-Registration selector-parameter types live in `src/chelonia.ts`:
-`ChelRegParams` (legacy ∪ spec forms), `RegistrationKeyReferences`,
-`ChelShareKeysParams`, `NestedInvocationParams` (the shape of an entry in an
-`OP_ATOMIC` batch), and the widened `ChelActionParams` /
-`ChelKeyAddParams` / `ChelKeyUpdateParams` / `ChelAtomicParams`.
+The registration selector-parameter types live in `src/chelonia.ts`:
+`ChelRegParams` (legacy and spec forms), `RegistrationKeyReferences`,
+`ChelShareKeysParams`, `NestedInvocationParams` (the shape of an entry in
+an `OP_ATOMIC` batch). The types `ChelActionParams`, `ChelKeyAddParams`,
+`ChelKeyUpdateParams`, and `ChelAtomicParams` are the widened forms.
 
 ## Security notes
 
-- **Ring levels stay explicit.** Ordinary names require `ringLevel`; the
+- **Ring levels stay explicit.** Ordinary names need `ringLevel`. The
   library never infers authority from key order or type.
-- **`autoSak` is opt-in** and requires an explicit wrapper; identity,
-  group, and chatroom contracts use different wrapping roots and inferring
-  one would hide a recovery decision.
-- **Never log a `KeyMap`** — `GeneratedKey.key` is raw secret material.
-- **Metadata merging is one-way**: caller `meta` may add fields but cannot
-  override generated `meta.private.content` or convention invariants.
-- Foreign-key construction copies only public material; origin private
-  metadata is never copied.
+- **`autoSak` is opt-in** and needs an explicit wrapper. Identity, group,
+  and chatroom contracts use different wrapping roots. An inferred wrapper
+  hides a recovery decision.
+- CAUTION: **Never log a `KeyMap`.** The field `GeneratedKey.key` is raw
+  secret material.
+- CAUTION: **Never send a `KeyMap` across a serialization boundary.** The
+  secret halves are dropped. The wrapped secrets collapse. The key buffers
+  of the sender become detached in the process. See the
+  [service-worker caveat](#service-worker-caveat).
+- **Metadata merging is one-way.** Caller `meta` can add fields. It cannot
+  override the `meta.private.content` that Chelonia makes, or the
+  convention invariants.
+- Foreign-key construction copies only public material. Private metadata
+  from the origin is never copied.

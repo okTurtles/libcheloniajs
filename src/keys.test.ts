@@ -28,7 +28,8 @@ import {
   normalizeKeySpecs,
   normalizeKeyUpdateSpecs,
   resolveGeneratedKeyReference,
-  resolveStateKeyReference
+  resolveStateKeyReference,
+  UNLIMITED_INVITE_USES
 } from './keys.js'
 import type { KeySpec } from './keys.js'
 import type { SPKeyMeta, SPKeyUpdate } from './SPMessage.js'
@@ -204,7 +205,7 @@ describe('keys: expandKeySpecs defaults and conventions', () => {
     )
   })
 
-  it('suffixes invite names and requires quantity', () => {
+  it('suffixes invite names and applies invite conventions', () => {
     const K = expandKeySpecs({
       keys: {
         generalInvite: {
@@ -219,9 +220,33 @@ describe('keys: expandKeySpecs defaults and conventions', () => {
     assert.strictEqual(K.generalInvite.spkey.ringLevel, Number.MAX_SAFE_INTEGER)
     assert.deepStrictEqual(K.generalInvite.spkey.purpose, ['sig'])
 
+    // Unlimited invites are a feature, not a malformed spec: an omitted
+    // `quantity` expands to an `SPKey` without `meta.quantity`, which
+    // `OP_KEY_REQUEST` processing honours indefinitely.
+    const unlimited = expandKeySpecs({ keys: { i: { name: '#inviteKey' } } })
+    assert.strictEqual(unlimited.i.spkey.meta?.quantity, undefined)
+    assert.strictEqual(unlimited.i.spkey.ringLevel, Number.MAX_SAFE_INTEGER)
+
+    // `UNLIMITED_INVITE_USES` says the same thing explicitly and never
+    // reaches the wire.
+    const explicitUnlimited = expandKeySpecs({
+      keys: { i: { name: '#inviteKey', quantity: UNLIMITED_INVITE_USES } }
+    })
+    assert.strictEqual(explicitUnlimited.i.spkey.meta?.quantity, undefined)
+
+    // A quantity that is present but unusable is still rejected.
+    for (const quantity of [0, -1, 1.5, NaN, Number.MAX_SAFE_INTEGER + 2]) {
+      assert.throws(
+        () => expandKeySpecs({ keys: { i: { name: '#inviteKey', quantity } } }),
+        ChelErrorKeySpecInvalid,
+        `expected quantity ${quantity} to be rejected`
+      )
+    }
     assert.throws(
-      () => expandKeySpecs({ keys: { i: { name: '#inviteKey' } } }),
-      /require 'quantity'/
+      () => expandKeySpecs({
+        keys: { i: { name: '#inviteKey', meta: { quantity: 0 } } }
+      }),
+      /meta.quantity/
     )
 
     // Two invite aliases with the same spec name do not collide: suffixing
@@ -583,8 +608,8 @@ describe('keys: foreign keys', () => {
       ChelErrorKeySpecInvalid
     )
 
-    // Invite names previously expanded with `quantity: undefined`, which
-    // processing treats as an unlimited invite.
+    // Invite names, whose accounting needs a locally held secret that a key
+    // owned by another contract can never provide.
     assert.throws(
       () => expandKeySpecs({
         keys: {

@@ -18,7 +18,7 @@ import type {
 } from './SPMessage.js'
 import { SPMessage } from './SPMessage.js'
 import { Secret } from './Secret.js'
-import { INVITE_STATUS } from './constants.js'
+import { INVITE_STATUS, isValidInviteQuantity } from './constants.js'
 import type { EncryptedData } from './encryptedData.js'
 import {
   ChelErrorForkedChain,
@@ -520,17 +520,22 @@ export const keyAdditionProcessor = function (
     if (key.name.startsWith('#inviteKey-')) {
       if (!state._vm.invites) state._vm.invites = Object.create(null)
       const quantity = key.meta?.quantity
-      // An invite without a numeric quantity is not merely cosmetic: the
-      // `OP_KEY_REQUEST` handler treats a missing quantity as 'unlimited', so
-      // such a key would be honoured forever. Key specs reject this shape at
-      // authoring time, but raw `SPKey` additions and hostile remote messages
-      // can still produce it, so fail closed here. Recording it as revoked
-      // (rather than throwing) keeps processing deterministic and does not
-      // break existing chains that already contain such a key.
-      const malformed = typeof quantity !== 'number' || !Number.isFinite(quantity)
+      // No `meta.quantity` means an invite with unlimited uses: the
+      // `OP_KEY_REQUEST` handler only decrements and exhausts invites that
+      // carry one, and unlimited invites are a supported feature (e.g. a
+      // public join link), so this shape is recorded as valid.
+      //
+      // A quantity that *is* present but cannot be honoured (`0`, negative,
+      // fractional, `NaN`) is a different story: key specs reject it at
+      // authoring time, so it can only come from a hand-built `SPKey` or a
+      // hostile message. Fail closed there. Recording it as revoked (rather
+      // than throwing) keeps processing deterministic and does not break
+      // existing chains that already contain such a key.
+      const malformed = quantity != null && !isValidInviteQuantity(quantity)
       if (malformed) {
         console.error(
-          `[chelonia] invite key ${key.id} has no numeric meta.quantity; recording as revoked`,
+          `[chelonia] invite key ${key.id} has an unusable meta.quantity ` +
+            `(${String(quantity)}); recording as revoked`,
           { contractID }
         )
       }
@@ -541,8 +546,10 @@ export const keyAdditionProcessor = function (
           : undefined)
       state._vm.invites![key.id] = {
         status: malformed ? INVITE_STATUS.REVOKED : INVITE_STATUS.VALID,
-        initialQuantity: quantity!,
-        quantity: quantity!,
+        // Left `undefined` for an unlimited invite, which is what the
+        // `OP_KEY_REQUEST` handler checks for.
+        initialQuantity: isValidInviteQuantity(quantity) ? quantity : undefined,
+        quantity: isValidInviteQuantity(quantity) ? quantity : undefined,
         expires: key.meta?.expires as number,
         inviteSecret: inviteSecret!,
         responses: []

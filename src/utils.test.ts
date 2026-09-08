@@ -134,9 +134,11 @@ describe('Chelonia utils', () => {
     }, /^Error: Signing key has ringLevel/, 'Ring level is not being enforced')
   })
 
-  it('records invite keys without a numeric quantity as revoked', () => {
-    // A missing quantity means 'unlimited' to the OP_KEY_REQUEST handler, so
-    // processing must fail closed rather than mint an unlimited invite.
+  it('records invite keys with an unusable quantity as revoked', () => {
+    // A missing quantity means 'unlimited' to the OP_KEY_REQUEST handler,
+    // which is a supported kind of invite. A quantity that is present but
+    // cannot be honoured (0, negative, fractional, NaN) can only come from a
+    // hand-built key or a hostile message, so processing fails closed there.
     const inviteKey = {
       id: 'invite_id',
       name: '#inviteKey-broken',
@@ -158,19 +160,38 @@ describe('Chelonia utils', () => {
         inviteKey as unknown as ChelContractKey
       )
 
-    const state = { _vm: { type: 'type', authorizedKeys: {} } } as unknown as ChelContractState
     const errors: unknown[][] = []
-    const originalError = console.error
-    console.error = (...args: unknown[]) => { errors.push(args) }
-    try {
-      assert.doesNotThrow(() => process(inviteKey as unknown as SPKey, state))
-    } finally {
-      console.error = originalError
+    const withCapturedErrors = (fn: () => void) => {
+      const originalError = console.error
+      console.error = (...args: unknown[]) => { errors.push(args) }
+      try {
+        assert.doesNotThrow(fn)
+      } finally {
+        console.error = originalError
+      }
     }
-    assert.strictEqual(state._vm.invites!.invite_id.status, INVITE_STATUS.REVOKED)
-    assert.strictEqual(errors.length, 1)
 
-    // A well-formed invite is still recorded as valid.
+    for (const quantity of [0, -3, 1.5, NaN, 'many']) {
+      const state = { _vm: { type: 'type', authorizedKeys: {} } } as unknown as ChelContractState
+      withCapturedErrors(() =>
+        process({ ...inviteKey, meta: { quantity } } as unknown as SPKey, state)
+      )
+      assert.strictEqual(
+        state._vm.invites!.invite_id.status,
+        INVITE_STATUS.REVOKED,
+        `expected quantity ${String(quantity)} to be revoked`
+      )
+    }
+    assert.strictEqual(errors.length, 5)
+
+    // An invite without a quantity is unlimited, and valid.
+    const unlimited = { _vm: { type: 'type', authorizedKeys: {} } } as unknown as ChelContractState
+    process(inviteKey as unknown as SPKey, unlimited)
+    assert.strictEqual(unlimited._vm.invites!.invite_id.status, INVITE_STATUS.VALID)
+    assert.strictEqual(unlimited._vm.invites!.invite_id.quantity, undefined)
+    assert.strictEqual(unlimited._vm.invites!.invite_id.initialQuantity, undefined)
+
+    // A counted invite is recorded with its quantity.
     const ok = { _vm: { type: 'type', authorizedKeys: {} } } as unknown as ChelContractState
     process({ ...inviteKey, meta: { quantity: 2 } } as unknown as SPKey, ok)
     assert.strictEqual(ok._vm.invites!.invite_id.status, INVITE_STATUS.VALID)

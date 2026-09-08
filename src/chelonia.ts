@@ -204,15 +204,19 @@ export type ChelRegParamsLegacy = {
   publishOptions?: PublishOptions;
 };
 
-// Spec form: declarative keys plus name-addressed references. `onKeysReady`
-// and the `data` factory are local JavaScript callbacks — callers crossing a
-// service-worker serialization boundary must use the explicit two-phase
-// `chelonia/key/generate` form instead, since functions are not
-// transport-serializable.
+// Spec form: declarative keys plus name-addressed references.
+//
+// `onKeysReady` and the `data` factory receive the generated `KeyMap`, which
+// holds raw secret keys and lazy `EncryptedData` wrappers. That object cannot
+// cross a serialization boundary: secret halves are dropped, wrapped secrets
+// collapse, and the transfer detaches the sender's own key buffers. Functions
+// themselves survive serdes (as async proxies), so the constraint is on the
+// argument, not the callback — both callbacks must run in the context that
+// owns Chelonia. See the service-worker caveat in docs/keys.md.
 export type ChelRegParamsSpec = RegistrationKeyReferences & {
   contractName: string;
   server?: string; // TODO: implement!
-  data: object | ((K: KeyMap) => object);
+  data: object | ((K: KeyMap) => object | Promise<object>);
   keys: KeySpecMap | MarkedKeySpec[];
   // Opt-in SAK generation for spec-form registrations. Requires an explicit
   // `encryptWith`; a silently generated server-accounting key is too
@@ -2350,8 +2354,12 @@ export default sbp('sbp/selectors/register', {
         : undefined
       // `onKeysReady` runs after transient registration and before the
       // payload/message is created; a callback error prevents publication.
+      // Both callbacks are awaited, so an `async` factory works the same as
+      // a synchronous one (and a promise never leaks into the payload).
       await specParams.onKeysReady?.(keyMap)
-      data = typeof specParams.data === 'function' ? specParams.data(keyMap) : specParams.data
+      data = typeof specParams.data === 'function'
+        ? await specParams.data(keyMap)
+        : specParams.data
       keys = Object.values(keyMap).map((k) => k.spkey)
     } else {
       const legacy = params as ChelRegParamsLegacy

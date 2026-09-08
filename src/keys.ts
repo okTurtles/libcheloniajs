@@ -33,6 +33,7 @@ import type {
   SPOpKeyUpdate
 } from './SPMessage.js'
 import { SPMessage } from './SPMessage.js'
+import { isValidInviteQuantity } from './constants.js'
 import {
   encryptedDataKeyId,
   encryptedOutgoingData,
@@ -67,6 +68,16 @@ import type {
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+// Explicit marker for an invite key that may be used any number of times.
+// Omitting `quantity` means the same thing (processing only decrements and
+// exhausts an invite that carries `meta.quantity`), but reaching 'unlimited'
+// by omission is easy to do by accident, so this symbol lets a caller say it
+// on purpose. It never reaches the wire: both spellings produce an `SPKey`
+// without `meta.quantity`.
+export const UNLIMITED_INVITE_USES: unique symbol = Symbol.for(
+  'chelonia/keys/unlimitedInviteUses'
+) as never
 
 // What `encryptWith` may reference:
 //   - a plain string: another key in the same spec set (alias or final wire
@@ -107,9 +118,10 @@ export type KeySpec = {
   transient?: boolean
   // `meta.private.shareable`.
   shareable?: boolean
-  // Invite keys: how many times the key may be used. Required for
-  // `#inviteKey*`.
-  quantity?: number
+  // Invite keys: how many times the key may be used, as a positive safe
+  // integer. Omit — or pass `UNLIMITED_INVITE_USES` for an explicit,
+  // self-documenting declaration — for an invite with unlimited uses.
+  quantity?: number | typeof UNLIMITED_INVITE_USES
   expires?: number
   // Build a foreign key entry from an active key in another (loaded)
   // contract: `shelter:<contractID>?keyName=<name>` URI plus copied public
@@ -620,7 +632,8 @@ export const expandKeySpecs = (params: {
 
     // Conventional names carry processing-time invariants a foreign key can
     // never satisfy: '#sak' must be a contract-local, policy-free accounting
-    // key, and invite accounting needs a local secret plus 'meta.quantity'.
+    // key, and invite accounting needs a locally held secret and local
+    // invite bookkeeping.
     // Both foreign branches return before the convention checks below, so
     // reject the combination here rather than emitting a key that only
     // misbehaves once every client processes it.
@@ -735,11 +748,13 @@ export const expandKeySpecs = (params: {
     if (isSak) validateSakPolicy(spec)
 
     // ---- invite conventions --------------------------------------------------
-    if (isInvite && spec.quantity == null && spec.meta?.quantity == null) {
-      throw new ChelErrorKeySpecInvalid(
-        `Key spec '${alias}': '#inviteKey*' specs require 'quantity'`
-      )
-    }
+    // `quantity` is optional: an invite without `meta.quantity` is an
+    // unlimited invite, which `OP_KEY_REQUEST` processing supports on
+    // purpose (it only decrements and exhausts invites that carry one).
+    // `UNLIMITED_INVITE_USES` declares that explicitly and expands to the
+    // same wire form. What is rejected is a numeric quantity that no invite
+    // can honour.
+    validateQuantity(spec, alias)
 
     // ---- determine type / key / purpose --------------------------------------
     let type: string | undefined
@@ -1008,6 +1023,25 @@ const validateSakPolicy = (spec: KeySpec): void => {
   }
 }
 
+// Reject a `quantity` no invite can honour, on the spec or in caller-supplied
+// `meta`. Absent (or `UNLIMITED_INVITE_USES`) is valid and means unlimited;
+// `0`, fractions, `NaN`, negatives and unsafe integers are not, since such a
+// key is either dead on arrival or indistinguishable from corruption once
+// every client processes it.
+const validateQuantity = (spec: KeySpec, alias: string): void => {
+  const check = (quantity: unknown, where: string) => {
+    if (quantity == null || quantity === UNLIMITED_INVITE_USES) return
+    if (!isValidInviteQuantity(quantity)) {
+      throw new ChelErrorKeySpecInvalid(
+        `Key spec '${alias}': '${where}' must be a positive safe integer or ` +
+          'UNLIMITED_INVITE_USES (omit it for an invite with unlimited uses)'
+      )
+    }
+  }
+  check(spec.quantity, 'quantity')
+  check(spec.meta?.quantity, 'meta.quantity')
+}
+
 // Build the final `meta` for a materialized spec, merging caller-provided
 // meta under the generated fields (caller meta may add unrelated fields but
 // cannot override generated `content`, `transient` or `shareable`).
@@ -1024,7 +1058,12 @@ const buildMeta = (
   const callerMeta = m.spec.meta ?? {}
   const generated: SPKeyMeta = {}
 
-  if (m.spec.quantity != null) generated.quantity = m.spec.quantity
+  // `UNLIMITED_INVITE_USES` is an authoring-time marker for 'no quantity',
+  // so it is dropped here rather than emitted: the wire form of an
+  // unlimited invite is simply an `SPKey` without `meta.quantity`.
+  if (m.spec.quantity != null && m.spec.quantity !== UNLIMITED_INVITE_USES) {
+    generated.quantity = m.spec.quantity as number
+  }
   if (m.spec.expires != null) generated.expires = m.spec.expires
 
   if (m.hasSecret) {
@@ -1052,6 +1091,9 @@ const buildMeta = (
   }
 
   const merged: SPKeyMeta = { ...callerMeta }
+  // A caller that spelled the marker inside `meta` (only reachable from
+  // plain JavaScript) gets the same treatment as the spec-level field.
+  if ((merged.quantity as unknown) === UNLIMITED_INVITE_USES) delete merged.quantity
   if (generated.quantity != null) merged.quantity = generated.quantity
   if (generated.expires != null) merged.expires = generated.expires
   if (generated.private != null || callerMeta.private != null) {

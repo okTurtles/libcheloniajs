@@ -13,6 +13,7 @@ import {
   sign
 } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
+import { deserializer, serializer } from '@chelonia/serdes'
 import * as assert from 'node:assert'
 import { before, describe, it } from 'node:test'
 
@@ -20,6 +21,7 @@ import './chelonia.js'
 import './db.js'
 import './keys.js'
 import { createCID, multicodes } from './functions.js'
+import { isEncryptedData } from './encryptedData.js'
 import {
   ChelErrorKeyNameNotFound,
   ChelErrorKeySpecInvalid
@@ -379,6 +381,28 @@ describe('keys integration', () => {
       // The encrypted initial action was processed with the factory data
       const state = contractState(msg.contractID())
       assert.strictEqual(state.initialized, true)
+    })
+
+    it('awaits an async data factory instead of embedding the promise', async () => {
+      const msg = await sbp('chelonia/out/registerContract', {
+        contractName: CONTRACT_NAME,
+        signingKeyName: 'ipk',
+        actionSigningKeyName: 'csk',
+        keys: {
+          ipk: { purpose: ['sig'], ringLevel: 0, permissions: '*', allowedActions: '*', transient: true },
+          iek: { purpose: ['enc'], ringLevel: 0, transient: true },
+          csk: { purpose: ['sig'], ringLevel: 1, permissions: '*', allowedActions: '*', encryptWith: 'iek' }
+        },
+        onKeysReady: async () => { await Promise.resolve() },
+        data: async (K: KeyMap) => {
+          await Promise.resolve()
+          return { attributes: { embed: serializeKey(K.csk.key!, false) } }
+        }
+      }) as SPMessage
+      await applyRemote(msg.contractID())
+      // A non-awaited factory would have published a `{}`-shaped promise
+      // instead of the payload, and the action would not have processed.
+      assert.strictEqual(contractState(msg.contractID()).initialized, true)
     })
 
     it('a callback error prevents message creation and publishing', async () => {
@@ -2133,6 +2157,68 @@ describe('keys integration', () => {
       sbp('chelonia/clearTransientSecretKeys', [ipk.id])
       assert.strictEqual(sbp('chelonia/haveSecretKey', ipk.id), false)
       assert.ok(sbp('chelonia/haveSecretKey', csk.id, true))
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // The service-worker caveat in docs/keys.md, verified end to end. The
+  // constraint is *not* that callbacks cannot be serialized (serdes turns
+  // them into async MessagePort proxies, which is how selector calls already
+  // cross a tab/service-worker boundary) but that the `KeyMap` they receive
+  // cannot: the secret halves are dropped, wrapped secrets collapse, and the
+  // transfer detaches the sender's own key buffers.
+  // ---------------------------------------------------------------------
+
+  describe('KeyMap across a serdes boundary', () => {
+    const inviteSpecs = () => ({
+      iek: { purpose: ['enc' as const], ringLevel: 0 },
+      csk: { purpose: ['sig' as const], ringLevel: 1, permissions: '*', encryptWith: 'iek' }
+    })
+
+    it('proxies functions but loses the secret halves of a KeyMap', async () => {
+      // Functions do cross: the proxy is async, and both callbacks are
+      // awaited by `chelonia/out/registerContract`.
+      const fns = serializer({ factory: (n: number) => ({ doubled: n * 2 }) })
+      const remote = deserializer(fns.data) as {
+        factory: (n: number) => Promise<{ doubled: number }>
+      }
+      assert.deepStrictEqual(await remote.factory(21), { doubled: 42 })
+      fns.revokables.forEach((port) => port.close())
+
+      const K = sbp('chelonia/key/generate', { keys: inviteSpecs() }) as KeyMap
+      const originalContent = K.csk.spkey.meta?.private?.content
+      assert.ok(isEncryptedData(originalContent))
+
+      const copied = serializer(K)
+      const remoteKeyMap = deserializer(copied.data) as KeyMap
+      copied.revokables.forEach((port) => port.close())
+
+      // The public half survives (same key id) ...
+      assert.strictEqual(keyId(remoteKeyMap.csk.key!), K.csk.id)
+      // ... but the secret does not, so the far side cannot build an invite
+      // link or a recovery blob.
+      assert.throws(
+        () => serializeKey(remoteKeyMap.csk.key!, true),
+        /no secret key to export/
+      )
+      // The lazy wrapper collapses into inert data, losing the wrapped secret.
+      assert.strictEqual(
+        isEncryptedData(remoteKeyMap.csk.spkey.meta?.private?.content),
+        false
+      )
+    })
+
+    it('detaches the sender key buffers when a KeyMap is passed to a proxy', async () => {
+      const K = sbp('chelonia/key/generate', { keys: inviteSpecs() }) as KeyMap
+      const proxied = serializer({ f: (received: KeyMap) => Object.keys(received).sort() })
+      const remote = deserializer(proxied.data) as {
+        f: (received: KeyMap) => Promise<string[]>
+      }
+      assert.deepStrictEqual(await remote.f(K), ['csk', 'iek'])
+      // Serialization transfers the ArrayBuffers backing the public keys, so
+      // the *caller's* KeyMap is unusable afterwards.
+      assert.throws(() => keyId(K.csk.key!), /detached/)
+      proxied.revokables.forEach((port) => port.close())
     })
   })
 

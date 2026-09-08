@@ -92,7 +92,7 @@ All publish to the relay via `chelonia/private/out/publishEvent` once
 
 | Selector | Source | Op | Purpose |
 |---|---|---|---|
-| `chelonia/out/registerContract` | `src/chelonia.ts` | `OP_CONTRACT` + initial action | Create a new contract on-chain. Returns the initial-action `SPMessage`. Accepts raw `SPKey[]` arrays (legacy) or declarative `KeySpecMap` / marked `keySpec()` entries with name-addressed signing/action references, a `data(K)` factory, `onKeysReady`, and opt-in `autoSak`. See [`keys.md`](./keys.md). |
+| `chelonia/out/registerContract` | `src/chelonia.ts` | `OP_CONTRACT` + initial action | Create a new contract on-chain. Returns the initial-action `SPMessage`. Accepts raw `SPKey[]` arrays (legacy) or declarative `KeySpecMap` / marked `keySpec()` entries with name-addressed signing/action references, a `data(K)` factory, `onKeysReady`, and opt-in `autoSak`. Both callbacks are awaited and must run in the context that owns Chelonia, because a `KeyMap` cannot cross a serialization boundary. See [`keys.md`](./keys.md). |
 | `chelonia/out/actionEncrypted` | `src/chelonia.ts` | `OP_ACTION_ENCRYPTED` | Publish an encrypted state mutation. Accepts `signingKeyName` / `innerSigningKeyName` / `encryptionKeyName` twins of the id fields. |
 | `chelonia/out/actionUnencrypted` | `src/chelonia.ts` | `OP_ACTION_UNENCRYPTED` | Publish an unencrypted state mutation. Same name twins as above. |
 | `chelonia/out/keyAdd` | `src/chelonia.ts` | `OP_KEY_ADD` | Add authorized key(s). Accepts raw `SPKey` / `EncryptedData<SPKey>` entries, marked `keySpec()` entries (expanded against the live contract, incl. `foreignKeyFrom`), or a `KeySpecMap`. |
