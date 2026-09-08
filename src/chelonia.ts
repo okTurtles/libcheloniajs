@@ -57,7 +57,9 @@ import './chelonia-utils.js'
 // module so that direct `@chelonia/lib/chelonia` imports register them too.
 import './keys.js'
 import {
+  ATOMIC_ALLOWED_SELECTORS,
   expandKeyUpdateSpecs,
+  isAtomicSelector,
   isKeySpec,
   isKeyUpdateSpec,
   keySpec as markKeySpec,
@@ -3227,19 +3229,11 @@ export default sbp('sbp/selectors/register', {
     const payload = (
       await Promise.all(
         data.map(([selector, opParams]) => {
-          if (
-            ![
-              'chelonia/out/actionEncrypted',
-              'chelonia/out/actionUnencrypted',
-              'chelonia/out/keyAdd',
-              'chelonia/out/keyDel',
-              'chelonia/out/keyUpdate',
-              'chelonia/out/keyRequestResponse',
-              'chelonia/out/keyShare',
-              'chelonia/out/shareKeys'
-            ].includes(selector)
-          ) {
-            throw new Error('Selector not allowed in OP_ATOMIC: ' + selector)
+          if (!isAtomicSelector(selector)) {
+            throw new Error(
+              'Selector not allowed in OP_ATOMIC: ' + selector + ' (allowed: ' +
+                ATOMIC_ALLOWED_SELECTORS.join(', ') + ')'
+            )
           }
           // Only shared operation context is passed down. Each nested
           // invocation keeps its own key references untouched: outer key
@@ -4017,10 +4011,17 @@ async function outEncryptedOrUnencryptedAction (
   if (opType === SPMessage.OP_ACTION_ENCRYPTED && !encryptionKeyId && !params.encryptionKey) {
     throw new Error('OP_ACTION_ENCRYPTED requires an encryption key ID be given')
   }
-  if (params.encryptionKey) {
-    if (encryptionKeyId !== keyId(params.encryptionKey)) {
-      throw new Error('OP_ACTION_ENCRYPTED raw encryption key does not match encryptionKeyId')
-    }
+  // A raw `encryptionKey` needs no reference of its own: the payload below is
+  // encrypted with it directly and carries its key ID, so it may be given
+  // alone. When an id or a name is *also* given, the two must agree — a
+  // mismatch means the caller believes it is encrypting to a different key
+  // than it actually is.
+  if (
+    params.encryptionKey &&
+    encryptionKeyId != null &&
+    encryptionKeyId !== keyId(params.encryptionKey)
+  ) {
+    throw new Error('OP_ACTION_ENCRYPTED raw encryption key does not match encryptionKeyId')
   }
 
   const payload =

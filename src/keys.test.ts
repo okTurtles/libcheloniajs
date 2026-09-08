@@ -275,6 +275,76 @@ describe('keys: expandKeySpecs defaults and conventions', () => {
     assert.notStrictEqual(arrayForm.creatorInvite.name, arrayForm.generalInvite.name)
   })
 
+  it('validates invite expiry timestamps', () => {
+    const K = expandKeySpecs({
+      keys: { i: { name: '#inviteKey', expires: 1893456000000 } }
+    })
+    assert.strictEqual(K.i.spkey.meta?.expires, 1893456000000)
+
+    // An omitted `expires` means an invite that does not expire.
+    assert.strictEqual(
+      expandKeySpecs({ keys: { i: { name: '#inviteKey' } } }).i.spkey.meta?.expires,
+      undefined
+    )
+
+    // Processing compares `expires` with `<` against `Date.now()`, and every
+    // comparison against a non-number is `false`, so a bogus value would
+    // silently produce an invite that never expires. Fail closed instead.
+    for (const expires of ['tomorrow', NaN, Infinity, 0, -1, 1.5]) {
+      assert.throws(
+        () => expandKeySpecs({
+          keys: { i: { name: '#inviteKey', expires: expires as number } }
+        }),
+        ChelErrorKeySpecInvalid,
+        `expected expires ${String(expires)} to be rejected`
+      )
+    }
+    assert.throws(
+      () => expandKeySpecs({
+        keys: { i: { name: '#inviteKey', meta: { expires: 'tomorrow' as never } } }
+      }),
+      /meta.expires/
+    )
+  })
+
+  it('rejects invite accounting fields on names that are not invites', () => {
+    // `keyAdditionProcessor` reads `meta.quantity` / `meta.expires` only in
+    // its `#inviteKey-` branch, so on any other name they are inert metadata
+    // that still travels, signed, on the wire. A caller who writes them has
+    // almost certainly mistaken them for a use limit or a lifetime.
+    const cases: [string, KeySpec][] = [
+      ['quantity', { purpose: ['sig'], ringLevel: 1, quantity: 5 }],
+      ['expires', { purpose: ['sig'], ringLevel: 1, expires: 1893456000000 }],
+      ['meta.quantity', { purpose: ['sig'], ringLevel: 1, meta: { quantity: 5 } }],
+      ['meta.expires', { purpose: ['sig'], ringLevel: 1, meta: { expires: 1 } }],
+      // `#sak` is a reserved name, but not an invite one
+      ['#sak quantity', { name: '#sak', quantity: 5 }],
+      // The foreign-key branches materialize early; validation still runs
+      ['foreign quantity', {
+        foreignKeyFrom: ['cid', 'csk'],
+        purpose: ['sig'],
+        ringLevel: 1,
+        quantity: 5
+      }]
+    ]
+    for (const [label, spec] of cases) {
+      assert.throws(
+        () => expandKeySpecs({ keys: { csk: spec } }),
+        (e: Error) =>
+          e.name === 'ChelErrorKeySpecInvalid' &&
+          /only meaningful on an invite key/.test(e.message),
+        `expected '${label}' to be rejected`
+      )
+    }
+
+    // `#inviteKey-*` is an invite too, so both fields are accepted there.
+    const suffixed = expandKeySpecs({
+      keys: { i: { name: '#inviteKey-foo', ringLevel: 3, quantity: 1, expires: 1 } }
+    })
+    assert.strictEqual(suffixed.i.spkey.meta?.quantity, 1)
+    assert.strictEqual(suffixed.i.spkey.meta?.expires, 1)
+  })
+
   it('rejects unknown reserved names', () => {
     assert.throws(
       () => expandKeySpecs({ keys: { '#nope': { ringLevel: 0 } } }),
@@ -649,7 +719,9 @@ describe('keys: metadata merging', () => {
     const rawWrapper = keygen(CURVE25519XSALSA20POLY1305)
     const K = expandKeySpecs({
       keys: {
+        // An invite name, because `quantity` / `expires` are invite-only.
         a: {
+          name: '#inviteKey-a',
           purpose: ['sig'],
           ringLevel: 1,
           quantity: 3,

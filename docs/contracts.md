@@ -608,10 +608,12 @@ await sbp('chelonia/out/atomic', {
 Each inner entry MUST set `atomic: true` so the inner selector returns
 an op rather than publishing on its own. Only
 `chelonia/out/actionEncrypted`, `actionUnencrypted`, `keyAdd`,
-`keyDel`, `keyUpdate`, `keyShare`, and `keyRequestResponse` are
-accepted inside atomic batches (see the whitelist in
-`src/chelonia.ts`); anything else — including
-`chelonia/out/keyRequest` — throws.
+`keyDel`, `keyUpdate`, `keyShare`, `shareKeys`, and
+`keyRequestResponse` are accepted inside atomic batches; anything
+else — including `chelonia/out/keyRequest` — throws. The library
+exports the list as `ATOMIC_ALLOWED_SELECTORS`, and it is tied to the
+`AtomicInvocation` type, so what the batch accepts and what the types
+promise cannot drift apart.
 
 ---
 

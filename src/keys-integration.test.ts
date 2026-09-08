@@ -7,6 +7,7 @@
 
 import {
   EDWARDS25519SHA512BATCH,
+  deserializeKey,
   keyId,
   keygen,
   serializeKey,
@@ -612,6 +613,43 @@ describe('keys integration', () => {
       const state = contractState(contractID)
       assert.strictEqual(state.lastData?.hello, 'name-resolution')
       assert.ok(msg)
+    })
+
+    it('actionEncrypted accepts a lone raw encryptionKey', async () => {
+      // A raw key needs no id/name of its own: the payload is encrypted
+      // with it directly and carries its key id. It used to be rejected
+      // with a misleading 'does not match encryptionKeyId' error.
+      // The raw key here is the live CEK, recovered from local secret
+      // storage, so the outgoing message is also processable locally.
+      const state = contractState(contractID)
+      const cekId = Object.values(state._vm.authorizedKeys).find((k) => k.name === 'cek')!.id
+      const rawCek = deserializeKey((rootState().secretKeys ?? {})[cekId])
+      const msg = (await sbp('chelonia/out/actionEncrypted', {
+        action: `${CONTRACT_NAME}/act`,
+        contractID,
+        signingKeyName: 'csk',
+        encryptionKey: rawCek,
+        data: { hello: 'raw-encryption-key' }
+      })) as SPMessage
+      assert.ok(msg)
+      await applyRemote(contractID)
+      assert.strictEqual(contractState(contractID).lastData?.hello, 'raw-encryption-key')
+
+      // A reference given alongside the raw key is an assertion and must
+      // agree with it.
+      await assert.rejects(
+        () => sbp('chelonia/out/actionEncrypted', {
+          action: `${CONTRACT_NAME}/act`,
+          contractID,
+          signingKeyName: 'csk',
+          encryptionKeyName: 'ipk',
+          encryptionKey: rawCek,
+          data: {}
+        }),
+        {
+          message: 'OP_ACTION_ENCRYPTED raw encryption key does not match encryptionKeyId'
+        }
+      )
     })
 
     it('throws on id/name mismatch and unknown names', async () => {
@@ -1625,6 +1663,36 @@ describe('keys integration', () => {
       await applyRemote(contractID)
       const names = result.updates.map((u: { name: string }) => u.name)
       assert.deepStrictEqual(names, ['csk'])
+    })
+
+    it('throws for an explicitly named key that cannot be rotated', async () => {
+      const reg = await registerIdentity()
+      const contractID = reg.contractID()
+      const eventsBefore = fixture.eventsByContract().get(contractID)!.length
+      // ipk and iek are transient (no wrapped secret), so they cannot be
+      // rotated. An explicit name is a specific instruction, so it fails
+      // loudly instead of being silently skipped.
+      await assert.rejects(
+        () => sbp('chelonia/key/rotate', {
+          contractID,
+          contractName: CONTRACT_NAME,
+          names: ['ipk']
+        }),
+        (e: Error) =>
+          e.name === 'ChelErrorKeyNameNotFound' && /cannot rotate 'ipk'/.test(e.message)
+      )
+      // The same holds when the unrotatable name is part of a larger list:
+      // nothing is published, not even the rotatable entries.
+      await assert.rejects(
+        () => sbp('chelonia/key/rotate', {
+          contractID,
+          contractName: CONTRACT_NAME,
+          names: ['csk', 'iek']
+        }),
+        (e: Error) =>
+          e.name === 'ChelErrorKeyNameNotFound' && /cannot rotate 'iek'/.test(e.message)
+      )
+      assert.strictEqual(fixture.eventsByContract().get(contractID)!.length, eventsBefore)
     })
 
     it("'pending' excludes keys marked for deletion ('del')", async () => {

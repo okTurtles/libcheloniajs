@@ -77,7 +77,7 @@ import type {
 // without `meta.quantity`.
 export const UNLIMITED_INVITE_USES: unique symbol = Symbol.for(
   'chelonia/keys/unlimitedInviteUses'
-) as never
+)
 
 // What `encryptWith` may reference:
 //   - a plain string: another key in the same spec set (alias or final wire
@@ -118,10 +118,12 @@ export type KeySpec = {
   transient?: boolean
   // `meta.private.shareable`.
   shareable?: boolean
-  // Invite keys: how many times the key may be used, as a positive safe
+  // Invite keys only: how many times the key may be used, as a positive safe
   // integer. Omit — or pass `UNLIMITED_INVITE_USES` for an explicit,
   // self-documenting declaration — for an invite with unlimited uses.
   quantity?: number | typeof UNLIMITED_INVITE_USES
+  // Invite keys only: when the invite stops being usable, as a `Date.now()`
+  // millisecond timestamp. Omit for an invite that does not expire.
   expires?: number
   // Build a foreign key entry from an active key in another (loaded)
   // contract: `shelter:<contractID>?keyName=<name>` URI plus copied public
@@ -223,6 +225,32 @@ export type AtomicInvocation =
   ]
   | ['chelonia/out/keyShare', NestedInvocationParams<ChelKeyShareParams>]
   | ['chelonia/out/shareKeys', NestedInvocationParams<ChelShareKeysParams>]
+
+// The runtime half of `AtomicInvocation`: `chelonia/out/atomic` rejects any
+// selector that is not a key of this record. Because the record is keyed by
+// the union above, a selector added to the union but not here is a type
+// error (missing key), and one added here but not to the union is a type
+// error too (excess property). The types and the runtime check therefore
+// cannot drift apart.
+const atomicAllowedSelectors: Record<AtomicInvocation[0], true> = {
+  'chelonia/out/actionEncrypted': true,
+  'chelonia/out/actionUnencrypted': true,
+  'chelonia/out/keyAdd': true,
+  'chelonia/out/keyDel': true,
+  'chelonia/out/keyUpdate': true,
+  'chelonia/out/keyRequestResponse': true,
+  'chelonia/out/keyShare': true,
+  'chelonia/out/shareKeys': true
+}
+
+export const ATOMIC_ALLOWED_SELECTORS: readonly AtomicInvocation[0][] =
+  Object.keys(atomicAllowedSelectors) as AtomicInvocation[0][]
+
+const atomicSelectorSet: ReadonlySet<string> = new Set(ATOMIC_ALLOWED_SELECTORS)
+
+export const isAtomicSelector = (
+  selector: string
+): selector is AtomicInvocation[0] => atomicSelectorSet.has(selector)
 
 // ---------------------------------------------------------------------------
 // Markers (prototype tags, same technique as EncryptedData — never instanceof)
@@ -597,6 +625,12 @@ export const expandKeySpecs = (params: {
     const isSak = wireName === SAK_NAME
     const isInvite = isInviteName(wireName)
 
+    // ---- invite accounting fields ------------------------------------------
+    // Validated ahead of every other branch (including the foreign-key ones,
+    // which materialize and `continue`) because `quantity` and `expires` are
+    // copied into `meta` for every spec shape.
+    validateInviteAccounting(spec, alias, isInvite)
+
     if (spec.key != null && spec.type != null) {
       throw new ChelErrorKeySpecInvalid(
         `Key spec '${alias}': 'key' and 'type' are mutually exclusive`
@@ -746,15 +780,6 @@ export const expandKeySpecs = (params: {
 
     // ---- #sak convention invariants (fail at authoring time) ---------------
     if (isSak) validateSakPolicy(spec)
-
-    // ---- invite conventions --------------------------------------------------
-    // `quantity` is optional: an invite without `meta.quantity` is an
-    // unlimited invite, which `OP_KEY_REQUEST` processing supports on
-    // purpose (it only decrements and exhausts invites that carry one).
-    // `UNLIMITED_INVITE_USES` declares that explicitly and expands to the
-    // same wire form. What is rejected is a numeric quantity that no invite
-    // can honour.
-    validateQuantity(spec, alias)
 
     // ---- determine type / key / purpose --------------------------------------
     let type: string | undefined
@@ -1023,14 +1048,42 @@ const validateSakPolicy = (spec: KeySpec): void => {
   }
 }
 
-// Reject a `quantity` no invite can honour, on the spec or in caller-supplied
-// `meta`. Absent (or `UNLIMITED_INVITE_USES`) is valid and means unlimited;
-// `0`, fractions, `NaN`, negatives and unsafe integers are not, since such a
-// key is either dead on arrival or indistinguishable from corruption once
-// every client processes it.
-const validateQuantity = (spec: KeySpec, alias: string): void => {
-  const check = (quantity: unknown, where: string) => {
-    if (quantity == null || quantity === UNLIMITED_INVITE_USES) return
+// Validate the two invite-accounting fields, on the spec and in
+// caller-supplied `meta`.
+//
+// Both are read only for invite keys: `keyAdditionProcessor` records
+// `meta.quantity` and `meta.expires` under `_vm.invites` inside its
+// `#inviteKey-` branch, and nothing else consults them. On any other name
+// they are inert metadata that still travels, signed, on the wire — so a
+// caller who believes they capped the uses of a CSK or gave it a lifetime
+// gets an error instead of a silent no-op.
+//
+// For invites, an absent `quantity` (or `UNLIMITED_INVITE_USES`) is valid and
+// means unlimited, which `OP_KEY_REQUEST` processing supports on purpose: it
+// only decrements and exhausts invites that carry one. What is rejected is a
+// value no invite can honour — `0`, fractions, `NaN`, negatives and unsafe
+// integers leave a key that is either dead on arrival or indistinguishable
+// from corruption once every client processes it. `expires` is a `Date.now()`
+// millisecond timestamp compared with `<`, so a non-numeric one silently
+// makes the invite immortal (`NaN < x` is `false`); it fails closed here.
+const validateInviteAccounting = (
+  spec: KeySpec,
+  alias: string,
+  isInvite: boolean
+): void => {
+  const inviteOnly = (value: unknown, where: string) => {
+    if (value == null) return false
+    if (!isInvite) {
+      throw new ChelErrorKeySpecInvalid(
+        `Key spec '${alias}': '${where}' is only meaningful on an invite key ` +
+          '(#inviteKey or #inviteKey-*) and is ignored on any other name'
+      )
+    }
+    return true
+  }
+  const checkQuantity = (quantity: unknown, where: string) => {
+    if (!inviteOnly(quantity, where)) return
+    if (quantity === UNLIMITED_INVITE_USES) return
     if (!isValidInviteQuantity(quantity)) {
       throw new ChelErrorKeySpecInvalid(
         `Key spec '${alias}': '${where}' must be a positive safe integer or ` +
@@ -1038,8 +1091,20 @@ const validateQuantity = (spec: KeySpec, alias: string): void => {
       )
     }
   }
-  check(spec.quantity, 'quantity')
-  check(spec.meta?.quantity, 'meta.quantity')
+  const checkExpires = (expires: unknown, where: string) => {
+    if (!inviteOnly(expires, where)) return
+    if (typeof expires !== 'number' || !Number.isSafeInteger(expires) || expires <= 0) {
+      throw new ChelErrorKeySpecInvalid(
+        `Key spec '${alias}': '${where}' must be a positive safe integer ` +
+          '(a Date.now() millisecond timestamp); omit it for an invite that ' +
+          'does not expire'
+      )
+    }
+  }
+  checkQuantity(spec.quantity, 'quantity')
+  checkQuantity(spec.meta?.quantity, 'meta.quantity')
+  checkExpires(spec.expires, 'expires')
+  checkExpires(spec.meta?.expires, 'meta.expires')
 }
 
 // Build the final `meta` for a materialized spec, merging caller-provided
@@ -1485,10 +1550,33 @@ export default sbp('sbp/selectors/register', {
     }
 
     // Only keys whose secret is recoverable (wrapped) and locally available
-    // can be rotated.
-    selected = selected.filter(
-      (k) => k.meta?.private?.content != null && sbp('chelonia/haveSecretKey', k.id)
-    )
+    // can be rotated: a replacement is useless if the old secret cannot be
+    // read to re-wrap under the same wrapper.
+    const isRotatable = (k: ChelContractKey) =>
+      k.meta?.private?.content != null && sbp('chelonia/haveSecretKey', k.id)
+
+    // For the bulk selectors ('*' and 'pending') skipping such keys is the
+    // documented contract — both are "rotate whatever qualifies". An explicit
+    // name list is a specific instruction, though, and the caller usually has
+    // a reason to believe those keys must be replaced (a suspected
+    // compromise, say). Silently dropping one would return a successful
+    // result that simply omits it, leaving the old key authorized while the
+    // caller believes otherwise, so an unrotatable name fails loudly. This
+    // matches `chelonia/out/shareKeys`, which already throws for an explicitly
+    // named key with no recoverable secret.
+    if (Array.isArray(names)) {
+      const unrotatable = selected.filter((k) => !isRotatable(k))
+      if (unrotatable.length > 0) {
+        throw new ChelErrorKeyNameNotFound(
+          'chelonia/key/rotate: cannot rotate ' +
+            unrotatable.map((k) => `'${k.name}'`).join(', ') +
+            ` in ${contractID}: the key has no wrapped secret ` +
+            '(no meta.private.content), or its secret is not available locally'
+        )
+      }
+    }
+
+    selected = selected.filter(isRotatable)
 
     if (selected.length === 0) return undefined
 

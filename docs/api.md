@@ -54,7 +54,7 @@ Declarative, name-addressed key definitions. Full guide:
 | Selector | Source | Purpose |
 |---|---|---|
 | `chelonia/key/generate` | `src/keys.ts` | Expand a `KeySpecMap` (or marked array) against the optional target contract, transiently store every raw key, and return the `KeyMap`. No messages are created or sent. |
-| `chelonia/key/rotate` | `src/keys.ts` | Bulk key rotation (`'*'`, `'pending'`, or explicit names) with the two-case wrapper rule, optional atomic before/after operations, and stale-update suppression. `additionalOperations` runs before signer selection, so batch permission is only required when it returns operations. Returns `{ updates, newKeys, msg }` or `undefined`. |
+| `chelonia/key/rotate` | `src/keys.ts` | Bulk key rotation (`'*'`, `'pending'`, or explicit names) with the two-case wrapper rule, optional atomic before/after operations, and stale-update suppression. `additionalOperations` runs before signer selection, so batch permission is only required when it returns operations. Only keys with a wrapped, locally available secret can be rotated: the bulk forms skip the rest, while an explicitly named key that cannot be rotated throws `ChelErrorKeyNameNotFound`. Returns `{ updates, newKeys, msg }` or `undefined`. |
 
 ## Contract lifecycle
 

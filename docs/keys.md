@@ -93,7 +93,7 @@ hand-crafted entries in the raw `SPKey` form. The selector
 | Name pattern | Defaults |
 |---|---|
 | `#sak` | `purpose: ['sak']`, `ringLevel: 0`, `permissions: []`, `allowedActions: []`, edwards key. These are the invariants that `keyAdditionProcessor` enforces. Chelonia now checks them at authoring time. |
-| `#inviteKey` (or `#inviteKey-*`) | `ringLevel: Number.MAX_SAFE_INTEGER`, `purpose: ['sig']`. The field `quantity` is optional (see [Invite quantity](#invite-quantity)). Only the exact name `#inviteKey` gets the id suffix. A name like `#inviteKey-foo` is also an invite. It gets the same defaults and the same invite accounting, but it keeps its name without change. |
+| `#inviteKey` (or `#inviteKey-*`) | `ringLevel: Number.MAX_SAFE_INTEGER`, `purpose: ['sig']`. The fields `quantity` and `expires` are optional and apply to invites only (see [Invite quantity and expiry](#invite-quantity-and-expiry)). Only the exact name `#inviteKey` gets the id suffix. A name like `#inviteKey-foo` is also an invite. It gets the same defaults and the same invite accounting, but it keeps its name without change. |
 | anything else | `permissions: []`, `allowedActions: []` (fail-closed). The field `ringLevel` is necessary. It is a security decision. |
 
 Chelonia infers the curve type. A purpose with only `enc` means the type
@@ -105,10 +105,11 @@ the type.
 The `#` namespace is reserved. Only these exact names and their documented
 suffix forms pass: `#sak`, `#inviteKey`, `#inviteKey-*`, and `#krrk-*`.
 Every other name with the `#` prefix gets an error. This includes near
-misses, for example `#sak-1` or a bare `#krrk`. Such a name makes an
-ordinary key, and no convention handling matches it.
+misses, for example `#sak-1` or a bare `#krrk`: accepting one would quietly
+make an ordinary key that no convention handling matches, which is never
+what the author of such a name intended.
 
-### Invite quantity
+### Invite quantity and expiry
 
 The field `quantity` on an invite spec gives the number of times that a
 person can use the invite. If you do not set it, the invite has unlimited
@@ -142,6 +143,20 @@ invite with no `meta.quantity` as correct and unlimited. It fails closed
 only when `meta.quantity` is present and is not a positive safe integer. It
 then records the invite as revoked. Only a hand-built `SPKey` or a message
 from an attacker can have this shape.
+
+The field `expires` is a `Date.now()` millisecond timestamp. It must be a
+positive safe integer. Omit it for an invite that does not expire. The
+reason for the check is that processing compares the value with `<`, and
+every comparison against a non-number is `false`. An `expires` of
+`'tomorrow'` would therefore produce an invite that never expires, which is
+the opposite of the intent.
+
+Both fields apply to invite keys only. `keyAdditionProcessor` reads
+`meta.quantity` and `meta.expires` in its `#inviteKey-` branch, and nothing
+else looks at them. Declaring either on any other name gets an error rather
+than a silent no-op, because a `quantity` on a CSK reads like a use limit
+and an `expires` on a CSK reads like a lifetime, and neither has any
+effect. Use revocation to end the life of an ordinary key.
 
 ### The secret-key lifecycle
 
@@ -315,8 +330,8 @@ Callers across a boundary have two options:
    in a `Secret`, which is serdes-registered. Give it back through
    `spec.key` or `spec.data` on the other side.
 
-The test `src/keys-integration.test.ts` has the name "KeyMap does not
-survive a serdes boundary". It pins this behavior. It makes sure that this
+The suite "KeyMap across a serdes boundary" in
+`src/keys-integration.test.ts` pins this behavior. It makes sure that this
 caveat stays correct.
 
 ## Name references across outgoing operations
@@ -354,6 +369,12 @@ For every `fooKeyId` / `fooKeyName` pair:
 
 The resolution happens one time, at selector entry. The lower-level
 primitives `signedOutgoingData` and `encryptedOutgoingData` stay id-only.
+
+The action selectors also accept a raw `encryptionKey`, which is a `Key`
+object rather than a reference. It needs no pair of its own: the payload is
+encrypted with it directly and carries its key id. Give an
+`encryptionKeyId` or `encryptionKeyName` alongside it only as an assertion.
+The values must then agree with the raw key, or the call throws.
 
 TypeScript enforces the same rule at compile time. A necessary pair takes
 `{ id }`, `{ name }`, or `{ id, name }`, but not an empty pair. Plain
@@ -516,11 +537,23 @@ const result = await sbp('chelonia/key/rotate', {
   hooks, publishOptions
 })
 // => { updates, newKeys, msg } — or undefined when no keys qualify
+//    (a bulk form with nothing to rotate; an explicit name that cannot be
+//    rotated throws instead)
 ```
 
 The selector rotates only active keys with a recoverable, locally available
-secret. Rotation fails fast before publishing in one case: no signing key
-at the minimum ring level of the rotated set is locally available. For
+secret. A key qualifies when it carries a wrapped secret
+(`meta.private.content`) and that secret is available on this device. The
+two bulk forms, `'*'` and `'pending'`, mean "rotate whatever qualifies", so
+they skip a key that does not. An explicit name list does not: a name that
+cannot be rotated throws `ChelErrorKeyNameNotFound`, and nothing is
+published. The reason for the difference is that a caller who names a key
+usually has a reason to believe that the key must be replaced, for example
+a suspected compromise. A quiet skip would return a successful result with
+the old key still authorized.
+
+Rotation fails fast before publishing in one more case: no signing key at
+the minimum ring level of the rotated set is locally available. For
 example, a cleared transient root key causes this condition. In that case,
 give `signingKeyName` explicitly.
 
@@ -572,8 +605,12 @@ Expansion fails fast, with exact errors, in these cases:
   multi-node cycle.
 - A `#sak` spec with a policy field that is not a default.
 - A `#inviteKey*` spec with a `quantity` that is neither
-  `UNLIMITED_INVITE_USES` nor a positive safe integer. An omitted
-  `quantity` is correct and means unlimited uses.
+  `UNLIMITED_INVITE_USES` nor a positive safe integer, or with an `expires`
+  that is not a positive safe integer. An omitted `quantity` is correct and
+  means unlimited uses. An omitted `expires` is correct and means no expiry.
+- A `quantity` or an `expires` on any name that is not an invite. Only
+  invite accounting reads these two fields, so on another key they would be
+  a silent no-op, and they are rejected instead.
 - A reserved conventional name (`#sak`, `#inviteKey*`, `#krrk-*`) declared
   as a foreign key. A `#sak` is a contract-local, policy-free accounting
   key. An invite has a local secret and locally tracked accounting. A key
