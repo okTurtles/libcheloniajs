@@ -986,6 +986,12 @@ export function hasHiddenChange (
   after: RedactionSite
 ): boolean {
   const visiblePaths = defaultDiff(before.replacement, after.replacement)
+  if (visiblePaths.length === 0) {
+    // No visible change, so any change is hidden by definition. Compare the
+    // unredacted originals directly instead of diffing them into a throwaway
+    // patch (which would clone the hidden value on every call).
+    return !structurallyEqual(before.original, after.original)
+  }
   if (visiblePaths.some((p) => p.path === '')) return false
   const visible = new Set(visiblePaths.map((p) => p.path))
   for (const { path } of defaultDiff(before.original, after.original)) {
