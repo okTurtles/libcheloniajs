@@ -129,7 +129,7 @@ See [`journal.md`](./journal.md) for the full guide.
 | Selector | Source | Purpose |
 |---|---|---|
 | `chelonia/journal/get` | `src/journal.ts` | Return a deep clone of `{ entries }` or `undefined`. |
-| `chelonia/journal/reconstruct` | `src/journal.ts` | Rebuild the redacted HEAD state from the most recent snapshot. Throws `ChelErrorJournalCorrupt` on bad patches. |
+| `chelonia/journal/reconstruct` | `src/journal.ts` | Rebuild the redacted HEAD state from the most recent usable snapshot. Returns `undefined` when no snapshot has a state to seed from. Throws `ChelErrorJournalCorrupt` on bad patches. |
 | `chelonia/journal/clear` | `src/journal.ts` | Clear one contract's journal, or all if called with no argument. Returns the count cleared. |
 
 ## Database
@@ -284,9 +284,10 @@ The most useful exported types and values (re-exported from the package root):
 | `CheloniaContractCtx` | `src/types.ts` | Shape accepted by `chelonia/defineContract`. |
 | `SendMessageHooks` | `src/types.ts` | `hooks` object on `/out/*` params: `prepublish`, `onprocessed`, `preSendCheck`, `beforeRequest`, `postpublish`. |
 | `JournalConfig` | `src/types.ts` | Journal sub-tree of `CheloniaConfig`. |
-| `JournalEntry` | `src/types.ts` | Discriminated union of `{ kind: 'snapshot', ..., state }` and `{ kind: 'patch', ..., patch, error? }`. See [`journal.md`](./journal.md#public-selectors). |
-| `JournalPatch` | `src/types.ts` | Strict subset of RFC-6902 (`add` / `remove` / `replace`). |
-| `JournalRedaction` | `src/types.ts` | `{ path, redact }` directive. |
+| `JournalEntry` | `src/types.ts` | Discriminated union of `{ kind: 'snapshot', ..., state }` and `{ kind: 'patch', ..., patch }`. Both arms may carry `error?` (the event itself failed to process) plus `diffError?` / `redactionError?` (the journal could not record what changed). A snapshot may also carry `replayed?: true`, meaning its `state` was recovered by replaying the window rather than taken from that event. See [`journal.md`](./journal.md#public-selectors). |
+| `JournalPatch` | `src/types.ts` | Strict subset of RFC-6902 (`add` / `remove` / `replace`). `replace` may carry `redacted: true`, marking an identity edit that records a change the redactor hid. See [`journal.md`](./journal.md#changes-behind-a-constant-redactor). |
+| `JournalRedaction` | `src/types.ts` | `{ path, redact }` directive. Validated element-wise by `chelonia/configure`. |
+| `RedactionSite` / `RedactionSiteMap` | `src/types.ts` | `RedactionSiteMap` is the optional out-parameter of `applyRedactions`, mapping each redacted leaf's JSON Pointer to a `RedactionSite` (`{ original, replacement }`). `RedactionSite` is also the argument type of `hasHiddenChange()`. Used to detect changes a constant redactor hides; see [Low-level redaction helpers](./journal.md#low-level-redaction-helpers). `original` is a live reference into the state passed to `applyRedactions`, not a copy: treat the map as read-only and consume it before that state can change. |
 | `SPMessage` | `src/SPMessage.ts` | Wire format for every on-chain message. |
 | `Secret<T>` | `src/Secret.ts` | `WeakMap`-backed wrapper that prevents accidental key leakage in logs / serialization. |
 | `EncryptedData<T>` | `src/encryptedData.ts` | Tagged wrapper around encrypted payloads. |
@@ -297,6 +298,9 @@ The most useful exported types and values (re-exported from the package root):
 | `KvLoadStatus` | `src/types.ts` | `'non-init' | 'loading' | 'loaded' | 'error'` — status of a slot's mirror entry. |
 | `KvMirrorEntry` | `src/types.ts` | Shape of a single mirror entry at `rootState._kv[contractID][key]`: `{ value: JSONType | undefined, etag: string | null, status: KvLoadStatus, lastError?: { name, message } }`. `value` is canonical (always a server-confirmed payload or `undefined`); see [Consumer caveats](./kv.md#consumer-caveats). |
 | `KV_NOOP` | `src/kv.ts` | `Symbol.for('@chelonia/lib/KV_NOOP')` — return from an updater to abort the write. |
+| `DEFAULT_SNAPSHOT_INTERVAL` / `defaultJournalConfig` | `src/journal.ts` | Default snapshot cadence, and a fresh copy of the journal block Chelonia starts from. See [`configure.md`](./configure.md#journal-configuration). |
+| `REDACTION_ERROR_SENTINEL` / `REDACTION_NON_JSON_SAFE_SENTINEL` | `src/journal.ts` | Stored in place of a redactor result when the redactor threw, or returned a value JSON cannot round-trip losslessly. See [Redactions](./journal.md#redactions). |
+| `defaultDiff` / `defaultApplyPatch` / `shortHashRedactor` / `applyRedactions` / `hasHiddenChange` / `synthesizeRedactedChangeOps` / `structurallyEqual` / `cloneValue` | `src/journal.ts` | Diff, patch and redaction primitives, exported for custom `diff` / `applyPatch` pipelines. See [Low-level redaction helpers](./journal.md#low-level-redaction-helpers). |
 
 ## Errors
 

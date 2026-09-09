@@ -18,7 +18,9 @@
 // 6901 `-` token for array tail-appends, rejects `replace` on missing
 // object keys, and rejects `add`/`replace` whose `value` is absent. The
 // intent is that output is consumable by any standards-conformant RFC 6902
-// library and vice versa.
+// library and vice versa. Operations that only record "a redacted value
+// changed" carry an extra `redacted: true` member, which RFC 6902 §4
+// requires appliers to ignore.
 import { blake32Hash } from './functions.mjs';
 import sbp from '@sbp/sbp';
 import { has } from 'turtledash';
@@ -65,6 +67,40 @@ function isPlainObject(v) {
     const proto = Object.getPrototypeOf(v);
     return proto === Object.prototype || proto === null;
 }
+// Read array element `i`, reporting a hole (a missing index in a sparse
+// array) as `null`.
+//
+// JSON has no representation for a hole: `JSON.stringify` writes `null` in
+// its place. A plain `arr[i]` read yields `undefined` instead, which the
+// diff interprets as "index absent" and turns into an `add` / `remove` —
+// ops that `defaultApplyPatch` applies with `splice`, shifting every later
+// index and desynchronising the reconstructed state from the real one. So
+// every traversal in this module reads holes as `null`, which is both what
+// persistence produces and what the "plain JSON state" contract implies.
+function readIndex(arr, i) {
+    return i in arr ? arr[i] : null;
+}
+// Write `value` at `key` on `obj` without invoking inherited setters. This
+// is the single write primitive for every object the journal builds or
+// mutates: clones, JSON-safety normalization, redaction output and patch
+// application all go through it.
+//
+// Why this matters: `obj[key] = value` on a plain object will trigger any
+// setter inherited from the prototype chain. The most important case is
+// `key === '__proto__'`: the assignment form invokes the inherited
+// `Object.prototype.__proto__` setter and re-parents `obj`. Using
+// `Object.defineProperty` instead defines an *own* data property literally
+// named `"__proto__"` that shadows the accessor — `Object.prototype` is
+// never touched and `Object.getPrototypeOf(obj)` is unchanged. The same
+// reasoning covers any user-defined accessor on the prototype chain.
+function safeDefine(obj, key, value) {
+    Object.defineProperty(obj, key, {
+        value,
+        writable: true,
+        enumerable: true,
+        configurable: true
+    });
+}
 export function cloneValue(v) {
     // Minimal structural clone for plain JSON-ish values. Functions, Dates,
     // Maps, Sets, etc. fall through and are returned as-is — Chelonia state
@@ -78,10 +114,21 @@ export function cloneValue(v) {
     // (`JSON.stringify({ a: undefined })` is `"{}"`) and matches the
     // documented "plain JSON state" contract; states that rely on
     // explicit-undefined keys must supply a custom `diff` / `applyPatch`.
+    // Array holes, by contrast, are normalized to `null` (see `readIndex`),
+    // so a clone is always dense.
     if (v === null || typeof v !== 'object')
         return v;
-    if (Array.isArray(v))
-        return v.map(cloneValue);
+    if (Array.isArray(v)) {
+        // `Array.prototype.map` preserves holes, so build the copy index by
+        // index through `readIndex` — a clone that is handed to the diff must
+        // already be dense (see `readIndex`).
+        const src = v;
+        const out = new Array(src.length);
+        for (let i = 0; i < src.length; i++) {
+            out[i] = cloneValue(readIndex(src, i));
+        }
+        return out;
+    }
     if (isPlainObject(v)) {
         // Preserve the source prototype so `Object.create(null)` containers
         // (which Chelonia uses throughout contract state — `_vm`, `_volatile`,
@@ -90,15 +137,7 @@ export function cloneValue(v) {
         // state would otherwise diverge on prototype.
         const out = Object.create(Object.getPrototypeOf(v));
         for (const k of Object.keys(v)) {
-            // Use `defineProperty` instead of `out[k] = ...` so a state with an
-            // own enumerable `__proto__` key cannot pollute `Object.prototype`
-            // via this clone path.
-            Object.defineProperty(out, k, {
-                value: cloneValue(v[k]),
-                writable: true,
-                enumerable: true,
-                configurable: true
-            });
+            safeDefine(out, k, cloneValue(v[k]));
         }
         return out;
     }
@@ -155,14 +194,17 @@ function diffInto(before, after, segments, out) {
         const aArr = after;
         const minLen = Math.min(bArr.length, aArr.length);
         for (let i = 0; i < minLen; i++) {
-            diffInto(bArr[i], aArr[i], [...segments, String(i)], out);
+            // `readIndex`, not `bArr[i]`: a hole must compare as `null` rather
+            // than as an absent index, or the emitted add/remove would splice
+            // the array and shift every later element.
+            diffInto(readIndex(bArr, i), readIndex(aArr, i), [...segments, String(i)], out);
         }
         if (aArr.length > bArr.length) {
             for (let i = bArr.length; i < aArr.length; i++) {
                 out.push({
                     op: 'add',
                     path: segmentsToPointer([...segments, String(i)]),
-                    value: cloneValue(aArr[i])
+                    value: cloneValue(readIndex(aArr, i))
                 });
             }
         }
@@ -212,27 +254,61 @@ function shallowEqualPrimitives(a, b) {
         return true;
     return false;
 }
+// Deep equality using exactly the same notion of "changed" as
+// `defaultDiff`: `a` and `b` are equal iff `defaultDiff(a, b)` would be
+// empty. Keeping the two in lock-step matters because this predicate
+// decides whether a change hidden behind a constant redactor gets its own
+// journal entry; a looser or stricter notion would either invent churn or
+// keep hiding real changes.
+//
+// Notably: `undefined` on one side only is a change (the diff emits
+// add/remove), NaN equals NaN, array holes compare as `null` (see
+// `readIndex`), and non-plain containers (Date, Map, class instances) are
+// only equal by reference — mirroring `defaultDiff`, which emits a
+// wholesale `replace` for them.
+export function structurallyEqual(a, b) {
+    if (a === b)
+        return true;
+    if (a === undefined || b === undefined)
+        return false;
+    const aIsArr = Array.isArray(a);
+    const bIsArr = Array.isArray(b);
+    const aIsObj = isPlainObject(a);
+    const bIsObj = isPlainObject(b);
+    if (aIsArr !== bIsArr || aIsObj !== bIsObj)
+        return false;
+    if (aIsArr && bIsArr) {
+        const aArr = a;
+        const bArr = b;
+        if (aArr.length !== bArr.length)
+            return false;
+        for (let i = 0; i < aArr.length; i++) {
+            if (!structurallyEqual(readIndex(aArr, i), readIndex(bArr, i)))
+                return false;
+        }
+        return true;
+    }
+    if (aIsObj && bIsObj) {
+        const aObj = a;
+        const bObj = b;
+        const aKeys = Object.keys(aObj);
+        if (aKeys.length !== Object.keys(bObj).length)
+            return false;
+        for (const k of aKeys) {
+            // Own properties only — never let the prototype chain make two
+            // states look alike.
+            if (!has(bObj, k))
+                return false;
+            if (!structurallyEqual(aObj[k], bObj[k]))
+                return false;
+        }
+        return true;
+    }
+    return shallowEqualPrimitives(a, b);
+}
 // ---------------------------------------------------------------------------
 // Apply
 // ---------------------------------------------------------------------------
-// Write `value` at key `last` on `obj` without invoking inherited setters.
-//
-// Why this matters: `obj[last] = value` on a plain object will trigger any
-// setter inherited from the prototype chain. The most important case is
-// `last === '__proto__'`: the assignment form invokes the inherited
-// `Object.prototype.__proto__` setter and re-parents `obj`. Using
-// `Object.defineProperty` instead defines an *own* data property literally
-// named `"__proto__"` that shadows the accessor — `Object.prototype` is
-// never touched and `Object.getPrototypeOf(obj)` is unchanged. The same
-// reasoning covers any user-defined accessor on the prototype chain.
-function safeDefine(obj, last, value) {
-    Object.defineProperty(obj, last, {
-        value,
-        writable: true,
-        enumerable: true,
-        configurable: true
-    });
-}
 // Apply a sequence of patches to a value, returning a new value. Does not
 // mutate the input. Rejects unknown op kinds.
 export function defaultApplyPatch(state, patches) {
@@ -372,24 +448,249 @@ function applyOne(root, patch) {
 // ---------------------------------------------------------------------------
 // Redactions
 // ---------------------------------------------------------------------------
-// Deep-clone `state` and apply each redaction. Redactors are invoked on the
-// cloned value, so user code cannot mutate the live state object.
-// A throwing redactor logs once and substitutes the sentinel string so a
-// single bad redactor cannot blank out unrelated parts of the state.
+// Deep-clone `state` and apply each redaction. Redactors are invoked on
+// the cloned value with a disposable copy of the resolved path, so user
+// code can neither mutate the live state object nor corrupt the site
+// bookkeeping derived from the internal path. A throwing redactor logs and
+// substitutes `REDACTION_ERROR_SENTINEL` so a single bad redactor cannot
+// blank out unrelated parts of the state; a redactor returning a
+// non-JSON-safe value logs and substitutes
+// `REDACTION_NON_JSON_SAFE_SENTINEL` (deeply, preserving the JSON-safe
+// structure around an unsafe leaf) so projections, snapshots and markers
+// all stay persistable.
 export const REDACTION_ERROR_SENTINEL = '[REDACTION_ERROR]';
-export function applyRedactions(state, redactions, contractName) {
+// Substitute for redactor results that cannot survive JSON persistence
+// unchanged. The journal is serialized by whatever layer snapshots
+// `state.contracts[contractID]._journal`, and `JSON.stringify` drops
+// `undefined` members, renders `NaN` / `Infinity` as `null`, and throws on
+// `BigInt` and cycles — so a marker or snapshot carrying such a value would
+// corrupt `chelonia/journal/reconstruct` after a reload (a `replace` that
+// lost its `value` member is rejected by `defaultApplyPatch`). The bar is a
+// lossless JSON round-trip, not merely a successful `JSON.stringify`: a
+// `Date` serializes fine yet comes back as a string, so it is rejected too.
+export const REDACTION_NON_JSON_SAFE_SENTINEL = '[REDACTION_NON_JSON_SAFE]';
+// True when `v` survives a JSON round-trip without changing shape: `null`,
+// strings, booleans, finite numbers, and arrays / plain objects whose
+// elements / own values are themselves JSON-safe. Cycles are rejected
+// (`JSON.stringify` throws on them), as are `undefined`, `BigInt`, symbols,
+// functions and non-plain containers (Dates, Maps, class instances — the
+// journal's "plain JSON state" contract passes those through by reference,
+// which persists lossily at best). Holes in a sparse array are rejected too:
+// `JSON.stringify` writes `null` in their place, so the array would come
+// back a different shape. So is an array carrying own enumerable non-index
+// keys, which `JSON.stringify` drops outright. The `seen` set tracks only
+// the current ancestor chain, so shared (DAG-shaped) references remain
+// allowed exactly as they are for `JSON.stringify`.
+//
+// Note the deliberate asymmetry with `readIndex`, which reads a hole in
+// *contract state* as `null`: state is data the journal must record
+// faithfully, and `null` is its lossless JSON equivalent, whereas a hole in
+// a *redactor result* is a bug in caller code that is better surfaced
+// loudly through the sentinel than silently rewritten.
+//
+// This acceptance test and `normalizeToJSONSafe` below are deliberately
+// separate traversals (this one allocates nothing on the common path), so
+// they MUST classify every value identically. The agreement is asserted by
+// the "JSON-safety acceptance and normalization agree" suite; extend both
+// functions and that suite together.
+function isJSONSafeValue(v, seen) {
+    if (v === null)
+        return true;
+    const t = typeof v;
+    if (t === 'string' || t === 'boolean')
+        return true;
+    if (t === 'number')
+        return Number.isFinite(v);
+    if (t !== 'object')
+        return false;
+    if (seen.has(v))
+        return false;
+    if (Array.isArray(v)) {
+        seen.add(v);
+        const arr = v;
+        // An array carrying own enumerable keys that are not indices (e.g.
+        // `const a = [1, 2]; a.extra = 'x'`) is rejected: `JSON.stringify`
+        // serializes arrays index-by-index and silently drops those keys, so
+        // the value would not round-trip. Comparing the own-key count with
+        // the length catches that in O(1) extra allocations, and the
+        // per-index `i in arr` check below still catches an array that is
+        // both sparse and extra-keyed (where the two counts can coincide).
+        // Symbol-keyed and non-enumerable properties are deliberately not
+        // counted — `JSON.stringify` ignores them as well.
+        let ok = Object.keys(arr).length === arr.length;
+        for (let i = 0; ok && i < arr.length; i++) {
+            // `every` would skip holes, silently accepting a sparse array.
+            if (!(i in arr) || !isJSONSafeValue(arr[i], seen)) {
+                ok = false;
+            }
+        }
+        seen.delete(v);
+        return ok;
+    }
+    if (!isPlainObject(v))
+        return false;
+    seen.add(v);
+    const ok = Object.keys(v).every((k) => isJSONSafeValue(v[k], seen));
+    seen.delete(v);
+    return ok;
+}
+// Deep-rewrite a redactor result into JSON-safe shape, substituting
+// `REDACTION_NON_JSON_SAFE_SENTINEL` for every unsafe leaf (and for cyclic
+// back-references). Only called after `isJSONSafeValue` rejected the value,
+// so allocation here is the exceptional path. MUST stay in agreement with
+// `isJSONSafeValue` on what counts as unsafe (see the note above it).
+//
+// One rejection class is repaired without a sentinel: an array's own
+// enumerable non-index keys are simply dropped, because the array is
+// rebuilt index-by-index — which is exactly what JSON persistence would
+// have done to it, only now it happens once, visibly, and with a warning.
+function normalizeToJSONSafe(v, seen) {
+    if (v === null)
+        return v;
+    const t = typeof v;
+    if (t === 'string' || t === 'boolean')
+        return v;
+    if (t === 'number') {
+        return Number.isFinite(v) ? v : REDACTION_NON_JSON_SAFE_SENTINEL;
+    }
+    if (t !== 'object')
+        return REDACTION_NON_JSON_SAFE_SENTINEL;
+    if (seen.has(v))
+        return REDACTION_NON_JSON_SAFE_SENTINEL;
+    if (Array.isArray(v)) {
+        seen.add(v);
+        const arr = v;
+        const out = new Array(arr.length);
+        for (let i = 0; i < arr.length; i++) {
+            // `map` would preserve holes, so this loop is what actually repairs
+            // a sparse array. Holes get the sentinel for the reason given above
+            // `isJSONSafeValue`.
+            out[i] = i in arr
+                ? normalizeToJSONSafe(arr[i], seen)
+                : REDACTION_NON_JSON_SAFE_SENTINEL;
+        }
+        seen.delete(v);
+        return out;
+    }
+    if (!isPlainObject(v))
+        return REDACTION_NON_JSON_SAFE_SENTINEL;
+    seen.add(v);
+    const out = Object.create(Object.getPrototypeOf(v));
+    for (const k of Object.keys(v)) {
+        safeDefine(out, k, normalizeToJSONSafe(v[k], seen));
+    }
+    seen.delete(v);
+    return out;
+}
+// A breadcrumb for the warning above. Deliberately describes the *shape*
+// only — the rejected value is precisely what the redactor was asked to
+// keep out of the journal, so it must not appear in logs.
+function describeNonJSONSafe(v) {
+    if (typeof v === 'number')
+        return 'non-finite number';
+    if (typeof v === 'object' && v !== null) {
+        if (Array.isArray(v)) {
+            // A hole and a stowaway non-index key are both different failures
+            // than an unsafe element, and naming them saves the reader from
+            // hunting for a value that looks fine.
+            const keyCount = Object.keys(v).length;
+            if (keyCount < v.length)
+                return 'sparse array (holes are not JSON values)';
+            if (keyCount > v.length) {
+                return 'array with non-index properties (dropped by JSON)';
+            }
+            return 'array containing a non-JSON-safe value';
+        }
+        if (isPlainObject(v))
+            return 'object containing a non-JSON-safe or cyclic value';
+        return `non-plain object (${v.constructor?.name ?? 'unknown'})`;
+    }
+    return typeof v;
+}
+const pluralLeaves = (n) => `${n} more ${n === 1 ? 'leaf' : 'leaves'}`;
+// Report what went wrong across a whole projection: the count, plus the
+// first offending path (and, for a throwing redactor, the first error) so
+// the failure is still diagnosable. Never names a redacted value — the
+// whole point of a redactor is to keep those out of logs.
+function flushRedactionPassWarnings(pass) {
+    if (pass.threwCount > 0) {
+        const more = pass.threwCount > 1
+            ? ` (and ${pluralLeaves(pass.threwCount - 1)} in this projection)`
+            : '';
+        console.warn(`[chelonia][journal] redactor threw for path '${pass.threwFirstPath}'${more}:`, pass.threwFirstError);
+    }
+    if (pass.unsafeCount > 0) {
+        const more = pass.unsafeCount > 1
+            ? ` (and ${pluralLeaves(pass.unsafeCount - 1)} in this projection)`
+            : '';
+        console.warn(`[chelonia][journal] redactor for path '${pass.unsafeFirstPath}' returned a ` +
+            `non-JSON-safe value (${pass.unsafeFirstShape}); ` +
+            `normalizing it to a JSON-safe equivalent${more}`);
+    }
+}
+export function applyRedactions(state, redactions, contractName, 
+// Optional out-parameter. When supplied, every redacted leaf that was
+// actually written is recorded as `JSON-Pointer -> { original,
+// replacement }` so callers can tell whether the *underlying* value
+// changed even when its redacted projection is a constant. Passing a map
+// is the only way to obtain this: the returned state deliberately keeps
+// no trace of the original values.
+//
+// The recorded `original`s are live references into `state`, not copies.
+// Treat the map as read-only, and consume it before `state` can change
+// (see the aliasing note below).
+sites) {
     const cloned = cloneValue(state);
     if (!redactions || redactions.length === 0)
         return cloned;
-    for (const r of redactions) {
-        const segments = parseDottedPath(r.path);
-        if (segments.length === 0)
-            continue;
-        walkAndRedact(cloned, segments, 0, r.redact, [], contractName);
+    // Read-only view used to resolve pre-redaction originals. Aliasing the
+    // input rather than cloning it a second time is safe on two counts:
+    // `walkAndRedact` writes exclusively into `cloned`, and every recorded
+    // `original` is consumed synchronously by the caller (see `recordEvent`)
+    // before control returns to the event loop. Cloning bought no temporal
+    // isolation anyway (the copy was taken at the same instant as the reads)
+    // while costing a second full-state deep clone per projection, i.e. four
+    // per journaled event instead of two.
+    const source = sites ? state : undefined;
+    const pass = {
+        seen: new Set(),
+        sites,
+        threwCount: 0,
+        unsafeCount: 0
+    };
+    try {
+        for (const r of redactions) {
+            const segments = parseDottedPath(r.path);
+            if (segments.length === 0)
+                continue;
+            walkAndRedact(cloned, source, segments, 0, r.redact, [], contractName, pass);
+        }
+    }
+    finally {
+        // In a `finally` because the pass can still be abandoned mid-way (a
+        // malformed `path` rejected by `parseDottedPath`, a throwing getter in
+        // the state or in a redactor result): whatever went wrong before that
+        // point is diagnostic detail the caller still needs.
+        flushRedactionPassWarnings(pass);
     }
     return cloned;
 }
-function walkAndRedact(parent, segments, i, redact, resolved, contractName) {
+// Record a redacted leaf. When two directives match the same leaf the
+// second redactor sees the first one's output, so we keep the *first*
+// `original` (the true pre-redaction value, which is what change detection
+// must compare) and the *last* `replacement` (what actually ends up in the
+// journal).
+function recordSite(sites, fullPath, original, replacement) {
+    const pointer = segmentsToPointer(fullPath);
+    const existing = sites.get(pointer);
+    if (existing) {
+        existing.replacement = replacement;
+    }
+    else {
+        sites.set(pointer, { original, replacement });
+    }
+}
+function walkAndRedact(parent, source, segments, i, redact, resolved, contractName, pass) {
     if (parent === null || typeof parent !== 'object')
         return;
     const seg = segments[i];
@@ -405,38 +706,60 @@ function walkAndRedact(parent, segments, i, redact, resolved, contractName) {
         const fullPath = [...resolved, k];
         if (isLast) {
             const container = parent;
-            const original = container[k];
+            const value = container[k];
+            const sourceValue = pass.sites
+                ? resolveAtSegments(source, fullPath)
+                : undefined;
+            const original = sourceValue?.found ? sourceValue.value : value;
             let replacement;
             try {
-                replacement = redact(original, fullPath, contractName);
+                // The path is handed over as a disposable copy: redactors are
+                // contracted pure, but a mutating callback must not be able to
+                // corrupt the site bookkeeping `recordSite` derives from
+                // `fullPath` right below.
+                replacement = redact(value, [...fullPath], contractName);
             }
             catch (e) {
-                console.warn(`[chelonia][journal] redactor threw for path '${fullPath.join('.')}':`, e);
+                pass.threwCount++;
+                if (pass.threwFirstPath === undefined) {
+                    pass.threwFirstPath = fullPath.join('.');
+                    pass.threwFirstError = e;
+                }
                 replacement = REDACTION_ERROR_SENTINEL;
             }
-            // Write via defineProperty on objects: even though `cloneValue`
+            if (!isJSONSafeValue(replacement, pass.seen)) {
+                pass.unsafeCount++;
+                if (pass.unsafeFirstPath === undefined) {
+                    pass.unsafeFirstPath = fullPath.join('.');
+                    pass.unsafeFirstShape = describeNonJSONSafe(replacement);
+                }
+                replacement = normalizeToJSONSafe(replacement, pass.seen);
+            }
+            // Write via `safeDefine` on objects: even though `cloneValue`
             // produced this container, defending against prototype-polluting
             // keys at the write site costs nothing and keeps the invariant
             // local. On arrays we validate the index and use bracket
-            // assignment — arrays don't have string keys in JSON Patch, so a
-            // non-integer key here is a bug, not a write to mishandle.
+            // assignment: a literal path segment matches any own key, and an
+            // array's own non-index keys (`'arr.length'` resolves to one) have
+            // no JSON Patch location, so they must not be written. A leaf that
+            // was not written must not be recorded either, or `sites` would
+            // report a redaction that never happened.
+            let written = true;
             if (Array.isArray(container)) {
                 const idx = Number(k);
-                if (Number.isInteger(idx) && idx >= 0 && idx < container.length) {
+                written = Number.isInteger(idx) && idx >= 0 && idx < container.length;
+                if (written)
                     container[idx] = replacement;
-                }
             }
             else {
-                Object.defineProperty(container, k, {
-                    value: replacement,
-                    writable: true,
-                    enumerable: true,
-                    configurable: true
-                });
+                safeDefine(container, k, replacement);
+            }
+            if (pass.sites && written) {
+                recordSite(pass.sites, fullPath, original, replacement);
             }
         }
         else {
-            walkAndRedact(parent[k], segments, i + 1, redact, fullPath, contractName);
+            walkAndRedact(parent[k], source, segments, i + 1, redact, fullPath, contractName, pass);
         }
     }
 }
@@ -463,10 +786,186 @@ export function shortHashRedactor(value) {
     return blake32Hash(serialized).slice(0, 8);
 }
 // ---------------------------------------------------------------------------
+// Redacted-change markers
+// ---------------------------------------------------------------------------
+// Resolve a path against a value, reporting whether the location exists.
+// Own properties only, same as the applier's walk.
+function resolveAtSegments(root, segments) {
+    const notFound = { found: false, value: undefined };
+    let current = root;
+    for (const seg of segments) {
+        if (current === null || typeof current !== 'object')
+            return notFound;
+        if (Array.isArray(current)) {
+            const idx = Number(seg);
+            if (!Number.isInteger(idx) || idx < 0 || idx >= current.length)
+                return notFound;
+            current = readIndex(current, idx);
+        }
+        else {
+            if (!has(current, seg))
+                return notFound;
+            current = current[seg];
+        }
+    }
+    return { found: true, value: current };
+}
+// Same, for callers that only hold a JSON Pointer (site-map keys).
+function resolveAtPointer(root, pointer) {
+    return resolveAtSegments(root, pointerToSegments(pointer));
+}
+function buildCoverageIndex(patch) {
+    const paths = new Set();
+    let wholeRoot = false;
+    for (const p of patch) {
+        const path = p?.path;
+        if (typeof path !== 'string')
+            continue;
+        if (path === '') {
+            wholeRoot = true;
+            continue;
+        }
+        paths.add(path);
+    }
+    return { paths, wholeRoot };
+}
+function coveredByPatch(idx, pointer) {
+    if (idx.wholeRoot)
+        return true;
+    if (idx.paths.has(pointer))
+        return true;
+    // Any ancestor of `pointer` replaced wholesale.
+    for (let i = pointer.lastIndexOf('/'); i > 0; i = pointer.lastIndexOf('/', i - 1)) {
+        if (idx.paths.has(pointer.slice(0, i)))
+            return true;
+    }
+    return false;
+}
+// True when the underlying change at a redacted site is (at least partly)
+// invisible in the site's redacted projection — i.e. the diff of the
+// unredacted originals touches a pointer path that the diff of the
+// redacted projections does not reproduce exactly.
+//
+// Why this replaces the old "descendant of the site already shows up in
+// the patch" heuristic: for a container-returning redactor (e.g. keep
+// `id`/`purpose`, hide `data`) a change to the *visible* part of the
+// container must not suppress the marker for the hidden part, and a
+// visible-only change must not *produce* one either. Comparing the two
+// per-site diffs makes exactly that distinction.
+//
+// Only an exact path match counts as "visible". A projected *ancestor*
+// operation is never accepted as covering an original descendant change:
+// the visible paths live in the projection's path space while the original
+// paths live in the source's, and a reshaping redactor (e.g.
+// `(v) => ({ profile: v.profile.name })`) maps source leaves onto
+// projected ancestor positions, so those spaces do not correspond. A
+// projected ancestor op only proves that *something* inside that ancestor
+// changed — not that the hidden descendant change is visible. Moreover,
+// the built-in diff emits an op at an ancestor (instead of descending)
+// exactly when the projection changed container shape there between before
+// and after, which is precisely the lossy case where coverage cannot be
+// established. "Hidden" is the conservative direction: markers are
+// identity writes, so an extra one is noise while a suppressed one loses
+// the only record of the hidden change. (Contrast `coveredByPatch`, where
+// ancestor coverage IS sound: patch operations are real writes into the
+// reconstructed state, not observations about a projection.)
+//
+// Always uses `defaultDiff`, never `cfg.diff`: this asks a question
+// about RFC-6901 pointer paths within a single site, which is the same
+// vocabulary the markers themselves are emitted in.
+export function hasHiddenChange(before, after) {
+    const visiblePaths = defaultDiff(before.replacement, after.replacement);
+    if (visiblePaths.length === 0) {
+        // No visible change, so any change is hidden by definition. Compare the
+        // unredacted originals directly instead of diffing them into a throwaway
+        // patch (which would clone the hidden value on every call).
+        return !structurallyEqual(before.original, after.original);
+    }
+    if (visiblePaths.some((p) => p.path === ''))
+        return false;
+    const visible = new Set(visiblePaths.map((p) => p.path));
+    for (const { path } of defaultDiff(before.original, after.original)) {
+        if (!visible.has(path))
+            return true;
+    }
+    return false;
+}
+// Append an identity `replace` for every redacted leaf whose underlying
+// value changed while its redacted projection stayed the same.
+//
+// Why this is safe for `reconstruct`: each appended operation writes the
+// value that `redactedAfter` already holds at that location, and the
+// operations are appended *after* the diff — which by construction turns
+// `redactedBefore` into `redactedAfter`. So every marker is a no-op when
+// replayed. Leaves that are absent from `redactedAfter` (e.g. an
+// overlapping directive redacted an ancestor wholesale) are skipped rather
+// than emitted, since a `replace` on a missing location would throw.
+export function synthesizeRedactedChangeOps(patch, beforeSites, afterSites, redactedAfter) {
+    if (beforeSites.size === 0 || afterSites.size === 0)
+        return patch;
+    const idx = buildCoverageIndex(patch);
+    const markers = [];
+    for (const [pointer, after] of afterSites) {
+        const before = beforeSites.get(pointer);
+        // Absent before: the location is new, so the diff already emits an
+        // `add` carrying the redacted value.
+        if (before === undefined)
+            continue;
+        if (structurallyEqual(before.original, after.original))
+            continue;
+        // The change is already fully visible through the diff: the exact
+        // location, or an ancestor replaced wholesale. O(pointer depth).
+        if (coveredByPatch(idx, pointer))
+            continue;
+        // A container-returning redactor can leave visible changes (e.g. a
+        // sibling field) alongside hidden ones; only mark when part of the
+        // change is genuinely invisible in the projection.
+        if (!hasHiddenChange(before, after))
+            continue;
+        const resolved = resolveAtPointer(redactedAfter, pointer);
+        if (!resolved.found)
+            continue;
+        markers.push({
+            op: 'replace',
+            path: pointer,
+            value: cloneValue(resolved.value),
+            redacted: true
+        });
+    }
+    if (markers.length === 0)
+        return patch;
+    return patch.concat(markers);
+}
+// ---------------------------------------------------------------------------
 // SBP integration
 // ---------------------------------------------------------------------------
 // Default snapshot interval (X). The journal holds between X and 2X entries.
 export const DEFAULT_SNAPSHOT_INTERVAL = 50;
+// The documented default journal block, in one place. `chelonia/_init` seeds
+// the live config with it, and `chelonia/configure` reuses it both for the
+// `journal: null` reset and for the no-prior-block fallback: three call sites
+// that previously each carried their own copy of the literal and could drift
+// apart.
+//
+// A factory rather than a shared constant: each caller must own its arrays,
+// or one consumer's `contractIDs.push` would surface in another's config.
+//
+// Deliberately partial. The function fields (`diff`, `applyPatch`,
+// `redactions[*].redact`) are left unset because `chelonia/configure` merges
+// through a JSON deep-clone that would strip them; it reattaches them in a
+// dedicated pass. `markRedactedChanges` is left unset because its default is
+// *derived* from which `diff` / `applyPatch` pair is active (markers are
+// RFC-6901 pointer ops, only meaningful for the built-ins), so
+// `resolveJournalConfig` computes it instead of storing it. Adding either
+// here would silently change that behaviour.
+export function defaultJournalConfig() {
+    return {
+        enabled: false,
+        snapshotInterval: DEFAULT_SNAPSHOT_INTERVAL,
+        contractIDs: [],
+        redactions: []
+    };
+}
 function resolveJournalConfig(cfg) {
     // `chelonia/_init` populates `this.config.journal` with all of the
     // documented defaults so the policy lives in exactly one place. We still
@@ -484,7 +983,23 @@ function resolveJournalConfig(cfg) {
     const redactions = cfg?.redactions ?? [];
     const diff = cfg?.diff ?? defaultDiff;
     const applyPatch = cfg?.applyPatch ?? defaultApplyPatch;
-    return { enabled, snapshotInterval, contractIDs, redactions, diff, applyPatch };
+    // Opt-out rather than opt-in: a change hidden behind a constant redactor
+    // is indistinguishable from "nothing happened", which defeats the point
+    // of keeping a journal. But default on only while both halves of the
+    // patch pipeline are the built-ins: markers are always emitted as
+    // RFC-6901 pointer `replace` operations, which would be meaningless (or
+    // actively harmful) inside a foreign patch format. An explicit boolean
+    // always wins.
+    const markRedactedChanges = cfg?.markRedactedChanges ?? (diff === defaultDiff && applyPatch === defaultApplyPatch);
+    return {
+        enabled,
+        snapshotInterval,
+        contractIDs,
+        redactions,
+        markRedactedChanges,
+        diff,
+        applyPatch
+    };
 }
 function indexOfLastSnapshot(entries) {
     for (let i = entries.length - 1; i >= 0; i--) {
@@ -493,11 +1008,113 @@ function indexOfLastSnapshot(entries) {
     }
     return -1;
 }
+// True for a snapshot that carries no state to seed a replay from.
+//
+// `state` is `null` whenever no projection could be produced for the event:
+// the contract's post-state was `undefined` (a first message whose
+// processing threw), or the configured `redactions` threw while projecting
+// it. Such an entry is a faithful record of the event — it keeps the
+// `error` / `redactionError` detail — but it is *not* a checkpoint: a
+// following patch applied to a `null` root is rejected by
+// `defaultApplyPatch` ("cannot apply … to non-container root"), which would
+// turn a journal-side degradation into a `reconstruct` failure. Contract
+// state is always a container, so a `null` snapshot state is unambiguously
+// a placeholder and never a legitimate value.
+//
+// Both the recorder (which re-seeds instead of emitting a patch on top of
+// one) and `chelonia/journal/reconstruct` (which refuses to seed from one)
+// go through this single predicate, so the two can never disagree.
+function isPlaceholderSnapshot(entry) {
+    return entry.kind === 'snapshot' && entry.state == null;
+}
+// Index of the most recent snapshot usable as a replay seed, or -1.
+// Placeholders are skipped rather than trusted: an older real snapshot
+// still reconstructs to something, since patch entries form one continuous
+// chain across the window and snapshots are redundant checkpoints within
+// it, whereas a placeholder seed reconstructs to nothing at all.
+function indexOfLastSeedSnapshot(entries) {
+    for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i];
+        if (entry.kind === 'snapshot' && !isPlaceholderSnapshot(entry))
+            return i;
+    }
+    return -1;
+}
+// Recover a usable boundary state by replaying the window onto its most
+// recent seed snapshot — i.e. exactly what `chelonia/journal/reconstruct`
+// computes for the window's HEAD. Used when the boundary event's own
+// after-projection failed and therefore cannot be snapshotted.
+//
+// This is replay-equivalent by construction: `reconstruct` returns the same
+// value before and after the window is trimmed down to the snapshot this
+// produces, because the snapshot holds the replay of everything the trim
+// discards. Anchoring on the seed snapshot's state *as-is* would not be:
+// any healthy patches recorded between the seed and the boundary would be
+// trimmed away and their changes silently lost.
+//
+// Returns `null` when no replay is possible (no seed snapshot yet, or the
+// configured applier rejected a recorded patch). The caller then skips the
+// snapshot, and `dropOldestNoOpPatches` keeps the window bounded instead.
+function replayBoundaryState(window, applyPatch) {
+    const seedIdx = indexOfLastSeedSnapshot(window);
+    if (seedIdx < 0)
+        return null;
+    const seed = window[seedIdx];
+    let state = seed.state;
+    try {
+        for (let i = seedIdx + 1; i < window.length; i++) {
+            const e = window[i];
+            // Snapshots in the tail are redundant check-points on the same patch
+            // chain, and an empty patch is a no-op, so both are skipped. Mirrors
+            // the walk in `chelonia/journal/reconstruct`.
+            if (e.kind !== 'patch' || e.patch.length === 0)
+                continue;
+            state = applyPatch(state, e.patch);
+        }
+    }
+    catch (e) {
+        logJournalError('boundary snapshot replay failed', e);
+        return null;
+    }
+    if (state == null)
+        return null;
+    // Clone so the new snapshot cannot alias the seed's state object, which
+    // is what `state` still is when the window held no applicable patches.
+    return { state: cloneValue(state), replayed: true };
+}
+// Last-resort bound enforcement: drop the oldest no-op patch entries until
+// the window fits within `maxEntries`.
+//
+// Reached only when the window has no snapshot to trim to, i.e. when every
+// boundary snapshot was skipped for want of a state and
+// `replayBoundaryState` could not recover one either. Removing empty
+// patches is always replay-equivalent: they contribute nothing to
+// `reconstruct`. The trade-off is diagnostic, not correctness — the dropped
+// entries carried `error` / `redactionError` detail, so we drop the oldest
+// and keep the newest, leaving the tail as evidence of an ongoing failure.
+//
+// Entries are only ever removed from index 1 onwards: index 0 is the seed
+// snapshot every replay starts from.
+function dropOldestNoOpPatches(entries, maxEntries) {
+    let excess = entries.length - maxEntries;
+    if (excess <= 0)
+        return;
+    for (let i = 1; i < entries.length && excess > 0;) {
+        const e = entries[i];
+        if (e.kind === 'patch' && e.patch.length === 0) {
+            entries.splice(i, 1);
+            excess--;
+        }
+        else {
+            i++;
+        }
+    }
+}
 function appendAndTrim(entries, entry, snapshotInterval, 
-// When non-null, provides the current redacted state to snapshot at the
+// When non-null, resolves the current redacted state to snapshot at the
 // X-boundary. Passing null skips snapshot insertion (used for the very
 // first entry, which is itself a snapshot).
-postSnapshotState) {
+resolveSnapshotState) {
     // Allocate a fresh array on every call so the array's identity changes
     // in lock-step with the `_journal` wrapper swap performed by
     // `recordEvent` via `reactiveSet`. This means consumers that destructure
@@ -512,34 +1129,52 @@ postSnapshotState) {
     // If this push reached snapshotInterval patches since the most recent
     // snapshot, append a snapshot entry as well. We derive the identifying
     // fields from `entry` itself so the snapshot can never drift away from
-    // the patch it accompanies. The `postSnapshotState.state !== undefined`
-    // gate keeps us from persisting `{ state: undefined }` when an errored
-    // event lands on the boundary; in that case the auto-snapshot is
-    // simply deferred to the next non-errored event.
-    if (postSnapshotState &&
-        postSnapshotState.state !== undefined &&
-        entry.kind === 'patch') {
+    // the patch it accompanies.
+    if (resolveSnapshotState && entry.kind === 'patch') {
         const lastSnapIdx = indexOfLastSnapshot(entries);
         const patchesSinceSnap = entries.length - 1 - lastSnapIdx;
         if (patchesSinceSnap >= snapshotInterval) {
-            const snap = Object.create(null);
-            snap.kind = 'snapshot';
-            snap.hash = entry.hash;
-            snap.height = entry.height;
-            snap.opType = entry.opType;
-            snap.description = entry.description;
-            snap.state = postSnapshotState.state;
-            // If the patch entry that triggered this auto-snapshot was itself
-            // an errored event, carry the error detail forward onto the
-            // snapshot too. Otherwise, once `appendAndTrim` collapses the
-            // window past the most recent snapshot, the `error` information
-            // (which currently lives only on the trimmed-away patch entry)
-            // would be lost. Keeping the snapshot and the patch in sync
-            // guarantees error detail survives trimming on every code path.
-            if (entry.kind === 'patch' && entry.error !== undefined) {
-                snap.error = entry.error;
+            // Resolved lazily: only a boundary needs a state, and the recovery
+            // path (see `replayBoundaryState`) is not free.
+            const resolved = resolveSnapshotState(entries);
+            // The `state != null` gate keeps us from materializing a placeholder
+            // snapshot (see `isPlaceholderSnapshot`) when an errored event or a
+            // failed projection lands on the boundary and no state could be
+            // recovered for it; in that case the auto-snapshot is simply
+            // deferred to the next event that has a usable state.
+            if (resolved && resolved.state != null) {
+                const snap = Object.create(null);
+                snap.kind = 'snapshot';
+                snap.hash = entry.hash;
+                snap.height = entry.height;
+                snap.opType = entry.opType;
+                snap.description = entry.description;
+                snap.state = resolved.state;
+                // Flag a state that was recovered by replay rather than taken from
+                // this event's own post-state, so consumers do not read it as the
+                // state at this event's height. See `replayBoundaryState`.
+                if (resolved.replayed) {
+                    snap.replayed = true;
+                }
+                // If the patch entry that triggered this auto-snapshot was itself
+                // an errored event, carry the error detail forward onto the
+                // snapshot too. Otherwise, once `appendAndTrim` collapses the
+                // window past the most recent snapshot, the `error` information
+                // (which currently lives only on the trimmed-away patch entry)
+                // would be lost. Keeping the snapshot and the patch in sync
+                // guarantees error detail survives trimming on every code path.
+                // The journal-side failure fields ride along for the same reason.
+                if (entry.error !== undefined) {
+                    snap.error = entry.error;
+                }
+                if (entry.diffError !== undefined) {
+                    snap.diffError = entry.diffError;
+                }
+                if (entry.redactionError !== undefined) {
+                    snap.redactionError = entry.redactionError;
+                }
+                entries.push(snap);
             }
-            entries.push(snap);
         }
     }
     // Trim: if total length exceeded 2X, drop everything before the most
@@ -551,20 +1186,28 @@ postSnapshotState) {
         if (lastSnapIdx > 0) {
             entries.splice(0, lastSnapIdx);
         }
+        else {
+            // No snapshot to trim to: every boundary snapshot in this window was
+            // skipped for want of a state. Enforce the bound the only other way
+            // that cannot change what `reconstruct` returns.
+            dropOldestNoOpPatches(entries, 2 * snapshotInterval);
+        }
     }
     return entries;
 }
 function logJournalError(label, e) {
     console.warn(`[chelonia][journal] ${label}:`, e);
 }
-// Normalize an arbitrary throwable into `{ name, message }`. Mirrors
-// the leniency of the JS `throw` statement: any value can be raised,
-// so the journal must not assume an `Error` instance. We intentionally
-// avoid `JSON.stringify` (cycles, BigInt, Symbol → throws) and use
-// `String(...)` for value coercion. `Symbol` is a special case: its
+// Normalize an arbitrary throwable into `{ name, message }`. Used for
+// every error detail the journal records — the contract's own processing
+// failure as well as journal-side ones (a throwing `diff` or redactor).
+// Mirrors the leniency of the JS `throw` statement: any value can be
+// raised, so the journal must not assume an `Error` instance. We
+// intentionally avoid `JSON.stringify` (cycles, BigInt, Symbol → throws)
+// and use `String(...)` for value coercion. `Symbol` is a special case: its
 // `String()` form is the readable `Symbol(...)` representation, which
 // is exactly what we want for a debug breadcrumb.
-function normalizeProcessingError(e) {
+function normalizeErrorDetail(e) {
     // Object-shaped throwables (Error instances or plain objects).
     if (e !== null && typeof e === 'object') {
         const obj = e;
@@ -670,7 +1313,9 @@ export default sbp('sbp/selectors/register', {
             // same height) is *not* a resync — it just means the same event
             // was delivered twice (retry-on-publish, web-socket replay, etc.).
             // We ignore the duplicate so the perfectly valid prior window is
-            // preserved.
+            // preserved. Note how narrow this exemption is: it takes the hash
+            // to match too, because a *different* event at that height is a
+            // rewritten chain (handled as a resync below).
             if (lastEntry !== undefined &&
                 lastEntry.hash === hash &&
                 height === lastEntry.height) {
@@ -687,10 +1332,28 @@ export default sbp('sbp/selectors/register', {
             // captured by `lastEntry`, so producing a patch on top of it would
             // silently corrupt `reconstruct`. Drop the stale window and re-seed
             // with a fresh snapshot in that case.
+            //
+            // A *different* event at the height we already journalled is the
+            // third variant of the same problem: heights identify positions in
+            // the chain, so two hashes at one height mean the chain was rewritten
+            // under us (the duplicate-arrival check above already consumed the
+            // benign same-hash case). The recorded window describes the abandoned
+            // branch, so it gets dropped rather than patched onto.
             const isBackwards = lastEntry !== undefined && height < lastEntry.height;
             const isForwardGap = lastEntry !== undefined && height > lastEntry.height + 1;
-            const isResync = isBackwards || isForwardGap;
-            const isFirstOrResync = !existing || existing.length === 0 || isResync;
+            const isRewrite = lastEntry !== undefined && height === lastEntry.height;
+            const isResync = isBackwards || isForwardGap || isRewrite;
+            // A placeholder seed cannot carry a patch stream (see
+            // `isPlaceholderSnapshot`), so re-seed with a snapshot on the next
+            // event instead of anchoring patches on `null`. Unlike a resync this
+            // is not a sign that the recorded window is stale, so the placeholder
+            // is kept and the new snapshot appended after it: the failed event
+            // stays on the record with its `error` / `redactionError` detail.
+            const reseedAfterPlaceholder = lastEntry !== undefined &&
+                !isResync &&
+                isPlaceholderSnapshot(lastEntry);
+            const isFirstOrResync = !existing || existing.length === 0 ||
+                isResync || reseedAfterPlaceholder;
             // When the contract errored we will emit an empty-patch entry that
             // doesn't need either redacted projection — skip the work.
             const willEmitEmptyPatch = !isFirstOrResync && processingErrored;
@@ -704,25 +1367,55 @@ export default sbp('sbp/selectors/register', {
             // never be trimmed, growing the journal without bound.
             let redactedBefore;
             let redactedAfter;
+            // Redacted-leaf bookkeeping, used to detect changes that the redacted
+            // projections hide (constant redactors such as `() => '[REDACTED]'`).
+            // Only allocated when it can actually be used.
+            //
+            // These maps hold live references into `beforeState` / `afterState`
+            // (see `applyRedactions`), so they MUST be consumed before this
+            // function yields. Keep the path from the projections below to
+            // `synthesizeRedactedChangeOps` synchronous: an `await` in between
+            // would let the states move under the recorded originals.
+            const trackRedactedChanges = cfg.markRedactedChanges &&
+                cfg.redactions.length > 0 &&
+                !willEmitEmptyPatch &&
+                !isFirstOrResync;
+            const beforeSites = trackRedactedChanges ? new Map() : undefined;
+            const afterSites = trackRedactedChanges ? new Map() : undefined;
+            // A throwing `redactions` set is a journal-side failure, not a
+            // contract failure. Capture it so the entry can say so instead of
+            // silently degrading into an entry that looks like a real change:
+            // diffing against a missing projection emits a whole-root `add`
+            // (before failed) or a whole-root replace-to-`null` (after failed),
+            // the latter actively corrupting `reconstruct`. The two flags are
+            // tracked separately because only an after-failure invalidates the
+            // snapshot state hint below.
+            let redactionError = null;
+            let redactionAfterFailed = false;
             if (!willEmitEmptyPatch && !isFirstOrResync) {
                 try {
                     redactedBefore = beforeState === undefined
                         ? undefined
-                        : applyRedactions(beforeState, cfg.redactions, contractName);
+                        : applyRedactions(beforeState, cfg.redactions, contractName, beforeSites);
                 }
                 catch (e) {
                     logJournalError('redaction (before) failed', e);
                     redactedBefore = undefined;
+                    if (redactionError == null)
+                        redactionError = e;
                 }
             }
             try {
                 redactedAfter = afterState === undefined
                     ? null
-                    : applyRedactions(afterState, cfg.redactions, contractName);
+                    : applyRedactions(afterState, cfg.redactions, contractName, afterSites);
             }
             catch (e) {
                 logJournalError('redaction (after) failed', e);
                 redactedAfter = null;
+                redactionAfterFailed = true;
+                if (redactionError == null)
+                    redactionError = e;
             }
             let nextEntries;
             if (isFirstOrResync) {
@@ -740,24 +1433,67 @@ export default sbp('sbp/selectors/register', {
                 snap.description = description;
                 snap.state = redactedAfter;
                 if (processingErrored && processingError != null) {
-                    snap.error = normalizeProcessingError(processingError);
+                    snap.error = normalizeErrorDetail(processingError);
                 }
-                nextEntries = [snap];
+                // A projection failure leaves `state: null`. Label it, or the
+                // snapshot is indistinguishable from the legitimate "post-state
+                // was undefined because the mutation threw" null. Either way the
+                // entry is a placeholder, so the *next* event re-seeds again (see
+                // `reseedAfterPlaceholder`) instead of stacking patches on it.
+                if (redactionError != null) {
+                    snap.redactionError = normalizeErrorDetail(redactionError);
+                }
+                // A resync invalidates everything recorded so far, so the window
+                // collapses to this snapshot alone. Re-seeding after a placeholder
+                // does not: the recorded history is still valid, we just need a
+                // usable checkpoint, so the snapshot is appended (and the window
+                // trimmed as usual, which bounds a run of failing events).
+                nextEntries = reseedAfterPlaceholder && existing
+                    ? appendAndTrim(existing, snap, cfg.snapshotInterval, null)
+                    : [snap];
             }
             else {
                 let patch;
+                let diffError = null;
                 if (processingErrored) {
                     // Empty patch is itself a diagnostic signal. Skip redaction
                     // entirely above by short-circuiting the diff here.
                     patch = [];
                 }
+                else if (redactionError != null) {
+                    // One of the projections is missing. Diffing against it would
+                    // fabricate a whole-root operation: an `add` of the entire
+                    // state (before failed) or a replace-to-`null` that wipes the
+                    // reconstructed state (after failed). Record nothing and let
+                    // `entry.redactionError` carry the reason instead.
+                    patch = [];
+                }
                 else {
+                    let diffFailed = false;
                     try {
                         patch = cfg.diff(redactedBefore, redactedAfter);
                     }
                     catch (e) {
                         logJournalError('diff failed', e);
                         patch = [];
+                        diffFailed = true;
+                        diffError = e;
+                    }
+                    // A value that changed behind a constant redactor produces no
+                    // diff at all. Record it explicitly so the journal can tell
+                    // "redacted value changed" apart from "event did nothing" and
+                    // from "event failed". The appended operations are identity
+                    // writes, so `reconstruct` is unaffected — but only if the diff
+                    // they ride on is itself trustworthy, hence the `diffFailed`
+                    // guard: on a failed diff the replayed state is already stale
+                    // and a marker could then target a location that doesn't exist.
+                    if (trackRedactedChanges && !diffFailed && beforeSites && afterSites) {
+                        try {
+                            patch = synthesizeRedactedChangeOps(patch, beforeSites, afterSites, redactedAfter);
+                        }
+                        catch (e) {
+                            logJournalError('redacted-change marking failed', e);
+                        }
                     }
                 }
                 const entry = Object.create(null);
@@ -781,9 +1517,37 @@ export default sbp('sbp/selectors/register', {
                 // catch site only forwards a value when it actually caught
                 // something, but a paranoid extra check costs nothing.
                 if (processingErrored && processingError != null) {
-                    entry.error = normalizeProcessingError(processingError);
+                    entry.error = normalizeErrorDetail(processingError);
                 }
-                nextEntries = appendAndTrim(existing, entry, cfg.snapshotInterval, { state: redactedAfter });
+                // Journal-side failures. Both mean "the journal could not record
+                // what changed", which `patch: []` alone cannot express — it is
+                // also what a no-op event records. `diffError` and
+                // `redactionError` are mutually exclusive: a redaction failure
+                // skips the diff entirely. `error` is orthogonal and never
+                // co-occurs with `diffError` (an errored event skips the diff),
+                // but it *can* co-occur with `redactionError`: only the
+                // before-projection is skipped for an errored event, while the
+                // after-projection always runs so `appendAndTrim` has a state to
+                // materialize a boundary snapshot from — a throwing redactor is
+                // therefore still reachable and labels the entry as well.
+                if (diffError != null) {
+                    entry.diffError = normalizeErrorDetail(diffError);
+                }
+                if (redactionError != null) {
+                    entry.redactionError = normalizeErrorDetail(redactionError);
+                }
+                nextEntries = appendAndTrim(existing, entry, cfg.snapshotInterval, 
+                // A failed *after*-projection means `redactedAfter` is a
+                // placeholder `null`, not the real state: snapshotting it would
+                // anchor `reconstruct` on a bogus state once trimming discards
+                // everything before it. Recover the boundary state by replaying
+                // the window instead, which check-points exactly what
+                // `reconstruct` already returns and so keeps the window bounded
+                // without inventing a state. A failed before-projection leaves
+                // `redactedAfter` valid and usable.
+                redactionAfterFailed
+                    ? (window) => replayBoundaryState(window, cfg.applyPatch)
+                    : () => ({ state: redactedAfter }));
             }
             const wrapper = Object.create(null);
             wrapper.entries = nextEntries;
@@ -812,7 +1576,8 @@ export default sbp('sbp/selectors/register', {
     // Public: rebuild the redacted contract state at the journal's HEAD by
     // walking from the most recent snapshot and applying subsequent patches.
     // Returns `undefined` if no journal exists (or the journal exists but is
-    // empty / has no snapshot to seed from). Throws `ChelErrorJournalCorrupt`
+    // empty / has no snapshot with a usable state to seed from — see
+    // `isPlaceholderSnapshot`). Throws `ChelErrorJournalCorrupt`
     // if a recorded patch fails to apply: this is a debugging tool and a
     // self-check, so a loud failure is preferable to silently returning
     // `undefined` (which would be indistinguishable from "no journal"). The
@@ -824,16 +1589,23 @@ export default sbp('sbp/selectors/register', {
         const entries = rootState?.contracts?.[contractID]?._journal?.entries;
         if (!entries || entries.length === 0)
             return undefined;
-        const startIdx = indexOfLastSnapshot(entries);
+        // Placeholder snapshots are skipped rather than replayed from: their
+        // `null` state would make the very next patch throw
+        // `ChelErrorJournalCorrupt`, reporting corruption for what is only a
+        // recorded gap. Returning the older reconstruction (or `undefined`)
+        // keeps the promised behaviour of a journal-side failure: stale data,
+        // never a spurious error. Journals written by earlier versions of this
+        // module can contain such a snapshot mid-window, hence the search
+        // rather than a check of the last one.
+        const startIdx = indexOfLastSeedSnapshot(entries);
         if (startIdx < 0)
             return undefined;
         const snap = entries[startIdx];
         let state = snap.state;
         for (let i = startIdx + 1; i < entries.length; i++) {
             const e = entries[i];
-            // `indexOfLastSnapshot` returned the index of the latest snapshot,
-            // so the tail (i > startIdx) cannot contain another snapshot by
-            // construction. Skip defensively if it ever does.
+            // Snapshots in the tail are redundant checkpoints on the same patch
+            // chain (or skipped placeholders), so replaying past them is safe.
             if (e.kind !== 'patch')
                 continue;
             try {

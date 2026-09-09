@@ -103,9 +103,36 @@ export type CheloniaConfig = {
 // `value` is required on add/replace and absent on remove, mirroring RFC
 // 6902 so the output is consumable by any standards-conformant JSON Patch
 // implementation (and vice versa).
+//
+// `redacted` marks an operation that exists solely to record that a
+// redacted value changed: the underlying state moved, but its redacted
+// projection did not, so the operation writes the redacted value back over
+// itself (an identity edit). Applying it is a no-op, and RFC 6902 §4
+// requires appliers to ignore members it does not define, so the marker is
+// safe to feed to any conformant JSON Patch implementation.
+//
+// `redacted?: undefined` is declared on the `remove` arm so the member is
+// readable on an un-narrowed `JournalPatch` (reading it there yields
+// `undefined`) while still rejecting a literal `redacted` on a remove op.
 export type JournalPatch =
-  | { op: 'add' | 'replace'; path: string; value: unknown }
-  | { op: 'remove'; path: string };
+  | { op: 'add' | 'replace'; path: string; value: unknown; redacted?: true }
+  | { op: 'remove'; path: string; redacted?: undefined };
+
+// A single redacted leaf recorded while `applyRedactions` walked the state:
+// the value found there before redaction and the value that replaced it.
+//
+// `original` is a live reference into the state that was passed to
+// `applyRedactions`, not a copy: it exists so change detection can compare
+// pre-redaction values, and it is never persisted. Treat it as read-only and
+// read it before the underlying state can change. `replacement` is the value
+// that actually ended up in the projection, so it is safe to keep.
+export type RedactionSite = {
+  original: unknown;
+  replacement: unknown;
+};
+
+// Redacted leaves keyed by their RFC-6901 JSON-Pointer path.
+export type RedactionSiteMap = Map<string, RedactionSite>;
 
 export type JournalEntry =
   | {
@@ -130,6 +157,26 @@ export type JournalEntry =
       // detail that patch entries preserve. Same shape, same trust level,
       // and same NOT-redacted caveat as the patch variant's `error`.
       error?: { name: string; message: string };
+      // Populated when the configured `redactions` threw while projecting
+      // this event's state. This is a journal-side failure: `state` is
+      // `null` because no projection could be produced, and the field is
+      // recorded so a null state is not misread as "the contract state
+      // was undefined". Independent of `error`, which says whether the
+      // *event* also failed — both can be present at once.
+      redactionError?: { name: string; message: string };
+      // Copied forward from the patch entry that triggered an
+      // auto-snapshot at a snapshot boundary, so trimming cannot orphan
+      // the detail. See the patch variant for the semantics.
+      diffError?: { name: string; message: string };
+      // Set when this snapshot's `state` was recovered by replaying the
+      // journal window rather than taken from the event's own post-state,
+      // which happens when that event's redacted projection failed. The
+      // snapshot is still replay-equivalent — `reconstruct` returns the
+      // same value before and after the window is trimmed down to it — but
+      // its `state` predates the events whose projections failed, so it is
+      // NOT the contract state at this entry's `height`. Always accompanied
+      // by `redactionError`.
+      replayed?: true;
     }
   | {
       kind: 'patch';
@@ -148,14 +195,33 @@ export type JournalEntry =
       // unencrypted ops it can echo action data, treat it at the same
       // trust level as `description`.
       error?: { name: string; message: string };
+      // Populated when the configured `diff` threw while journaling this
+      // event. The event itself processed fine — this is a journal-side
+      // failure, recorded so the resulting `patch: []` is not misread as
+      // "this event changed nothing". `reconstruct` silently misses this
+      // event's changes until the next snapshot re-seeds the window.
+      // Same NOT-redacted caveat as `error`.
+      diffError?: { name: string; message: string };
+      // Populated when the configured `redactions` threw while projecting
+      // this event's before- or after-state. The diff is skipped entirely
+      // (`patch: []`) rather than diffing against a missing projection,
+      // which would emit a bogus whole-root operation. Same staleness and
+      // NOT-redacted caveats as `diffError`. Unlike `diffError` this can
+      // accompany `error`: an errored event still runs the
+      // after-projection, so a throwing redactor is reachable there.
+      redactionError?: { name: string; message: string };
     };
 
 // A single redaction directive. `path` uses dotted segments and supports a
 // literal `*` segment to match any single key (object key or array index).
-// `redact` is invoked with the value found at the path, the resolved
-// segments, and the contract's name/type (e.g. `gi.contracts/group`) so a
-// shared redactor can branch on which contract the value belongs to. It
-// MUST return a redacted replacement value and MUST NOT mutate the input.
+// `redact` is invoked with the value found at the path, a disposable copy
+// of the resolved segments, and the contract's name/type (e.g.
+// `gi.contracts/group`) so a shared redactor can branch on which contract
+// the value belongs to. It MUST be pure, MUST NOT mutate its arguments,
+// and MUST return a JSON-safe replacement (null / string / boolean /
+// finite number / arrays / plain objects thereof): the journal is
+// persisted as plain JSON. Non-JSON-safe results are substituted with a
+// sentinel (see `REDACTION_NON_JSON_SAFE_SENTINEL`).
 export type JournalRedaction = {
   path: string;
   redact: (value: unknown, fullPath: string[], contractName: string) => unknown;
@@ -168,6 +234,13 @@ export type JournalConfig = {
   // true). Otherwise only listed contractIDs are journaled.
   contractIDs?: string[];
   redactions?: JournalRedaction[];
+  // When true (the default), a change to a value whose redacted projection
+  // is constant is still recorded, as an identity `replace` carrying
+  // `redacted: true`. Without it such changes are invisible in the journal
+  // and indistinguishable from an event that did nothing. Set to false to
+  // emit only the minimal diff (e.g. when a custom `diff` / `applyPatch`
+  // pair does not use RFC-6901 pointers).
+  markRedactedChanges?: boolean;
   diff?: (before: unknown, after: unknown) => JournalPatch[];
   applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };

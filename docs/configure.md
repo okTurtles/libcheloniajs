@@ -226,18 +226,26 @@ await sbp('chelonia/configure', {
       { path: 'profiles.*.email', redact: shortHashRedactor },
       { path: 'secrets.apiKey', redact: () => '[REDACTED]' }
     ],
+    markRedactedChanges: true,
     diff: defaultDiff,
     applyPatch: defaultApplyPatch
   }
 })
 ```
 
+The defaults in the table below are also available programmatically as
+`defaultJournalConfig()`, which returns a fresh copy of the block Chelonia
+seeds itself with (and resets to on `journal: null`). It deliberately omits
+`markRedactedChanges`, `diff` and `applyPatch`, which are resolved at read
+time — see their rows below.
+
 | Field | Type | Default | Purpose |
 |---|---|---|---|
 | `enabled` | `boolean` | `false` | Master switch. Strict-typed — non-boolean throws `TypeError`. |
-| `snapshotInterval` | positive integer | `50` (`DEFAULT_SNAPSHOT_INTERVAL`) | A new snapshot is recorded every N patches; the journal is trimmed to the most recent snapshot once it reaches `2N` entries. Non-integer/non-positive values fall back to the default and emit a `console.warn`. |
+| `snapshotInterval` | positive integer | `50` (`DEFAULT_SNAPSHOT_INTERVAL`) | A new snapshot is recorded every N patches; the journal is trimmed to the most recent snapshot once it reaches `2N` entries. The `2N` ceiling holds even through runs of events that yield no state to snapshot — see [`journal.md`](./journal.md#snapshot-cadence). Non-integer/non-positive values fall back to the default and emit a `console.warn`. |
 | `contractIDs` | `string[]` | `[]` (= all) | If non-empty, only these contracts are journaled. Stored via `.slice()` so later mutations on the caller's reference don't leak in. |
-| `redactions` | `{ path, redact }[]` | `[]` | Applied to both the before- and after-state **before diffing**. `path` uses dotted segments; `*` matches any key/index. `redact(value, fullPath, contractName)` MUST be pure and return the replacement. Deep-copied on the way in. |
+| `redactions` | `{ path, redact }[]` | `[]` | Applied to both the before- and after-state **before diffing**. `path` uses dotted segments; `*` matches any key/index. `redact(value, fullPath, contractName)` MUST be pure and return a JSON-safe replacement (non-JSON-safe results are substituted with `REDACTION_NON_JSON_SAFE_SENTINEL`). Deep-copied on the way in, and every element is validated: anything that is not `{ path: string, redact: function }` throws a `TypeError` naming the offending index. Overlapping paths are supported; redactors run in array order, so the projected output remains order-sensitive. |
+| `markRedactedChanges` | `boolean` | `true`* | Record changes that a constant redactor hides, as an identity `replace` flagged `redacted: true` — otherwise such an event is indistinguishable from one that changed nothing. Strict-typed — non-boolean throws `TypeError`. *Derived: defaults to `true` only while both `diff` and `applyPatch` are the built-ins, `false` otherwise; an explicit value always wins. See [`journal.md`](./journal.md#changes-behind-a-constant-redactor). |
 | `diff` | `(before, after) => JournalPatch[]` | `defaultDiff` | Override the diff implementation. Must be a function or `TypeError`. To revert to the built-in, pass `defaultDiff` explicitly. |
 | `applyPatch` | `(state, patches) => unknown` | `defaultApplyPatch` | Override the patch applier used by `chelonia/journal/reconstruct`. To revert, pass `defaultApplyPatch` explicitly. |
 
@@ -247,6 +255,21 @@ These are stricter than for top-level fields:
 
 - **Per-field `null` throws `TypeError`.** Omit the field to leave it
   alone; pass `journal: null` to reset the whole block.
+- **A non-object `journal` throws `TypeError`.** `null` (reset) and
+  `undefined` (leave alone) are the only non-object values accepted;
+  anything else (a number, a boolean, a string, an array) would make
+  every field lookup come back empty and silently do nothing.
+- **Malformed `redactions` entries throw `TypeError`.** A directive
+  missing `path`, or whose `redact` is not a function, would otherwise
+  fail on every projection of every event, leaving the journal alive but
+  useless (`chelonia/journal/reconstruct` permanently `undefined`).
+- **A rejected journal reconfigure applies nothing.** The whole override
+  is validated before any of it is applied, so a `TypeError` from any
+  field leaves every live journal field exactly as it was. In
+  particular, journaling does not start, stop, or change redaction
+  semantics on a rejected call — `{ enabled: true, redactions: [<bad
+  entry>] }` throws and leaves journaling off rather than switching it
+  on under the previously accepted redactions.
 - **`journal: null` is an escape hatch.** It resets the block to
   disabled defaults *and* wipes every persisted journal via
   `chelonia/journal/clear`. Use it when you really want to stop
@@ -264,6 +287,10 @@ These are stricter than for top-level fields:
 - `contractIDs` and `redactions` accept an empty array to **clear**
   them. They are deep-copied on the way in so caller mutations don't
   leak into Chelonia.
+- **Toggling `markRedactedChanges` does not rewrite existing
+  entries.** It applies to events recorded from that point on, so one
+  journal can hold a mix. Both kinds stay replayable, since the
+  markers are identity edits.
 
 See [`journal.md`](./journal.md) for the public read/reconstruct/clear
 selectors, redaction details, and observability concerns.
