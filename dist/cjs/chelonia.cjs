@@ -1634,7 +1634,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         return stateCopy;
     },
-    'chelonia/contract/fullState': function (contractID, key) {
+    'chelonia/contract/fullState': function (contractID, key, options = { includeJournal: false }) {
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
         if (Array.isArray(contractID)) {
             return Object.fromEntries(contractID.map((contractID) => {
@@ -1642,7 +1642,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     contractID,
                     {
                         contractState: rootState[contractID],
-                        cheloniaState: rootState.contracts[contractID],
+                        cheloniaState: {
+                            ...rootState.contracts[contractID],
+                            _journal: options.includeJournal
+                                ? rootState.contracts[contractID]._journal
+                                : undefined
+                        },
                         kvState: rootState._kv?.[contractID],
                         kvEntry: key === undefined ? undefined : rootState._kv?.[contractID]?.[key]
                     }
@@ -1651,7 +1656,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         return {
             contractState: rootState[contractID],
-            cheloniaState: rootState.contracts[contractID],
+            cheloniaState: {
+                ...rootState.contracts[contractID],
+                _journal: options.includeJournal
+                    ? rootState.contracts[contractID]._journal
+                    : undefined
+            },
             kvState: rootState._kv?.[contractID],
             kvEntry: key === undefined ? undefined : rootState._kv?.[contractID]?.[key]
         };
