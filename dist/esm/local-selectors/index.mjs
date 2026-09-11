@@ -166,11 +166,20 @@ export default sbp('sbp/selectors/register', {
     'chelonia/externalStateWait': async function (contractID) {
         await sbp('chelonia/contract/wait', contractID);
         const { cheloniaState } = await sbp('chelonia/contract/fullState', contractID);
-        const localState = sbp(this.stateSelector);
+        // There's nothing to wait for when Chelonia has no usable bookkeeping
+        // entry for this contract: `null` marks a permanently-deleted contract,
+        // `undefined` one that was never synced, and a missing `height` means
+        // there's no target to reach. Waiting in any of those cases would never
+        // settle, since no further `EVENT_HANDLED_READY` can advance the height.
+        const targetHeight = typeof cheloniaState?.height === 'number' ? cheloniaState.height : null;
+        const localHeight = () => {
+            const height = sbp(this.stateSelector).contracts?.[contractID]?.height;
+            return typeof height === 'number' ? height : -1;
+        };
         // If the current 'local' state has a height higher than or equal to the
         // Chelonia height, we've processed all events and don't need to wait any
         // longer.
-        if (!cheloniaState || cheloniaState.height <= localState.contracts[contractID]?.height)
+        if (targetHeight === null || targetHeight <= localHeight())
             return;
         // Otherwise, listen for `EVENT_HANDLED_READY` events till we have reached
         // the necessary height.
@@ -178,8 +187,7 @@ export default sbp('sbp/selectors/register', {
             const removeListener = sbp('okTurtles.events/on', EVENT_HANDLED_READY, (cID) => {
                 if (cID !== contractID)
                     return;
-                const localState = sbp(this.stateSelector);
-                if (cheloniaState.height <= localState.contracts[contractID]?.height) {
+                if (targetHeight <= localHeight()) {
                     resolve();
                     removeListener();
                 }

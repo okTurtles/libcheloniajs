@@ -69,10 +69,17 @@ For the authoritative signatures, follow the source links.
 | `chelonia/contract/waitingForKeyShareTo` | `src/chelonia.ts` | Returns the originating contract IDs we're currently awaiting a key share from. |
 | `chelonia/contract/hasKeyShareBeenRespondedBy` | `src/chelonia.ts` | Has a given contract responded to one of our outstanding key requests? |
 | `chelonia/contract/state` | `src/chelonia.ts` | Deep-clone of a contract's state, optionally filtered to a particular `height`. |
-| `chelonia/contract/fullState` | `src/chelonia.ts` | `{ contractState, cheloniaState }` for one id or an array of ids. |
+| `chelonia/contract/fullState` | `src/chelonia.ts` | `(contractID \| contractID[], key?, { includeJournal? })` → state tuple. |
 | `chelonia/contract/remove` | `src/chelonia.ts` | Hard-remove a contract from state (refcount-aware via callback). |
 | `chelonia/contract/disconnect` | `src/chelonia.ts` | Publish an `OP_KEY_DEL` to detach the foreign keys we hold for another contract. |
 | `chelonia/latestContractState` | `src/chelonia.ts` | Return a cloned, possibly freshly-synced contract state. Accepts `{ forceSync }`. |
+
+`chelonia/contract/fullState` returns `{ contractState, cheloniaState,
+kvState, kvEntry }` — one tuple per id, or a map of tuples keyed by id
+when given an array. `cheloniaState` is a copy of
+`rootState.contracts[contractID]` with `_journal` left out unless
+`includeJournal` is set; it stays `null` for a permanently-deleted
+contract and `undefined` for one Chelonia has no meta for.
 
 ## Outgoing operations
 

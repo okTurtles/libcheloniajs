@@ -311,27 +311,32 @@ is a concern.
 
 ### Consumer-visible leakage
 
-Because `_journal` is an own property of `state.contracts[contractID]`,
-it travels with anything exposing that subtree:
+`_journal` is an own property of `state.contracts[contractID]`, so
+anything handing out that subtree verbatim hands out the journal too.
+The built-in consumers deliberately do not:
 
-- **`chelonia/contract/fullState`** returns
-  `cheloniaState: rootState.contracts[contractID]` verbatim.
-- **`EVENT_HANDLED` listeners** that snapshot `state.contracts` (e.g.
-  the Vuex mirror set up by `chelonia/externalStateSetup`) receive the
-  journal too.
+- **`chelonia/contract/fullState`** omits `_journal` from
+  `cheloniaState`. Opt in with its third argument:
 
-Treat the journal as in-band with the rest of the bookkeeping subtree.
-If you need a journal-free view, project it out client-side:
+  ```js
+  const { cheloniaState } = sbp(
+    'chelonia/contract/fullState', contractID, undefined, { includeJournal: true }
+  )
+  ```
+
+  Unlike `chelonia/journal/get`, which deep-clones, the journal is
+  returned **by reference** here. Treat it as read-only.
+- **`chelonia/externalStateSetup`** builds its mirror (e.g. Vuex) on
+  top of `fullState`, so the external store never sees the journal.
+
+Code that reads `state.contracts[contractID]` directly — your own
+`EVENT_HANDLED` listeners, a persistence hook, anything serializing the
+root state — still gets `_journal` as part of the bookkeeping subtree.
+Project it out if that matters:
 
 ```js
-const { _journal, ...cheloniaStateWithoutJournal } = cheloniaState
+const { _journal, ...bookkeepingWithoutJournal } = state.contracts[contractID]
 ```
-
-TypeScript consumers: `_journal` is typed as optional on the
-bookkeeping subtree (`{ entries: JournalEntry[] } | undefined`), so
-the destructured `_journal` is `undefined` whenever the contract
-never enabled journaling. Ignore the binding (or `void _journal`) if
-your lint config flags unused destructured names.
 
 The journal API itself remains accessible via `chelonia/journal/get`.
 
@@ -443,7 +448,8 @@ try {
   }
 }
 
-// 4. Clear one contract's journal (e.g. before sharing fullState off-device).
+// 4. Clear one contract's journal (e.g. to reclaim disk space, or before
+//    serializing `state.contracts` yourself).
 sbp('chelonia/journal/clear', contractID)
 
 // 5. Clear all journals.
