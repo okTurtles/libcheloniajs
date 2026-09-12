@@ -13,8 +13,9 @@
     "forceConsistentCasingInFileNames": true,
     "lib": ["ES2022", "dom"],
     "isolatedModules": true,
+    "types": ["node"],
     "allowJs": true,
-    "checkJs": true
+    "checkJs": true,
   },
   "ts-node": {
     "experimentalResolver": true
