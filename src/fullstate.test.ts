@@ -159,6 +159,52 @@ describe('chelonia/contract/fullState', () => {
     assert.ok(!('_journal' in cheloniaState))
   })
 
+  it('accepts a null options argument', () => {
+    contractMetas()[CID] = makeMeta({ _journal: JOURNAL })
+
+    const { cheloniaState } = sbp('chelonia/contract/fullState', CID, undefined, null)
+
+    assert.ok(!('_journal' in cheloniaState))
+  })
+
+  it('omits the _journal key when opted in but there is no journal', () => {
+    contractMetas()[CID] = makeMeta()
+
+    const { cheloniaState } = sbp(
+      'chelonia/contract/fullState', CID, undefined, { includeJournal: true }
+    )
+
+    // An `_journal: undefined` own key would make `'_journal' in
+    // cheloniaState` (and `structuredClone` / `deepStrictEqual`) report a
+    // journal the contract never had.
+    assert.ok(!('_journal' in cheloniaState))
+    assert.deepStrictEqual(Object.keys(cheloniaState).sort(), ['HEAD', 'height', 'previousKeyOp'])
+  })
+
+  it('omits the _journal key after the journal was cleared', () => {
+    contractMetas()[CID] = makeMeta({ _journal: JOURNAL })
+    sbp('chelonia/journal/clear', CID)
+    const live = contractMetas()[CID] as Record<string, unknown>
+    assert.ok(!('_journal' in live), 'clearing must delete the key, not empty it')
+
+    const { cheloniaState } = sbp(
+      'chelonia/contract/fullState', CID, undefined, { includeJournal: true }
+    )
+
+    assert.ok(!('_journal' in cheloniaState))
+  })
+
+  it('is a shallow copy: nested values stay shared with live state', () => {
+    const keyIds = ['kid1']
+    contractMetas()[CID] = makeMeta({ missingDecryptionKeyIds: keyIds })
+
+    const { cheloniaState } = sbp('chelonia/contract/fullState', CID)
+
+    // Documented in docs/api.md: only top-level keys are isolated, so the
+    // whole tuple must be treated as read-only.
+    assert.strictEqual(cheloniaState.missingDecryptionKeyIds, keyIds)
+  })
+
   it('passes a null meta through unchanged (permanently-deleted sentinel)', () => {
     contractMetas()[CID] = null
 
@@ -232,6 +278,16 @@ describe('chelonia/externalStateWait', () => {
     contractMetas()[CID] = { HEAD: 'hash', previousKeyOp: 'keyop' }
 
     await settlesWithin(sbp('chelonia/externalStateWait', CID), 500, 'wait(heightless meta)')
+  })
+
+  it('returns immediately during a resync window (meta shell)', async () => {
+    // `chelonia/private/removeImmediately(cid, { resync: true })` deletes
+    // every meta key but `references`, leaving a truthy meta with no height
+    // until the replay sets HEAD/height again. If the resync itself fails,
+    // that shell persists, so waiting on it would never settle.
+    contractMetas()[CID] = { references: 1 }
+
+    await settlesWithin(sbp('chelonia/externalStateWait', CID), 500, 'wait(resync shell)')
   })
 
   it('waits for the external mirror, even before it has a contracts subtree', async () => {

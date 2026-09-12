@@ -673,14 +673,16 @@ Chelonia maintains your contract's state under
 ```js
 const { cheloniaState, contractState } =
   sbp('chelonia/contract/fullState', contractID)
-// cheloniaState  → a copy of rootState.contracts[contractID]
+// cheloniaState  → a shallow copy of rootState.contracts[contractID]
 // contractState  → rootState[contractID]            (your action-produced state)
 ```
 
 `cheloniaState` is Chelonia's bookkeeping for the contract (`HEAD`,
 `height`, `previousKeyOp`, …). The journal is left out of it; pass
 `{ includeJournal: true }` as the third argument to include it. See
-[`journal.md`](./journal.md#consumer-visible-leakage).
+[`journal.md`](./journal.md#consumer-visible-leakage). The copy is
+shallow, so treat it as read-only: nested values are shared with
+Chelonia's live state.
 
 ---
 

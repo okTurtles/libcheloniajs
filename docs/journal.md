@@ -316,7 +316,8 @@ anything handing out that subtree verbatim hands out the journal too.
 The built-in consumers deliberately do not:
 
 - **`chelonia/contract/fullState`** omits `_journal` from
-  `cheloniaState`. Opt in with its third argument:
+  `cheloniaState`. Opt in with its third argument (the key is only
+  present when a journal actually exists):
 
   ```js
   const { cheloniaState } = sbp(

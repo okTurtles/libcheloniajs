@@ -1634,10 +1634,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         return stateCopy;
     },
-    'chelonia/contract/fullState': function (contractID, key, { includeJournal = false } = {}) {
+    'chelonia/contract/fullState': function (contractID, key, options) {
+        const { includeJournal = false } = options ?? {};
         const rootState = (0, sbp_1.default)(this.config.stateSelector);
-        const stateFor = (contractID) => {
-            const meta = rootState.contracts?.[contractID];
+        const stateFor = (id) => {
+            const meta = rootState.contracts?.[id];
             // A falsy `meta` is meaningful and must be returned as-is: `null` marks
             // a permanently-deleted contract and `undefined` one that was never
             // synced. Spreading either would produce a truthy `{}`, which callers
@@ -1645,17 +1646,19 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // for to decide whether there's anything to wait for or copy over.
             let cheloniaState = meta;
             if (meta != null) {
-                // Destructure instead of assigning `_journal: undefined` so that the
-                // key is absent entirely when the journal isn't requested.
+                // Shallow copy: nested values (`missingDecryptionKeyIds`, the journal)
+                // stay shared by reference with live state. `_journal` is re-attached
+                // only when it was requested AND exists, so an opted-in caller never
+                // sees an `_journal: undefined` key advertising a journal we lack.
                 const { _journal, ...rest } = meta;
                 // Returned by reference, unlike `chelonia/journal/get`, which clones.
-                cheloniaState = includeJournal ? { ...rest, _journal } : rest;
+                cheloniaState = includeJournal && _journal !== undefined ? { ...rest, _journal } : rest;
             }
             return {
-                contractState: rootState[contractID],
+                contractState: rootState[id],
                 cheloniaState,
-                kvState: rootState._kv?.[contractID],
-                kvEntry: key === undefined ? undefined : rootState._kv?.[contractID]?.[key]
+                kvState: rootState._kv?.[id],
+                kvEntry: key === undefined ? undefined : rootState._kv?.[id]?.[key]
             };
         };
         if (Array.isArray(contractID)) {
