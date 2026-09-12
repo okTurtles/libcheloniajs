@@ -2146,29 +2146,42 @@ export default sbp('sbp/selectors/register', {
     }
     return stateCopy
   },
-  'chelonia/contract/fullState': function (this: CheloniaContext, contractID: string | string[], key?: string) {
+  'chelonia/contract/fullState': function (
+    this: CheloniaContext,
+    contractID: string | string[],
+    key?: string,
+    options?: { includeJournal?: boolean } | null
+  ) {
+    const { includeJournal = false } = options ?? {}
     const rootState = sbp(this.config.stateSelector)
+    const stateFor = (id: string) => {
+      const meta = rootState.contracts?.[id]
+      // A falsy `meta` is meaningful and must be returned as-is: `null` marks
+      // a permanently-deleted contract and `undefined` one that was never
+      // synced. Spreading either would produce a truthy `{}`, which callers
+      // (e.g. `chelonia/externalStateWait`, the external state mirror) test
+      // for to decide whether there's anything to wait for or copy over.
+      let cheloniaState = meta
+      if (meta != null) {
+        // Shallow copy: nested values (`missingDecryptionKeyIds`, the journal)
+        // stay shared by reference with live state. `_journal` is re-attached
+        // only when it was requested AND exists, so an opted-in caller never
+        // sees an `_journal: undefined` key advertising a journal we lack.
+        const { _journal, ...rest } = meta
+        // Returned by reference, unlike `chelonia/journal/get`, which clones.
+        cheloniaState = includeJournal && _journal !== undefined ? { ...rest, _journal } : rest
+      }
+      return {
+        contractState: rootState[id],
+        cheloniaState,
+        kvState: rootState._kv?.[id],
+        kvEntry: key === undefined ? undefined : rootState._kv?.[id]?.[key]
+      }
+    }
     if (Array.isArray(contractID)) {
-      return Object.fromEntries(
-        contractID.map((contractID) => {
-          return [
-            contractID,
-            {
-              contractState: rootState[contractID],
-              cheloniaState: rootState.contracts[contractID],
-              kvState: rootState._kv?.[contractID],
-              kvEntry: key === undefined ? undefined : rootState._kv?.[contractID]?.[key]
-            }
-          ]
-        })
-      )
+      return Object.fromEntries(contractID.map((id) => [id, stateFor(id)]))
     }
-    return {
-      contractState: rootState[contractID],
-      cheloniaState: rootState.contracts[contractID],
-      kvState: rootState._kv?.[contractID],
-      kvEntry: key === undefined ? undefined : rootState._kv?.[contractID]?.[key]
-    }
+    return stateFor(contractID)
   },
   // 'chelonia/out' - selectors that send data out to the server
   'chelonia/out/registerContract': async function (this: CheloniaContext, params: ChelRegParams) {

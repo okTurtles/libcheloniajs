@@ -3473,10 +3473,10 @@ const handleEvent = {
     // Journal recording. Runs after `state.contracts[contractID]` has been
     // populated (HEAD/height/etc.) so the journal selector can attach
     // `_journal` to a real bookkeeping object, but BEFORE we emit
-    // EVENT_HANDLED so any listeners that snapshot contract state on that
-    // event (e.g. `chelonia/externalStateSetup` mirroring
-    // `chelonia/contract/fullState` into an outer store) observe the
-    // fully-committed `_journal` rather than the previous event's value.
+    // EVENT_HANDLED, so that listeners snapshotting contract state on that
+    // event (either reading `state.contracts[contractID]` directly, or calling
+    // `chelonia/contract/fullState` with `{ includeJournal: true }`) observe
+    // the fully-committed `_journal` rather than the previous event's value.
     // The selector enforces a "MUST NOT throw" contract internally, so we
     // deliberately do not wrap this call: a journal failure must never
     // break event processing, and we don't want a duplicate log line on

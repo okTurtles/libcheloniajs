@@ -69,10 +69,21 @@ For the authoritative signatures, follow the source links.
 | `chelonia/contract/waitingForKeyShareTo` | `src/chelonia.ts` | Returns the originating contract IDs we're currently awaiting a key share from. |
 | `chelonia/contract/hasKeyShareBeenRespondedBy` | `src/chelonia.ts` | Has a given contract responded to one of our outstanding key requests? |
 | `chelonia/contract/state` | `src/chelonia.ts` | Deep-clone of a contract's state, optionally filtered to a particular `height`. |
-| `chelonia/contract/fullState` | `src/chelonia.ts` | `{ contractState, cheloniaState }` for one id or an array of ids. |
+| `chelonia/contract/fullState` | `src/chelonia.ts` | `(contractID \| contractID[], key?, { includeJournal? })` → state tuple. |
 | `chelonia/contract/remove` | `src/chelonia.ts` | Hard-remove a contract from state (refcount-aware via callback). |
 | `chelonia/contract/disconnect` | `src/chelonia.ts` | Publish an `OP_KEY_DEL` to detach the foreign keys we hold for another contract. |
 | `chelonia/latestContractState` | `src/chelonia.ts` | Return a cloned, possibly freshly-synced contract state. Accepts `{ forceSync }`. |
+
+`chelonia/contract/fullState` returns `{ contractState, cheloniaState,
+kvState, kvEntry }` — one tuple per id, or a map of tuples keyed by id
+when given an array. `cheloniaState` is a **shallow** copy of
+`rootState.contracts[contractID]`: top-level keys are isolated, but
+nested values (`missingDecryptionKeyIds`, and `_journal` when included)
+are still shared by reference with live state, so treat the whole tuple
+as read-only. `_journal` appears as an own key only when `includeJournal`
+is set *and* the contract actually has a journal. `cheloniaState` stays
+`null` for a permanently-deleted contract and `undefined` for one
+Chelonia has no meta for.
 
 ## Outgoing operations
 
@@ -213,20 +224,31 @@ Chelonia in a service worker, Vuex/Pinia in the tab).
 | Selector | Source | Purpose |
 |---|---|---|
 | `chelonia/externalStateSetup` | `src/local-selectors/index.ts` | Wire up Chelonia → external store synchronization. |
+| `chelonia/externalStateWait` | `src/local-selectors/index.ts` | Await until the external store has caught up with Chelonia's height. |
 
 `chelonia/externalStateSetup` projects Chelonia's bookkeeping subtrees into
-the external store alongside `rootState.contracts`. Two of them travel with
-anything that exposes that subtree, so treat them as in-band data you may
-need to redact in consumer code:
+the external store alongside `rootState.contracts`. One of them is in-band
+data you may need to redact in consumer code:
 
 - **`rootState._kv`** — the KV slot mirror (see
   [The local mirror](./kv.md#the-local-mirror)). Slot updates push the
   changed `_kv[contractID][key]` entry; contract removal drops the full
   per-contract KV subtree. For a `_kv`-free view, project
   `{ ...rootState, _kv: undefined }`.
-- **`state.contracts[contractID]._journal`** — the per-contract journal
-  (when enabled). See [journal.md](./journal.md#consumer-visible-leakage)
-  for the journal-side caveats and the `_journal`-free projection.
+
+The per-contract journal does **not** reach the external store: the mirror is
+built on `chelonia/contract/fullState`, which strips `_journal` unless called
+with `{ includeJournal: true }`. See
+[journal.md](./journal.md#consumer-visible-leakage). Code that reads
+`state.contracts[contractID]` directly still sees it.
+
+`chelonia/externalStateWait(contractID)` resolves once the external store has
+caught up with Chelonia's height for that contract. It returns immediately
+when there is nothing to wait for: no meta (`undefined`), a permanently-deleted
+contract (`null`), or a meta with no numeric `height`, e.g. the `{ references }`
+shell a resync leaves behind, which would otherwise never settle. The target
+height is captured when the call is made, so events handled afterwards do not
+move the goalposts.
 
 ## Events
 

@@ -458,9 +458,11 @@ in the tab), see `chelonia/externalStateSetup` in
   short enums — anyone with the journal and the contract schema can
   rainbow-table the hash.
 - **The journal travels with `state.contracts[contractID]._journal`.**
-  Anything that serializes that subtree (e.g. a Vuex mirror set up via
-  `chelonia/externalStateSetup`, or `chelonia/contract/fullState`)
-  exposes the journal as well. Project it out client-side if needed.
+  Anything that serializes that subtree directly exposes the journal as
+  well; project it out if needed. The built-in consumers don't:
+  `chelonia/contract/fullState` omits it unless called with
+  `{ includeJournal: true }`, and the Vuex mirror set up via
+  `chelonia/externalStateSetup` is built on top of that selector.
 - **Contract state must be plain JSON for the journal to behave.**
   `Date` / `Map` / `Set` / class instances in contract state aren't
   cloned by `defaultDiff` — in-place mutations would retroactively

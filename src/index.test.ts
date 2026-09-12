@@ -17,6 +17,11 @@
 //     that don't pull in `chelonia.ts`).
 //   - `journal-integration.test.ts` imports `./chelonia.js` directly
 //     and is the first test in this list to lock the domain.
+//   - Because SBP keeps the first registration of a selector, the stub
+//     above also means the *real* `chelonia/contract/fullState` is never
+//     registered in this process. Tests that assert on it therefore live
+//     in `src/fullstate.test.ts`, which the `test` script runs as a
+//     separate entry point.
 //
 // Each block below is separated by a blank line; the comment above
 // each block records the constraint that pins its placement.
