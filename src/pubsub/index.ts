@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-this-alias */
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
-import { randomIntFromRange } from 'turtledash'
+import { randomHexString, randomIntFromRange } from 'turtledash'
 import type { JSONObject, JSONType } from '../types.js'
 
 // ====== Enums ====== //
@@ -21,6 +21,7 @@ export const NOTIFICATION_TYPE = Object.freeze({
 
 export const REQUEST_TYPE = Object.freeze({
   PUB: 'pub',
+  RSI: 'rsi',
   SUB: 'sub',
   UNSUB: 'unsub',
   PUSH_ACTION: 'push_action',
@@ -29,7 +30,9 @@ export const REQUEST_TYPE = Object.freeze({
 
 export const RESPONSE_TYPE = Object.freeze({
   ERROR: 'error',
-  OK: 'ok'
+  OK: 'ok',
+  RSI_ERROR: 'rsi-error',
+  RSI_OK: 'rsi-ok'
 })
 
 export const PUSH_SERVER_ACTION_TYPE = Object.freeze({
@@ -45,6 +48,7 @@ export type ResponseTypeEnum = (typeof RESPONSE_TYPE)[keyof typeof RESPONSE_TYPE
 
 // ====== Types ====== //
 
+type JsonSbpInvocation = [selector: string, ...args: JSONType[]]
 type TimeoutID = ReturnType<typeof setTimeout>;
 
 export type Options = {
@@ -80,17 +84,22 @@ export type PubSubClient = {
   // eslint-disable-next-line no-use-before-define
   customEventHandlers: Partial<ClientEventHandlers>;
   failedConnectionAttempts: number;
+  id: string;
   isLocal: boolean;
   isNew: boolean;
   // eslint-disable-next-line no-use-before-define
   listeners: ClientEventHandlers;
+  messageCounter: number;
   // eslint-disable-next-line no-use-before-define
   messageHandlers: MessageHandlers;
   nextConnectionAttemptDelayID: TimeoutID | undefined;
   options: Options;
   // eslint-disable-next-line no-use-before-define
   pendingOperations: TieredMap<RequestTypeEnum, string, object>;
+  pendingRsiOperations: Map<string, RsiMessage>;
   pingTimeoutID: TimeoutID | undefined;
+  promiseRejectersByMessageID: Map<string, (reason?: any) => void>;
+  promiseResolversByMessageID: Map<string, (value: unknown) => void>;
   shouldReconnect: boolean;
   socket: WebSocket | null;
   subscriptionSet: Set<string>;
@@ -99,13 +108,16 @@ export type PubSubClient = {
   // Methods
   clearAllTimers(this: PubSubClient): void;
   connect(this: PubSubClient): void;
+  createRsiMessage(this: PubSubClient, data: JsonSbpInvocation): RsiMessage;
   destroy(this: PubSubClient): void;
+  generateMessageID(this: PubSubClient): string;
   pub(this: PubSubClient, channelID: string, data: JSONType): void;
   scheduleConnectionAttempt(this: PubSubClient): void;
   sub(this: PubSubClient, channelID: string): void;
   unsub(this: PubSubClient, channelID: string): void;
   getNextRandomDelay(this: PubSubClient): number;
   setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void;
+  tryRsiOperation(this: PubSubClient, op: RsiMessage): void;
 };
 
 type ClientEventHandlers = {
@@ -157,11 +169,31 @@ type MessageHandlers = {
   [RESPONSE_TYPE.OK](this: PubSubClient, msg: { data:
     { type: string; channelID: string; kvFilter?: string[] }
   }): void;
+  [RESPONSE_TYPE.RSI_ERROR](this: PubSubClient, msg: RsiErrorMessage): void;
+  [RESPONSE_TYPE.RSI_OK](this: PubSubClient, msg: RsiOkMessage): void;
 };
 
 export type PubMessage = {
   type: 'pub';
   channelID: string;
+  data: JSONType;
+};
+
+export type RsiMessage = {
+  type: 'rsi';
+  id: string;
+  data: JsonSbpInvocation
+};
+
+export type RsiErrorMessage = {
+  type: 'rsi-error';
+  to: string;
+  data: JSONType;
+};
+
+export type RsiOkMessage = {
+  type: 'rsi-ok';
+  to: string;
   data: JSONType;
 };
 
@@ -345,15 +377,20 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
     // Reset to 0 upon successful connection.
     // Used to compute how long to wait before the next reconnection attempt.
     failedConnectionAttempts: 0,
+    id: randomHexString(6),
     isLocal: /\/\/(localhost|127\.0\.0\.1)([:?/]|$)/.test(url),
     // True if this client has never been connected yet.
     isNew: true,
     listeners: Object.create(null),
+    messageCounter: 0,
     messageHandlers: { ...defaultMessageHandlers, ...options.messageHandlers },
     nextConnectionAttemptDelayID: undefined,
     options: { ...defaultOptions, ...options },
     pendingOperations: new TieredMap(),
+    pendingRsiOperations: new Map(),
     pingTimeoutID: undefined,
+    promiseRejectersByMessageID: new Map(),
+    promiseResolversByMessageID: new Map(),
     shouldReconnect: true,
     // The underlying WebSocket object.
     // A new one is necessary for every connection or reconnection attempt.
@@ -494,6 +531,7 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     client.subscriptionSet.clear()
     client.pendingOperations.tClear(REQUEST_TYPE.UNSUB)
     client.pendingOperations.tClear(REQUEST_TYPE.KV_FILTER)
+    // Do not clear pending RSI operations, they will be retried upon reconnection.
 
     if (client.shouldReconnect && client.options.reconnectOnDisconnection) {
       if (client.failedConnectionAttempts > client.options.maxRetries) {
@@ -592,6 +630,11 @@ const defaultClientEventHandlers: ClientEventHandlers = {
       client.pingTimeoutID = setTimeout(() => {
         client.socket?.close()
       }, options.pingTimeout)
+    }
+    // Send any pending RSI request.
+    console.debug(`[pubsub] Resending ${client.pendingRsiOperations.size} RSI requests that are still pending.`)
+    for (const op of client.pendingRsiOperations.values()) {
+      client.tryRsiOperation(op)
     }
     // Send any pending subscription request.
     for (const [channelID] of client.pendingOperations.get(REQUEST_TYPE.SUB) || []) {
@@ -748,7 +791,47 @@ const defaultMessageHandlers: MessageHandlers = {
         console.error(`[pubsub] Malformed response: invalid request type ${type}`)
       }
     }
-  }
+  },
+
+  async [RESPONSE_TYPE.RSI_ERROR] ({ to, data }: RsiErrorMessage) {
+    const client = this
+    const { pendingRsiOperations } = client
+    console.warn('[pubsub] Received RSI_ERROR:', { to, data })
+    if (typeof to !== 'string' || to === '') throw new Error('Field "to" must be a non-empty string.')
+    const originalMessage = pendingRsiOperations.get(to)
+    pendingRsiOperations.delete(to)
+    const reject = client.promiseRejectersByMessageID.get(to)
+    client.promiseRejectersByMessageID.delete(to)
+    client.promiseResolversByMessageID.delete(to)
+    if (!originalMessage) return console.warn('[pubsub] Message %s not found', to)
+    console.debug('[pubsub]', { originalMessage });
+    if (!reject) throw new Error('Missing promise rejecter.')
+    const reason = (
+      typeof data === 'string'
+      ? new Error(data)
+      : typeof data === 'object' && data !== null
+      ? Object.assign(new Error(), data)
+      : data
+    )
+    reject(reason)
+    console.debug('[pubsub] RSI promise was rejected:', { reason })
+  },
+
+  async [RESPONSE_TYPE.RSI_OK] ({ to, data }: RsiOkMessage) {
+    const client = this
+    const { pendingRsiOperations } = client
+    console.log('[pubsub] Received RSI_OK:', { to, data })
+    if (typeof to !== 'string' || to === '') throw new Error('Field "to" must be a non-empty string.')
+    const originalMessage = pendingRsiOperations.get(to)
+    pendingRsiOperations.delete(to)
+    const resolve = client.promiseResolversByMessageID.get(to)
+    client.promiseRejectersByMessageID.delete(to)
+    client.promiseResolversByMessageID.delete(to)
+    if (!originalMessage) return console.warn('[pubsub] Message %s not found', to)
+    if (!resolve) throw new Error('Missing promise resolver.')
+    resolve(data)
+    console.debug('[pubsub] RSI promise was resolved:', { data })
+  },
 }
 
 const globalEventNames = ['offline', 'online'] as const
@@ -792,10 +875,14 @@ export const messageParser = (data: string): Message => {
 const publicMethods: {
   clearAllTimers(this: PubSubClient): void;
   connect(this: PubSubClient): void;
+  createRsiMessage(this: PubSubClient, data: JsonSbpInvocation): RsiMessage;
   destroy(this: PubSubClient): void;
+  generateMessageID(this: PubSubClient): string;
   pub(this: PubSubClient, channelID: string, data: JSONType): void;
   scheduleConnectionAttempt(this: PubSubClient): void;
+  rsi(this: PubSubClient, data: JsonSbpInvocation): Promise<unknown>;
   sub(this: PubSubClient, channelID: string): void;
+  tryRsiOperation(this: PubSubClient, op: RsiMessage): void;
   setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void;
   unsub(this: PubSubClient, channelID: string): void;
   getNextRandomDelay(this: PubSubClient): number;
@@ -858,6 +945,10 @@ const publicMethods: {
     }
   },
 
+  createRsiMessage (data: JsonSbpInvocation) {
+    return { type: 'rsi' as const, id: this.generateMessageID(), data }
+  },
+
   /**
    * Immediately close the socket, stop listening for events and clear any cache.
    *
@@ -873,6 +964,9 @@ const publicMethods: {
     // Update property values.
     // Note: do not clear 'client.options'.
     client.pendingOperations.clear()
+    client.pendingRsiOperations.clear()
+    client.promiseRejectersByMessageID.clear()
+    client.promiseResolversByMessageID.clear()
     client.subscriptionSet.clear()
     // Remove global event listeners.
     if (typeof self === 'object' && self instanceof EventTarget) {
@@ -890,6 +984,10 @@ const publicMethods: {
     client.listeners = Object.create(null)
     client.socket = null
     client.shouldReconnect = false
+  },
+
+  generateMessageID () {
+    return `${this.id}-${this.messageCounter++}`
   },
 
   getNextRandomDelay (): number {
@@ -937,6 +1035,14 @@ const publicMethods: {
     sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SCHEDULED, client, { delay, nth })
   },
 
+  // Should be idempotent, but it's up to the server.
+  tryRsiOperation (op: RsiMessage) {
+    this.pendingRsiOperations.set(op.id, op)
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(op))
+    }
+  },
+
   // Can be used to send ephemeral messages outside of any contract log.
   // Does nothing if the socket is not in the OPEN state.
   pub (channelID: string, data: JSONType) {
@@ -944,6 +1050,17 @@ const publicMethods: {
       this.socket.send(createPubMessage(channelID, data))
     }
   },
+
+  // Not idempotent!
+  async rsi (data: JsonSbpInvocation) {
+    const op = this.createRsiMessage(data)
+    this.tryRsiOperation(op)
+    return await new Promise((resolver, rejecter) => {
+      this.promiseResolversByMessageID.set(op.id, resolver)
+      this.promiseRejectersByMessageID.set(op.id, rejecter)
+    })
+  },
+
   /**
    * Sends a SUB request to the server as soon as possible.
    *

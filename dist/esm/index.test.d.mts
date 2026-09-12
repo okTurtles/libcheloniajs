@@ -3,6 +3,7 @@ import './local-selectors/index.test.mjs';
 import './journal.test.mjs';
 import './journal-integration.test.mjs';
 import './chelonia-kv-set.test.mjs';
+import './publish-error.test.mjs';
 import './name-lookup.test.mjs';
 import './persistent-actions.test.mjs';
 import './pubsub/index.test.mjs';

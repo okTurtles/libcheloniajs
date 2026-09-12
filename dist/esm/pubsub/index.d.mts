@@ -14,6 +14,7 @@ export declare const NOTIFICATION_TYPE: Readonly<{
 }>;
 export declare const REQUEST_TYPE: Readonly<{
     PUB: "pub";
+    RSI: "rsi";
     SUB: "sub";
     UNSUB: "unsub";
     PUSH_ACTION: "push_action";
@@ -22,6 +23,8 @@ export declare const REQUEST_TYPE: Readonly<{
 export declare const RESPONSE_TYPE: Readonly<{
     ERROR: "error";
     OK: "ok";
+    RSI_ERROR: "rsi-error";
+    RSI_OK: "rsi-ok";
 }>;
 export declare const PUSH_SERVER_ACTION_TYPE: Readonly<{
     SEND_PUBLIC_KEY: "send-public-key";
@@ -32,6 +35,7 @@ export declare const PUSH_SERVER_ACTION_TYPE: Readonly<{
 export type NotificationTypeEnum = (typeof NOTIFICATION_TYPE)[keyof typeof NOTIFICATION_TYPE];
 export type RequestTypeEnum = (typeof REQUEST_TYPE)[keyof typeof REQUEST_TYPE];
 export type ResponseTypeEnum = (typeof RESPONSE_TYPE)[keyof typeof RESPONSE_TYPE];
+type JsonSbpInvocation = [selector: string, ...args: JSONType[]];
 type TimeoutID = ReturnType<typeof setTimeout>;
 export type Options = {
     logPingMessages: boolean;
@@ -59,14 +63,19 @@ export type PubSubClient = {
     connectionTimeUsed?: number;
     customEventHandlers: Partial<ClientEventHandlers>;
     failedConnectionAttempts: number;
+    id: string;
     isLocal: boolean;
     isNew: boolean;
     listeners: ClientEventHandlers;
+    messageCounter: number;
     messageHandlers: MessageHandlers;
     nextConnectionAttemptDelayID: TimeoutID | undefined;
     options: Options;
     pendingOperations: TieredMap<RequestTypeEnum, string, object>;
+    pendingRsiOperations: Map<string, RsiMessage>;
     pingTimeoutID: TimeoutID | undefined;
+    promiseRejectersByMessageID: Map<string, (reason?: any) => void>;
+    promiseResolversByMessageID: Map<string, (value: unknown) => void>;
     shouldReconnect: boolean;
     socket: WebSocket | null;
     subscriptionSet: Set<string>;
@@ -74,13 +83,16 @@ export type PubSubClient = {
     url: string;
     clearAllTimers(this: PubSubClient): void;
     connect(this: PubSubClient): void;
+    createRsiMessage(this: PubSubClient, data: JsonSbpInvocation): RsiMessage;
     destroy(this: PubSubClient): void;
+    generateMessageID(this: PubSubClient): string;
     pub(this: PubSubClient, channelID: string, data: JSONType): void;
     scheduleConnectionAttempt(this: PubSubClient): void;
     sub(this: PubSubClient, channelID: string): void;
     unsub(this: PubSubClient, channelID: string): void;
     getNextRandomDelay(this: PubSubClient): number;
     setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void;
+    tryRsiOperation(this: PubSubClient, op: RsiMessage): void;
 };
 type ClientEventHandlers = {
     close(this: PubSubClient, event: CloseEvent): void;
@@ -141,10 +153,27 @@ type MessageHandlers = {
             kvFilter?: string[];
         };
     }): void;
+    [RESPONSE_TYPE.RSI_ERROR](this: PubSubClient, msg: RsiErrorMessage): void;
+    [RESPONSE_TYPE.RSI_OK](this: PubSubClient, msg: RsiOkMessage): void;
 };
 export type PubMessage = {
     type: 'pub';
     channelID: string;
+    data: JSONType;
+};
+export type RsiMessage = {
+    type: 'rsi';
+    id: string;
+    data: JsonSbpInvocation;
+};
+export type RsiErrorMessage = {
+    type: 'rsi-error';
+    to: string;
+    data: JSONType;
+};
+export type RsiOkMessage = {
+    type: 'rsi-ok';
+    to: string;
     data: JSONType;
 };
 export type SubMessage = {
@@ -214,6 +243,7 @@ declare const _default: {
     }>;
     REQUEST_TYPE: Readonly<{
         PUB: "pub";
+        RSI: "rsi";
         SUB: "sub";
         UNSUB: "unsub";
         PUSH_ACTION: "push_action";
@@ -222,6 +252,8 @@ declare const _default: {
     RESPONSE_TYPE: Readonly<{
         ERROR: "error";
         OK: "ok";
+        RSI_ERROR: "rsi-error";
+        RSI_OK: "rsi-ok";
     }>;
     createClient: typeof createClient;
     createMessage: typeof createMessage;

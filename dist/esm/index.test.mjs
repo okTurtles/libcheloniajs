@@ -34,8 +34,9 @@ import './journal.test.mjs';
 // `chelonia/*` selectors.
 import './journal-integration.test.mjs';
 import './chelonia-kv-set.test.mjs';
-// Depends on `chelonia.js` being loaded (locked domain), same as the
-// tests above.
+// Depends on `chelonia.js` being loaded (locked domain), same as the tests
+// above.
+import './publish-error.test.mjs';
 import './name-lookup.test.mjs';
 import './persistent-actions.test.mjs';
 import './pubsub/index.test.mjs';

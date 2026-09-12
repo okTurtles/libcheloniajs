@@ -28,6 +28,7 @@ exports.NOTIFICATION_TYPE = Object.freeze({
 });
 exports.REQUEST_TYPE = Object.freeze({
     PUB: 'pub',
+    RSI: 'rsi',
     SUB: 'sub',
     UNSUB: 'unsub',
     PUSH_ACTION: 'push_action',
@@ -35,7 +36,9 @@ exports.REQUEST_TYPE = Object.freeze({
 });
 exports.RESPONSE_TYPE = Object.freeze({
     ERROR: 'error',
-    OK: 'ok'
+    OK: 'ok',
+    RSI_ERROR: 'rsi-error',
+    RSI_OK: 'rsi-ok'
 });
 exports.PUSH_SERVER_ACTION_TYPE = Object.freeze({
     SEND_PUBLIC_KEY: 'send-public-key',
@@ -185,15 +188,20 @@ function createClient(url, options = {}) {
         // Reset to 0 upon successful connection.
         // Used to compute how long to wait before the next reconnection attempt.
         failedConnectionAttempts: 0,
+        id: (0, turtledash_1.randomHexString)(6),
         isLocal: /\/\/(localhost|127\.0\.0\.1)([:?/]|$)/.test(url),
         // True if this client has never been connected yet.
         isNew: true,
         listeners: Object.create(null),
+        messageCounter: 0,
         messageHandlers: { ...defaultMessageHandlers, ...options.messageHandlers },
         nextConnectionAttemptDelayID: undefined,
         options: { ...defaultOptions, ...options },
         pendingOperations: new TieredMap(),
+        pendingRsiOperations: new Map(),
         pingTimeoutID: undefined,
+        promiseRejectersByMessageID: new Map(),
+        promiseResolversByMessageID: new Map(),
         shouldReconnect: true,
         // The underlying WebSocket object.
         // A new one is necessary for every connection or reconnection attempt.
@@ -314,6 +322,7 @@ const defaultClientEventHandlers = {
         client.subscriptionSet.clear();
         client.pendingOperations.tClear(exports.REQUEST_TYPE.UNSUB);
         client.pendingOperations.tClear(exports.REQUEST_TYPE.KV_FILTER);
+        // Do not clear pending RSI operations, they will be retried upon reconnection.
         if (client.shouldReconnect && client.options.reconnectOnDisconnection) {
             if (client.failedConnectionAttempts > client.options.maxRetries) {
                 (0, sbp_1.default)('okTurtles.events/emit', exports.PUBSUB_RECONNECTION_FAILED, client);
@@ -402,6 +411,11 @@ const defaultClientEventHandlers = {
             client.pingTimeoutID = setTimeout(() => {
                 client.socket?.close();
             }, options.pingTimeout);
+        }
+        // Send any pending RSI request.
+        console.debug(`[pubsub] Resending ${client.pendingRsiOperations.size} RSI requests that are still pending.`);
+        for (const op of client.pendingRsiOperations.values()) {
+            client.tryRsiOperation(op);
         }
         // Send any pending subscription request.
         for (const [channelID] of client.pendingOperations.get(exports.REQUEST_TYPE.SUB) || []) {
@@ -543,7 +557,49 @@ const defaultMessageHandlers = {
                 console.error(`[pubsub] Malformed response: invalid request type ${type}`);
             }
         }
-    }
+    },
+    async [exports.RESPONSE_TYPE.RSI_ERROR]({ to, data }) {
+        const client = this;
+        const { pendingRsiOperations } = client;
+        console.warn('[pubsub] Received RSI_ERROR:', { to, data });
+        if (typeof to !== 'string' || to === '')
+            throw new Error('Field "to" must be a non-empty string.');
+        const originalMessage = pendingRsiOperations.get(to);
+        pendingRsiOperations.delete(to);
+        const reject = client.promiseRejectersByMessageID.get(to);
+        client.promiseRejectersByMessageID.delete(to);
+        client.promiseResolversByMessageID.delete(to);
+        if (!originalMessage)
+            return console.warn('[pubsub] Message %s not found', to);
+        console.debug('[pubsub]', { originalMessage });
+        if (!reject)
+            throw new Error('Missing promise rejecter.');
+        const reason = (typeof data === 'string'
+            ? new Error(data)
+            : typeof data === 'object' && data !== null
+                ? Object.assign(new Error(), data)
+                : data);
+        reject(reason);
+        console.debug('[pubsub] RSI promise was rejected:', { reason });
+    },
+    async [exports.RESPONSE_TYPE.RSI_OK]({ to, data }) {
+        const client = this;
+        const { pendingRsiOperations } = client;
+        console.log('[pubsub] Received RSI_OK:', { to, data });
+        if (typeof to !== 'string' || to === '')
+            throw new Error('Field "to" must be a non-empty string.');
+        const originalMessage = pendingRsiOperations.get(to);
+        pendingRsiOperations.delete(to);
+        const resolve = client.promiseResolversByMessageID.get(to);
+        client.promiseRejectersByMessageID.delete(to);
+        client.promiseResolversByMessageID.delete(to);
+        if (!originalMessage)
+            return console.warn('[pubsub] Message %s not found', to);
+        if (!resolve)
+            throw new Error('Missing promise resolver.');
+        resolve(data);
+        console.debug('[pubsub] RSI promise was resolved:', { data });
+    },
 };
 const globalEventNames = ['offline', 'online'];
 const socketEventNames = ['close', 'error', 'message', 'open'];
@@ -628,6 +684,9 @@ const publicMethods = {
             client.socket.addEventListener(name, client.listeners[name]);
         }
     },
+    createRsiMessage(data) {
+        return { type: 'rsi', id: this.generateMessageID(), data };
+    },
     /**
      * Immediately close the socket, stop listening for events and clear any cache.
      *
@@ -642,6 +701,9 @@ const publicMethods = {
         // Update property values.
         // Note: do not clear 'client.options'.
         client.pendingOperations.clear();
+        client.pendingRsiOperations.clear();
+        client.promiseRejectersByMessageID.clear();
+        client.promiseResolversByMessageID.clear();
         client.subscriptionSet.clear();
         // Remove global event listeners.
         if (typeof self === 'object' && self instanceof EventTarget) {
@@ -659,6 +721,9 @@ const publicMethods = {
         client.listeners = Object.create(null);
         client.socket = null;
         client.shouldReconnect = false;
+    },
+    generateMessageID() {
+        return `${this.id}-${this.messageCounter++}`;
     },
     getNextRandomDelay() {
         const client = this;
@@ -691,12 +756,28 @@ const publicMethods = {
         }, delay);
         (0, sbp_1.default)('okTurtles.events/emit', exports.PUBSUB_RECONNECTION_SCHEDULED, client, { delay, nth });
     },
+    // Should be idempotent, but it's up to the server.
+    tryRsiOperation(op) {
+        this.pendingRsiOperations.set(op.id, op);
+        if (this.socket?.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify(op));
+        }
+    },
     // Can be used to send ephemeral messages outside of any contract log.
     // Does nothing if the socket is not in the OPEN state.
     pub(channelID, data) {
         if (this.socket?.readyState === WebSocket.OPEN) {
             this.socket.send(createPubMessage(channelID, data));
         }
+    },
+    // Not idempotent!
+    async rsi(data) {
+        const op = this.createRsiMessage(data);
+        this.tryRsiOperation(op);
+        return await new Promise((resolver, rejecter) => {
+            this.promiseResolversByMessageID.set(op.id, resolver);
+            this.promiseRejectersByMessageID.set(op.id, rejecter);
+        });
     },
     /**
      * Sends a SUB request to the server as soon as possible.
