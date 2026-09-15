@@ -329,6 +329,11 @@ export function structurallyEqual (a: unknown, b: unknown): boolean {
 
 // ---------------------------------------------------------------------------
 // Apply
+// Functions used for applying JSON patches.
+// `defaultApplyPatch` is the exported function that
+// applies an array of patches (can be overridden in the
+// config) and `applyOne` is a helper function that applies
+// a single patch.
 // ---------------------------------------------------------------------------
 
 // Apply a sequence of patches to a value, returning a new value. Does not
@@ -949,38 +954,18 @@ function coveredByPatch (idx: CoverageIndex, pointer: string): boolean {
   return false
 }
 
-// True when the underlying change at a redacted site is (at least partly)
-// invisible in the site's redacted projection — i.e. the diff of the
-// unredacted originals touches a pointer path that the diff of the
-// redacted projections does not reproduce exactly.
-//
-// Why this replaces the old "descendant of the site already shows up in
-// the patch" heuristic: for a container-returning redactor (e.g. keep
-// `id`/`purpose`, hide `data`) a change to the *visible* part of the
-// container must not suppress the marker for the hidden part, and a
-// visible-only change must not *produce* one either. Comparing the two
-// per-site diffs makes exactly that distinction.
-//
-// Only an exact path match counts as "visible". A projected *ancestor*
-// operation is never accepted as covering an original descendant change:
-// the visible paths live in the projection's path space while the original
-// paths live in the source's, and a reshaping redactor (e.g.
-// `(v) => ({ profile: v.profile.name })`) maps source leaves onto
-// projected ancestor positions, so those spaces do not correspond. A
-// projected ancestor op only proves that *something* inside that ancestor
-// changed — not that the hidden descendant change is visible. Moreover,
-// the built-in diff emits an op at an ancestor (instead of descending)
-// exactly when the projection changed container shape there between before
-// and after, which is precisely the lossy case where coverage cannot be
-// established. "Hidden" is the conservative direction: markers are
-// identity writes, so an extra one is noise while a suppressed one loses
-// the only record of the hidden change. (Contrast `coveredByPatch`, where
-// ancestor coverage IS sound: patch operations are real writes into the
-// reconstructed state, not observations about a projection.)
-//
-// Always uses `defaultDiff`, never `cfg.diff`: this asks a question
-// about RFC-6901 pointer paths within a single site, which is the same
-// vocabulary the markers themselves are emitted in.
+// This helper function returns true when there's a change
+// that's 'hidden' as the result of having applied a redaction.
+// The goal is to report a change that's occurred even if
+// naively diffing the journal won't show it due to the
+// redaction being applied. This is useful for debugging
+// purposes.
+// For example, an identity contract could have an `email`
+// field to which a redaction is applied for privacy. We
+// still want the journal to show that an action `changeEmail`
+// changed the email value even if the visible value in the
+// journal would be `[REDACTED]` for both the old and the new
+// values.
 export function hasHiddenChange (
   before: RedactionSite,
   after: RedactionSite
