@@ -1183,6 +1183,88 @@ export const handleFetchResult = (
   }
 }
 
+// This text ends up in `e.message` and in the logs, and a proxy answering with
+// an HTML error page can send kilobytes of markup, so it is capped.
+// Note: the cap applies to the *prefix* length; a truncation suffix is appended.
+const MAX_ERROR_DETAIL_PREFIX_LENGTH = 512
+
+// Reading has a budget of its own, larger than the one above because JSON has
+// to be read whole to be parsed. Without it a hostile relay or proxy could make
+// the client buffer an arbitrarily large "error page" for a string that is
+// about to be cut down to 512 characters anyway. A body over the budget is kept
+// only up to it: text is then truncated as usual, and JSON no longer parses,
+// which is reported as no detail.
+const MAX_ERROR_BODY_LENGTH = 8192
+
+const truncateDetail = (s: string) => {
+  return s.length > MAX_ERROR_DETAIL_PREFIX_LENGTH
+    ? `${s.slice(0, MAX_ERROR_DETAIL_PREFIX_LENGTH)}…[truncated]`
+    : s
+}
+
+// The body is written by whoever answered the request, so it can carry
+// newlines, ANSI escapes or NULs, and it is about to go into a log line and
+// into `e.message`. Control characters become spaces so a hostile response
+// cannot forge log entries.
+const cleanDetail = (s: string) =>
+  // eslint-disable-next-line no-control-regex
+  truncateDetail(s.replace(/[\u0000-\u001F\u007F]+/g, ' ').trim())
+
+// `Response.text()` and `.json()` both read to the end, so (when streaming is
+// available) the cap is applied while reading instead. Nothing past the budget
+// is kept, and the transfer is cancelled as soon as it is reached (peak: one
+// chunk). Some environments do not expose `body`/`getReader()`, so we fall back
+// to `text()` and can only slice after buffering the full body.
+const readCappedBody = async (r: Response): Promise<string> => {
+  if (!r.body?.getReader) return (await r.text()).slice(0, MAX_ERROR_BODY_LENGTH)
+  const reader = r.body.getReader()
+  const decoder = new TextDecoder()
+  let text = ''
+  try {
+    while (text.length < MAX_ERROR_BODY_LENGTH) {
+      const { done, value } = await reader.read()
+      if (done) break
+      text += decoder.decode(value, { stream: true })
+    }
+    return (text + decoder.decode()).slice(0, MAX_ERROR_BODY_LENGTH)
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+}
+
+/**
+ * Companion to the `${status}: ${statusText}` line from `httpErrorMessage`.
+ * A relay may answer with JSON (`message`, `detail` or `error`) or with plain
+ * text, so the `Content-Type` decides how the body is read rather than guessing
+ * by trying to parse it. Reading must never throw: the status code is the
+ * useful part of a failed response, and a body that does not match its declared
+ * type should not hide it.
+ *
+ * Returns an empty string when there is no usable detail.
+ */
+export const httpErrorDetail = async (r: Response): Promise<string> => {
+  try {
+    const mediaType = (r.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+    // `application/json` plus structured suffixes such as
+    // `application/problem+json`. The `application/` prefix is required, so
+    // something like `text/x+json` is read as text.
+    const isJson = mediaType === 'application/json' ||
+      (mediaType.startsWith('application/') && mediaType.endsWith('+json'))
+    const body = await readCappedBody(r)
+    if (!isJson) return cleanDetail(body)
+    const parsed = JSON.parse(body)
+    // `message` is what chel sends. RFC 7807 problem documents use `detail`,
+    // and `error` is common enough elsewhere to be worth reading.
+    const detail = ['message', 'detail', 'error']
+      .map((field) => parsed?.[field])
+      .find((value) => typeof value === 'string')
+    return detail === undefined ? '' : cleanDetail(detail)
+  } catch (e) {
+    console.warn('[chelonia] Could not read the body of a failed response', e)
+    return ''
+  }
+}
+
 /**
  * Helper function to delete keys from the state and clear related pending revocations.
  * Handles key rotation scenarios by clearing pending revocations for all keys with the same name.

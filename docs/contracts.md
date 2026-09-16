@@ -662,6 +662,34 @@ await sbp('chelonia/out/actionEncrypted', {
 })
 ```
 
+### When a publish fails
+
+A publish that the relay rejects throws
+`ChelErrorUnexpectedHttpResponseCode` with the HTTP status on `.cause`, so an
+app can tell the user why instead of showing a generic message. Check the type
+before reading `.cause`, because other error classes put other things there,
+for example `ChelErrorKvMaxAttempts` stores an object:
+
+```js
+import { ChelErrorUnexpectedHttpResponseCode } from '@chelonia/lib/errors'
+
+try {
+  await sbp('chelonia/out/registerContract', { /* … */ })
+} catch (e) {
+  if (e instanceof ChelErrorUnexpectedHttpResponseCode) {
+    if (e.cause === 403) { /* signups are disabled on this relay */ }
+    if (e.cause === 429) { /* rate limited */ }
+  }
+  throw e
+}
+```
+
+The detail in the message comes from the response body, read as JSON
+(`message`, `detail` or `error`) or as text according to the response's
+`Content-Type`. A body that cannot be read is skipped rather than masking the
+status, and one that is long, or carries control characters, is cut down before
+it reaches the message and the logs.
+
 ---
 
 ## 5. Read state

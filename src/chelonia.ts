@@ -2260,7 +2260,10 @@ export default sbp('sbp/selectors/register', {
     })
     if (!response.ok) {
       console.error('Unable to fetch own resources', contractID, response.status)
-      throw new Error(`Unable to fetch own resources for ${contractID}: ${response.status}`)
+      throw new ChelErrorUnexpectedHttpResponseCode(
+        `Unable to fetch own resources for ${contractID}: ${httpErrorMessage(response)}`,
+        { cause: response.status }
+      )
     }
 
     return response.json()
@@ -2907,7 +2910,7 @@ export default sbp('sbp/selectors/register', {
         // These are not treated as errors since we could still set the value.
       } else if (response.status !== 404 && response.status !== 410) {
         throw new ChelErrorUnexpectedHttpResponseCode(
-          '[kv/set] Invalid response code: ' + response.status
+          `[kv/set] ${httpErrorMessage(response)}`, { cause: response.status }
         )
       }
       // When a 409/412 response provides neither an etag header nor a
@@ -3053,7 +3056,7 @@ export default sbp('sbp/selectors/register', {
             }
           }
           throw new ChelErrorUnexpectedHttpResponseCode(
-            'kv/set invalid response status: ' + response.status
+            `[kv/set] ${httpErrorMessage(response)}`, { cause: response.status }
           )
         }
         // Successful write: capture the server-issued etag (x-cid /
@@ -3081,7 +3084,9 @@ export default sbp('sbp/selectors/register', {
       return null
     }
     if (!response.ok) {
-      throw new Error('Invalid response status: ' + response.status)
+      throw new ChelErrorUnexpectedHttpResponseCode(
+        `[kv/get] ${httpErrorMessage(response)}`, { cause: response.status }
+      )
     }
     const etag = response.headers.get('x-cid') || response.headers.get('etag')
     const data = await response.json()
