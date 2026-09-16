@@ -20,6 +20,7 @@ import { after, before, beforeEach, describe, it } from 'node:test'
 import './local-selectors/index.js'
 import './chelonia.js'
 import { EVENT_HANDLED } from './events.js'
+import { waitMicrotasks } from './test-utils.js'
 import type { ChelRootState } from './types.js'
 
 const EXTERNAL_STATE_SELECTOR = 'test/fullState/externalState'
@@ -63,14 +64,6 @@ const resetState = (): void => {
   }
   delete state._kv
   externalState = { contracts: Object.create(null) }
-}
-
-const waitMicrotasks = async (): Promise<void> => {
-  // The handlers queue work onto okTurtles.eventQueue/queueEvent; await a
-  // couple of macrotask boundaries so that they settle.
-  for (let i = 0; i < 5; i++) {
-    await new Promise<void>((resolve) => setTimeout(resolve as () => void, 0))
-  }
 }
 
 // Fails loudly instead of hanging the suite when a promise never settles.
@@ -253,6 +246,18 @@ describe('chelonia/contract/fullState', () => {
     contractMetas()[CID] = makeMeta()
 
     const { cheloniaState } = sbp('chelonia/contract/fullState', CID)
+    cheloniaState.HEAD = 'mutated'
+
+    const live = contractMetas()[CID] as Record<string, unknown>
+    assert.strictEqual(live.HEAD, 'hash')
+  })
+
+  it('returns a copy when opted in, so callers cannot mutate Chelonia state', () => {
+    contractMetas()[CID] = makeMeta({ _journal: JOURNAL })
+
+    const { cheloniaState } = sbp(
+      'chelonia/contract/fullState', CID, undefined, { includeJournal: true }
+    )
     cheloniaState.HEAD = 'mutated'
 
     const live = contractMetas()[CID] as Record<string, unknown>

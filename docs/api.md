@@ -224,11 +224,11 @@ Chelonia in a service worker, Vuex/Pinia in the tab).
 | Selector | Source | Purpose |
 |---|---|---|
 | `chelonia/externalStateSetup` | `src/local-selectors/index.ts` | Wire up Chelonia → external store synchronization. |
-| `chelonia/externalStateWait` | `src/local-selectors/index.ts` | Await until the external store has caught up with Chelonia's height. |
+| `chelonia/externalStateWait` | `src/local-selectors/index.ts` | Wait until the external store has caught up with Chelonia's height. |
 
 `chelonia/externalStateSetup` projects Chelonia's bookkeeping subtrees into
-the external store alongside `rootState.contracts`. One of them is in-band
-data you may need to redact in consumer code:
+the external store alongside `rootState.contracts`. Of these, only the KV
+mirror is in-band data you may need to redact in consumer code:
 
 - **`rootState._kv`** — the KV slot mirror (see
   [The local mirror](./kv.md#the-local-mirror)). Slot updates push the

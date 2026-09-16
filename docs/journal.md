@@ -449,8 +449,9 @@ try {
   }
 }
 
-// 4. Clear one contract's journal (e.g. to reclaim disk space, or before
-//    serializing `state.contracts` yourself).
+// 4. Clear one contract's journal (e.g. to reclaim memory, or persisted
+//    storage if you save `state.contracts`, or before serializing
+//    `state.contracts` yourself).
 sbp('chelonia/journal/clear', contractID)
 
 // 5. Clear all journals.
