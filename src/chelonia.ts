@@ -2162,14 +2162,15 @@ export default sbp('sbp/selectors/register', {
       // (e.g. `chelonia/externalStateWait`, the external state mirror) test
       // for to decide whether there's anything to wait for or copy over.
       let cheloniaState = meta
-      if (meta != null) {
+      if (meta != null && !includeJournal) {
         // Shallow copy: nested values (`missingDecryptionKeyIds`, the journal)
         // stay shared by reference with live state. `_journal` is re-attached
         // only when it was requested AND exists, so an opted-in caller never
         // sees an `_journal: undefined` key advertising a journal we lack.
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { _journal, ...rest } = meta
         // Returned by reference, unlike `chelonia/journal/get`, which clones.
-        cheloniaState = includeJournal && _journal !== undefined ? { ...rest, _journal } : rest
+        cheloniaState = rest
       }
       return {
         contractState: rootState[id],

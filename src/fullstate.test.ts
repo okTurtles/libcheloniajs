@@ -1,13 +1,12 @@
 // Tests for the real `chelonia/contract/fullState` selector and for the
 // consumers of it in `src/local-selectors/index.ts`.
 //
-// These live in their own entry point (see the `test` script in
-// package.json) and MUST NOT be imported from `src/index.test.ts`:
-// `src/local-selectors/index.test.ts` registers a *stub*
-// `chelonia/contract/fullState` and is imported before `src/chelonia.ts`,
-// and SBP silently drops a registration for an already-registered selector.
-// In the aggregate run the real selector therefore never gets registered, so
-// assertions placed there would exercise the stub instead.
+// The `test` script runs every `*.test.ts` file in its own Node process,
+// so the real selector registered by `src/chelonia.ts` is exercised here.
+// Test files must never import one another: `src/local-selectors/index.test.ts`
+// registers a *stub* `chelonia/contract/fullState`, and SBP silently drops
+// a registration for an already-registered selector, so in a shared
+// process these assertions would exercise the stub instead.
 //
 // Import order below also matters: `src/local-selectors/index.ts` registers
 // `chelonia/externalStateSetup` and `chelonia/externalStateWait`, and must be

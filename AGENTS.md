@@ -19,7 +19,7 @@ Every contract is represented as an append-only log of operations (op codes). So
 
 ```bash
 npm install        # Install dependencies
-npm test           # Run tests (node:test via ts-node with ESM loader)
+npm test           # Run tests (node:test; every .test.ts file auto-discovered, each in its own process)
 npm run build      # Build both ESM and CJS outputs
 npm run build:esm  # Build ESM only (.mjs files)
 npm run build:cjs  # Build CJS only (.cjs files)
@@ -324,14 +324,19 @@ describe('Feature name', () => {
 })
 ```
 
-Test files use `.test.ts` suffix and are imported in `src/index.test.ts`.
+Test files use `.test.ts` suffix and are discovered automatically: `npm test` runs every
+`src/**/*.test.ts` file via the Node test runner, each in its own process (fresh SBP
+registrations per file). Never import one test file from another: SBP keeps the first
+registration of a selector, and `src/chelonia.ts` locks the `chelonia` SBP domain at module
+scope, so a stub registered by one file (e.g. the `chelonia/contract/fullState` stub in
+`src/local-selectors/index.test.ts`) would shadow the real selectors for the whole process.
 
 ## Common Gotchas
 
 1. **Import extensions**: Always use `.js` extension in imports, even for TypeScript files. The build process does not transform these.
 2. **SBP context**: Many functions use `this: CheloniaContext` - they must be called through SBP to have proper context binding.
 3. **`dist/` under version control**: Ignore the files in `dist/`, don't review them or read them or update them.
-4. **Test isolation**: Tests use SBP selectors which are globally registered. Mock functions carefully to avoid cross-test contamination.
+4. **Test isolation**: Tests use SBP selectors which are globally registered. Each test file runs in its own process; keep files self-contained and never import one test file from another. Mock functions carefully to avoid cross-test contamination within a file.
 5. **Secret keys**: Secret keys are stored in `rootState.secretKeys` as serialized strings and accessed via `transientSecretKeys` proxy.
 6. **Reference counting for contracts** — Use `chelonia/contract/retain` and `chelonia/contract/release` for contract lifecycle. At refcount 0, the contract is unsubscribed.
 7. **Event queue serialization** — `chelonia/db/addEntry` and other operations use `okTurtles.eventQueue` to ensure serialized execution of asynchronous operations. Each contract has its own event queue under the `contractID` key. Convention: to ensure an operation is run after a contract sync finishes, add it to this queue.
