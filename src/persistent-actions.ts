@@ -1,5 +1,6 @@
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
+import { randomUUID } from './functions.js'
 import {
   PERSISTENT_ACTION_FAILURE,
   PERSISTENT_ACTION_SUCCESS,
@@ -70,7 +71,7 @@ export class PersistentAction {
   [timer]?: ReturnType<typeof setTimeout>
 
   constructor (invocation: SbpInvocation, options: Partial<PersistentActionOptions> = {}) {
-    this.id = crypto.randomUUID()
+    this.id = randomUUID()
     this.invocation = invocation
     this.options = { ...defaultOptions, ...options }
     this.status = {

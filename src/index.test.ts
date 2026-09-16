@@ -45,6 +45,7 @@ import './publish-error.test.js'
 import './name-lookup.test.js'
 
 import './persistent-actions.test.js'
+import './random-uuid.test.js'
 import './pubsub/index.test.js'
 import './reingestTracker.test.js'
 import './reingestTracker-integration.test.js'
