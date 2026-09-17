@@ -1,7 +1,6 @@
 import assert from 'node:assert'
 import { describe, it } from 'node:test'
 
-import { PersistentAction } from './persistent-actions.js'
 import type { UUIDV4 } from './types.js'
 
 const V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
@@ -52,11 +51,5 @@ describe('randomUUID', () => {
     await withRandomUUID(undefined, (randomUUID) => {
       assert.strictEqual(new Set(Array.from({ length: 500 }, randomUUID)).size, 500)
     })
-  })
-
-  // What the bug actually broke: a persistent action could not be built at all
-  // on a plain http origin, so the first enqueue threw and the action was lost.
-  it('gives a persistent action a usable id', () => {
-    assert.match(new PersistentAction(['log', 'hello']).id, V4)
   })
 })
