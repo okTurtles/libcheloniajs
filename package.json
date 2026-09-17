@@ -285,7 +285,7 @@
     "@sbp/okturtles.eventqueue": "1.2.1",
     "@sbp/okturtles.events": "1.0.1",
     "scrypt-async": "2.0.1",
-    "turtledash": "1.0.3",
+    "turtledash": "2.0.0",
     "tweetnacl": "1.0.3"
   },
   "devDependencies": {
