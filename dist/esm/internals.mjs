@@ -6,12 +6,12 @@ import { Secret } from './Secret.mjs';
 import { INVITE_STATUS } from './constants.mjs';
 import './db.mjs';
 import { encryptedIncomingData, encryptedOutgoingData } from './encryptedData.mjs';
-import { ChelErrorAlreadyProcessed, ChelErrorDBBadPreviousHEAD, ChelErrorFetchServerTimeFailed, ChelErrorForkedChain, ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnrecoverable, ChelErrorWarning } from './errors.mjs';
+import { ChelErrorAlreadyProcessed, ChelErrorDBBadPreviousHEAD, ChelErrorFetchServerTimeFailed, ChelErrorForkedChain, ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable, ChelErrorWarning } from './errors.mjs';
 import { CONTRACTS_MODIFIED, CONTRACT_HAS_RECEIVED_KEYS, CONTRACT_IS_SYNCING, EVENT_HANDLED, EVENT_PUBLISHED, EVENT_PUBLISHING_ERROR } from './events.mjs';
 import { multicodes } from './functions.mjs';
 import { clearReingestTrackerForContract, noteFutureEvent, noteReingestSuccess, pruneStaleEntries } from './reingestTracker.mjs';
 import { isSignedData, signedIncomingData } from './signedData.mjs';
-import { buildShelterAuthorizationHeader, deleteKeyHelper, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, updateKey, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
+import { buildShelterAuthorizationHeader, deleteKeyHelper, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, httpErrorDetail, httpErrorMessage, keyAdditionProcessor, logEvtError, recreateEvent, updateKey, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
 // Used for temporarily storing the missing decryption key IDs in a given
 // message
 const missingDecryptionKeyIdsMap = new WeakMap();
@@ -627,7 +627,9 @@ export default sbp('sbp/selectors/register', {
                     if (r.status === 409) {
                         if (attempt + 1 > maxAttempts) {
                             console.error(`[chelonia] failed to publish ${entry.description()} after ${attempt} attempts`, entry);
-                            throw new Error(`publishEvent: ${r.status} - ${r.statusText}. attempt ${attempt}`);
+                            // The body is deliberately not read here: a 409 means the HEAD
+                            // raced, which the attempt count already explains.
+                            throw new ChelErrorUnexpectedHttpResponseCode(`publishEvent: ${httpErrorMessage(r)}. attempt ${attempt}`, { cause: r.status });
                         }
                         // create new entry
                         const randDelay = randomIntFromRange(0, 1500);
@@ -642,9 +644,14 @@ export default sbp('sbp/selectors/register', {
                         }
                     }
                     else {
-                        const message = (await r.json())?.message;
-                        console.error(`[chelonia] ERROR: failed to publish ${entry.description()}: ${r.status} - ${r.statusText}: ${message}`, entry);
-                        throw new Error(`publishEvent: ${r.status} - ${r.statusText}: ${message}`);
+                        // The same line the rest of the library raises HTTP errors with,
+                        // plus whatever the body explains.
+                        const detail = await httpErrorDetail(r);
+                        const description = `${httpErrorMessage(r)}${detail ? ` - ${detail}` : ''}`;
+                        console.error(`[chelonia] ERROR: failed to publish ${entry.description()}: ${description}`, entry);
+                        throw new ChelErrorUnexpectedHttpResponseCode(`publishEvent: ${description}`, {
+                            cause: r.status
+                        });
                     }
                 }
                 catch (e) {

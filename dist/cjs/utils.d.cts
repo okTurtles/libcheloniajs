@@ -39,6 +39,17 @@ export declare const logEvtError: (msg: SPMessage, ...args: unknown[]) => void;
 export declare const httpErrorMessage: (r: Response) => string;
 export declare const handleFetchResult: (type: "text" | "json" | "blob") => ((r: Response) => Promise<string | JSONType | Blob>);
 /**
+ * Companion to the `${status}: ${statusText}` line from `httpErrorMessage`.
+ * A relay may answer with JSON (`message`, `detail` or `error`) or with plain
+ * text, so the `Content-Type` decides how the body is read rather than guessing
+ * by trying to parse it. Reading must never throw: the status code is the
+ * useful part of a failed response, and a body that does not match its declared
+ * type should not hide it.
+ *
+ * Returns an empty string when there is no usable detail.
+ */
+export declare const httpErrorDetail: (r: Response) => Promise<string>;
+/**
  * Helper function to delete keys from the state and clear related pending revocations.
  * Handles key rotation scenarios by clearing pending revocations for all keys with the same name.
  *
