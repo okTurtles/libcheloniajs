@@ -191,7 +191,7 @@ export const aes256gcmHandlers = {
     const recordSize = (params?.rs ?? 1 << 16) as number
     if (!IKM) {
       IKM = new Uint8Array(33)
-      self.crypto.getRandomValues(IKM)
+      crypto.getRandomValues(IKM)
     }
     // The keyId is only used as a sanity check but otherwise it is not needed
     // Because the keyId is computed from the IKM, which is a secret, it is

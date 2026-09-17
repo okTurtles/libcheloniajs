@@ -35,6 +35,10 @@ export type ResTypeUnsub = 'unsub';
 export type ResTypePub = 'pub';
 export type ResTypeEntry = 'entry';
 
+// A v4 UUID. Loose on purpose: it only pins the five hyphen-separated groups,
+// which is enough to keep an arbitrary string out.
+export type UUIDV4 = `${string}-${string}-${string}-${string}-${string}`;
+
 export type CheloniaConfig = {
   // eslint-disable-next-line no-unused-vars
   [_ in `preOp_${SPOpType}`]?: (message: SPMessage, state: ChelContractState) => boolean;

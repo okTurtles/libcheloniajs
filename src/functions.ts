@@ -5,6 +5,7 @@ import { blake2b256stream } from '@chelonia/multiformats/blake2bstream'
 import { CID } from '@chelonia/multiformats/cid'
 // Use 'buffer' instead of 'node:buffer' to polyfill in the browser
 import { Buffer } from 'buffer'
+import type { UUIDV4 } from './types.js'
 
 // Values from https://github.com/multiformats/multicodec/blob/master/table.csv
 export const multicodes: Record<string, number> = {
@@ -81,21 +82,21 @@ export const strToB64 = (str: string): string => strToBuf(str).toString('base64'
 export const bytesToB64 = (ary: Uint8Array): string => Buffer.from(ary).toString('base64')
 
 // `crypto.randomUUID` only exists on https and on localhost, so anything served
-// over plain http (a LAN address, say) has to build its own. `getRandomValues`
-// is there either way.
-export const randomUUID = (): `${string}-${string}-${string}-${string}-${string}` => {
-  if (typeof globalThis.crypto?.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID()
+// over plain http (a LAN address, say) needs a fallback. `getRandomValues` is
+// there either way. Which one to use is settled here, not on every call.
+export const randomUUID: () => UUIDV4 = (() => {
+  if (typeof crypto === 'object' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID.bind(crypto)
   }
-  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
-  // Version 4 and variant 1, the two fields RFC 9562 pins down.
-  bytes[6] = (bytes[6] & 0x0f) | 0x40
-  bytes[8] = (bytes[8] & 0x3f) | 0x80
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-` +
-    `${hex.slice(16, 20)}-${hex.slice(20)}` as
-    `${string}-${string}-${string}-${string}-${string}`
-}
+  return () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(16))
+    // Version 4 and variant 1, the two fields RFC 9562 pins down.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40
+    bytes[8] = (bytes[8] & 0x3f) | 0x80
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  }
+})()
 
 // Generate an UUID from a `PushSubscription'
 export const getSubscriptionId = async (
