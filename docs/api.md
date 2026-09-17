@@ -299,7 +299,7 @@ The most useful exported types and values (re-exported from the package root):
 | `KV_NOOP` | `src/kv.ts` | `Symbol.for('@chelonia/lib/KV_NOOP')` — return from an updater to abort the write. |
 | `DEFAULT_SNAPSHOT_INTERVAL` / `defaultJournalConfig` | `src/journal.ts` | Default snapshot cadence, and a fresh copy of the journal block Chelonia starts from. See [`configure.md`](./configure.md#journal-configuration). |
 | `REDACTION_ERROR_SENTINEL` / `REDACTION_NON_JSON_SAFE_SENTINEL` | `src/journal.ts` | Stored in place of a redactor result when the redactor threw, or returned a value JSON cannot round-trip losslessly. See [Redactions](./journal.md#redactions). |
-| `defaultDiff` / `defaultApplyPatch` / `shortHashRedactor` / `applyRedactions` / `hasHiddenChange` / `synthesizeRedactedChangeOps` / `structurallyEqual` / `cloneValue` | `src/journal.ts` | Diff, patch and redaction primitives, exported for custom `diff` / `applyPatch` pipelines. See [Low-level redaction helpers](./journal.md#low-level-redaction-helpers). |
+| `defaultDiff` / `defaultApplyPatch` / `shortHashRedactor` / `applyRedactions` / `hasHiddenChange` / `synthesizeRedactedChangeOps` | `src/journal.ts` | Diff, patch and redaction primitives, exported for custom `diff` / `applyPatch` pipelines. See [Low-level redaction helpers](./journal.md#low-level-redaction-helpers). |
 
 ## Errors
 

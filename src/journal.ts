@@ -24,7 +24,14 @@
 
 import { blake32Hash } from './functions.js'
 import sbp from '@sbp/sbp'
-import { has } from 'turtledash'
+import {
+  cloneValue,
+  deepEqualJSONType,
+  has,
+  isPlainObject,
+  readJSONIndex,
+  safeDefine
+} from 'turtledash'
 import { ChelErrorJournalCorrupt } from './errors.js'
 import type { SPMessage } from './SPMessage.js'
 import type {
@@ -71,95 +78,6 @@ export function pointerToSegments (pointer: string): string[] {
 export function parseDottedPath (path: string): string[] {
   if (path === '') return []
   return path.split('.')
-}
-
-// ---------------------------------------------------------------------------
-// Plain-object / array helpers
-// ---------------------------------------------------------------------------
-
-function isPlainObject (v: unknown): v is Record<string, unknown> {
-  if (v === null || typeof v !== 'object') return false
-  if (Array.isArray(v)) return false
-  const proto = Object.getPrototypeOf(v)
-  return proto === Object.prototype || proto === null
-}
-
-// Read array element `i`, reporting a hole (a missing index in a sparse
-// array) as `null`.
-//
-// JSON has no representation for a hole: `JSON.stringify` writes `null` in
-// its place. A plain `arr[i]` read yields `undefined` instead, which the
-// diff interprets as "index absent" and turns into an `add` / `remove` —
-// ops that `defaultApplyPatch` applies with `splice`, shifting every later
-// index and desynchronising the reconstructed state from the real one. So
-// every traversal in this module reads holes as `null`, which is both what
-// persistence produces and what the "plain JSON state" contract implies.
-function readIndex (arr: unknown[], i: number): unknown {
-  return i in arr ? arr[i] : null
-}
-
-// Write `value` at `key` on `obj` without invoking inherited setters. This
-// is the single write primitive for every object the journal builds or
-// mutates: clones, JSON-safety normalization, redaction output and patch
-// application all go through it.
-//
-// Why this matters: `obj[key] = value` on a plain object will trigger any
-// setter inherited from the prototype chain. The most important case is
-// `key === '__proto__'`: the assignment form invokes the inherited
-// `Object.prototype.__proto__` setter and re-parents `obj`. Using
-// `Object.defineProperty` instead defines an *own* data property literally
-// named `"__proto__"` that shadows the accessor — `Object.prototype` is
-// never touched and `Object.getPrototypeOf(obj)` is unchanged. The same
-// reasoning covers any user-defined accessor on the prototype chain.
-function safeDefine (obj: Record<string, unknown>, key: string, value: unknown): void {
-  Object.defineProperty(obj, key, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true
-  })
-}
-
-export function cloneValue<T> (v: T): T {
-  // Minimal structural clone for plain JSON-ish values. Functions, Dates,
-  // Maps, Sets, etc. fall through and are returned as-is — Chelonia state
-  // is plain JSON in practice, so this is enough.
-  //
-  // Round-trip caveat: `cloneValue` faithfully preserves own keys whose
-  // value is `undefined` (`{ a: undefined }` clones to `{ a: undefined }`),
-  // but `defaultDiff` treats `undefined` on either side as "key absent"
-  // and emits an `add`/`remove`. Reconstructing through diff+apply
-  // therefore drops such keys. This is consistent with JSON semantics
-  // (`JSON.stringify({ a: undefined })` is `"{}"`) and matches the
-  // documented "plain JSON state" contract; states that rely on
-  // explicit-undefined keys must supply a custom `diff` / `applyPatch`.
-  // Array holes, by contrast, are normalized to `null` (see `readIndex`),
-  // so a clone is always dense.
-  if (v === null || typeof v !== 'object') return v
-  if (Array.isArray(v)) {
-    // `Array.prototype.map` preserves holes, so build the copy index by
-    // index through `readIndex` — a clone that is handed to the diff must
-    // already be dense (see `readIndex`).
-    const src = v as unknown[]
-    const out: unknown[] = new Array(src.length)
-    for (let i = 0; i < src.length; i++) {
-      out[i] = cloneValue(readIndex(src, i))
-    }
-    return (out as unknown) as T
-  }
-  if (isPlainObject(v)) {
-    // Preserve the source prototype so `Object.create(null)` containers
-    // (which Chelonia uses throughout contract state — `_vm`, `_volatile`,
-    // etc.) round-trip as null-prototype objects rather than silently
-    // gaining `Object.prototype`. `deepStrictEqual` against the live
-    // state would otherwise diverge on prototype.
-    const out: Record<string, unknown> = Object.create(Object.getPrototypeOf(v))
-    for (const k of Object.keys(v)) {
-      safeDefine(out, k, cloneValue((v as Record<string, unknown>)[k]))
-    }
-    return (out as unknown) as T
-  }
-  return v
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +130,7 @@ function diffInto (
   // If either side is a primitive or the container shape differs, replace
   // the whole subtree.
   if (bIsArr !== aIsArr || bIsObj !== aIsObj || (!bIsArr && !bIsObj)) {
-    if (!shallowEqualPrimitives(before, after)) {
+    if (!deepEqualJSONType(before, after)) {
       out.push({ op: 'replace', path, value: cloneValue(after) })
     }
     return
@@ -223,17 +141,17 @@ function diffInto (
     const aArr = after as unknown[]
     const minLen = Math.min(bArr.length, aArr.length)
     for (let i = 0; i < minLen; i++) {
-      // `readIndex`, not `bArr[i]`: a hole must compare as `null` rather
+      // `readJSONIndex`, not `bArr[i]`: a hole must compare as `null` rather
       // than as an absent index, or the emitted add/remove would splice
       // the array and shift every later element.
-      diffInto(readIndex(bArr, i), readIndex(aArr, i), [...segments, String(i)], out)
+      diffInto(readJSONIndex(bArr, i), readJSONIndex(aArr, i), [...segments, String(i)], out)
     }
     if (aArr.length > bArr.length) {
       for (let i = bArr.length; i < aArr.length; i++) {
         out.push({
           op: 'add',
           path: segmentsToPointer([...segments, String(i)]),
-          value: cloneValue(readIndex(aArr, i))
+          value: cloneValue(readJSONIndex(aArr, i))
         })
       }
     } else if (bArr.length > aArr.length) {
@@ -271,60 +189,6 @@ function diffInto (
       diffInto(bObj[k], aObj[k], [...segments, k], out)
     }
   }
-}
-
-function shallowEqualPrimitives (a: unknown, b: unknown): boolean {
-  // Used only when we've already established neither side is a container
-  // we'd recurse into. NaN-aware so NaN equals NaN (avoids spurious diffs).
-  if (a === b) return true
-  if (typeof a === 'number' && typeof b === 'number' &&
-      Number.isNaN(a) && Number.isNaN(b)) return true
-  return false
-}
-
-// Deep equality using exactly the same notion of "changed" as
-// `defaultDiff`: `a` and `b` are equal iff `defaultDiff(a, b)` would be
-// empty. Keeping the two in lock-step matters because this predicate
-// decides whether a change hidden behind a constant redactor gets its own
-// journal entry; a looser or stricter notion would either invent churn or
-// keep hiding real changes.
-//
-// Notably: `undefined` on one side only is a change (the diff emits
-// add/remove), NaN equals NaN, array holes compare as `null` (see
-// `readIndex`), and non-plain containers (Date, Map, class instances) are
-// only equal by reference — mirroring `defaultDiff`, which emits a
-// wholesale `replace` for them.
-export function structurallyEqual (a: unknown, b: unknown): boolean {
-  if (a === b) return true
-  if (a === undefined || b === undefined) return false
-  const aIsArr = Array.isArray(a)
-  const bIsArr = Array.isArray(b)
-  const aIsObj = isPlainObject(a)
-  const bIsObj = isPlainObject(b)
-  if (aIsArr !== bIsArr || aIsObj !== bIsObj) return false
-  if (aIsArr && bIsArr) {
-    const aArr = a as unknown[]
-    const bArr = b as unknown[]
-    if (aArr.length !== bArr.length) return false
-    for (let i = 0; i < aArr.length; i++) {
-      if (!structurallyEqual(readIndex(aArr, i), readIndex(bArr, i))) return false
-    }
-    return true
-  }
-  if (aIsObj && bIsObj) {
-    const aObj = a as Record<string, unknown>
-    const bObj = b as Record<string, unknown>
-    const aKeys = Object.keys(aObj)
-    if (aKeys.length !== Object.keys(bObj).length) return false
-    for (const k of aKeys) {
-      // Own properties only — never let the prototype chain make two
-      // states look alike.
-      if (!has(bObj, k)) return false
-      if (!structurallyEqual(aObj[k], bObj[k])) return false
-    }
-    return true
-  }
-  return shallowEqualPrimitives(a, b)
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +396,7 @@ export const REDACTION_NON_JSON_SAFE_SENTINEL = '[REDACTION_NON_JSON_SAFE]'
 // the current ancestor chain, so shared (DAG-shaped) references remain
 // allowed exactly as they are for `JSON.stringify`.
 //
-// Note the deliberate asymmetry with `readIndex`, which reads a hole in
+// Note the deliberate asymmetry with `readJSONIndex`, which reads a hole in
 // *contract state* as `null`: state is data the journal must record
 // faithfully, and `null` is its lossless JSON equivalent, whereas a hole in
 // a *redactor result* is a bug in caller code that is better surfaced
@@ -898,7 +762,7 @@ function resolveAtSegments (
     if (Array.isArray(current)) {
       const idx = Number(seg)
       if (!Number.isInteger(idx) || idx < 0 || idx >= current.length) return notFound
-      current = readIndex(current, idx)
+      current = readJSONIndex(current, idx)
     } else {
       if (!has(current as Record<string, unknown>, seg)) return notFound
       current = (current as Record<string, unknown>)[seg]
@@ -975,7 +839,7 @@ export function hasHiddenChange (
     // No visible change, so any change is hidden by definition. Compare the
     // unredacted originals directly instead of diffing them into a throwaway
     // patch (which would clone the hidden value on every call).
-    return !structurallyEqual(before.original, after.original)
+    return !deepEqualJSONType(before.original, after.original)
   }
   if (visiblePaths.some((p) => p.path === '')) return false
   const visible = new Set(visiblePaths.map((p) => p.path))
@@ -1009,7 +873,7 @@ export function synthesizeRedactedChangeOps (
     // Absent before: the location is new, so the diff already emits an
     // `add` carrying the redacted value.
     if (before === undefined) continue
-    if (structurallyEqual(before.original, after.original)) continue
+    if (deepEqualJSONType(before.original, after.original)) continue
     // The change is already fully visible through the diff: the exact
     // location, or an ancestor replaced wholesale. O(pointer depth).
     if (coveredByPatch(idx, pointer)) continue
@@ -1696,7 +1560,7 @@ export default sbp('sbp/selectors/register', {
     const rootState = sbp(this.config.stateSelector) as ChelRootState
     const j = rootState?.contracts?.[contractID]?._journal
     if (!j) return undefined
-    // Use the module-local deep clone so `undefined` values inside
+    // Use the shared structural clone so `undefined` values inside
     // snapshots / patch payloads survive (a JSON round-trip would drop
     // them) and so any pathological references cannot throw the way
     // `JSON.stringify` would on cycles.

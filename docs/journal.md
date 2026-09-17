@@ -320,6 +320,9 @@ redaction behaviour). Normal use of the journal never calls them: the
 recorder applies redactions, detects hidden changes and emits markers
 on its own.
 
+For structural cloning and JSON-shaped deep equality, import `cloneValue`
+and `deepEqualJSONType` from `turtledash`.
+
 #### `applyRedactions(state, redactions, contractName, sites?)`
 
 Deep-clones `state` and applies each `{ path, redact }` directive to
@@ -359,24 +362,6 @@ that the diff did not already cover (`redactedAfter` is the redacted
 after-projection, used to read the value each marker writes back over
 itself). This is what produces the markers described in [Changes behind
 a constant redactor](#changes-behind-a-constant-redactor).
-
-#### `structurallyEqual(a, b)`
-
-Deep equality defined as "`defaultDiff(a, b)` would be empty": own keys
-only, `NaN` equals `NaN`, array holes compare as `null`, `undefined` on
-one side only is a difference, and non-plain containers (`Date`, `Map`,
-class instances) are equal only by reference. A custom pipeline that
-substitutes its own equality must keep it in lock-step with its own
-diff, or markers will either invent churn or keep hiding real changes.
-
-#### `cloneValue(value)`
-
-The structural clone the journal itself uses: plain objects (prototype
-preserved, so `Object.create(null)` containers stay that way) and dense
-arrays are copied deeply, everything else is returned by reference. Own
-keys whose value is `undefined` are preserved, array holes are read as
-`null`. Useful when a custom pipeline needs to snapshot state without
-the lossiness of a JSON round-trip.
 
 ### Changes behind a constant redactor
 

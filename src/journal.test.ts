@@ -1,11 +1,11 @@
 import * as assert from 'node:assert'
 import { describe, it } from 'node:test'
+import { cloneValue, deepEqualJSONType } from 'turtledash'
 import {
   DEFAULT_SNAPSHOT_INTERVAL,
   REDACTION_ERROR_SENTINEL,
   REDACTION_NON_JSON_SAFE_SENTINEL,
   applyRedactions,
-  cloneValue,
   defaultApplyPatch,
   defaultDiff,
   defaultJournalConfig,
@@ -15,7 +15,6 @@ import {
   pointerToSegments,
   segmentsToPointer,
   shortHashRedactor,
-  structurallyEqual,
   synthesizeRedactedChangeOps,
   unescapePointerSegment
 } from './journal.js'
@@ -267,10 +266,10 @@ describe('journal: defaultApplyPatch', () => {
     for (const [before, after] of fixtures) {
       const out = defaultApplyPatch(before, defaultDiff(before, after))
       // `deepStrictEqual` reads a hole as `undefined`, so compare through
-      // the module's own equality too: it is the notion `reconstruct`
-      // ultimately has to satisfy.
+      // the JSON-shaped equality used by `defaultDiff`: it is the notion
+      // `reconstruct` ultimately has to satisfy.
       assert.ok(
-        structurallyEqual(out, after),
+        deepEqualJSONType(out, after),
         `failed for ${JSON.stringify(before)} -> ${JSON.stringify(after)}`
       )
       assert.deepStrictEqual(
@@ -671,7 +670,7 @@ describe('journal: applyRedactions', () => {
       assert.deepStrictEqual(out.a, [REDACTION_NON_JSON_SAFE_SENTINEL, 'x'])
       assert.ok(0 in out.a)
       // Storing it and reading it back must yield the same value.
-      assert.ok(structurallyEqual(JSON.parse(JSON.stringify(out)), out))
+      assert.ok(deepEqualJSONType(JSON.parse(JSON.stringify(out)), out))
       assert.ok(warnings.some(w => w.includes('sparse array')))
     } finally {
       console.warn = orig
@@ -1027,12 +1026,12 @@ describe('journal: JSON-safety acceptance and normalization agree', () => {
         safe ? 'accepted values must not warn' : 'rejected values must warn'
       )
       assert.strictEqual(containsSentinel(out), sentinel ?? !safe)
-      if (safe) assert.ok(structurallyEqual(out, value))
+      if (safe) assert.ok(deepEqualJSONType(out, value))
       // The property that actually matters: whatever is stored must survive
-      // persistence as the same value, judged by the journal's own notion of
-      // equality (the one `defaultDiff` uses).
-      assert.ok(structurallyEqual(JSON.parse(JSON.stringify(out)), out))
-      // `structurallyEqual` compares arrays index by index, so it cannot see
+      // persistence as the same value, judged by the equality `defaultDiff`
+      // uses.
+      assert.ok(deepEqualJSONType(JSON.parse(JSON.stringify(out)), out))
+      // `deepEqualJSONType` compares arrays index by index, so it cannot see
       // a stowaway non-index key. `deepStrictEqual` can, which is what makes
       // this the assertion that pins the round-trip end to end.
       if (exactRoundTrip ?? true) {
@@ -1065,7 +1064,7 @@ describe('journal: JSON-safety acceptance and normalization agree', () => {
     const negativeZero = redactTo(-0)
     assert.ok(Object.is(negativeZero, -0))
     assert.ok(Object.is(JSON.parse(JSON.stringify(negativeZero)), 0))
-    assert.ok(structurallyEqual(negativeZero, 0))
+    assert.ok(deepEqualJSONType(negativeZero, 0))
 
     const nullProto = redactTo(Object.assign(Object.create(null), { a: 1 }))
     assert.strictEqual(Object.getPrototypeOf(nullProto), null)
@@ -1073,11 +1072,11 @@ describe('journal: JSON-safety acceptance and normalization agree', () => {
       Object.getPrototypeOf(JSON.parse(JSON.stringify(nullProto))),
       Object.prototype
     )
-    assert.ok(structurallyEqual(nullProto, { a: 1 }))
+    assert.ok(deepEqualJSONType(nullProto, { a: 1 }))
   })
 })
 
-describe('journal: structurallyEqual', () => {
+describe('journal: deepEqualJSONType', () => {
   it('agrees with defaultDiff on what counts as a change', () => {
     const samples: Array<[unknown, unknown]> = [
       [1, 1],
@@ -1101,7 +1100,7 @@ describe('journal: structurallyEqual', () => {
     ]
     for (const [a, b] of samples) {
       assert.strictEqual(
-        structurallyEqual(a, b),
+        deepEqualJSONType(a, b),
         defaultDiff(a, b).length === 0,
         `disagreed on ${JSON.stringify(a)} vs ${JSON.stringify(b)}`
       )
@@ -1111,10 +1110,10 @@ describe('journal: structurallyEqual', () => {
   it('compares own properties only', () => {
     // Null-prototype objects are the common shape in Chelonia state.
     const nullProto = Object.assign(Object.create(null), { a: 1 })
-    assert.strictEqual(structurallyEqual(nullProto, { a: 1 }), true)
-    assert.strictEqual(structurallyEqual(Object.create(null), {}), true)
+    assert.strictEqual(deepEqualJSONType(nullProto, { a: 1 }), true)
+    assert.strictEqual(deepEqualJSONType(Object.create(null), {}), true)
     // Same key count, different keys: not equal (and the diff agrees).
-    assert.strictEqual(structurallyEqual({ a: 1 }, { b: 1 }), false)
+    assert.strictEqual(deepEqualJSONType({ a: 1 }, { b: 1 }), false)
     assert.ok(defaultDiff({ a: 1 }, { b: 1 }).length > 0)
   })
 
@@ -1122,9 +1121,9 @@ describe('journal: structurallyEqual', () => {
     // Matches defaultDiff, which emits a wholesale replace for values it
     // won't recurse into.
     const d = new Date(0)
-    assert.strictEqual(structurallyEqual(d, d), true)
-    assert.strictEqual(structurallyEqual(new Date(0), new Date(0)), false)
-    assert.strictEqual(structurallyEqual(Object.create({ inherited: 1 }), {}), false)
+    assert.strictEqual(deepEqualJSONType(d, d), true)
+    assert.strictEqual(deepEqualJSONType(new Date(0), new Date(0)), false)
+    assert.strictEqual(deepEqualJSONType(Object.create({ inherited: 1 }), {}), false)
   })
 })
 
