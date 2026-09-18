@@ -104,17 +104,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // Opt-in by default: enabling it imposes per-event CPU (deep clones
             // + diff) and persisted-state cost (up to ~2X entries plus full
             // snapshots) on every active contract. Consumers turn it on via
-            // `chelonia/configure`. Function fields (`redactions[*].redact`,
-            // `diff`, `applyPatch`) are intentionally left unset here so they
-            // survive `merge()` (which deep-clones via JSON and would otherwise
-            // strip them); `chelonia/configure` reattaches them in a dedicated
-            // pass.
-            journal: {
-                enabled: false,
-                snapshotInterval: journal_js_1.DEFAULT_SNAPSHOT_INTERVAL,
-                contractIDs: [],
-                redactions: []
-            },
+            // `chelonia/configure`. See `defaultJournalConfig` for why the block
+            // is deliberately partial (function fields must survive `merge()`;
+            // `markRedactedChanges` is derived, not stored).
+            journal: (0, journal_js_1.defaultJournalConfig)(),
             unwrapMaybeEncryptedData: encryptedData_js_1.unwrapMaybeEncryptedData
         };
         // Used in publishEvent to cancel sending events after reset (logout)
@@ -292,15 +285,21 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // journals. This is the documented "don't journal" escape hatch
             // and is symmetric with the way other config blocks accept a
             // null/empty value to mean "off".
-            this.config.journal = {
-                enabled: false,
-                snapshotInterval: journal_js_1.DEFAULT_SNAPSHOT_INTERVAL,
-                contractIDs: [],
-                redactions: []
-            };
+            this.config.journal = (0, journal_js_1.defaultJournalConfig)();
             (0, sbp_1.default)('chelonia/journal/clear');
         }
         else if (journalOverride !== undefined) {
+            // The journal block must be an object. Anything else (a number, a
+            // boolean, a string, an array) makes every field lookup below come
+            // back empty, so the call would silently do nothing at all — the
+            // exact "silently surprising effects" the per-field checks that
+            // follow exist to prevent. `null` is already handled above as the
+            // documented reset, so it cannot reach here.
+            if (typeof journalOverride !== 'object' || Array.isArray(journalOverride)) {
+                throw new TypeError('[chelonia][journal] config.journal must be an object, `null` to ' +
+                    'reset the whole block to disabled defaults, or omitted to leave ' +
+                    `it alone; got ${Array.isArray(journalOverride) ? 'array' : typeof journalOverride}`);
+            }
             // Reject `null` per individual field: docs/configure.md documents that
             // only the typed values are accepted and that callers should
             // omit a field (or pass `undefined`) to leave it alone. Silently
@@ -325,30 +324,40 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             rejectNull('snapshotInterval');
             rejectNull('contractIDs');
             rejectNull('redactions');
+            rejectNull('markRedactedChanges');
             rejectNull('diff');
             rejectNull('applyPatch');
-            if (!this.config.journal) {
-                // No prior journal block (e.g. configure called before _init in
-                // tests). Seed with the documented defaults so subsequent
-                // field-by-field overrides have somewhere to land.
-                this.config.journal = {
-                    enabled: false,
-                    snapshotInterval: journal_js_1.DEFAULT_SNAPSHOT_INTERVAL,
-                    contractIDs: [],
-                    redactions: []
-                };
-            }
-            const target = this.config.journal;
-            if (journalOverride.enabled !== undefined) {
-                // `resolveJournalConfig` checks `cfg?.enabled === true` (strict
-                // equality), so any non-boolean truthy value (`"true"`, `1`,
-                // etc.) would silently leave journaling disabled. Fail loudly
-                // instead — same rationale as `rejectNull`.
-                if (typeof journalOverride.enabled !== 'boolean') {
-                    throw new TypeError(`[chelonia][journal] config.journal.enabled must be a boolean; got ${typeof journalOverride.enabled}`);
+            // Everything below validates into `staged` and nothing touches the
+            // live config until the whole override has been accepted. A rejected
+            // call must leave journaling exactly as it was: applying it halfway
+            // would journal events under directives the caller never got
+            // accepted — e.g. `{ enabled: true, redactions: [<malformed>] }`
+            // throws, and would otherwise have started journaling under the
+            // *previous* (possibly empty) redaction set.
+            const staged = {};
+            let intervalWarning;
+            // Stage `name` only if the caller supplied it, and only if it has
+            // the declared type. Wrong types must fail loudly rather than be
+            // coerced, because the read path uses strict comparisons: e.g.
+            // `resolveJournalConfig` checks `cfg?.enabled === true`, so a truthy
+            // `"true"` would silently leave journaling disabled, and it reads
+            // `cfg?.markRedactedChanges ?? (derived)`, so a truthy `"false"`
+            // would silently keep the marking on instead of opting out. Same
+            // rationale as `rejectNull` above.
+            const stageTypedField = (name, type) => {
+                const value = journalOverride[name];
+                if (value === undefined)
+                    return;
+                const actualType = typeof value;
+                if (actualType !== type) {
+                    throw new TypeError(`[chelonia][journal] config.journal.${name} must be a ${type}; got ${actualType}`);
                 }
-                target.enabled = journalOverride.enabled;
-            }
+                staged[name] = value;
+            };
+            stageTypedField('enabled', 'boolean');
+            stageTypedField('markRedactedChanges', 'boolean');
+            stageTypedField('diff', 'function');
+            stageTypedField('applyPatch', 'function');
             if (journalOverride.snapshotInterval !== undefined) {
                 // `snapshotInterval` directly bounds journal retention. Reject
                 // non-finite / non-positive / non-integer values that would break
@@ -356,11 +365,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // retention nonsensical, fractions break the boundary arithmetic)
                 // and fall back to the default in that case.
                 const si = journalOverride.snapshotInterval;
-                target.snapshotInterval = (Number.isInteger(si) && si > 0)
+                staged.snapshotInterval = (Number.isInteger(si) && si > 0)
                     ? si
                     : journal_js_1.DEFAULT_SNAPSHOT_INTERVAL;
-                if (target.snapshotInterval !== si) {
-                    console.warn(`[chelonia][journal] invalid snapshotInterval ${String(si)}; ` +
+                if (staged.snapshotInterval !== si) {
+                    // Deferred with the assignment: a call that ends up rejected must
+                    // not log a fallback it never applied.
+                    intervalWarning = (`[chelonia][journal] invalid snapshotInterval ${String(si)}; ` +
                         `falling back to ${journal_js_1.DEFAULT_SNAPSHOT_INTERVAL}`);
                 }
             }
@@ -368,7 +379,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 if (!Array.isArray(journalOverride.contractIDs)) {
                     throw new TypeError(`[chelonia][journal] config.journal.contractIDs must be an array; got ${typeof journalOverride.contractIDs}`);
                 }
-                target.contractIDs = journalOverride.contractIDs.slice();
+                staged.contractIDs = journalOverride.contractIDs.slice();
             }
             if (journalOverride.redactions !== undefined) {
                 if (!Array.isArray(journalOverride.redactions)) {
@@ -378,10 +389,27 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // `{ path, redact }` objects with the caller, who could then
                 // re-point `path` and silently change the live journal config.
                 // The `redact` function is intentionally shared by reference.
-                target.redactions = journalOverride.redactions.map(r => ({
-                    path: r.path,
-                    redact: r.redact
-                }));
+                //
+                // Validate each entry while copying it. A malformed directive is
+                // not a harmless no-op: a missing `path` makes the dotted-path
+                // parser throw on *every* projection of *every* event, which turns
+                // journaling into a stream of unusable placeholder entries and a
+                // permanently `undefined` `chelonia/journal/reconstruct`, while a
+                // non-function `redact` replaces every matched leaf with the
+                // redaction-error sentinel. Both are silent deaths from a one-key
+                // typo, so fail loudly here instead — same rationale as
+                // `rejectNull` and `stageTypedField` above.
+                staged.redactions = journalOverride.redactions.map((r, i) => {
+                    const path = r?.path;
+                    const redact = r?.redact;
+                    if (r === null || typeof r !== 'object' || Array.isArray(r) ||
+                        typeof path !== 'string' || typeof redact !== 'function') {
+                        throw new TypeError(`[chelonia][journal] config.journal.redactions[${i}] must be ` +
+                            '`{ path: string, redact: function }`; got ' +
+                            `path=${typeof path}, redact=${typeof redact}`);
+                    }
+                    return { path: r.path, redact: r.redact };
+                });
                 // We deliberately do NOT auto-clear journals here. Two reasons:
                 //   1. `redactions` contains user functions that cannot be
                 //      stably compared across process restarts (function
@@ -398,18 +426,21 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // redactions. Mixing entries across redaction sets will leave
                 // `reconstruct` output inconsistent until the next snapshot.
             }
-            if (journalOverride.diff !== undefined) {
-                if (typeof journalOverride.diff !== 'function') {
-                    throw new TypeError(`[chelonia][journal] config.journal.diff must be a function; got ${typeof journalOverride.diff}`);
-                }
-                target.diff = journalOverride.diff;
+            // The single commit point. Every check above either threw or
+            // produced a validated value, so the live block can never be left
+            // half-updated. Seeding the defaults is part of the commit for the
+            // same reason: a rejected call on a context that has no journal
+            // block yet (configure before `_init`, e.g. in tests) must leave it
+            // absent rather than materialize one.
+            if (!this.config.journal) {
+                this.config.journal = (0, journal_js_1.defaultJournalConfig)();
             }
-            if (journalOverride.applyPatch !== undefined) {
-                if (typeof journalOverride.applyPatch !== 'function') {
-                    throw new TypeError(`[chelonia][journal] config.journal.applyPatch must be a function; got ${typeof journalOverride.applyPatch}`);
-                }
-                target.applyPatch = journalOverride.applyPatch;
-            }
+            // Only the keys the caller actually supplied are present on
+            // `staged`, so omitted fields keep their live values — the
+            // documented "omit to leave alone" semantics.
+            Object.assign(this.config.journal, staged);
+            if (intervalWarning !== undefined)
+                console.warn(intervalWarning);
         }
         // using Object.assign here instead of merge to avoid stripping away imported modules
         if (config.contracts) {
