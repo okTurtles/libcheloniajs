@@ -320,7 +320,7 @@ jobs:
             printf -- '- Nobody can answer questions. If the skill needs user input or hits an error, report the problem in your final response and stop.\n'
             printf -- '- Base ref: `%s` (pass it as `--base`). This checkout has no local `main` or `master` branch.\n' "$REVIEW_BASE"
             if [ "$MERGE_CONFLICT" = "true" ]; then
-              printf -- '- The PR branch conflicts with `%s` and was not merged, so review it as-is against its merge base with `origin/%s` (the base ref above).\n' "$BASE_REF" "$BASE_REF"
+              printf -- '- The PR branch conflicts with `%s` and was not merged. The base ref above is its merge base with `origin/%s`, so the PR is reviewed as-is against that. Do not pass `origin/%s` as `--base`: the skill would stop on the conflict.\n' "$BASE_REF" "$BASE_REF" "$BASE_REF"
             fi
             printf -- '- Output file: write the review to `%s`, not to `REVIEW.md` in the project root (the checkout is read-only).\n' "$REVIEW_OUTPUT_FILE"
             printf -- '- Model for the review header: `%s`.\n' "$REVIEW_MODEL"
