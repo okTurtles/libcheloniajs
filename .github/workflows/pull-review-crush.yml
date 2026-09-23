@@ -13,6 +13,18 @@ jobs:
       (github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'COLLABORATOR')
+    # WARNING: the "Run agentic review" sandbox assumes a throwaway
+    # GitHub-hosted VM. On a self-hosted runner, whose disk outlives the job:
+    #   a. Stop binding .git/objects read-write: swapped objects would reach
+    #      later checkouts. Use a pre-created private GIT_OBJECT_DIRECTORY
+    #      plus GIT_ALTERNATE_OBJECT_DIRECTORIES=.git/objects (if that dir is
+    #      missing, git finds no repo and the pre-flight silently passes).
+    #   b. Replace `--ro-bind / /`: it shows the networked agent every file
+    #      the runner user can read (SSH keys, cloud credentials).
+    #   c. Empty ~/.local/share/crush (crush loads its crush.json as config)
+    #      and .git/code-review before each run.
+    #   d. Provision bwrap and crush on the host instead of the install
+    #      step's apt/npm/sysctl changes.
     runs-on: ubuntu-latest
     concurrency:
       group: pr-review-crush-${{ github.event.issue.number }}
@@ -433,11 +445,12 @@ jobs:
           #     or hooks dir would let the agent plant commands that git
           #     later runs outside the sandbox (e.g. in the checkout
           #     action's post-job cleanup) with GH_TOKEN in its env. Git
-          #     never executes object data. Code outside the sandbox (the
-          #     result selection below and later steps) must treat files in
-          #     these writable paths as untrusted and never follow symlinks
-          #     out of them (a REVIEW.md symlink to /proc/self/environ would
-          #     leak GH_TOKEN);
+          #     never executes object data, and swapped objects are discarded
+          #     with the runner VM (see the self-hosted runner warning above
+          #     `runs-on`). Code outside the sandbox (the result selection
+          #     below and later steps) must treat files in these writable
+          #     paths as untrusted and never follow symlinks out of them (a
+          #     REVIEW.md symlink to /proc/self/environ would leak GH_TOKEN);
           #   - a tmpfs over the runner temp dir, hiding step scripts and
           #     runner-internal files such as GITHUB_ENV;
           #   - a tmpfs over the runner agent install dir (best-effort),
