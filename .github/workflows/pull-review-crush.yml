@@ -545,6 +545,12 @@ jobs:
           echo "::group::crush output (stdout)"
           cat /tmp/crush_output.txt
           echo "::endgroup::"
+          echo "::group::crush stderr"
+          cat /tmp/crush_stderr.txt
+          echo "::endgroup::"
+          if [ "$CRUSH_STATUS" -ne 0 ]; then
+            echo "::warning::crush exited with code $CRUSH_STATUS"
+          fi
 
           # The skill writes the review to REVIEW_OUTPUT_FILE and only prints
           # a summary, and crush stdout may also contain thought-process text
@@ -561,9 +567,8 @@ jobs:
             echo "::warning::No review found in $REVIEW_OUTPUT_FILE; using crush output instead"
             cp /tmp/crush_output.txt /tmp/agentic_review.txt
           else
-            echo "::warning::Agentic review via crush produced no review (exit code $CRUSH_STATUS)"
-            cat /tmp/crush_stderr.txt >&2
-            echo "Agentic review unavailable (crush encountered an error)." > /tmp/agentic_review.txt
+            echo "::warning::Agentic review via crush produced no review"
+            echo "Agentic review unavailable (crush produced no review)." > /tmp/agentic_review.txt
           fi
 
           echo "Agentic review complete ($(wc -c < /tmp/agentic_review.txt) bytes)"
