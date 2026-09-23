@@ -437,6 +437,40 @@ jobs:
           }
           EOF
 
+      # Installs the latest taoeffect/code-review skill on every run, so skill
+      # updates reach reviews without workflow changes (unpinned by design,
+      # like crush itself). `-g -a crush --copy` writes one plain copy to
+      # ~/.config/crush/skills, which the sandboxed crush scans. The skills
+      # CLI is a third-party npx package: it gets no GH_TOKEN (the skill repo
+      # is public, so an anonymous clone works) and runs from $HOME so the
+      # checkout stays untouched.
+      - name: Install code-review skill
+        if: steps.size-check.outputs.too_large == 'false'
+        env:
+          DISABLE_TELEMETRY: '1'
+          GH_TOKEN: ''
+        run: |
+          cd "$HOME"
+          npx --yes skills add taoeffect/code-review --skill code-review -g -a crush --copy -y
+
+          SKILL_FILE="$HOME/.config/crush/skills/code-review/SKILL.md"
+          if [ ! -f "$SKILL_FILE" ]; then
+            echo "::error::code-review skill install failed: $SKILL_FILE is missing"
+            exit 1
+          fi
+
+          # Log which skill version this run uses. skillFolderHash is the
+          # upstream commit SHA when the CLI's anonymous GitHub API lookup
+          # succeeds, else a content hash of the skill folder. The CLI keeps
+          # its lock file under $XDG_STATE_HOME/skills when that is set.
+          if [ -n "${XDG_STATE_HOME:-}" ]; then
+            LOCK_FILE="$XDG_STATE_HOME/skills/.skill-lock.json"
+          else
+            LOCK_FILE="$HOME/.agents/.skill-lock.json"
+          fi
+          SKILL_HASH=$(jq -r '.skills["code-review"].skillFolderHash // empty' "$LOCK_FILE" 2>/dev/null) || true
+          echo "Installed code-review skill (skillFolderHash: ${SKILL_HASH:-unknown})"
+
       - name: Run agentic review
         if: steps.size-check.outputs.too_large == 'false'
         run: |
