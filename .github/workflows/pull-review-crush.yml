@@ -452,6 +452,15 @@ jobs:
           # arrive as plain command arguments, and the stdio redirections
           # are also performed outside the sandbox, so neither requires
           # env vars inside it.
+
+          # `.crush` comes from the PR checkout, and bwrap follows symlinks
+          # in bind paths: a committed symlink such as `.crush -> ../../..`
+          # would make its bind below a writable bind of $HOME that also
+          # covers the $RUNNER_TEMP and runner-dir masks.
+          if [ -L .crush ]; then
+            echo "::error::.crush in the PR checkout is a symlink; refusing to bind it into the sandbox"
+            exit 1
+          fi
           mkdir -p "$HOME/.local/share/crush" .crush
 
           # bwrap needs every bind source to exist, and `.git` itself is
