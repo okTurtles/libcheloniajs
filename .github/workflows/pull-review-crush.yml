@@ -28,6 +28,9 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # File the code-review skill writes its review to. "Run agentic
+      # review" binds its directory read-write into the review sandbox.
+      REVIEW_OUTPUT_FILE: /tmp/review-output/REVIEW.md
       # ── Provider configuration ─────────────────────────────
       # Set via Settings → Secrets and variables → Actions → Variables:
       #   REVIEW_PROVIDER: openrouter | zai-coding-plan
@@ -389,14 +392,18 @@ jobs:
       # requests for its session, so `permissions.allowed_tools` alone can neither
       # grant nor restrict anything reliably. Enforcement is done via
       # `options.disabled_tools`, which removes tools from the agent entirely:
-      # mutation tools (edit/multiedit/write) are disabled to keep the review
-      # read-only, LSP/MCP tools are disabled because no LSPs or MCP servers
-      # are configured here, and crush introspection tools (crush_info,
-      # crush_logs) are disabled as irrelevant to reviewing. Everything else
-      # (bash, download, sourcegraph, etc.) stays available to improve review
-      # quality. The allowlist mirrors the enabled set as a belt-and-braces
-      # measure in case a future crush release stops auto-approving in
-      # non-interactive mode.
+      # edit/multiedit are disabled because a review never edits code,
+      # LSP/MCP tools are disabled because no LSPs or MCP servers are
+      # configured here, and crush_logs is disabled as irrelevant to
+      # reviewing. `write` stays enabled because the code-review skill writes
+      # its review to a file, and `crush_info` because the skill reads the
+      # configured models from it before launching crush workers for large
+      # diffs. The bwrap sandbox in "Run agentic review", not this list,
+      # keeps the checkout read-only: only a few dedicated paths are writable
+      # there. Everything else (bash, download, sourcegraph, etc.) stays
+      # available to improve review quality. The allowlist mirrors the
+      # enabled set as a belt-and-braces measure in case a future crush
+      # release stops auto-approving in non-interactive mode.
       - name: Install crush and bubblewrap
         if: steps.size-check.outputs.too_large == 'false'
         run: |
@@ -429,10 +436,10 @@ jobs:
             "options": {
               "context_paths": ["AGENTS.md", "CRUSH.md", "CLAUDE.md", "README.md"],
               "disable_metrics": true,
-              "disabled_tools": ["edit", "multiedit", "write", "lsp_diagnostics", "lsp_references", "lsp_restart", "list_mcp_resources", "read_mcp_resource", "crush_info", "crush_logs"]
+              "disabled_tools": ["edit", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "list_mcp_resources", "read_mcp_resource", "crush_logs"]
             },
             "permissions": {
-              "allowed_tools": ["agent", "agentic_fetch", "bash", "download", "fetch", "glob", "grep", "job_kill", "job_output", "ls", "sourcegraph", "todos", "view"]
+              "allowed_tools": ["agent", "agentic_fetch", "bash", "crush_info", "download", "fetch", "glob", "grep", "job_kill", "job_output", "ls", "sourcegraph", "todos", "view", "write"]
             }
           }
           EOF
@@ -481,7 +488,21 @@ jobs:
           #     below: GH_TOKEN and the rest of the runner env never
           #     enter the sandbox (--clearenv);
           #   - a read-only view of the filesystem, except the crush data
-          #     dir, a `.crush` dir in the workspace, and a private /tmp;
+          #     dir, a `.crush` dir in the workspace, a private /tmp, and
+          #     the paths the code-review skill writes to:
+          #       - `.git/objects`: its virtual merge (`git merge-tree
+          #         --write-tree`) stores objects there;
+          #       - `.git/code-review`: its run folders (diff, source
+          #         snapshot, working dir of its crush workers);
+          #       - the review output dir (the dir of REVIEW_OUTPUT_FILE).
+          #     The rest of `.git` stays read-only: a writable `.git/config`
+          #     or hooks dir would let the agent plant commands that git
+          #     later runs outside the sandbox (e.g. in the checkout
+          #     action's post-job cleanup) with GH_TOKEN in its env. Git
+          #     never executes object data. Later steps run unsandboxed, so
+          #     they must treat files in these writable paths as untrusted
+          #     and never follow symlinks out of them (a REVIEW.md symlink
+          #     to /proc/self/environ would leak GH_TOKEN);
           #   - a tmpfs over the runner temp dir, hiding step scripts and
           #     runner-internal files such as GITHUB_ENV;
           #   - a tmpfs over the runner agent install dir (best-effort),
@@ -501,6 +522,17 @@ jobs:
           # are also performed outside the sandbox, so neither requires
           # env vars inside it.
           mkdir -p "$HOME/.local/share/crush" .crush
+
+          # bwrap needs every bind source to exist, and `.git` itself is
+          # read-only inside the sandbox, so create the skill's run root
+          # here. The output dir starts empty so that only this run's
+          # review can be picked up; it lives under /tmp, so its bind must
+          # come after `--tmpfs /tmp`.
+          GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir)
+          mkdir -p "$GIT_COMMON_DIR/code-review"
+          REVIEW_OUTPUT_DIR=$(dirname "$REVIEW_OUTPUT_FILE")
+          rm -rf "$REVIEW_OUTPUT_DIR"
+          mkdir -p "$REVIEW_OUTPUT_DIR"
 
           # Mask any runner agent install dirs that exist, probing known
           # locations instead of hardcoding one path (the layout differs
@@ -533,6 +565,9 @@ jobs:
           BWRAP+=(
             --bind "$HOME/.local/share/crush" "$HOME/.local/share/crush"
             --bind "$PWD/.crush" "$PWD/.crush"
+            --bind "$GIT_COMMON_DIR/objects" "$GIT_COMMON_DIR/objects"
+            --bind "$GIT_COMMON_DIR/code-review" "$GIT_COMMON_DIR/code-review"
+            --bind "$REVIEW_OUTPUT_DIR" "$REVIEW_OUTPUT_DIR"
             --clearenv
             --setenv PATH "$PATH"
             --setenv HOME "$HOME"
