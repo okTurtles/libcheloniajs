@@ -579,10 +579,6 @@ jobs:
           cat /tmp/agentic_review.txt
           echo "::endgroup::"
 
-      - name: Use agentic review as final
-        run: |
-          cp /tmp/agentic_review.txt /tmp/final_review.txt
-
       - name: Post review comment
         run: |
           # GitHub rejects comment bodies over 65,536 characters, and
@@ -600,13 +596,13 @@ jobs:
             echo "<details>"
             echo "<summary>Click to expand review</summary>"
             echo ""
-            if [ "$(wc -c < /tmp/final_review.txt)" -le "$REVIEW_LIMIT" ]; then
-              cat /tmp/final_review.txt
+            if [ "$(wc -c < /tmp/agentic_review.txt)" -le "$REVIEW_LIMIT" ]; then
+              cat /tmp/agentic_review.txt
             else
               # Cut at a line boundary so no UTF-8 sequence or markdown line
               # is split, and close a code fence the cut left open, else the
               # note, </details> and footer below would render as code.
-              head -c "$REVIEW_LIMIT" /tmp/final_review.txt | sed '$d' | awk '
+              head -c "$REVIEW_LIMIT" /tmp/agentic_review.txt | sed '$d' | awk '
                 { print }
                 /^ ? ? ?(```|~~~)/ {
                   line = $0; sub(/^ */, "", line)
