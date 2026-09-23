@@ -568,12 +568,24 @@ jobs:
 
           echo "Agentic review complete ($(wc -c < /tmp/agentic_review.txt) bytes)"
 
+          # Log the review: it otherwise reaches only "Post review comment",
+          # and a failed post would lose it.
+          echo "::group::Selected review"
+          cat /tmp/agentic_review.txt
+          echo "::endgroup::"
+
       - name: Use agentic review as final
         run: |
           cp /tmp/agentic_review.txt /tmp/final_review.txt
 
       - name: Post review comment
         run: |
+          # GitHub rejects comment bodies over 65,536 characters, and
+          # split-mode reviews of large PRs can exceed that. Post at most
+          # REVIEW_LIMIT bytes of the review (bytes >= characters; the rest
+          # of the comment fits in the difference). "Run agentic review"
+          # logs the full review.
+          REVIEW_LIMIT=60000
           {
             echo "## Advanced AI Review"
             echo ""
@@ -583,7 +595,27 @@ jobs:
             echo "<details>"
             echo "<summary>Click to expand review</summary>"
             echo ""
-            cat /tmp/final_review.txt
+            if [ "$(wc -c < /tmp/final_review.txt)" -le "$REVIEW_LIMIT" ]; then
+              cat /tmp/final_review.txt
+            else
+              # Cut at a line boundary so no UTF-8 sequence or markdown line
+              # is split, and close a code fence the cut left open, else the
+              # note, </details> and footer below would render as code.
+              head -c "$REVIEW_LIMIT" /tmp/final_review.txt | sed '$d' | awk '
+                { print }
+                /^ ? ? ?(```|~~~)/ {
+                  line = $0; sub(/^ */, "", line)
+                  mark = substr(line, 1, 1); n = 1
+                  while (substr(line, n + 1, 1) == mark) n++
+                  if (fence == "") fence = substr(line, 1, n)
+                  else if (mark == substr(fence, 1, 1) && n >= length(fence) &&
+                           substr(line, n + 1) ~ /^[ \t]*$/) fence = ""
+                }
+                END { if (fence != "") print fence }
+              '
+              echo ""
+              echo "_Review truncated to fit GitHub's comment size limit. The full review is in the \"Run agentic review\" step log of the [workflow run](${RUN_URL})._"
+            fi
             echo ""
             echo "</details>"
             echo ""
