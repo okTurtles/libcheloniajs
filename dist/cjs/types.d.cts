@@ -18,6 +18,7 @@ export type ResTypeSub = 'sub';
 export type ResTypeUnsub = 'unsub';
 export type ResTypePub = 'pub';
 export type ResTypeEntry = 'entry';
+export type UUIDV4 = `${string}-${string}-${string}-${string}-${string}`;
 export type CheloniaConfig = {
     [_ in `preOp_${SPOpType}`]?: (message: SPMessage, state: ChelContractState) => boolean;
 } & {
@@ -160,6 +161,28 @@ export type KvMirrorEntry = {
         name: string;
         message: string;
     };
+    settled?: boolean;
+};
+export type KvServerValueStatus = 'absent' | 'present' | 'ahead';
+export type KvHeightAheadCause = {
+    requiredHeight: number;
+    exact: boolean;
+    localHeight: number | undefined;
+    etag: string | null;
+    status: number;
+};
+export type KvHeightAheadMode = 'sync' | 'reject';
+export type KvHeightListener = {
+    minHeight: number;
+    fire: () => void;
+};
+export type KvHeightWait = {
+    contractID: string;
+    key: string;
+    requiredHeight: number;
+    reason: Exclude<KvUpdateCtx['reason'], 'local'>;
+    off: () => void;
+    timer: ReturnType<typeof setTimeout> | undefined;
 };
 export type KvUpdateCtx = {
     contractID: string;
@@ -349,6 +372,10 @@ export type CheloniaContext = {
     kvPendingWrites: Map<string, number>;
     kvPendingLoads: Map<string, number>;
     kvOnUpdateActive: Map<string, number>;
+    kvHeightListeners: Map<string, Set<KvHeightListener>>;
+    kvHeightWaits: Map<string, KvHeightWait>;
+    kvRecoveries: Map<string, Promise<void>>;
+    kvHeightSession: AbortController;
     defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
 };
 export type ChelContractManifestBody = {
@@ -536,12 +563,29 @@ export type ChelKvOnConflictCallback = (args: {
     status: number;
     etag: string | null | undefined;
     /**
+     * What is known about the server value. `'absent'` means the server
+     * holds no value, `'present'` that `currentData` is the verified server
+     * value. `'ahead'` is only ever passed when the caller set
+     * `allowUnverifiedConflict: true`; without it, `chelonia/kv/set` rejects
+     * with `ChelErrorKvHeightAhead` instead of calling `onconflict`.
+     * See KV-REVAMPED.md §3.4.
+     */
+    currentStatus: KvServerValueStatus;
+    /**
+     * Set when `currentStatus` is `'ahead'`: the contract height the local
+     * contract must reach before the server value can be verified.
+     */
+    requiredHeight?: number;
+    /**
      * The decrypted/verified server data for the conflicting key.
+     * `undefined` means the server holds no value (`currentStatus` is
+     * `'absent'`).
      *
      * **Throws on access.** The runtime value is a lazy getter (see
      * `resolveData` in `src/chelonia.ts`) that forces decryption and
      * signature verification the first time it is read, and may reject
-     * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`.
+     * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`. When
+     * `currentStatus` is `'ahead'` it throws `ChelErrorKvHeightAhead`.
      * Access it inside a `try`/`catch` (falling back to `undefined` or
      * re-throwing as appropriate), or read `currentValue.data` directly
      * with the same precaution. The bundled slot API (`chelonia/kv/update`,

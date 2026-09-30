@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getSubscriptionId = exports.bytesToB64 = exports.strToB64 = exports.strToBuf = exports.bufToB64 = exports.b64ToStr = exports.b64ToBuf = exports.maybeParseCID = exports.parseCID = exports.multicodes = void 0;
+exports.getSubscriptionId = exports.randomUUID = exports.bytesToB64 = exports.strToB64 = exports.strToBuf = exports.bufToB64 = exports.b64ToStr = exports.b64ToBuf = exports.maybeParseCID = exports.parseCID = exports.multicodes = void 0;
 exports.createCIDfromStream = createCIDfromStream;
 exports.createCID = createCID;
 exports.blake32Hash = blake32Hash;
@@ -80,6 +80,22 @@ const strToB64 = (str) => (0, exports.strToBuf)(str).toString('base64');
 exports.strToB64 = strToB64;
 const bytesToB64 = (ary) => buffer_1.Buffer.from(ary).toString('base64');
 exports.bytesToB64 = bytesToB64;
+// `crypto.randomUUID` only exists on https and on localhost, so anything served
+// over plain http (a LAN address, say) needs a fallback. `getRandomValues` is
+// there either way. Which one to use is settled here, not on every call.
+exports.randomUUID = (() => {
+    if (typeof crypto === 'object' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID.bind(crypto);
+    }
+    return () => {
+        const bytes = crypto.getRandomValues(new Uint8Array(16));
+        // Version 4 and variant 1, the two fields RFC 9562 pins down.
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    };
+})();
 // Generate an UUID from a `PushSubscription'
 const getSubscriptionId = async (subscriptionInfo) => {
     const textEncoder = new TextEncoder();

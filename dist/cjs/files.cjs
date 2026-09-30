@@ -175,7 +175,7 @@ exports.aes256gcmHandlers = {
         const recordSize = (params?.rs ?? 1 << 16);
         if (!IKM) {
             IKM = new Uint8Array(33);
-            self.crypto.getRandomValues(IKM);
+            crypto.getRandomValues(IKM);
         }
         // The keyId is only used as a sanity check but otherwise it is not needed
         // Because the keyId is computed from the IKM, which is a secret, it is
@@ -309,18 +309,8 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 }
             })
         });
-        // TODO: Using `self.crypto.randomUUID` breaks the tests. Maybe upgrading
-        // Cypress would fix this.
-        const boundary = typeof self.crypto?.randomUUID === 'function'
-            ? self.crypto.randomUUID()
-            // If randomUUID not available, we instead compute a random boundary
-            // The indirect call to Math.random (`(0, Math.random)`) is to explicitly
-            // mark that we intend on using Math.random, even though it's not a
-            // CSPRNG, so that it's not reported as a bug in by static analysis tools.
-            : new Array(36)
-                .fill('')
-                .map(() => 'abcdefghijklmnopqrstuvwxyz'[((0, Math.random)() * 26) | 0])
-                .join('');
+        // Hyphens and hex digits are both fine in a multipart boundary.
+        const boundary = (0, functions_js_1.randomUUID)();
         const stream = (0, encodeMultipartMessage_1.default)(boundary, transferParts);
         const deletionToken = 'deletionToken' + (0, crypto_1.generateSalt)();
         const deletionTokenHash = (0, functions_js_1.blake32Hash)(deletionToken);

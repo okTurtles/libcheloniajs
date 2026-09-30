@@ -6,12 +6,13 @@ import { Secret } from './Secret.mjs';
 import { INVITE_STATUS } from './constants.mjs';
 import './db.mjs';
 import { encryptedIncomingData, encryptedOutgoingData } from './encryptedData.mjs';
-import { ChelErrorAlreadyProcessed, ChelErrorDBBadPreviousHEAD, ChelErrorFetchServerTimeFailed, ChelErrorForkedChain, ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnrecoverable, ChelErrorWarning } from './errors.mjs';
+import { ChelErrorAlreadyProcessed, ChelErrorDBBadPreviousHEAD, ChelErrorFetchServerTimeFailed, ChelErrorForkedChain, ChelErrorKeyAlreadyExists, ChelErrorResourceGone, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable, ChelErrorWarning } from './errors.mjs';
 import { CONTRACTS_MODIFIED, CONTRACT_HAS_RECEIVED_KEYS, CONTRACT_IS_SYNCING, EVENT_HANDLED, EVENT_PUBLISHED, EVENT_PUBLISHING_ERROR } from './events.mjs';
 import { multicodes } from './functions.mjs';
+import { notifyContractHeight } from './kv-height.mjs';
 import { clearReingestTrackerForContract, noteFutureEvent, noteReingestSuccess, pruneStaleEntries } from './reingestTracker.mjs';
 import { isSignedData, signedIncomingData } from './signedData.mjs';
-import { buildShelterAuthorizationHeader, deleteKeyHelper, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, keyAdditionProcessor, logEvtError, recreateEvent, updateKey, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
+import { buildShelterAuthorizationHeader, deleteKeyHelper, findKeyIdByName, findSuitablePublicKeyIds, findSuitableSecretKeyId, getContractIDfromKeyId, handleFetchResult, httpErrorDetail, httpErrorMessage, keyAdditionProcessor, logEvtError, recreateEvent, updateKey, validateKeyAddPermissions, validateKeyDelPermissions, validateKeyPermissions, validateKeyUpdatePermissions } from './utils.mjs';
 // Used for temporarily storing the missing decryption key IDs in a given
 // message
 const missingDecryptionKeyIdsMap = new WeakMap();
@@ -43,6 +44,20 @@ const getMsgMeta = function (message, contractID, state, index) {
         index
     };
     return result;
+};
+// Drops the local state of `contractID`: its reference counts, its
+// `state.contracts` entry (replaced by `null`, to remember that the
+// contract is gone, when `permanent` is set) and its contract state.
+const removeContractState = function (state, contractID, permanent) {
+    delete this.ephemeralReferenceCount[contractID];
+    if (permanent) {
+        // `ChelRootState` doesn't model the `null` marker.
+        this.config.reactiveSet(state.contracts, contractID, null);
+    }
+    else {
+        this.config.reactiveDel(state.contracts, contractID);
+    }
+    this.config.reactiveDel(state, contractID);
 };
 const keysToMap = function (keys_, height, authorizedKeys) {
     // Using cloneDeep to ensure that the returned object is serializable
@@ -411,6 +426,21 @@ export default sbp('sbp/selectors/register', {
         clearReprocessDebounceForContract(contractID);
         const contractName = state.contracts[contractID]?.type;
         if (!contractName) {
+            // An entry without a type is a contract whose first sync never
+            // completed: `retain` created the entry, then the sync failed (or a
+            // re-sync failed after clearing the contract's state). It isn't
+            // subscribed (applying the first message both sets the type and
+            // subscribes) and has no destructor to call. Unless re-syncing, drop
+            // what is left of it, which would otherwise linger in (persisted)
+            // state. It was never announced as added, so its removal isn't
+            // announced either.
+            if (state.contracts[contractID] &&
+                !params?.resync &&
+                !this.subscriptionSet.has(contractID)) {
+                console.debug(`[chelonia/private/removeImmediately] Removing ${contractID}, which never finished syncing`);
+                removeContractState.call(this, state, contractID, params?.permanent);
+                return;
+            }
             console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
                 contractID
             });
@@ -446,16 +476,7 @@ export default sbp('sbp/selectors/register', {
             }
         }
         else {
-            delete this.ephemeralReferenceCount[contractID];
-            if (params?.permanent) {
-                // Keep a 'null' state to remember permanently-deleted contracts
-                // (e.g., when they've been removed from the server)
-                this.config.reactiveSet(state.contracts, contractID, null);
-            }
-            else {
-                this.config.reactiveDel(state.contracts, contractID);
-            }
-            this.config.reactiveDel(state, contractID);
+            removeContractState.call(this, state, contractID, params?.permanent);
         }
         // Drop per-contract KV runtime state on every removal; the
         // `CONTRACTS_MODIFIED` listener also performs this cleanup via
@@ -627,7 +648,9 @@ export default sbp('sbp/selectors/register', {
                     if (r.status === 409) {
                         if (attempt + 1 > maxAttempts) {
                             console.error(`[chelonia] failed to publish ${entry.description()} after ${attempt} attempts`, entry);
-                            throw new Error(`publishEvent: ${r.status} - ${r.statusText}. attempt ${attempt}`);
+                            // The body is deliberately not read here: a 409 means the HEAD
+                            // raced, which the attempt count already explains.
+                            throw new ChelErrorUnexpectedHttpResponseCode(`publishEvent: ${httpErrorMessage(r)}. attempt ${attempt}`, { cause: r.status });
                         }
                         // create new entry
                         const randDelay = randomIntFromRange(0, 1500);
@@ -642,9 +665,14 @@ export default sbp('sbp/selectors/register', {
                         }
                     }
                     else {
-                        const message = (await r.json())?.message;
-                        console.error(`[chelonia] ERROR: failed to publish ${entry.description()}: ${r.status} - ${r.statusText}: ${message}`, entry);
-                        throw new Error(`publishEvent: ${r.status} - ${r.statusText}: ${message}`);
+                        // The same line the rest of the library raises HTTP errors with,
+                        // plus whatever the body explains.
+                        const detail = await httpErrorDetail(r);
+                        const description = `${httpErrorMessage(r)}${detail ? ` - ${detail}` : ''}`;
+                        console.error(`[chelonia] ERROR: failed to publish ${entry.description()}: ${description}`, entry);
+                        throw new ChelErrorUnexpectedHttpResponseCode(`publishEvent: ${description}`, {
+                            cause: r.status
+                        });
                     }
                 }
                 catch (e) {
@@ -1517,6 +1545,10 @@ export default sbp('sbp/selectors/register', {
         if (state.contracts[contractID] === null) {
             throw new ChelErrorResourceGone('Cannot sync permanently deleted contract ' + contractID);
         }
+        // The entry this sync adds to `this.pending` (see below), if any. It is
+        // removed when the sync ends, however it ends: after that, `handleEvent`
+        // must only accept events for contracts that are subscribed.
+        let pendingEntry;
         try {
             this.currentSyncs[contractID] = { firstSync: !state.contracts[contractID]?.type };
             sbp('okTurtles.events/emit', CONTRACT_IS_SYNCING, contractID, true);
@@ -1542,7 +1574,8 @@ export default sbp('sbp/selectors/register', {
                 // we're syncing a contract for the first time, make sure to add to pending
                 // so that handleEvents knows to expect events from this contract
                 if (!entry) {
-                    this.pending.push({ contractID });
+                    pendingEntry = { contractID };
+                    this.pending.push(pendingEntry);
                 }
             }
             this.postSyncOperations[contractID] =
@@ -1584,10 +1617,6 @@ export default sbp('sbp/selectors/register', {
                     added: [contractID],
                     removed: []
                 });
-                const entryIndex = this.pending.findIndex((entry) => entry?.contractID === contractID);
-                if (entryIndex !== -1) {
-                    this.pending.splice(entryIndex, 1);
-                }
                 console.debug(`[chelonia] added already synchronized ${contractID} to subscription set`);
             }
             else {
@@ -1603,6 +1632,14 @@ export default sbp('sbp/selectors/register', {
             throw e;
         }
         finally {
+            // Normally already gone: applying the first event removes it. Not when
+            // the sync failed before that, e.g. on a network error, or when the
+            // contract was already up to date.
+            if (pendingEntry) {
+                const index = this.pending.indexOf(pendingEntry);
+                if (index !== -1)
+                    this.pending.splice(index, 1);
+            }
             if (state[contractID]?._volatile?.resyncing) {
                 this.config.reactiveDel(state[contractID]._volatile, 'resyncing');
             }
@@ -2652,6 +2689,10 @@ const handleEvent = {
             sbp('okTurtles.events/emit', hash, contractID, message);
             sbp('okTurtles.events/emit', EVENT_HANDLED, contractID, message);
         }
+        // The local height has been committed above (even when processing
+        // errored), so KV values stamped at this height are now verifiable.
+        // Wake up KV operations waiting for it (see `src/kv-height.ts`).
+        notifyContractHeight(this, contractID, height);
     }
 };
 const notImplemented = (v) => {

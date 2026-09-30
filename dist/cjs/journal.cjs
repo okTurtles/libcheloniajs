@@ -32,9 +32,7 @@ exports.unescapePointerSegment = unescapePointerSegment;
 exports.segmentsToPointer = segmentsToPointer;
 exports.pointerToSegments = pointerToSegments;
 exports.parseDottedPath = parseDottedPath;
-exports.cloneValue = cloneValue;
 exports.defaultDiff = defaultDiff;
-exports.structurallyEqual = structurallyEqual;
 exports.defaultApplyPatch = defaultApplyPatch;
 exports.applyRedactions = applyRedactions;
 exports.shortHashRedactor = shortHashRedactor;
@@ -77,93 +75,6 @@ function parseDottedPath(path) {
     return path.split('.');
 }
 // ---------------------------------------------------------------------------
-// Plain-object / array helpers
-// ---------------------------------------------------------------------------
-function isPlainObject(v) {
-    if (v === null || typeof v !== 'object')
-        return false;
-    if (Array.isArray(v))
-        return false;
-    const proto = Object.getPrototypeOf(v);
-    return proto === Object.prototype || proto === null;
-}
-// Read array element `i`, reporting a hole (a missing index in a sparse
-// array) as `null`.
-//
-// JSON has no representation for a hole: `JSON.stringify` writes `null` in
-// its place. A plain `arr[i]` read yields `undefined` instead, which the
-// diff interprets as "index absent" and turns into an `add` / `remove` —
-// ops that `defaultApplyPatch` applies with `splice`, shifting every later
-// index and desynchronising the reconstructed state from the real one. So
-// every traversal in this module reads holes as `null`, which is both what
-// persistence produces and what the "plain JSON state" contract implies.
-function readIndex(arr, i) {
-    return i in arr ? arr[i] : null;
-}
-// Write `value` at `key` on `obj` without invoking inherited setters. This
-// is the single write primitive for every object the journal builds or
-// mutates: clones, JSON-safety normalization, redaction output and patch
-// application all go through it.
-//
-// Why this matters: `obj[key] = value` on a plain object will trigger any
-// setter inherited from the prototype chain. The most important case is
-// `key === '__proto__'`: the assignment form invokes the inherited
-// `Object.prototype.__proto__` setter and re-parents `obj`. Using
-// `Object.defineProperty` instead defines an *own* data property literally
-// named `"__proto__"` that shadows the accessor — `Object.prototype` is
-// never touched and `Object.getPrototypeOf(obj)` is unchanged. The same
-// reasoning covers any user-defined accessor on the prototype chain.
-function safeDefine(obj, key, value) {
-    Object.defineProperty(obj, key, {
-        value,
-        writable: true,
-        enumerable: true,
-        configurable: true
-    });
-}
-function cloneValue(v) {
-    // Minimal structural clone for plain JSON-ish values. Functions, Dates,
-    // Maps, Sets, etc. fall through and are returned as-is — Chelonia state
-    // is plain JSON in practice, so this is enough.
-    //
-    // Round-trip caveat: `cloneValue` faithfully preserves own keys whose
-    // value is `undefined` (`{ a: undefined }` clones to `{ a: undefined }`),
-    // but `defaultDiff` treats `undefined` on either side as "key absent"
-    // and emits an `add`/`remove`. Reconstructing through diff+apply
-    // therefore drops such keys. This is consistent with JSON semantics
-    // (`JSON.stringify({ a: undefined })` is `"{}"`) and matches the
-    // documented "plain JSON state" contract; states that rely on
-    // explicit-undefined keys must supply a custom `diff` / `applyPatch`.
-    // Array holes, by contrast, are normalized to `null` (see `readIndex`),
-    // so a clone is always dense.
-    if (v === null || typeof v !== 'object')
-        return v;
-    if (Array.isArray(v)) {
-        // `Array.prototype.map` preserves holes, so build the copy index by
-        // index through `readIndex` — a clone that is handed to the diff must
-        // already be dense (see `readIndex`).
-        const src = v;
-        const out = new Array(src.length);
-        for (let i = 0; i < src.length; i++) {
-            out[i] = cloneValue(readIndex(src, i));
-        }
-        return out;
-    }
-    if (isPlainObject(v)) {
-        // Preserve the source prototype so `Object.create(null)` containers
-        // (which Chelonia uses throughout contract state — `_vm`, `_volatile`,
-        // etc.) round-trip as null-prototype objects rather than silently
-        // gaining `Object.prototype`. `deepStrictEqual` against the live
-        // state would otherwise diverge on prototype.
-        const out = Object.create(Object.getPrototypeOf(v));
-        for (const k of Object.keys(v)) {
-            safeDefine(out, k, cloneValue(v[k]));
-        }
-        return out;
-    }
-    return v;
-}
-// ---------------------------------------------------------------------------
 // Diff
 // ---------------------------------------------------------------------------
 // Produce a JSON-Patch-style diff transforming `before` into `after`.
@@ -182,7 +93,7 @@ function diffInto(before, after, segments, out) {
         return;
     const path = segmentsToPointer(segments);
     if (before === undefined) {
-        out.push({ op: 'add', path, value: cloneValue(after) });
+        out.push({ op: 'add', path, value: (0, turtledash_1.cloneValue)(after) });
         return;
     }
     if (after === undefined) {
@@ -199,13 +110,13 @@ function diffInto(before, after, segments, out) {
     }
     const bIsArr = Array.isArray(before);
     const aIsArr = Array.isArray(after);
-    const bIsObj = isPlainObject(before);
-    const aIsObj = isPlainObject(after);
+    const bIsObj = (0, turtledash_1.isPlainObject)(before);
+    const aIsObj = (0, turtledash_1.isPlainObject)(after);
     // If either side is a primitive or the container shape differs, replace
     // the whole subtree.
     if (bIsArr !== aIsArr || bIsObj !== aIsObj || (!bIsArr && !bIsObj)) {
-        if (!shallowEqualPrimitives(before, after)) {
-            out.push({ op: 'replace', path, value: cloneValue(after) });
+        if (!(0, turtledash_1.deepEqualJSONType)(before, after)) {
+            out.push({ op: 'replace', path, value: (0, turtledash_1.cloneValue)(after) });
         }
         return;
     }
@@ -214,17 +125,17 @@ function diffInto(before, after, segments, out) {
         const aArr = after;
         const minLen = Math.min(bArr.length, aArr.length);
         for (let i = 0; i < minLen; i++) {
-            // `readIndex`, not `bArr[i]`: a hole must compare as `null` rather
+            // `readJSONIndex`, not `bArr[i]`: a hole must compare as `null` rather
             // than as an absent index, or the emitted add/remove would splice
             // the array and shift every later element.
-            diffInto(readIndex(bArr, i), readIndex(aArr, i), [...segments, String(i)], out);
+            diffInto((0, turtledash_1.readJSONIndex)(bArr, i), (0, turtledash_1.readJSONIndex)(aArr, i), [...segments, String(i)], out);
         }
         if (aArr.length > bArr.length) {
             for (let i = bArr.length; i < aArr.length; i++) {
                 out.push({
                     op: 'add',
                     path: segmentsToPointer([...segments, String(i)]),
-                    value: cloneValue(readIndex(aArr, i))
+                    value: (0, turtledash_1.cloneValue)((0, turtledash_1.readJSONIndex)(aArr, i))
                 });
             }
         }
@@ -256,7 +167,7 @@ function diffInto(before, after, segments, out) {
             out.push({
                 op: 'add',
                 path: segmentsToPointer([...segments, k]),
-                value: cloneValue(aObj[k])
+                value: (0, turtledash_1.cloneValue)(aObj[k])
             });
         }
         else {
@@ -264,75 +175,18 @@ function diffInto(before, after, segments, out) {
         }
     }
 }
-function shallowEqualPrimitives(a, b) {
-    // Used only when we've already established neither side is a container
-    // we'd recurse into. NaN-aware so NaN equals NaN (avoids spurious diffs).
-    if (a === b)
-        return true;
-    if (typeof a === 'number' && typeof b === 'number' &&
-        Number.isNaN(a) && Number.isNaN(b))
-        return true;
-    return false;
-}
-// Deep equality using exactly the same notion of "changed" as
-// `defaultDiff`: `a` and `b` are equal iff `defaultDiff(a, b)` would be
-// empty. Keeping the two in lock-step matters because this predicate
-// decides whether a change hidden behind a constant redactor gets its own
-// journal entry; a looser or stricter notion would either invent churn or
-// keep hiding real changes.
-//
-// Notably: `undefined` on one side only is a change (the diff emits
-// add/remove), NaN equals NaN, array holes compare as `null` (see
-// `readIndex`), and non-plain containers (Date, Map, class instances) are
-// only equal by reference — mirroring `defaultDiff`, which emits a
-// wholesale `replace` for them.
-function structurallyEqual(a, b) {
-    if (a === b)
-        return true;
-    if (a === undefined || b === undefined)
-        return false;
-    const aIsArr = Array.isArray(a);
-    const bIsArr = Array.isArray(b);
-    const aIsObj = isPlainObject(a);
-    const bIsObj = isPlainObject(b);
-    if (aIsArr !== bIsArr || aIsObj !== bIsObj)
-        return false;
-    if (aIsArr && bIsArr) {
-        const aArr = a;
-        const bArr = b;
-        if (aArr.length !== bArr.length)
-            return false;
-        for (let i = 0; i < aArr.length; i++) {
-            if (!structurallyEqual(readIndex(aArr, i), readIndex(bArr, i)))
-                return false;
-        }
-        return true;
-    }
-    if (aIsObj && bIsObj) {
-        const aObj = a;
-        const bObj = b;
-        const aKeys = Object.keys(aObj);
-        if (aKeys.length !== Object.keys(bObj).length)
-            return false;
-        for (const k of aKeys) {
-            // Own properties only — never let the prototype chain make two
-            // states look alike.
-            if (!(0, turtledash_1.has)(bObj, k))
-                return false;
-            if (!structurallyEqual(aObj[k], bObj[k]))
-                return false;
-        }
-        return true;
-    }
-    return shallowEqualPrimitives(a, b);
-}
 // ---------------------------------------------------------------------------
 // Apply
+// Functions used for applying JSON patches.
+// `defaultApplyPatch` is the exported function that
+// applies an array of patches (can be overridden in the
+// config) and `applyOne` is a helper function that applies
+// a single patch.
 // ---------------------------------------------------------------------------
 // Apply a sequence of patches to a value, returning a new value. Does not
 // mutate the input. Rejects unknown op kinds.
 function defaultApplyPatch(state, patches) {
-    let current = cloneValue(state);
+    let current = (0, turtledash_1.cloneValue)(state);
     for (const p of patches) {
         current = applyOne(current, p);
     }
@@ -361,7 +215,7 @@ function applyOne(root, patch) {
         if (patch.op === 'remove') {
             throw new Error("Whole-root 'remove' is not supported (use replace with null)");
         }
-        return cloneValue(patch.value);
+        return (0, turtledash_1.cloneValue)(patch.value);
     }
     if (root === undefined || root === null || typeof root !== 'object') {
         throw new Error(`Cannot apply patch '${patch.op}' at '${patch.path}' to non-container root`);
@@ -415,7 +269,7 @@ function applyOne(root, patch) {
             if (!isDash && idx > parent.length) {
                 throw new Error(`Cannot 'add' at '${patch.path}': array index out of bounds`);
             }
-            parent.splice(idx, 0, cloneValue(patch.value));
+            parent.splice(idx, 0, (0, turtledash_1.cloneValue)(patch.value));
         }
         else if (patch.op === 'replace') {
             if (isDash) {
@@ -424,7 +278,7 @@ function applyOne(root, patch) {
             if (idx >= parent.length) {
                 throw new Error(`Cannot 'replace' at '${patch.path}': array index out of bounds`);
             }
-            parent[idx] = cloneValue(patch.value);
+            parent[idx] = (0, turtledash_1.cloneValue)(patch.value);
         }
         else if (patch.op === 'remove') {
             if (isDash) {
@@ -442,7 +296,7 @@ function applyOne(root, patch) {
     else {
         const obj = parent;
         if (patch.op === 'add') {
-            safeDefine(obj, last, cloneValue(patch.value));
+            (0, turtledash_1.safeDefine)(obj, last, (0, turtledash_1.cloneValue)(patch.value));
         }
         else if (patch.op === 'replace') {
             // RFC 6902 §4.3: replace requires the target location to already
@@ -451,7 +305,7 @@ function applyOne(root, patch) {
             if (!(0, turtledash_1.has)(obj, last)) {
                 throw new Error(`Cannot 'replace' at '${patch.path}': target key does not exist`);
             }
-            safeDefine(obj, last, cloneValue(patch.value));
+            (0, turtledash_1.safeDefine)(obj, last, (0, turtledash_1.cloneValue)(patch.value));
         }
         else if (patch.op === 'remove') {
             if (!(0, turtledash_1.has)(obj, last)) {
@@ -502,7 +356,7 @@ exports.REDACTION_NON_JSON_SAFE_SENTINEL = '[REDACTION_NON_JSON_SAFE]';
 // the current ancestor chain, so shared (DAG-shaped) references remain
 // allowed exactly as they are for `JSON.stringify`.
 //
-// Note the deliberate asymmetry with `readIndex`, which reads a hole in
+// Note the deliberate asymmetry with `readJSONIndex`, which reads a hole in
 // *contract state* as `null`: state is data the journal must record
 // faithfully, and `null` is its lossless JSON equivalent, whereas a hole in
 // a *redactor result* is a bug in caller code that is better surfaced
@@ -547,7 +401,7 @@ function isJSONSafeValue(v, seen) {
         seen.delete(v);
         return ok;
     }
-    if (!isPlainObject(v))
+    if (!(0, turtledash_1.isPlainObject)(v))
         return false;
     seen.add(v);
     const ok = Object.keys(v).every((k) => isJSONSafeValue(v[k], seen));
@@ -592,12 +446,12 @@ function normalizeToJSONSafe(v, seen) {
         seen.delete(v);
         return out;
     }
-    if (!isPlainObject(v))
+    if (!(0, turtledash_1.isPlainObject)(v))
         return exports.REDACTION_NON_JSON_SAFE_SENTINEL;
     seen.add(v);
     const out = Object.create(Object.getPrototypeOf(v));
     for (const k of Object.keys(v)) {
-        safeDefine(out, k, normalizeToJSONSafe(v[k], seen));
+        (0, turtledash_1.safeDefine)(out, k, normalizeToJSONSafe(v[k], seen));
     }
     seen.delete(v);
     return out;
@@ -621,7 +475,7 @@ function describeNonJSONSafe(v) {
             }
             return 'array containing a non-JSON-safe value';
         }
-        if (isPlainObject(v))
+        if ((0, turtledash_1.isPlainObject)(v))
             return 'object containing a non-JSON-safe or cyclic value';
         return `non-plain object (${v.constructor?.name ?? 'unknown'})`;
     }
@@ -660,7 +514,7 @@ function applyRedactions(state, redactions, contractName,
 // Treat the map as read-only, and consume it before `state` can change
 // (see the aliasing note below).
 sites) {
-    const cloned = cloneValue(state);
+    const cloned = (0, turtledash_1.cloneValue)(state);
     if (!redactions || redactions.length === 0)
         return cloned;
     // Read-only view used to resolve pre-redaction originals. Aliasing the
@@ -772,7 +626,7 @@ function walkAndRedact(parent, source, segments, i, redact, resolved, contractNa
                     container[idx] = replacement;
             }
             else {
-                safeDefine(container, k, replacement);
+                (0, turtledash_1.safeDefine)(container, k, replacement);
             }
             if (pass.sites && written) {
                 recordSite(pass.sites, fullPath, original, replacement);
@@ -820,7 +674,7 @@ function resolveAtSegments(root, segments) {
             const idx = Number(seg);
             if (!Number.isInteger(idx) || idx < 0 || idx >= current.length)
                 return notFound;
-            current = readIndex(current, idx);
+            current = (0, turtledash_1.readJSONIndex)(current, idx);
         }
         else {
             if (!(0, turtledash_1.has)(current, seg))
@@ -861,45 +715,25 @@ function coveredByPatch(idx, pointer) {
     }
     return false;
 }
-// True when the underlying change at a redacted site is (at least partly)
-// invisible in the site's redacted projection — i.e. the diff of the
-// unredacted originals touches a pointer path that the diff of the
-// redacted projections does not reproduce exactly.
-//
-// Why this replaces the old "descendant of the site already shows up in
-// the patch" heuristic: for a container-returning redactor (e.g. keep
-// `id`/`purpose`, hide `data`) a change to the *visible* part of the
-// container must not suppress the marker for the hidden part, and a
-// visible-only change must not *produce* one either. Comparing the two
-// per-site diffs makes exactly that distinction.
-//
-// Only an exact path match counts as "visible". A projected *ancestor*
-// operation is never accepted as covering an original descendant change:
-// the visible paths live in the projection's path space while the original
-// paths live in the source's, and a reshaping redactor (e.g.
-// `(v) => ({ profile: v.profile.name })`) maps source leaves onto
-// projected ancestor positions, so those spaces do not correspond. A
-// projected ancestor op only proves that *something* inside that ancestor
-// changed — not that the hidden descendant change is visible. Moreover,
-// the built-in diff emits an op at an ancestor (instead of descending)
-// exactly when the projection changed container shape there between before
-// and after, which is precisely the lossy case where coverage cannot be
-// established. "Hidden" is the conservative direction: markers are
-// identity writes, so an extra one is noise while a suppressed one loses
-// the only record of the hidden change. (Contrast `coveredByPatch`, where
-// ancestor coverage IS sound: patch operations are real writes into the
-// reconstructed state, not observations about a projection.)
-//
-// Always uses `defaultDiff`, never `cfg.diff`: this asks a question
-// about RFC-6901 pointer paths within a single site, which is the same
-// vocabulary the markers themselves are emitted in.
+// This helper function returns true when there's a change
+// that's 'hidden' as the result of having applied a redaction.
+// The goal is to report a change that's occurred even if
+// naively diffing the journal won't show it due to the
+// redaction being applied. This is useful for debugging
+// purposes.
+// For example, an identity contract could have an `email`
+// field to which a redaction is applied for privacy. We
+// still want the journal to show that an action `changeEmail`
+// changed the email value even if the visible value in the
+// journal would be `[REDACTED]` for both the old and the new
+// values.
 function hasHiddenChange(before, after) {
     const visiblePaths = defaultDiff(before.replacement, after.replacement);
     if (visiblePaths.length === 0) {
         // No visible change, so any change is hidden by definition. Compare the
         // unredacted originals directly instead of diffing them into a throwaway
         // patch (which would clone the hidden value on every call).
-        return !structurallyEqual(before.original, after.original);
+        return !(0, turtledash_1.deepEqualJSONType)(before.original, after.original);
     }
     if (visiblePaths.some((p) => p.path === ''))
         return false;
@@ -931,7 +765,7 @@ function synthesizeRedactedChangeOps(patch, beforeSites, afterSites, redactedAft
         // `add` carrying the redacted value.
         if (before === undefined)
             continue;
-        if (structurallyEqual(before.original, after.original))
+        if ((0, turtledash_1.deepEqualJSONType)(before.original, after.original))
             continue;
         // The change is already fully visible through the diff: the exact
         // location, or an ancestor replaced wholesale. O(pointer depth).
@@ -948,7 +782,7 @@ function synthesizeRedactedChangeOps(patch, beforeSites, afterSites, redactedAft
         markers.push({
             op: 'replace',
             path: pointer,
-            value: cloneValue(resolved.value),
+            value: (0, turtledash_1.cloneValue)(resolved.value),
             redacted: true
         });
     }
@@ -1100,7 +934,7 @@ function replayBoundaryState(window, applyPatch) {
         return null;
     // Clone so the new snapshot cannot alias the seed's state object, which
     // is what `state` still is when the window held no applicable patches.
-    return { state: cloneValue(state), replayed: true };
+    return { state: (0, turtledash_1.cloneValue)(state), replayed: true };
 }
 // Last-resort bound enforcement: drop the oldest no-op patch entries until
 // the window fits within `maxEntries`.
@@ -1587,11 +1421,11 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         const j = rootState?.contracts?.[contractID]?._journal;
         if (!j)
             return undefined;
-        // Use the module-local deep clone so `undefined` values inside
+        // Use the shared structural clone so `undefined` values inside
         // snapshots / patch payloads survive (a JSON round-trip would drop
         // them) and so any pathological references cannot throw the way
         // `JSON.stringify` would on cycles.
-        return cloneValue(j);
+        return (0, turtledash_1.cloneValue)(j);
     },
     // Public: rebuild the redacted contract state at the journal's HEAD by
     // walking from the most recent snapshot and applying subsequent patches.

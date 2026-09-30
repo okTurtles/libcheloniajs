@@ -83,6 +83,7 @@ src/
 ├── persistent-actions.ts # PersistentAction queue with retry
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
+├── kv-height.ts          # KV contract-height awareness (waits, recovery; internal)
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time synchronization via monotonic offsets
 ├── chelonia-utils.ts     # Optional utility selectors (e.g., chelonia/kv/queuedSet)
@@ -131,7 +132,7 @@ Often the source file's default export is an array of the selector names it regi
 | `chelonia/journal/*` | `journal.ts` | Public journal API — get, reconstruct, clear |
 | `chelonia/private/journal/*` | `journal.ts` | Internal journal recorder — recordEvent |
 | `chelonia/kv/queuedSet` | `chelonia-utils.ts` | Optional queued raw KV setter |
-| `chelonia/kv/{defineSlot,update,read,sync,clear,status,refreshFilters}` | `kv.ts` | KV slots — declarative typed key/value API |
+| `chelonia/kv/{defineSlot,update,read,sync,clear,status,whenSettled,refreshFilters}` | `kv.ts` | KV slots — declarative typed key/value API |
 | `chelonia/externalStateSetup` | `local-selectors/` | External state synchronization |
 
 #### Key Public Selectors
@@ -220,7 +221,14 @@ Full documentation:
 - Selector reference and events: [docs/api.md](docs/api.md#kv-slots)
 - Public selectors: `chelonia/kv/defineSlot`, `chelonia/kv/update`,
   `chelonia/kv/read`, `chelonia/kv/sync`, `chelonia/kv/clear`,
-  `chelonia/kv/status`, `chelonia/kv/refreshFilters`
+  `chelonia/kv/status`, `chelonia/kv/whenSettled`,
+  `chelonia/kv/refreshFilters`
+- Contract heights: a KV value can only be verified once the local
+  contract has reached the height it was written at, and the server only
+  accepts writes stamped with its current height. Never treat an
+  unverifiable value as absent; see
+  [docs/kv.md](docs/kv.md#contract-heights) and
+  [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md).
 
 ### Contract State Structure
 
