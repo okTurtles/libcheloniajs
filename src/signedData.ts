@@ -159,6 +159,12 @@ const verifySignatureData = function <T, U extends object = object> (
     // These errors (ChelErrorSignatureKeyUnauthorized) are serious and
     // indicate a bug. Make them fatal when running integration tests
     // (otherwise, they get swallowed and shown as a notification)
+    // Note: CI services (e.g. GitHub Actions) also set `CI` when running this
+    // library's own unit tests, and this branch can then make tests fail:
+    // `state/vuex/state` is registered by the host app, not by this library,
+    // so the lookup throws in place of `ChelErrorSignatureKeyUnauthorized`,
+    // and the unhandled rejection fails the running `node:test` test. Tests
+    // that reach this path need to account for both (see kv-height.test.ts).
     if (process.env.CI) {
       console.error(`Key ${sKeyId} is unauthorized or expired for the current contract`, {
         designatedKey,

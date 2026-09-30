@@ -39,6 +39,34 @@ const NS_CACHE = 'namespace-cache'
 const rootState = (): ChelRootState & Record<string, any> => sbp('chelonia/private/state')
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
+// When `process.env.CI` is set (as it is on GitHub Actions), signature
+// verification with an unauthorized key logs the app's root state via
+// `state/vuex/state`, a selector the host app registers, before throwing.
+// Without it, that lookup throws instead of `ChelErrorSignatureKeyUnauthorized`.
+sbp('sbp/selectors/register', {
+  'state/vuex/state': () => rootState()
+})
+// On that same path, the CI branch also leaves a rejected
+// `ChelErrorSignatureKeyUnauthorized` promise unhandled, which the test
+// runner reports as a failure of the running test. Drop those rejections
+// while `fn` runs; any other unhandled rejection still reaches the runner.
+const ignoringUnauthorizedKeyRejections = async (fn: () => void) => {
+  const listeners = process.listeners('unhandledRejection')
+  process.removeAllListeners('unhandledRejection')
+  process.on('unhandledRejection', (reason, promise) => {
+    if (reason instanceof ChelErrorSignatureKeyUnauthorized) return
+    for (const listener of listeners) listener.call(process, reason, promise)
+  })
+  try {
+    fn()
+    // Unhandled rejections are reported once the microtask queue drains.
+    await new Promise((resolve) => setImmediate(resolve))
+  } finally {
+    process.removeAllListeners('unhandledRejection')
+    for (const listener of listeners) process.on('unhandledRejection', listener)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Simulated chel server
 // ---------------------------------------------------------------------------
@@ -941,7 +969,9 @@ describe('height stamps', () => {
       sbp('chelonia/parseEncryptedOrUnencryptedDetachedMessage', {
         contractID: CID, serializedData, meta: KEY
       })
-    assert.throws(() => parse(signedAt('40')).data, ChelErrorSignatureKeyUnauthorized)
+    await ignoringUnauthorizedKeyRejections(() => {
+      assert.throws(() => parse(signedAt('40')).data, ChelErrorSignatureKeyUnauthorized)
+    })
     // `parseInt` reads these as 4 and 0, inside the key's window.
     for (const stamp of ['4e1', '0.4e2']) {
       assert.throws(() => parse(signedAt(stamp)), ChelErrorInvalidMessageHeight, stamp)
