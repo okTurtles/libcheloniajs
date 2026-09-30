@@ -7,7 +7,7 @@ import { coerce } from '@chelonia/multiformats/bytes';
 import sbp from '@sbp/sbp';
 import { Buffer } from 'buffer';
 import { has } from 'turtledash';
-import { blake32Hash, createCID, createCIDfromStream, multicodes } from './functions.mjs';
+import { blake32Hash, createCID, createCIDfromStream, multicodes, randomUUID } from './functions.mjs';
 import { buildShelterAuthorizationHeader } from './utils.mjs';
 // Snippet from <https://github.com/WebKit/standards-positions/issues/24#issuecomment-1181821440>
 // Node.js supports request streams, but also this check isn't meant for Node.js
@@ -169,7 +169,7 @@ export const aes256gcmHandlers = {
         const recordSize = (params?.rs ?? 1 << 16);
         if (!IKM) {
             IKM = new Uint8Array(33);
-            self.crypto.getRandomValues(IKM);
+            crypto.getRandomValues(IKM);
         }
         // The keyId is only used as a sanity check but otherwise it is not needed
         // Because the keyId is computed from the IKM, which is a secret, it is
@@ -303,18 +303,8 @@ export default sbp('sbp/selectors/register', {
                 }
             })
         });
-        // TODO: Using `self.crypto.randomUUID` breaks the tests. Maybe upgrading
-        // Cypress would fix this.
-        const boundary = typeof self.crypto?.randomUUID === 'function'
-            ? self.crypto.randomUUID()
-            // If randomUUID not available, we instead compute a random boundary
-            // The indirect call to Math.random (`(0, Math.random)`) is to explicitly
-            // mark that we intend on using Math.random, even though it's not a
-            // CSPRNG, so that it's not reported as a bug in by static analysis tools.
-            : new Array(36)
-                .fill('')
-                .map(() => 'abcdefghijklmnopqrstuvwxyz'[((0, Math.random)() * 26) | 0])
-                .join('');
+        // Hyphens and hex digits are both fine in a multipart boundary.
+        const boundary = randomUUID();
         const stream = encodeMultipartMessage(boundary, transferParts);
         const deletionToken = 'deletionToken' + generateSalt();
         const deletionTokenHash = blake32Hash(deletionToken);

@@ -663,7 +663,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     if (r.status === 409) {
                         if (attempt + 1 > maxAttempts) {
                             console.error(`[chelonia] failed to publish ${entry.description()} after ${attempt} attempts`, entry);
-                            throw new Error(`publishEvent: ${r.status} - ${r.statusText}. attempt ${attempt}`);
+                            // The body is deliberately not read here: a 409 means the HEAD
+                            // raced, which the attempt count already explains.
+                            throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode(`publishEvent: ${(0, utils_js_1.httpErrorMessage)(r)}. attempt ${attempt}`, { cause: r.status });
                         }
                         // create new entry
                         const randDelay = (0, turtledash_1.randomIntFromRange)(0, 1500);
@@ -678,9 +680,14 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         }
                     }
                     else {
-                        const message = (await r.json())?.message;
-                        console.error(`[chelonia] ERROR: failed to publish ${entry.description()}: ${r.status} - ${r.statusText}: ${message}`, entry);
-                        throw new Error(`publishEvent: ${r.status} - ${r.statusText}: ${message}`);
+                        // The same line the rest of the library raises HTTP errors with,
+                        // plus whatever the body explains.
+                        const detail = await (0, utils_js_1.httpErrorDetail)(r);
+                        const description = `${(0, utils_js_1.httpErrorMessage)(r)}${detail ? ` - ${detail}` : ''}`;
+                        console.error(`[chelonia] ERROR: failed to publish ${entry.description()}: ${description}`, entry);
+                        throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode(`publishEvent: ${description}`, {
+                            cause: r.status
+                        });
                     }
                 }
                 catch (e) {

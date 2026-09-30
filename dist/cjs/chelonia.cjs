@@ -1676,15 +1676,14 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             // (e.g. `chelonia/externalStateWait`, the external state mirror) test
             // for to decide whether there's anything to wait for or copy over.
             let cheloniaState = meta;
-            if (meta != null && !includeJournal) {
+            if (meta != null) {
                 // Shallow copy: nested values (`missingDecryptionKeyIds`, the journal)
                 // stay shared by reference with live state. `_journal` is re-attached
                 // only when it was requested AND exists, so an opted-in caller never
                 // sees an `_journal: undefined` key advertising a journal we lack.
-                // eslint-disable-next-line @typescript-eslint/no-unused-vars
                 const { _journal, ...rest } = meta;
                 // Returned by reference, unlike `chelonia/journal/get`, which clones.
-                cheloniaState = rest;
+                cheloniaState = includeJournal && _journal !== undefined ? { ...rest, _journal } : rest;
             }
             return {
                 contractState: rootState[id],
@@ -1759,7 +1758,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         });
         if (!response.ok) {
             console.error('Unable to fetch own resources', contractID, response.status);
-            throw new Error(`Unable to fetch own resources for ${contractID}: ${response.status}`);
+            throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode(`Unable to fetch own resources for ${contractID}: ${(0, utils_js_1.httpErrorMessage)(response)}`, { cause: response.status });
         }
         return response.json();
     },
@@ -2218,7 +2217,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // These are not treated as errors since we could still set the value.
             }
             else if (response.status !== 404 && response.status !== 410) {
-                throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode('[kv/set] Invalid response code: ' + response.status);
+                throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode(`[kv/set] ${(0, utils_js_1.httpErrorMessage)(response)}`, { cause: response.status });
             }
             // When a 409/412 response provides neither an etag header nor a
             // body, the retry loop cannot recover — it would re-send
@@ -2364,7 +2363,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                             break;
                         }
                     }
-                    throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode('kv/set invalid response status: ' + response.status);
+                    throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode(`[kv/set] ${(0, utils_js_1.httpErrorMessage)(response)}`, { cause: response.status });
                 }
                 // Successful write: capture the server-issued etag (x-cid /
                 // etag header) so the resolved value reflects the freshest
@@ -2389,7 +2388,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             return null;
         }
         if (!response.ok) {
-            throw new Error('Invalid response status: ' + response.status);
+            throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode(`[kv/get] ${(0, utils_js_1.httpErrorMessage)(response)}`, { cause: response.status });
         }
         const etag = response.headers.get('x-cid') || response.headers.get('etag');
         const data = await response.json();

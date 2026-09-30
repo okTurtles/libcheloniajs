@@ -18,6 +18,7 @@ export type ResTypeSub = 'sub';
 export type ResTypeUnsub = 'unsub';
 export type ResTypePub = 'pub';
 export type ResTypeEntry = 'entry';
+export type UUIDV4 = `${string}-${string}-${string}-${string}-${string}`;
 export type CheloniaConfig = {
     [_ in `preOp_${SPOpType}`]?: (message: SPMessage, state: ChelContractState) => boolean;
 } & {
