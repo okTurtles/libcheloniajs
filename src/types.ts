@@ -321,6 +321,10 @@ export type KvHeightWait = {
   contractID: string;
   key: string;
   requiredHeight: number;
+  // The `reason` of the first registration for the key. Later registrations
+  // merged into this wait raise `requiredHeight` but keep this `reason`, so
+  // the reload reports the first trigger (e.g. `'load'` even when a later
+  // pubsub frame raised the height). The reloaded value is the latest.
   reason: Exclude<KvUpdateCtx['reason'], 'local'>;
   // Removes the height listener backing this wait.
   off: () => void;

@@ -673,6 +673,10 @@ describe('writes while the local contract is behind', () => {
         ChelErrorKvUpdateInvalid
       )
       await assert.rejects(sbp('chelonia/kv/clear', CID, UNREAD, options), ChelErrorKvUpdateInvalid)
+      await assert.rejects(
+        sbp('chelonia/kv/queuedSet', { contractID: CID, key: UNREAD, data: {}, ...options }),
+        ChelErrorKvUpdateInvalid
+      )
     }
     assert.strictEqual(server.log.length, 0)
   })

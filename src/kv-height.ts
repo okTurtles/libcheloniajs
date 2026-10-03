@@ -17,7 +17,11 @@
 // from `src/index.ts`.
 
 import sbp from '@sbp/sbp'
-import { ChelErrorInvalidMessageHeight, ChelErrorKvHeightAhead } from './errors.js'
+import {
+  ChelErrorInvalidMessageHeight,
+  ChelErrorKvHeightAhead,
+  ChelErrorKvUpdateInvalid
+} from './errors.js'
 import type {
   CheloniaContext,
   KvHeightAheadCause,
@@ -337,7 +341,8 @@ export function invalidHeightRecoveryOptions (
 
 // Runs `attempt` and, while it rejects with `ChelErrorKvHeightAhead`, syncs
 // the contract and runs it again (up to `maxHeightRecoveries` times).
-// `attempt` receives the number of recoveries performed so far.
+// `attempt` receives the number of recoveries performed so far. Invalid
+// options reject with `ChelErrorKvUpdateInvalid` before `attempt` runs.
 //
 // `attempt` is expected to enqueue its work on the contract's lane and
 // return the lane promise, so the recovery below always runs with the lane
@@ -351,7 +356,7 @@ export async function withHeightRecovery<T> (
   { onHeightAhead, maxHeightRecoveries, signal }: KvHeightRecoveryOptions = {}
 ): Promise<T> {
   const invalid = invalidHeightRecoveryOptions({ onHeightAhead, maxHeightRecoveries })
-  if (invalid) throw new TypeError(`[chelonia/kv] ${invalid}`)
+  if (invalid) throw new ChelErrorKvUpdateInvalid(`[chelonia/kv] ${contractID}: ${invalid}`)
   const mode = onHeightAhead ?? 'sync'
   const maxRecoveries = maxHeightRecoveries ?? KV_DEFAULT_MAX_HEIGHT_RECOVERIES
   // Captured once: `chelonia/reset` aborts this controller and replaces it.

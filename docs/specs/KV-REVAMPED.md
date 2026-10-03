@@ -2800,7 +2800,8 @@ processing real contract events through `handleEvent`):
     the default; `onHeightAhead: 'reject'` rejects without writing; the
     recovery sync runs with the queue lane released; a caller abort
     during recovery rejects promptly and `_waitInFlight` waits for the
-    sync; invalid recovery options reject before any network access.
+    sync; invalid recovery options reject with `ChelErrorKvUpdateInvalid`
+    before any network access (for `update`, `clear` and `queuedSet`).
 32. `queuedSet` (with an async `onconflict`, as Group Income's name
     cache uses) keeps the other device's data, recovers by syncing, and
     rejects with `ChelErrorKvHeightAhead` when recovery can't help;
@@ -2851,7 +2852,7 @@ for `fetch`/`pubsub`.
 
 ### 11.8 Definition of done
 
-- All thirty-four test cases above pass under `npm test`.
+- All thirty-seven test cases above pass under `npm test`.
 - `npm run lint` is clean.
 - `npm run build` produces both ESM and CJS outputs with the new
   selectors exported.

@@ -248,6 +248,7 @@ In addition to the cases listed in KV-REVAMPED.md §4.6,
   clear sentinel and the "not yet loaded" mirror representation.
 - `onHeightAhead` is not `'sync'` / `'reject'`, or `maxHeightRecoveries`
   is not a non-negative integer (checked before any network access).
+  `chelonia/kv/queuedSet` rejects these the same way.
 
 Both rules apply identically on the first attempt and on every
 conflict-retry pass.
