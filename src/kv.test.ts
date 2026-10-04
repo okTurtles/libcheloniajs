@@ -185,6 +185,11 @@ sbp('sbp/selectors/register', {
     this.kvPendingWrites = new Map()
     this.kvPendingLoads = new Map()
     this.kvOnUpdateActive = new Map()
+    this.kvHeightListeners = new Map()
+    this.kvHeightWaits = new Map()
+    this.kvRecoveries = new Map()
+    this.kvHeightSession = new AbortController()
+    this.kvSuspendedHeightWaits = []
     this.defContractKvByManifest = new Map()
   },
 
@@ -202,6 +207,7 @@ sbp('sbp/selectors/register', {
     // before the post-cleanup hook observes state and runtime maps clear.
     this.abortController.abort()
     this.abortController = new AbortController()
+    sbp('chelonia/kv/_endHeightSession')
     await sbp('chelonia/kv/_waitInFlight')
     await postCleanupFn?.()
     const s = this.state as Record<string, unknown>
@@ -224,6 +230,10 @@ sbp('sbp/selectors/register', {
     this.kvPendingWrites.clear()
     this.kvPendingLoads.clear()
     this.kvOnUpdateActive.clear()
+    sbp('chelonia/kv/_clearHeightWaits')
+    this.kvHeightSession = new AbortController()
+    this.kvSuspendedHeightWaits = []
+    this.kvRecoveries.clear()
     this.subscriptionSet.clear()
   },
 
@@ -2303,7 +2313,7 @@ describe('KV slot API', () => {
 
   it('43a: post-success abort still echo-suppresses the committed write (update)', async () => {
     // An abort that lands between `kv/set` resolving (write committed)
-    // and the post-success `throwIfSignalAborted` check must
+    // and the post-success `throwIfAborted` check must
     // NOT leave the committed write's pubsub echo unsuppressed. The
     // documented AbortError contract (§4.2: "Mirror is unchanged; no
     // event fires") requires the echo-suppression recording to run
@@ -2657,7 +2667,7 @@ describe('KV slot API', () => {
   it('44h: post-success abort still echo-suppresses the committed write (clear)', async () => {
     // Clear analog of 43a: an abort that lands between
     // `kv/set` resolving (clear committed) and the post-success
-    // `throwIfSignalAborted` check must NOT leave the committed clear's
+    // `throwIfAborted` check must NOT leave the committed clear's
     // pubsub echo unsuppressed. The AbortError contract (§4.2) requires
     // "Mirror is unchanged; no event fires" — `recordEchoCID` must run
     // before the abort check, otherwise the unsuppressed echo would

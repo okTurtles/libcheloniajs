@@ -16,16 +16,24 @@ export default sbp('sbp/selectors/register', {
     // `chelonia/kv/set`. However, the `chelonia/kv/set` primitive is needed if
     // the queueing logic needs to be more advanced, the key to use requires
     // custom logic or _if the `onconflict` callback also needs to be queued_.
-    'chelonia/kv/queuedSet': ({ contractID, key, data, onconflict, ifMatch, maxAttempts, signal, encryptionKeyName = 'cek', signingKeyName = 'csk' }) => {
-        return sbp('chelonia/queueInvocation', contractID, () => {
-            return sbp('chelonia/kv/set', contractID, key, data, {
-                ifMatch,
-                encryptionKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, encryptionKeyName),
-                signingKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, signingKeyName),
-                onconflict,
-                maxAttempts,
-                signal
+    //
+    // When the server value is ahead of the local contract
+    // (`ChelErrorKvHeightAhead`), the contract is synced outside the queue and
+    // the write is retried (`onHeightAhead: 'sync'`, the default), up to
+    // `maxHeightRecoveries` times. Pass `onHeightAhead: 'reject'` to get the
+    // error instead. See KV-REVAMPED.md §4.2 step 5a.
+    'chelonia/kv/queuedSet': ({ contractID, key, data, onconflict, ifMatch, maxAttempts, signal, onHeightAhead, maxHeightRecoveries, encryptionKeyName = 'cek', signingKeyName = 'csk' }) => {
+        return sbp('chelonia/kv/_withHeightRecovery', contractID, () => {
+            return sbp('chelonia/queueInvocation', contractID, () => {
+                return sbp('chelonia/kv/set', contractID, key, data, {
+                    ifMatch,
+                    encryptionKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, encryptionKeyName),
+                    signingKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, signingKeyName),
+                    onconflict,
+                    maxAttempts,
+                    signal
+                });
             });
-        });
+        }, { onHeightAhead, maxHeightRecoveries, signal });
     }
 });

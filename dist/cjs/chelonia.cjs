@@ -15,6 +15,7 @@ const reingestTracker_js_1 = require("./reingestTracker.cjs");
 const crypto_1 = require("@chelonia/crypto");
 const errors_js_1 = require("./errors.cjs");
 const internal_errors_js_1 = require("./internal-errors.cjs");
+const kv_height_js_1 = require("./kv-height.cjs");
 const events_js_1 = require("./events.cjs");
 const SPMessage_js_1 = require("./SPMessage.cjs");
 Object.defineProperty(exports, "SPMessage", { enumerable: true, get: function () { return SPMessage_js_1.SPMessage; } });
@@ -197,6 +198,10 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.kvPendingWrites = new Map();
         this.kvPendingLoads = new Map();
         this.kvOnUpdateActive = new Map();
+        this.kvHeightListeners = new Map();
+        this.kvHeightWaits = new Map();
+        this.kvRecoveries = new Map();
+        this.kvHeightSession = new AbortController();
         // Name for `defContractKvByManifest` doesn't start with
         // `kv`, like the preceding keys, for consistency with
         // `defContractManifest`.
@@ -498,6 +503,12 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         // work a KV continuation enqueued.
         this.abortController.abort();
         this.abortController = new AbortController();
+        // Height-deferred slot loads (their fallback timers) and height
+        // listeners belong to the old session. End the height session as soon
+        // as the old session is aborted: a fallback firing, or a load
+        // registering a new wait, while the steps below are pending would
+        // otherwise start a contract sync that runs into the next session.
+        (0, sbp_1.default)('chelonia/kv/_endHeightSession');
         await (0, sbp_1.default)('chelonia/kv/_waitInFlight');
         await (0, sbp_1.default)('chelonia/contract/wait');
         const result = await postCleanupFn?.();
@@ -532,6 +543,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         this.kvPendingWrites.clear();
         this.kvPendingLoads.clear();
         this.kvOnUpdateActive.clear();
+        // Height waits can't have been registered since the height session
+        // ended (above), but listeners of passive height waits started while
+        // draining can. Drop them, then start the next session's height
+        // session. `kvRecoveries` was drained by `_waitInFlight` above.
+        (0, sbp_1.default)('chelonia/kv/_clearHeightWaits');
+        this.kvHeightSession = new AbortController();
+        this.kvRecoveries.clear();
         (0, utils_js_1.clearObject)(this.ephemeralReferenceCount);
         this.pending.splice(0);
         (0, utils_js_1.clearObject)(this.currentSyncs);
@@ -875,26 +893,34 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     if (!rawKvHandler && !this.kvSlotsByContractID.get(msg.channelID)?.size)
                         return;
                     (0, sbp_1.default)('chelonia/queueInvocation', msg.channelID, async () => {
+                        const serializedData = JSON.parse(buffer_1.Buffer.from(msg.data).toString());
+                        // A frame written at a height the local contract hasn't reached
+                        // can't be verified yet (KV-REVAMPED.md §3.4). Instead of
+                        // dropping it, have the slot reload the key once the contract
+                        // catches up. The raw KV callback is not called for such
+                        // frames. A malformed height stamp throws and is logged below.
+                        const height = (0, kv_height_js_1.readKvValueHeight)(serializedData);
+                        if (!(0, kv_height_js_1.isHeightReached)(this, msg.channelID, height)) {
+                            console.debug(`[chelonia] kv pubsub frame for ${msg.channelID}::${msg.key} was written at ` +
+                                `height ${height}, ahead of local state; reloading once the contract catches up`);
+                            (0, sbp_1.default)('chelonia/kv/_registerHeightWait', {
+                                contractID: msg.channelID,
+                                key: msg.key,
+                                requiredHeight: height,
+                                reason: 'remote'
+                            });
+                            return;
+                        }
                         // Share one lazy parsed wrapper between the raw KV callback and the
                         // slot layer. If either consumer forces `.data`, the decoded value
                         // or thrown error is cached; both consumers can therefore observe
                         // and log the same decode failure, and the raw KV callback may
                         // decode frames the slot layer would skip as self-echoes.
-                        let parsed;
-                        try {
-                            parsed = parseEncryptedOrUnencryptedMessage(this, {
-                                contractID: msg.channelID,
-                                meta: msg.key,
-                                serializedData: JSON.parse(buffer_1.Buffer.from(msg.data).toString())
-                            });
-                        }
-                        catch (e) {
-                            if (e instanceof errors_js_1.ChelErrorInvalidMessageHeight) {
-                                console.warn(`[chelonia] kv pubsub frame for ${msg.channelID}::${msg.key} has height ahead of local state; dropping until contract syncs`);
-                                return;
-                            }
-                            throw e;
-                        }
+                        const parsed = parseEncryptedOrUnencryptedMessage(this, {
+                            contractID: msg.channelID,
+                            meta: msg.key,
+                            serializedData
+                        });
                         if (rawKvHandler) {
                             try {
                                 ;
@@ -2153,7 +2179,18 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // this case, see if `chelonia/kv/queuedSet` covers your needs.
     // `data` is allowed to be falsy, in which case a fetch will occur first and
     // the `onconflict` handler will be called.
-    'chelonia/kv/set': async function (contractID, key, data, { ifMatch, innerSigningKeyId, encryptionKeyId, signingKeyId, maxAttempts, onconflict, signal: callerSignal }) {
+    //
+    // Contract heights (KV-REVAMPED.md §3.4): every write is stamped with the
+    // local contract height, and the server only accepts the stamp that equals
+    // its own contract height. A 409 therefore means that the `if-match`
+    // precondition still holds but the stamp is stale: the same data is signed
+    // again once the local contract has moved past it, without calling
+    // `onconflict`. A conflicting server value written at a height the local
+    // contract has not reached cannot be verified; after a bounded wait for the
+    // height, the call rejects with `ChelErrorKvHeightAhead` instead of handing
+    // `onconflict` an unverified (or missing) value, unless the caller opts in
+    // with `allowUnverifiedConflict`.
+    'chelonia/kv/set': async function (contractID, key, data, { ifMatch, innerSigningKeyId, encryptionKeyId, signingKeyId, maxAttempts, onconflict, allowUnverifiedConflict, signal: callerSignal }) {
         maxAttempts = maxAttempts ?? 3;
         const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`;
         const hasOnconflict = typeof onconflict === 'function';
@@ -2173,61 +2210,75 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         let conflictEtag = null;
         let successEtag = null;
         let currentValue;
+        // What the last conflict (or fetch-first GET) response revealed about
+        // the server value, and, when it is ahead, the height it requires.
+        // (Declared with a cast so TypeScript doesn't narrow them to their
+        // initial values: they are assigned inside `resolveData`.)
+        let currentStatus = 'absent';
+        let requiredHeight = undefined;
         let lastRecoveredValue;
         let recoveryGetAttempted = false;
+        // Height stamp of the most recent POST.
+        let postedHeight = 0;
+        const heightAheadError = (required, exact, etag, status) => (0, kv_height_js_1.kvHeightAheadError)(this, contractID, key, {
+            requiredHeight: required, exact, etag, status
+        });
+        // Classifies a server value (see `classifyKvBody`). A value that is
+        // ahead is first given a bounded, passive wait for the local contract to
+        // catch up (only when `wait` is set).
+        const classifyBody = async (serializedDataText, wait) => {
+            const body = classifyKvBody(this, contractID, key, serializedDataText);
+            if (body.kind !== 'ahead' || !wait)
+                return body;
+            await (0, kv_height_js_1.waitForContractHeight)(this, contractID, body.requiredHeight, {
+                signal: fetchSignal
+            });
+            return classifyKvBody(this, contractID, key, serializedDataText);
+        };
         // The `resolveData` function is tasked with computing merged data, as in
         // merging the existing stored values (after a conflict or initial fetch)
         // and new data. The return value indicates whether there should be a new
-        // attempt at storing updated data (if `true`) or not (if `false`)
-        const resolveData = async (invokeOnConflict = true) => {
+        // attempt at storing updated data (if `true`) or not (if `false`).
+        // `invokeOnConflict: false` only classifies the response (used for the
+        // diagnostics attached to a conflict-exhaustion error).
+        const resolveData = async (invokeOnConflict = true, backoff = false) => {
             currentValue = undefined;
+            currentStatus = 'absent';
+            requiredHeight = undefined;
+            let body = { kind: 'absent' };
             let headerEtag = response.headers.get('x-cid') || response.headers.get('etag');
             if (headerEtag)
                 conflictEtag = headerEtag;
             // Rationale:
             //  * response.ok could be the result of `GET` (no initial data)
-            //  * 409 indicates a conflict because the height used is too old
             //  * 412 indicates a conflict (precondition failed) because the data
             //    on the KV store have been updated / is not what we expected
-            // All of these situations should trigger parsing the response and
-            // conflict resolution
-            if (response.ok || response.status === 409 || response.status === 412) {
+            // Both situations should trigger parsing the response and conflict
+            // resolution. (A 409 never gets here: the main loop handles it.)
+            if (response.ok || response.status === 412) {
                 const serializedDataText = await response.text();
-                // We can get 409 even if there's no data on the server. We still need
-                // to call `onconflict` in this case, but we don't need to attempt to
-                // parse the response.
+                // An empty body means that there's no data on the server. We still
+                // need to call `onconflict` in this case, but we don't need to
+                // attempt to parse the response.
                 // This prevents this from failing in such cases, which can result in
                 // race conditions and data not being properly initialised.
                 // See <https://github.com/okTurtles/group-income/issues/2780>
-                if (serializedDataText) {
-                    try {
-                        currentValue = parseEncryptedOrUnencryptedMessage(this, {
-                            contractID,
-                            serializedData: JSON.parse(serializedDataText),
-                            meta: key
-                        });
-                        lastRecoveredValue = currentValue;
-                    }
-                    catch (e) {
-                        if (!(e instanceof errors_js_1.ChelErrorInvalidMessageHeight))
-                            throw e;
-                    }
-                }
+                body = await classifyBody(serializedDataText, invokeOnConflict);
                 // Rationale: 404 and 410 both indicate that the store key doesn't exist.
                 // These are not treated as errors since we could still set the value.
             }
             else if (response.status !== 404 && response.status !== 410) {
                 throw new errors_js_1.ChelErrorUnexpectedHttpResponseCode(`[kv/set] ${(0, utils_js_1.httpErrorMessage)(response)}`, { cause: response.status });
             }
-            // When a 409/412 response provides neither an etag header nor a
+            // When a 412 response provides neither an etag header nor a
             // body, the retry loop cannot recover — it would re-send
             // if-match: '""' and loop until maxAttempts. Do at most one GET
             // per set call to recover the current etag and value so
             // onconflict can produce a valid retry.
             if (!recoveryGetAttempted &&
                 !headerEtag &&
-                !currentValue &&
-                (response.status === 409 || response.status === 412)) {
+                body.kind === 'absent' &&
+                response.status === 412) {
                 recoveryGetAttempted = true;
                 const getResp = await this.config.fetch(url, {
                     headers: new Headers([
@@ -2236,21 +2287,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     signal: fetchSignal
                 });
                 if (getResp.ok) {
-                    const getText = await getResp.text();
-                    if (getText) {
-                        try {
-                            currentValue = parseEncryptedOrUnencryptedMessage(this, {
-                                contractID,
-                                serializedData: JSON.parse(getText),
-                                meta: key
-                            });
-                            lastRecoveredValue = currentValue;
-                        }
-                        catch (e) {
-                            if (!(e instanceof errors_js_1.ChelErrorInvalidMessageHeight))
-                                throw e;
-                        }
-                    }
+                    body = await classifyBody(await getResp.text(), invokeOnConflict);
                     headerEtag = getResp.headers.get('x-cid') || getResp.headers.get('etag');
                 }
                 else {
@@ -2260,8 +2297,29 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 if (headerEtag)
                     conflictEtag = headerEtag;
             }
+            // Publish what is known about the server value (the conflict-
+            // exhaustion path reads it after `resolveData(false)`).
+            const value = body.kind === 'present' ? body.parsed : undefined;
+            currentValue = value;
+            currentStatus = body.kind;
+            requiredHeight = body.kind === 'ahead' ? body.requiredHeight : undefined;
+            if (value)
+                lastRecoveredValue = value;
             if (!invokeOnConflict)
                 return false;
+            // Never hand `onconflict` a value that could not be verified as if it
+            // were absent (KV-REVAMPED.md §3.4): a merge against the default would
+            // either drop the write or overwrite the server value.
+            const aheadError = body.kind === 'ahead'
+                ? heightAheadError(body.requiredHeight, true, headerEtag ?? null, response.status)
+                : undefined;
+            if (aheadError && !allowUnverifiedConflict)
+                throw aheadError;
+            if (backoff && !aheadError) {
+                // Spread out retries from clients contending for the same key.
+                await (0, turtledash_1.delay)((0, turtledash_1.randomIntFromRange)(0, 1500));
+                (0, kv_height_js_1.throwIfAborted)(callerSignal);
+            }
             const result = await onconflict({
                 contractID,
                 key,
@@ -2272,10 +2330,14 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 // when writing. This allows 404 / 410 responses to work even if no
                 // etag is explicitly given
                 etag: headerEtag,
+                currentStatus: body.kind,
+                ...(body.kind === 'ahead' && { requiredHeight: body.requiredHeight }),
                 get currentData() {
-                    return currentValue?.data;
+                    if (aheadError)
+                        throw aheadError;
+                    return value?.data;
                 },
-                currentValue
+                currentValue: value
             });
             if (!result)
                 return false;
@@ -2294,6 +2356,7 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                         data: data,
                         meta: key
                     });
+                    postedHeight = Number(serializedData.height);
                     response = await this.config.fetch(url, {
                         headers: new Headers([
                             ['authorization', utils_js_1.buildShelterAuthorizationHeader.call(this, contractID)],
@@ -2327,13 +2390,39 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     }
                 }
                 if (!response.ok) {
-                    // Rationale: 409 and 412 indicate conflict resolution is needed
-                    if (response.status === 409 || response.status === 412) {
+                    if (response.status === 409) {
+                        // The server checks `if-match` before the height stamp, so a
+                        // 409 means the precondition still holds and `data` is still
+                        // the right value: only the height stamp is stale (the server
+                        // has processed contract events this client hasn't). Wait for
+                        // the local contract to move past the stamp, then sign the same
+                        // data again. The stored value's own stamp, when the body
+                        // carries one, is a better lower bound for the server height.
+                        const etag = response.headers.get('x-cid') || response.headers.get('etag');
+                        if (etag)
+                            conflictEtag = etag;
+                        const required = Math.max(postedHeight + 1, await readConflictBodyHeight(response) ?? 0);
+                        if (--maxAttempts <= 0) {
+                            throw heightAheadError(required, false, etag, response.status);
+                        }
+                        (0, kv_height_js_1.throwIfAborted)(callerSignal);
+                        const reached = await (0, kv_height_js_1.waitForContractHeight)(this, contractID, required, {
+                            signal: fetchSignal
+                        });
+                        if (!reached)
+                            throw heightAheadError(required, false, etag, response.status);
+                        continue;
+                    }
+                    // Rationale: 412 indicates conflict resolution is needed
+                    if (response.status === 412) {
                         if (--maxAttempts <= 0) {
                             try {
                                 await resolveData(false);
                             }
                             catch { }
+                            if (currentStatus === 'ahead') {
+                                throw heightAheadError(requiredHeight, true, conflictEtag, response.status);
+                            }
                             let currentData;
                             try {
                                 currentData = (currentValue ?? lastRecoveredValue)?.data;
@@ -2343,20 +2432,15 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                                 cause: { currentData, etag: conflictEtag ?? null }
                             });
                         }
-                        // Honour caller-side abort at every retry boundary so a
-                        // cancellation that lands between requests is respected
-                        // without waiting for the next fetch.
-                        if (callerSignal?.aborted) {
-                            throw callerSignal.reason instanceof Error
-                                ? callerSignal.reason
-                                : new DOMException('Aborted', 'AbortError');
-                        }
+                        // Honour a caller-side abort at every retry boundary, so a
+                        // cancellation that lands between requests is respected without
+                        // waiting for the next fetch.
+                        (0, kv_height_js_1.throwIfAborted)(callerSignal);
                         if (!hasOnconflict) {
                             // Can't resolve automatically if there's no conflict handler
                             throw new Error(`kv/set failed with status ${response.status} and no onconflict handler was provided`);
                         }
-                        await (0, turtledash_1.delay)((0, turtledash_1.randomIntFromRange)(0, 1500));
-                        if (await resolveData()) {
+                        if (await resolveData(true, true)) {
                             continue;
                         }
                         else {
@@ -2392,21 +2476,21 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
         }
         const etag = response.headers.get('x-cid') || response.headers.get('etag');
         const data = await response.json();
-        let parsed;
-        try {
-            parsed = parseEncryptedOrUnencryptedMessage(this, {
-                contractID,
-                serializedData: data,
-                meta: key
+        // A value written at a height the local contract hasn't reached can't be
+        // verified yet (KV-REVAMPED.md §3.4). Report it as such, with the height
+        // to wait for; a malformed height stamp is reported as the invalid
+        // value it is (`ChelErrorInvalidMessageHeight`).
+        const height = (0, kv_height_js_1.readKvValueHeight)(data);
+        if (!(0, kv_height_js_1.isHeightReached)(this, contractID, height)) {
+            throw (0, kv_height_js_1.kvHeightAheadError)(this, contractID, key, {
+                requiredHeight: height, exact: true, etag, status: response.status
             });
         }
-        catch (e) {
-            if (e instanceof errors_js_1.ChelErrorInvalidMessageHeight) {
-                throw new errors_js_1.ChelErrorInvalidMessageHeight(`[kv/get] ${contractID}::${key} was written at a contract height ` +
-                    'ahead of local state; sync the contract and retry', { cause: e });
-            }
-            throw e;
-        }
+        const parsed = parseEncryptedOrUnencryptedMessage(this, {
+            contractID,
+            serializedData: data,
+            meta: key
+        });
         // Attach `etag` in place rather than spreading: `parsed` exposes
         // `data` / `encryptionKeyId` / `innerSigningKeyId` / etc. as
         // accessors that force eager unwrap (and throw on decryption
@@ -2492,15 +2576,52 @@ function outputEncryptedOrUnencryptedMessage({ contractID, innerSigningKeyId, en
     const serializedData = { ...message.serialize((meta ?? '') + height), height };
     return serializedData;
 }
+// Classifies the raw text of a server KV value. An empty body is `absent`.
+// A value stamped with a height the local contract hasn't reached is
+// `ahead`: it cannot be verified yet, and its (unverified) height stamp says
+// how far the contract must advance. Otherwise the value is parsed
+// (verification stays lazy, on `.data`). A malformed body or height stamp
+// throws.
+function classifyKvBody(ctx, contractID, key, serializedDataText) {
+    if (!serializedDataText)
+        return { kind: 'absent' };
+    const serializedData = JSON.parse(serializedDataText);
+    const height = (0, kv_height_js_1.readKvValueHeight)(serializedData);
+    if (!(0, kv_height_js_1.isHeightReached)(ctx, contractID, height)) {
+        return { kind: 'ahead', requiredHeight: height };
+    }
+    return {
+        kind: 'present',
+        parsed: parseEncryptedOrUnencryptedMessage(ctx, {
+            contractID,
+            serializedData,
+            meta: key
+        })
+    };
+}
+// Height stamp of the value carried by a 409 response, or `undefined` when
+// there is none (no stored value) or it can't be read. Only used as a lower
+// bound for the server's contract height, so failures are not fatal.
+async function readConflictBodyHeight(response) {
+    try {
+        const text = await response.text();
+        return text ? (0, kv_height_js_1.readKvValueHeight)(JSON.parse(text)) : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
 function parseEncryptedOrUnencryptedMessage(ctx, { contractID, serializedData, meta }) {
     if (!serializedData) {
         throw new TypeError('[chelonia] parseEncryptedOrUnencryptedMessage: serializedData is required');
     }
     const state = (0, sbp_1.default)(ctx.config.stateSelector)[contractID];
-    const numericHeight = parseInt(serializedData.height);
+    // Canonical stamps only (see `readKvValueHeight`): the key window is
+    // checked at `numericHeight`, while the signature covers the raw stamp.
+    const numericHeight = (0, kv_height_js_1.readKvValueHeight)(serializedData);
     const rootState = (0, sbp_1.default)(ctx.config.stateSelector);
     const currentHeight = rootState.contracts[contractID].height;
-    if (!(numericHeight >= 0) || !(numericHeight <= currentHeight)) {
+    if (!(numericHeight <= currentHeight)) {
         throw new errors_js_1.ChelErrorInvalidMessageHeight(`[chelonia] parseEncryptedOrUnencryptedMessage: Invalid height ${serializedData.height}; it must be between 0 and ${currentHeight}`);
     }
     // Additional data used for verification
