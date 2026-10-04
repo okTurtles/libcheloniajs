@@ -273,17 +273,23 @@ export type KvMirrorEntry = {
   // `true` once the slot has reached a terminal outcome since it was last
   // activated: a load (value or 404), an applied remote frame, a committed
   // local write or clear, or a terminal error. Tells a settled `'non-init'`
-  // (the server has no value) apart from a pending one. Always present on
-  // entries of active slots; entries persisted by older versions may lack
-  // it until their slot is activated, so treat a missing value as `false`.
-  // See KV-REVAMPED.md §4.3.
+  // (the server has no value) apart from a pending one. It stays `true`
+  // while the slot reloads (status `'loading'`, unless it holds a value).
+  // Always present on entries of active slots; entries persisted by older
+  // versions may lack it until their slot is activated, so treat a missing
+  // value as `false`. Only meaningful for an active slot: an entry
+  // persisted by an earlier session keeps its old value until its slot is
+  // activated again. See KV-REVAMPED.md §4.3 and `chelonia/kv/whenSettled`.
   settled?: boolean;
 };
 
 // What `chelonia/kv/set` knows about the server value it received with a
 // conflict (or fetch-first GET) response. See KV-REVAMPED.md §3.4.
 //   - 'absent':  the server holds no value for the key.
-//   - 'present': the server value was decoded and verified.
+//   - 'present': the local contract has reached the value's height, so it
+//                can be verified. Decryption and signature verification
+//                happen lazily, on `currentData` / `currentValue.data`,
+//                which may still throw.
 //   - 'ahead':   the server value was written at a contract height the
 //                local contract has not reached, so it cannot be verified.
 export type KvServerValueStatus = 'absent' | 'present' | 'ahead';
@@ -622,6 +628,10 @@ export type CheloniaContext = {
   // aborted, no height wait can be registered and no height-recovery sync
   // can start: either would run into the next session. Runtime-only.
   kvHeightSession: AbortController;
+  // The height waits `chelonia/reset` dropped when it ended the height
+  // session. If the reset fails before tearing the session down, they are
+  // registered again (`chelonia/kv/_resumeHeightSession`). Runtime-only.
+  kvSuspendedHeightWaits: Array<Pick<KvHeightWait, 'contractID' | 'key' | 'requiredHeight' | 'reason'>>;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
@@ -797,10 +807,11 @@ export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<
 };
 
 /**
- * Callback supplied to `chelonia/kv/set` to resolve a `409` / `412`
- * conflict (or to populate the body when `data` was omitted and the
- * primitive performs a fetch-first GET — see the `data === undefined`
- * branch in `src/chelonia.ts`).
+ * Callback supplied to `chelonia/kv/set` to resolve a `412` conflict (or to
+ * populate the body when `data` was omitted and the primitive performs a
+ * fetch-first GET; see the `data === undefined` branch in
+ * `src/chelonia.ts`). A `409` (stale height stamp) is handled inside
+ * `kv/set`, which signs the same data again, and never reaches it.
  *
  * Return either:
  *   - `[newData, ifMatch]` to retry the write with `newData` against
@@ -828,29 +839,15 @@ export type ChelKvOnConflictCallback = (args: {
   status: number;
   etag: string | null | undefined;
   /**
-   * What is known about the server value. `'absent'` means the server
-   * holds no value, `'present'` that `currentData` is the verified server
-   * value. `'ahead'` is only ever passed when the caller set
-   * `allowUnverifiedConflict: true`; without it, `chelonia/kv/set` rejects
-   * with `ChelErrorKvHeightAhead` instead of calling `onconflict`.
-   * See KV-REVAMPED.md §3.4.
-   */
-  currentStatus: KvServerValueStatus;
-  /**
-   * Set when `currentStatus` is `'ahead'`: the contract height the local
-   * contract must reach before the server value can be verified.
-   */
-  requiredHeight?: number;
-  /**
-   * The decrypted/verified server data for the conflicting key.
-   * `undefined` means the server holds no value (`currentStatus` is
-   * `'absent'`).
+   * The server data for the conflicting key. `undefined` means the server
+   * holds no value (`currentStatus` is `'absent'`).
    *
    * **Throws on access.** The runtime value is a lazy getter (see
    * `resolveData` in `src/chelonia.ts`) that forces decryption and
    * signature verification the first time it is read, and may reject
-   * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`. When
-   * `currentStatus` is `'ahead'` it throws `ChelErrorKvHeightAhead`.
+   * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`, also
+   * when `currentStatus` is `'present'`. When `currentStatus` is
+   * `'ahead'` it throws `ChelErrorKvHeightAhead`.
    * Access it inside a `try`/`catch` (falling back to `undefined` or
    * re-throwing as appropriate), or read `currentValue.data` directly
    * with the same precaution. The bundled slot API (`chelonia/kv/update`,
@@ -859,4 +856,16 @@ export type ChelKvOnConflictCallback = (args: {
    */
   currentData: JSONType | undefined;
   currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string | undefined] | false>;
+} & KvConflictServerValue) => Promise<[JSONType, string | undefined] | false>;
+
+/**
+ * What `chelonia/kv/set` tells `onconflict` about the server value (see
+ * `KvServerValueStatus` and KV-REVAMPED.md §3.4). `'ahead'` is only ever
+ * passed when the caller set `allowUnverifiedConflict: true`; without it,
+ * `chelonia/kv/set` rejects with `ChelErrorKvHeightAhead` instead of
+ * calling `onconflict`. `requiredHeight` is then the contract height the
+ * local contract must reach before the server value can be verified.
+ */
+export type KvConflictServerValue =
+  | { currentStatus: 'absent' | 'present'; requiredHeight?: undefined }
+  | { currentStatus: 'ahead'; requiredHeight: number };

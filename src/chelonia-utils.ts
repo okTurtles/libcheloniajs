@@ -4,7 +4,9 @@ import type { ChelKvOnConflictCallback, JSONType, KvHeightAheadMode } from './ty
 // This file contains non-core parts of Chelonia, i.e., functionality that is
 // useful but optional. The threshold for something being 'optional' generally
 // is something that can be implemented externally using only public Chelonia
-// selectors.
+// selectors. (An exception: `queuedSet` uses the private
+// `chelonia/kv/_withHeightRecovery`, the height recovery that `kv/update`
+// and `kv/clear` also use.)
 // Optional functionality can make certain assumptions about contracts or
 // actions to make things simpler or easier to implement.
 // Currently, a single selector is defined: 'chelonia/kv/queuedSet'.
@@ -24,12 +26,14 @@ export default sbp('sbp/selectors/register', {
   // (`ChelErrorKvHeightAhead`), the contract is synced outside the queue and
   // the write is retried (`onHeightAhead: 'sync'`, the default), up to
   // `maxHeightRecoveries` times. Pass `onHeightAhead: 'reject'` to get the
-  // error instead. See KV-REVAMPED.md §4.2 step 5a.
+  // error instead. See KV-REVAMPED.md §4.2 step 5a. `allowUnverifiedConflict`
+  // is passed on to `chelonia/kv/set`.
   'chelonia/kv/queuedSet': ({
     contractID,
     key,
     data,
     onconflict,
+    allowUnverifiedConflict,
     ifMatch,
     maxAttempts,
     signal,
@@ -42,6 +46,7 @@ export default sbp('sbp/selectors/register', {
     key: string;
     data: JSONType;
     onconflict?: ChelKvOnConflictCallback;
+    allowUnverifiedConflict?: boolean;
     ifMatch?: string;
     maxAttempts?: number;
     signal?: AbortSignal;
@@ -57,6 +62,7 @@ export default sbp('sbp/selectors/register', {
           encryptionKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, encryptionKeyName),
           signingKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, signingKeyName),
           onconflict,
+          allowUnverifiedConflict,
           maxAttempts,
           signal
         })

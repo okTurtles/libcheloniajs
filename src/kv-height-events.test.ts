@@ -18,8 +18,8 @@ import './chelonia.js'
 import './internals.js'
 import { SPMessage } from './SPMessage.js'
 import type { SPKey, SPOpContract, SPOpValue } from './SPMessage.js'
-import { createCID, multicodes } from './functions.js'
 import { signedOutgoingDataWithRawKey } from './signedData.js'
+import { makeKvServer, sleep, whenSettledWithin, withLocalHeight } from './test-utils.js'
 import type { ChelRootState, CheloniaConfig, JSONType } from './types.js'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -29,67 +29,8 @@ const MANIFEST = 'test-manifest'
 const KEY = 'profile'
 
 const rootState = (): ChelRootState & Record<string, any> => sbp('chelonia/private/state')
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
-// A simulated chel server: the KV routes only, with the same checks, in
-// the same order, as chel's `POST /kv/:contractID/:key` (`if-match`, then
-// the height stamp against the server's contract height).
-const makeServer = () => {
-  const store = new Map<string, { body: string; cid: string }>()
-  const posts: Array<{ status: number; height: string }> = []
-  const quote = (cid: string) => `"${cid}"`
-  const server = {
-    height: 0,
-    posts,
-    onPost: null as ((n: number) => void) | null,
-    fetch: async (url: string, opts: {
-      method?: string;
-      headers?: ConstructorParameters<typeof Headers>[0];
-      body?: string;
-      signal?: AbortSignal;
-    } = {}) => {
-      opts.signal?.throwIfAborted()
-      const { pathname } = new URL(url)
-      if (pathname === '/time') return new Response(String(Date.now()), { status: 200 })
-      const m = /^\/kv\/[^/]+\/([^/]+)$/.exec(pathname)
-      if (!m) return new Response('', { status: 404 })
-      const key = decodeURIComponent(m[1])
-      if ((opts.method ?? 'GET') === 'GET') {
-        const existing = store.get(key)
-        return existing
-          ? new Response(existing.body, {
-            status: 200, headers: { ETag: quote(existing.cid), 'x-cid': quote(existing.cid) }
-          })
-          : new Response(null, { status: 404 })
-      }
-      const entry = { status: 0, height: JSON.parse(opts.body!).height as string }
-      posts.push(entry)
-      server.onPost?.(posts.length)
-      const existing = store.get(key)
-      const etag = quote(existing?.cid ?? '')
-      const ifMatch = new Headers(opts.headers).get('if-match') ?? ''
-      if (ifMatch !== '*' && !ifMatch.split(',').map((v) => v.trim()).includes(etag)) {
-        entry.status = 412
-        return new Response(existing?.body ?? '', {
-          status: 412, headers: { ETag: etag, 'x-cid': etag }
-        })
-      }
-      if (server.height !== Number(entry.height)) {
-        entry.status = 409
-        return new Response(existing?.body ?? '', {
-          status: 409, headers: { ETag: etag, 'x-cid': etag }
-        })
-      }
-      const cid = createCID(opts.body!, multicodes.RAW)
-      store.set(key, { body: opts.body!, cid })
-      entry.status = 204
-      return new Response(null, { status: 204, headers: { ETag: quote(cid), 'x-cid': quote(cid) } })
-    }
-  }
-  return server
-}
-
-let server: ReturnType<typeof makeServer>
+let server: ReturnType<typeof makeKvServer>
 let csk: ReturnType<typeof keygen>
 let contractID: string
 
@@ -144,12 +85,12 @@ const createContract = async (): Promise<SPMessage> => {
   return first
 }
 
-// The event after `previous`: an (unprocessed) unencrypted action.
-const nextEvent = (first: SPMessage, previous: SPMessage): SPMessage => SPMessage.createV1_0({
+// The event after `first`: an (unprocessed) unencrypted action.
+const nextEvent = (first: SPMessage): SPMessage => SPMessage.createV1_0({
   contractID,
-  previousHEAD: previous.hash(),
+  previousHEAD: first.hash(),
   previousKeyOp: first.hash(),
-  height: previous.height() + 1,
+  height: first.height() + 1,
   op: [
     SPMessage.OP_ACTION_UNENCRYPTED,
     signedOutgoingDataWithRawKey<SPOpValue, object>(
@@ -163,17 +104,12 @@ const nextEvent = (first: SPMessage, previous: SPMessage): SPMessage => SPMessag
 // `atHeight`, writes `value` (the server's contract is at that height).
 const writeAsOtherDevice = async (value: JSONType, atHeight: number) => {
   server.height = atHeight
-  const meta = rootState().contracts[contractID]
-  const saved = meta.height
-  meta.height = atHeight
-  try {
-    await sbp('chelonia/kv/set', contractID, KEY, value, {
+  await withLocalHeight(contractID, atHeight, () =>
+    sbp('chelonia/kv/set', contractID, KEY, value, {
       ifMatch: '*', signingKeyId: keyId(csk)
     })
-  } finally {
-    meta.height = saved
-  }
-  server.posts.length = 0
+  )
+  server.log.length = 0
 }
 
 const originalWarn = console.warn
@@ -183,12 +119,13 @@ const originalLog = console.log
 
 beforeEach(() => {
   sbp('chelonia/_init')
-  server = makeServer()
+  server = makeKvServer(0)
   sbp('chelonia/configure', {
     connectionURL: 'https://example.test',
     skipActionProcessing: true,
     acceptAllMessages: true,
-    fetch: server.fetch
+    fetch: async (url: string, opts: Parameters<typeof server.handleKv>[1]) =>
+      await server.handleKv(new URL(url).pathname, opts) ?? new Response('', { status: 404 })
   } as unknown as Partial<CheloniaConfig>)
   console.warn = () => {}
   console.debug = () => {}
@@ -203,7 +140,6 @@ afterEach(() => {
   console.debug = originalDebug
   console.info = originalInfo
   console.log = originalLog
-  sbp('chelonia/private/stopClockSync')
 })
 
 describe('height waits woken by processed events', () => {
@@ -214,18 +150,20 @@ describe('height waits woken by processed events', () => {
     const first = await createContract()
     // The server has processed the next event; this device hasn't yet.
     server.height = 1
-    const event = nextEvent(first, first)
+    const event = nextEvent(first)
     // The event arrives while the write is in flight.
+    let handled: Promise<void> | undefined
     server.onPost = (n) => {
-      if (n === 1) setTimeout(() => { handle(event).catch(() => {}) }, 20)
+      if (n === 1) setTimeout(() => { handled = handle(event) }, 20)
     }
     const startedAt = Date.now()
     await sbp('chelonia/kv/set', contractID, KEY, { name: 'alice' }, {
       ifMatch: '""', signingKeyId: keyId(csk)
     })
     const elapsed = Date.now() - startedAt
+    await handled
     assert.strictEqual(rootState().contracts[contractID].height, 1)
-    assert.deepStrictEqual(server.posts.map((p) => [p.status, p.height]), [
+    assert.deepStrictEqual(server.posts().map((p) => [p.status, p.height]), [
       [409, '0'], [204, '1']
     ])
     assert.ok(elapsed < 1500, `the write waited ${elapsed} ms: it wasn't woken by the event`)
@@ -243,11 +181,8 @@ describe('height waits woken by processed events', () => {
     await sleep(10)
     // The value was written at height 1: the load is deferred.
     assert.strictEqual(sbp('chelonia/kv/status', contractID, KEY), 'loading')
-    await handle(nextEvent(first, first))
-    assert.strictEqual(
-      await sbp('chelonia/kv/whenSettled', contractID, KEY, { signal: AbortSignal.timeout(2000) }),
-      'loaded'
-    )
+    await handle(nextEvent(first))
+    assert.strictEqual(await whenSettledWithin(contractID, KEY, 2000), 'loaded')
     assert.deepStrictEqual(sbp('chelonia/kv/read', contractID, KEY), { name: 'bob' })
   })
 })

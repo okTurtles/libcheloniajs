@@ -159,17 +159,19 @@ const verifySignatureData = function <T, U extends object = object> (
     // These errors (ChelErrorSignatureKeyUnauthorized) are serious and
     // indicate a bug. Make them fatal when running integration tests
     // (otherwise, they get swallowed and shown as a notification)
-    // Note: CI services (e.g. GitHub Actions) also set `CI` when running this
-    // library's own unit tests, and this branch can then make tests fail:
-    // `state/vuex/state` is registered by the host app, not by this library,
-    // so the lookup throws in place of `ChelErrorSignatureKeyUnauthorized`,
-    // and the unhandled rejection fails the running `node:test` test. Tests
-    // that reach this path need to account for both (see kv-height.test.ts).
-    if (process.env.CI) {
+    // Only when the host app registers `state/vuex/state` (Group Income's
+    // integration tests do): CI services (e.g. GitHub Actions) also set `CI`
+    // when running this library's own unit tests, or another app's, where
+    // the lookup would throw in place of `ChelErrorSignatureKeyUnauthorized`
+    // and the unhandled rejection would fail unrelated tests.
+    const vuexState = process.env.CI
+      ? sbp('sbp/selectors/fn', 'state/vuex/state') as (() => unknown) | undefined
+      : undefined
+    if (vuexState) {
       console.error(`Key ${sKeyId} is unauthorized or expired for the current contract`, {
         designatedKey,
         height,
-        state: JSON.parse(JSON.stringify(sbp('state/vuex/state')))
+        state: JSON.parse(JSON.stringify(vuexState()))
       })
       // An unhandled promise rejection will cause Cypress to fail
       Promise.reject(

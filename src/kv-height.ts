@@ -20,7 +20,8 @@ import sbp from '@sbp/sbp'
 import {
   ChelErrorInvalidMessageHeight,
   ChelErrorKvHeightAhead,
-  ChelErrorKvUpdateInvalid
+  ChelErrorKvUpdateInvalid,
+  isKvHeightAhead
 } from './errors.js'
 import type {
   CheloniaContext,
@@ -43,6 +44,12 @@ export const KV_HEIGHT_PENDING_FALLBACK_MS = 10000
 export const KV_HEIGHT_RECOVERY_TIMEOUT_MS = 30000
 // Default number of sync-and-retry rounds for `onHeightAhead: 'sync'`.
 export const KV_DEFAULT_MAX_HEIGHT_RECOVERIES = 2
+// How many times one `chelonia/kv/set` call re-signs its data after a `409`
+// (stale height stamp). Each retry already waits for the local contract to
+// move past the rejected stamp, so this only stops a server that keeps
+// moving ahead faster than this client processes events. Counted
+// separately from `maxAttempts`, which bounds `412` conflict resolution.
+export const KV_MAX_STALE_STAMP_RETRIES = 5
 
 let heightWaitMs = KV_HEIGHT_WAIT_MS
 let pendingFallbackMs = KV_HEIGHT_PENDING_FALLBACK_MS
@@ -71,18 +78,6 @@ export const setKvHeightTimings = (
   return kvHeightTimings()
 }
 
-// Name-based so it also matches errors created by another loaded copy of
-// the library (dual ESM/CJS builds), where `instanceof` fails.
-export function isKvHeightAhead (e: unknown): e is Error & { cause: KvHeightAheadCause } {
-  return !!e && typeof e === 'object' && (e as Error).name === 'ChelErrorKvHeightAhead'
-}
-
-export function kvHeightAheadCause (e: unknown): KvHeightAheadCause | undefined {
-  if (!isKvHeightAhead(e)) return undefined
-  const cause = (e as { cause?: unknown }).cause
-  return cause && typeof cause === 'object' ? cause as KvHeightAheadCause : undefined
-}
-
 export function localContractHeight (
   ctx: CheloniaContext,
   contractID: string
@@ -104,10 +99,11 @@ export function isHeightReached (
 // (`String(height)`).
 const CANONICAL_HEIGHT = /^(?:0|[1-9][0-9]*)$/
 
-// Reads the height stamp of a serialized KV value without verifying it.
-// Throws `ChelErrorInvalidMessageHeight` for a missing or malformed stamp:
-// such a value can never become verifiable, so it must not be mistaken for
-// "not yet verifiable" (or, as before, for "absent").
+// Reads the height stamp of a serialized message (a KV value, or any other
+// message parsed by `parseEncryptedOrUnencryptedMessage`) without verifying
+// it. Throws `ChelErrorInvalidMessageHeight` for a missing or malformed
+// stamp: such a value can never become verifiable, so it must not be
+// mistaken for "not yet verifiable" (or, as before, for "absent").
 //
 // A stamp is a safe non-negative integer, or its canonical decimal string.
 // Anything else ("1e1", "0x0a", "010", " 10", ...) is malformed: the
@@ -115,7 +111,7 @@ const CANONICAL_HEIGHT = /^(?:0|[1-9][0-9]*)$/
 // `Number(stamp)` against its contract height, so a stamp that parses to a
 // different height elsewhere (`parseInt("1e1")` is 1) could get a value
 // verified against a key window the server never checked.
-export function readKvValueHeight (serializedData: unknown): number {
+export function readHeightStamp (serializedData: unknown): number {
   const raw = (serializedData as { height?: unknown } | null | undefined)?.height
   const height = typeof raw === 'number'
     ? raw
@@ -124,7 +120,7 @@ export function readKvValueHeight (serializedData: unknown): number {
       : NaN
   if (!Number.isSafeInteger(height) || height < 0) {
     throw new ChelErrorInvalidMessageHeight(
-      `[chelonia/kv] Invalid KV value height ${JSON.stringify(raw)}`
+      `[chelonia] Invalid height stamp ${JSON.stringify(raw)}`
     )
   }
   return height
@@ -138,17 +134,24 @@ export function kvHeightAheadError (
 ): Error & { cause: KvHeightAheadCause } {
   const localHeight = localContractHeight(ctx, contractID)
   const cause: KvHeightAheadCause = { requiredHeight, exact, localHeight, etag, status }
+  // `exact: false` comes from a 409, which may carry no stored value at all:
+  // the height is then only a lower bound for the server's contract height.
+  const required = exact
+    ? `the server value was written at contract height ${requiredHeight}`
+    : `the server requires contract height at least ${requiredHeight}`
+  const local = localHeight === undefined
+    ? 'is not loaded'
+    : `is at height ${localHeight}`
   return new ChelErrorKvHeightAhead(
-    `[chelonia/kv] ${contractID}::${key}: the server value requires contract ` +
-    `height ${exact ? '' : 'at least '}${requiredHeight}, but the local contract ` +
-    `is at height ${String(localHeight)}; sync the contract and retry`,
+    `[chelonia/kv] ${contractID}::${key}: ${required}, but the local contract ` +
+    `${local}; sync the contract and retry`,
     { cause }
   ) as Error & { cause: KvHeightAheadCause }
 }
 
 // What an operation aborted by `signal` rejects with: the signal's reason
-// when it is an `Error`, otherwise an `AbortError`. Shared by all the KV
-// code (`src/kv.ts`, `chelonia/kv/set`).
+// when it is an `Error`, otherwise an `AbortError`. Used by all the KV code
+// (`src/kv.ts`, `chelonia/kv/set`), directly or through `throwIfAborted`.
 export function abortReason (signal: AbortSignal): unknown {
   return signal.reason instanceof Error
     ? signal.reason
@@ -169,7 +172,6 @@ export function addHeightListener (
   minHeight: number,
   fire: () => void
 ): () => void {
-  if (!ctx.kvHeightListeners) ctx.kvHeightListeners = new Map()
   let listeners = ctx.kvHeightListeners.get(contractID)
   if (!listeners) {
     listeners = new Set()
@@ -178,7 +180,7 @@ export function addHeightListener (
   const listener: KvHeightListener = { minHeight, fire }
   listeners.add(listener)
   return () => {
-    const current = ctx.kvHeightListeners?.get(contractID)
+    const current = ctx.kvHeightListeners.get(contractID)
     if (!current) return
     current.delete(listener)
     if (current.size === 0) ctx.kvHeightListeners.delete(contractID)
@@ -195,7 +197,7 @@ export function notifyContractHeight (
   contractID: string,
   height: number
 ): void {
-  const listeners = ctx.kvHeightListeners?.get(contractID)
+  const listeners = ctx.kvHeightListeners.get(contractID)
   if (!listeners) return
   for (const listener of Array.from(listeners)) {
     if (height < listener.minHeight) continue
@@ -211,25 +213,31 @@ export function notifyContractHeight (
 
 // Waits, without touching any queue, until the local contract reaches
 // `minHeight`. Resolves `true` when it does and `false` when `timeoutMs`
-// elapses first. Rejects with the abort reason if `signal` aborts.
+// elapses first. Rejects with the abort reason if any of `signals` aborts.
 export function waitForContractHeight (
   ctx: CheloniaContext,
   contractID: string,
   minHeight: number,
-  { timeoutMs = heightWaitMs, signal }: { timeoutMs?: number; signal?: AbortSignal } = {}
+  { timeoutMs = heightWaitMs, signals = [] }: {
+    timeoutMs?: number;
+    signals?: Array<AbortSignal | undefined>;
+  } = {}
 ): Promise<boolean> {
   if (isHeightReached(ctx, contractID, minHeight)) return Promise.resolve(true)
-  if (signal?.aborted) return Promise.reject(abortReason(signal))
+  const active = signals.filter((s): s is AbortSignal => !!s)
+  const alreadyAborted = active.find((s) => s.aborted)
+  if (alreadyAborted) return Promise.reject(abortReason(alreadyAborted))
   if (!(timeoutMs > 0)) return Promise.resolve(false)
   return new Promise<boolean>((resolve, reject) => {
     const cleanup = () => {
       clearTimeout(timer)
       off()
-      signal?.removeEventListener('abort', onAbort)
+      for (const s of active) s.removeEventListener('abort', onAbort)
     }
     const onAbort = () => {
       cleanup()
-      reject(abortReason(signal!))
+      // Only called by an `abort` event, so one of the signals is aborted.
+      reject(abortReason(active.find((s) => s.aborted)!))
     }
     const off = addHeightListener(ctx, contractID, minHeight, () => {
       cleanup()
@@ -239,7 +247,7 @@ export function waitForContractHeight (
       cleanup()
       resolve(isHeightReached(ctx, contractID, minHeight))
     }, timeoutMs)
-    signal?.addEventListener('abort', onAbort, { once: true })
+    for (const s of active) s.addEventListener('abort', onAbort, { once: true })
   })
 }
 
@@ -248,7 +256,6 @@ export function waitForContractHeight (
 // internal queue; callers MUST NOT hold the contract's public
 // (`queueInvocation`) lane while awaiting it.
 function startRecoverySync (ctx: CheloniaContext, contractID: string): Promise<void> {
-  if (!ctx.kvRecoveries) ctx.kvRecoveries = new Map()
   const existing = ctx.kvRecoveries.get(contractID)
   if (existing) return existing
   const sync: Promise<void> = Promise.resolve()
@@ -322,8 +329,9 @@ export type KvHeightRecoveryOptions = {
   signal?: AbortSignal;
 }
 
-// Validates the height-recovery options shared by `update`, `clear` and
-// `queuedSet`. Returns the error message for invalid input, or `undefined`.
+// Validates the height-recovery options shared by `update`, `clear`,
+// `queuedSet` (through `withHeightRecovery`) and single-key `sync`. Returns
+// the error message for invalid input, or `undefined`.
 export function invalidHeightRecoveryOptions (
   { onHeightAhead, maxHeightRecoveries }: KvHeightRecoveryOptions
 ): string | undefined {
@@ -342,7 +350,8 @@ export function invalidHeightRecoveryOptions (
 // Runs `attempt` and, while it rejects with `ChelErrorKvHeightAhead`, syncs
 // the contract and runs it again (up to `maxHeightRecoveries` times).
 // `attempt` receives the number of recoveries performed so far. Invalid
-// options reject with `ChelErrorKvUpdateInvalid` before `attempt` runs.
+// options reject with `ChelErrorKvUpdateInvalid` before `attempt` runs;
+// `label` (e.g. `'update: cID::key'`) prefixes that error's message.
 //
 // `attempt` is expected to enqueue its work on the contract's lane and
 // return the lane promise, so the recovery below always runs with the lane
@@ -353,10 +362,11 @@ export async function withHeightRecovery<T> (
   ctx: CheloniaContext,
   contractID: string,
   attempt: (recoveries: number) => Promise<T>,
-  { onHeightAhead, maxHeightRecoveries, signal }: KvHeightRecoveryOptions = {}
+  { onHeightAhead, maxHeightRecoveries, signal }: KvHeightRecoveryOptions = {},
+  label: string = contractID
 ): Promise<T> {
   const invalid = invalidHeightRecoveryOptions({ onHeightAhead, maxHeightRecoveries })
-  if (invalid) throw new ChelErrorKvUpdateInvalid(`[chelonia/kv] ${contractID}: ${invalid}`)
+  if (invalid) throw new ChelErrorKvUpdateInvalid(`[chelonia/kv] ${label}: ${invalid}`)
   const mode = onHeightAhead ?? 'sync'
   const maxRecoveries = maxHeightRecoveries ?? KV_DEFAULT_MAX_HEIGHT_RECOVERIES
   // Captured once: `chelonia/reset` aborts this controller and replaces it.

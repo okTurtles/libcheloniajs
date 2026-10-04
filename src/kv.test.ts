@@ -189,6 +189,7 @@ sbp('sbp/selectors/register', {
     this.kvHeightWaits = new Map()
     this.kvRecoveries = new Map()
     this.kvHeightSession = new AbortController()
+    this.kvSuspendedHeightWaits = []
     this.defContractKvByManifest = new Map()
   },
 
@@ -231,6 +232,7 @@ sbp('sbp/selectors/register', {
     this.kvOnUpdateActive.clear()
     sbp('chelonia/kv/_clearHeightWaits')
     this.kvHeightSession = new AbortController()
+    this.kvSuspendedHeightWaits = []
     this.kvRecoveries.clear()
     this.subscriptionSet.clear()
   },

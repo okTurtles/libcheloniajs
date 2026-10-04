@@ -228,7 +228,8 @@ Full documentation:
   accepts writes stamped with its current height. Never treat an
   unverifiable value as absent; see
   [docs/kv.md](docs/kv.md#contract-heights) and
-  [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md).
+  [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md). Detect the resulting
+  error with `isKvHeightAhead(e)` (`src/errors.ts`), not by name.
 
 ### Contract State Structure
 
@@ -331,6 +332,11 @@ describe('Feature name', () => {
   })
 })
 ```
+
+Shared helpers live in plain modules that register no selectors and are
+excluded from the CJS build: `src/test-utils.ts` (incl. a simulated KV
+server, `makeKvServer`) and `src/kv-height-harness.ts` (the harness of the
+`kv-height*.test.ts` files). Test files may import those, never each other.
 
 Test files use `.test.ts` suffix and are discovered automatically: `npm test` runs every
 `src/**/*.test.ts` file via the Node test runner, each in its own process (fresh SBP

@@ -86,7 +86,22 @@ const status = await sbp('chelonia/kv/whenSettled', contractID, 'unreadMessages'
 `whenSettled` also waits for the contract to sync and the slot to
 activate, rejects when `signal` aborts or on `chelonia/reset`, and never
 resolves for a slot that is never loaded (`autoLoad: 'never'`, or
-`'on-demand'` without a `sync`/`update`/`clear`).
+`'on-demand'` without a `sync`/`update`/`clear`). It never resolves with
+`'loading'`: once settled, a slot stays settled while it reloads (and
+reports `'loading'` meanwhile, unless it holds a value), and
+`whenSettled` waits for the reload to finish. Only an active slot's
+`settled` counts: an entry persisted by an earlier session may still
+carry `settled: true` until its slot is activated again.
+
+A reducer passed to `chelonia/kv/update` never runs against a value
+that couldn't be verified, or against the default in its place (see
+[Contract heights](#contract-heights)). One case remains where the first
+attempt runs against the default without knowing the server value: a
+slot that has never loaded (`autoLoad: 'never'`, or `'on-demand'` without
+a `sync`). A write is then still guarded (it is sent with `if-match: ""`
+and merged on the `412`), but a reducer that returns `KV_NOOP` on the
+default sends nothing. When that would be wrong, `sync` the slot (or
+`await whenSettled`) first.
 
 ## Contract heights
 
@@ -106,26 +121,47 @@ The library handles both, so that an unverifiable value is never
 mistaken for an absent one (which used to silently drop writes, or
 overwrite the other device's value with a default-seeded one):
 
-- `chelonia/kv/set` waits briefly (up to 1.5 s, without blocking any
-  queue) for the local contract to catch up. A `409` is then re-signed
-  with the same data; a conflicting value that is still ahead makes the
-  call reject with `ChelErrorKvHeightAhead` instead of reaching
-  `onconflict`.
+- `chelonia/kv/set` waits briefly (up to 1.5 s) for the local contract
+  to catch up. The wait is passive (contract events keep being
+  processed), but when `kv/set` runs inside `update`, `clear` or
+  `queuedSet`, the contract's `queueInvocation` lane stays held during
+  it. A `409` is then re-signed with the same data (up to 5 times; this
+  doesn't count against `maxAttempts`); a conflicting value that is still
+  ahead makes the call reject with `ChelErrorKvHeightAhead` instead of
+  reaching `onconflict`.
 - `chelonia/kv/update`, `chelonia/kv/clear` and `chelonia/kv/queuedSet`
   go further: on `ChelErrorKvHeightAhead` they sync the contract (outside
   the queue lane) and try again, up to `maxHeightRecoveries` (default 2)
   times. Pass `onHeightAhead: 'reject'` to get the error instead.
+  Before running its reducer, `update` reloads a slot whose server value
+  is known to be ahead (its load is deferred, or gave up), so the reducer
+  never runs against the default in place of that value.
 - A slot load or pubsub frame whose value is ahead doesn't fail: the
-  slot keeps its value (a first load stays `'loading'`) and reloads the
-  key once the contract catches up. If it hasn't after 10 s, the library
-  syncs the contract; if that doesn't help either, the slot settles: a
-  slot that never loaded settles to `'error'` (`lastError.name ===
-  'ChelErrorKvHeightAhead'`), and a slot that holds a value keeps it.
-- `chelonia/kv/sync` for a single key waits and syncs the same way
-  before rejecting (and settles the slot the same way).
+  slot keeps its value and status (a slot that hasn't settled stays
+  `'loading'`) and reloads the key once the contract catches up. If it
+  hasn't after 10 s, the library syncs the contract; if that doesn't help
+  either, the slot settles: a slot that never loaded settles to `'error'`
+  (`lastError.name === 'ChelErrorKvHeightAhead'`), and a slot that holds
+  a value, or settled as `'non-init'`, keeps it. The raw
+  `NOTIFICATION_TYPE.KV` handler passed to `chelonia/connect` is not
+  called for frames that are ahead: define a slot for the key to receive
+  the value once the contract catches up.
+- `chelonia/kv/sync` for a single key waits up to 1.5 s, then syncs the
+  contract and loads again, up to `maxHeightRecoveries` (default 2) times,
+  before rejecting (and settling the slot as above). With the default
+  timings that can take about a minute when the syncs are slow; it takes
+  the same `signal`, `onHeightAhead` and `maxHeightRecoveries` options as
+  `update`.
 
-`ChelErrorKvHeightAhead` extends `ChelErrorInvalidMessageHeight`; its
-`.cause` is `{ requiredHeight, exact, localHeight, etag, status }`. A
+KV writes made from code that holds another contract's queue (e.g. a
+contract `sideEffect`) shouldn't be awaited there: waiting for heights,
+or for a recovery sync, would hold that queue too.
+
+`ChelErrorKvHeightAhead` extends `ChelErrorInvalidMessageHeight`, but has
+its own `name`; match it with `isKvHeightAhead(e)` (exported, and
+name-based, so it also matches errors from another copy of the library),
+and read its `.cause` (`{ requiredHeight, exact, localHeight, etag,
+status }`) with `kvHeightAheadCause(e)`. A
 value with a malformed height stamp is rejected with
 `ChelErrorInvalidMessageHeight`. A stamp must be a non-negative integer
 or its plain decimal string: `"1e1"`, `"010"` or `" 10"` are malformed,
@@ -201,7 +237,7 @@ direct callers (the high-level slot API hides them):
   where previously it was only representable at the type level as a
   tuple. No runtime behaviour change for existing callers.
 
-Three runtime changes come with height-aware conflict handling (see
+Four runtime changes come with height-aware conflict handling (see
 [Contract heights](#contract-heights)):
 
 - **A `409` no longer calls `onconflict`.** The server checks `if-match`
@@ -209,20 +245,29 @@ Three runtime changes come with height-aware conflict handling (see
   only the stamp is stale. `kv/set` waits for the local contract to move
   past it and signs the same data again. A `409` therefore also works
   without an `onconflict` handler.
+- **`maxAttempts` only counts conflicts (`412`).** Re-signing after a
+  `409` is bounded separately (5 times per call), and running out of
+  those retries rejects with `ChelErrorKvHeightAhead`.
 - **An unverifiable conflicting value no longer reaches `onconflict` as
   `currentData: undefined`.** `kv/set` rejects with
   `ChelErrorKvHeightAhead` instead (after a short wait). `onconflict`
   receives `currentStatus: 'absent' | 'present'`, so it can tell an
-  empty server apart from a present value. A blind writer that doesn't
-  care about the current value can pass `allowUnverifiedConflict: true`
-  to be called with `currentStatus: 'ahead'` (and a `requiredHeight`)
-  instead; `currentData` then throws `ChelErrorKvHeightAhead`.
+  empty server apart from a value. `'present'` means the value can be
+  verified: decryption and signature verification still happen lazily,
+  when `currentData` is read, which may throw. A blind writer that
+  doesn't care about the current value can pass
+  `allowUnverifiedConflict: true` (to `kv/set` or `queuedSet`) to be
+  called with `currentStatus: 'ahead'` (and a `requiredHeight`) instead;
+  `currentData` then throws `ChelErrorKvHeightAhead`.
 - **A malformed height stamp is an error.** It used to be treated like
   an absent value.
 
-`chelonia/kv/get` rejects with `ChelErrorKvHeightAhead` (previously a
-plain `ChelErrorInvalidMessageHeight`, which it still extends) for a
-value that is ahead.
+`chelonia/kv/get` rejects with `ChelErrorKvHeightAhead` for a value that
+is ahead. It used to reject with a plain `ChelErrorInvalidMessageHeight`:
+`instanceof ChelErrorInvalidMessageHeight` still matches, but a check of
+`e.name === 'ChelErrorInvalidMessageHeight'` (e.g. one that has to work
+across separately bundled copies of the library) no longer does. Use
+`isKvHeightAhead(e)`.
 
 ## Schema-driven default normalization
 

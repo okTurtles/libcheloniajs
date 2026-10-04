@@ -189,6 +189,19 @@ describe('a first sync that fails', () => {
 })
 
 describe('a re-sync that fails', () => {
+  it('keeps the reference count of a contract whose first sync failed', async () => {
+    await failedRetain()
+    eventsAfterStatus = 500
+    await assert.rejects(
+      sbp('chelonia/contract/sync', contractID, { resync: true }),
+      { name: 'ChelErrorUnexpectedHttpResponseCode' }
+    )
+    eventsAfterStatus = 200
+    // Still retained: releasing it removes it.
+    assert.deepStrictEqual({ ...rootState().contracts[contractID] }, { references: 1 })
+    await sbp('chelonia/contract/release', contractID)
+    assert.ok(!(contractID in rootState().contracts))
+  })
   it('leaves no state once the contract is released', async () => {
     await sbp('chelonia/contract/retain', contractID)
     eventsAfterStatus = 500
@@ -227,7 +240,11 @@ describe('a sync that succeeds', () => {
     }))
     await sbp('chelonia/reset', persisted)
     added.length = 0
+    // Up to date: the sync must subscribe the contract without fetching
+    // events (an `/eventsAfter` request would fail).
+    eventsAfterStatus = 500
     await sbp('chelonia/contract/sync', contractID)
+    eventsAfterStatus = 200
     assert.deepStrictEqual(added, [contractID])
     await sbp('chelonia/contract/release', contractID)
     assert.ok(!(contractID in rootState().contracts))
