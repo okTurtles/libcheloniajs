@@ -69,8 +69,24 @@ export const setLocalHeightLater = (contractID: string, height: number, ms: numb
 
 // `chelonia/kv/whenSettled` that fails after `ms`, instead of hanging the
 // test file, if the slot never settles.
-export const whenSettledWithin = (contractID: string, key: string, ms = 3000): Promise<string> =>
-  sbp('chelonia/kv/whenSettled', contractID, key, { signal: AbortSignal.timeout(ms) })
+//
+// The deadline is a plain (ref'd) timer rather than `AbortSignal.timeout`,
+// whose timer doesn't keep the event loop alive: neither do the library's
+// deferred-load fallback timers (deliberately unref'd), so a test waiting
+// only on those would leave the loop empty, and Node 22's test runner then
+// cancels the test ("Promise resolution is still pending but the event
+// loop has already resolved").
+export const whenSettledWithin = (contractID: string, key: string, ms = 3000): Promise<string> => {
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException(
+      `${contractID}::${key} did not settle within ${ms} ms`, 'TimeoutError'
+    ))
+  }, ms)
+  return (sbp('chelonia/kv/whenSettled', contractID, key, {
+    signal: controller.signal
+  }) as Promise<string>).finally(() => clearTimeout(timer))
+}
 
 export type KvFetchOptions = {
   method?: string;
