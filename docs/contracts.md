@@ -280,6 +280,17 @@ name rules: malformed names are rejected with HTTP 400 and duplicates are
 rejected with HTTP 409. For other contract types the header is silently
 ignored, so the name simply never registers.
 
+To check a name before sending anything, for example while a user picks a
+username, use `isValidName`. It's the same rule the reference relay checks
+names against:
+
+```js
+import { isValidName } from '@chelonia/lib/names'
+
+isValidName('alice') // → true
+isValidName('Alice') // → false: only lowercase letters, digits, `_` and `-`
+```
+
 To resolve a registered name back to a contract ID, use
 `chelonia/out/nameToContractID`:
 

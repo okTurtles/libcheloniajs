@@ -147,6 +147,16 @@
         "default": "./dist/cjs/local-selectors/index.cjs"
       }
     },
+    "./names": {
+      "import": {
+        "types": "./dist/esm/names.d.mts",
+        "default": "./dist/esm/names.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/names.d.cts",
+        "default": "./dist/cjs/names.cjs"
+      }
+    },
     "./persistent-actions": {
       "import": {
         "types": "./dist/esm/persistent-actions.d.mts",
