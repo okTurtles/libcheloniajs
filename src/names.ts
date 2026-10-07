@@ -7,9 +7,9 @@
 // - no `__` or `--`
 //
 // Checked as safe from ReDoS with <https://devina.io/redos-checker>
-const NAME_REGEX = /^(?![_-])((?!([_-])\2)[a-z\d_-]){1,80}(?<![_-])$/
+const USERNAME_REGEX = /^(?![_-])((?!([_-])\2)[a-z\d_-]){1,80}(?<![_-])$/
 
 // The `typeof` check is for callers without types: `test` turns its argument
-// into a string, and 'undefined' is a valid name.
-export const isValidName = (name: string): boolean =>
-  typeof name === 'string' && NAME_REGEX.test(name)
+// into a string, and 'undefined' is a valid username.
+export const isValidUsername = (username: string): boolean =>
+  typeof username === 'string' && USERNAME_REGEX.test(username)
