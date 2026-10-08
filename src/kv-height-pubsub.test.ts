@@ -14,12 +14,15 @@ import './internals.js'
 import { CHELONIA_KV_UPDATED } from './events.js'
 import {
   CONTRACT_ID,
+  TEST_TIMINGS,
   UNREAD,
   V0,
   VB,
+  activateContract,
   addChatRoomUnreadMessage,
   advanceLocalHeightOnInternalLane,
   debugs,
+  defineSlot,
   drainLanes,
   installKvHeightHooks,
   mirror,
@@ -29,8 +32,10 @@ import {
   setLocalHeight,
   setupStaleDeviceA,
   sleep,
+  slotStatus,
   subscribeContract,
   warnings,
+  whenSettledWithin,
   writeAsDeviceB
 } from './kv-height-harness.js'
 import { NOTIFICATION_TYPE } from './pubsub/index.js'
@@ -89,6 +94,25 @@ describe('pubsub frames while the local contract is behind', () => {
       contractID: CONTRACT_ID, key: UNREAD, updater: addChatRoomUnreadMessage('roomA', 'a2', 5)
     })
     assert.deepStrictEqual(server.posts().map((p) => p.status), [204])
+  })
+
+  it("a frame that is ahead makes a settled 'non-init' slot 'loading' until it loads", async () => {
+    sbp('chelonia/kv/_testSetHeightTimings', { ...TEST_TIMINGS, pendingFallbackMs: 10000 })
+    defineSlot({ key: UNREAD })
+    await activateContract()
+    assert.strictEqual(slotStatus(UNREAD), 'non-init')
+    assert.strictEqual(mirror(UNREAD).settled, true)
+    connect()
+    await writeAsDeviceB(UNREAD, VB, 42)
+    // The frame shows that the server value isn't absent after all.
+    deliverKvFrame()
+    await drainLanes()
+    assert.strictEqual(slotStatus(UNREAD), 'loading')
+    await assert.rejects(whenSettledWithin(UNREAD, 100), (e: any) => e.name === 'TimeoutError')
+    const settling = whenSettledWithin(UNREAD)
+    await advanceLocalHeightOnInternalLane(42)
+    assert.strictEqual(await settling, 'loaded')
+    assert.deepStrictEqual(mirror(UNREAD).value, VB)
   })
 
   it("a clear retried after a recovery doesn't carry the first attempt's conflict", async () => {

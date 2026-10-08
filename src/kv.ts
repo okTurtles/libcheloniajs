@@ -745,10 +745,14 @@ function decrementPendingLoad (ctx: CheloniaContext, contractID: string): void {
 //
 // A load or pubsub frame that returns a value written at a contract height
 // the local contract has not reached is not a failure: the slot keeps its
-// current value and status, and reloads once the contract reaches that
-// height. If it doesn't within `pendingFallbackMs`, the contract is force-
-// synced; if it is still behind after that, the slot settles: a slot that
-// never loaded to `'error'`, a loaded slot with its value kept.
+// current value, and reloads once the contract reaches that height. A
+// `'non-init'` slot goes `'loading'` meanwhile: its server value isn't
+// absent. If the height isn't reached within `pendingFallbackMs`, the
+// contract is force-synced; if it is still behind after that, the slot
+// settles (a loaded slot keeps its value, any other slot goes to `'error'`)
+// and its wait is parked, not dropped: the slot still reloads if the
+// contract reaches the height later, and until then `update` doesn't use
+// its mirror as a basis (see `parkHeightWait`, `mirrorBasisUnverified`).
 // ---------------------------------------------------------------------------
 
 const heightWaitKey = (contractID: string, key: string): string =>
@@ -807,12 +811,14 @@ function fireHeightWait (ctx: CheloniaContext, wait: KvHeightWait): void {
   })
 }
 
-// The contract could not be brought to `requiredHeight`. A slot that never
-// loaded settles to `'error'`; a slot holding a value (`'loaded'`), already
-// in `'error'`, or that settled as `'non-init'` keeps its status and value,
-// and the next load or frame retries. Either way the slot settles: giving
-// up is a terminal outcome, and a re-activated slot (e.g. restored from
-// persisted state) may not have settled yet.
+// The contract could not be brought to `requiredHeight`. A slot holding a
+// value (`'loaded'`) or already in `'error'` keeps its status and value;
+// any other slot (one that never loaded, or a `'non-init'` one whose server
+// value turned out to be ahead) settles to `'error'`. Either way the slot
+// settles: giving up is a terminal outcome, and a re-activated slot (e.g.
+// restored from persisted state) may not have settled yet. The key's
+// height wait is parked rather than dropped (see `parkHeightWait`), so the
+// slot keeps knowing that the server holds a value it can't verify.
 function settleHeightAheadFailure (
   ctx: CheloniaContext,
   contractID: string,
@@ -820,17 +826,29 @@ function settleHeightAheadFailure (
   requiredHeight: number
 ): void {
   const slot = ctx.kvSlotsByContractID.get(contractID)?.get(key)
-  if (!slot) return
   const rootState = sbp(ctx.config.stateSelector) as ChelRootState
   const entry = rootState._kv?.[contractID]?.[key]
-  if (!entry) return
+  if (!slot || !entry) {
+    // Nothing left to reload: a height wait only exists for an active slot.
+    cancelHeightWaits(ctx, contractID, key)
+    return
+  }
   const message = `[chelonia/kv] ${contractID}::${key}: the server value was written at ` +
     `contract height ${requiredHeight}, which the local contract (at height ` +
     `${String(localContractHeight(ctx, contractID))}) did not reach`
+  // Parked before the status changes, so that observers of the settled
+  // status already find the mirror unverified.
+  parkHeightWait(ctx, {
+    contractID,
+    key,
+    requiredHeight,
+    // Only used when there is no wait to park (single-key `kv/sync`
+    // dropped it); an existing wait keeps its own reason.
+    reason: KV_UPDATE_REASON.LOAD
+  })
   if (
     entry.status === KV_LOAD_STATUS.LOADED ||
-    entry.status === KV_LOAD_STATUS.ERROR ||
-    (entry.status === KV_LOAD_STATUS.NON_INIT && entry.settled === true)
+    entry.status === KV_LOAD_STATUS.ERROR
   ) {
     console.warn(`${message}; keeping the current mirror value`)
     setSlotStatus(
@@ -845,34 +863,17 @@ function settleHeightAheadFailure (
   )
 }
 
-// Fallback timer: force a contract sync, then either reload (height now
-// reached) or give up (see `settleHeightAheadFailure`).
-function heightWaitFallback (ctx: CheloniaContext, wait: KvHeightWait): void {
-  const waitKey = heightWaitKey(wait.contractID, wait.key)
-  if (ctx.kvHeightWaits.get(waitKey) !== wait) return
-  wait.timer = undefined
-  const conclude = () => {
-    // Fired (height reached) or cancelled while the sync ran.
-    if (ctx.kvHeightWaits.get(waitKey) !== wait) return
-    if (isHeightReached(ctx, wait.contractID, wait.requiredHeight)) {
-      fireHeightWait(ctx, wait)
-      return
-    }
-    dropHeightWait(ctx, waitKey, wait)
-    settleHeightAheadFailure(ctx, wait.contractID, wait.key, wait.requiredHeight)
-  }
-  recoverContractHeight(
-    ctx, wait.contractID, new Error(`height fallback for ${waitKey}`)
-  ).catch(() => {}).then(conclude)
-}
-
-// Defers a reload of `(contractID, key)` until the local contract reaches
-// `requiredHeight`. A no-op for keys without an active slot, and while
-// `chelonia/reset` is tearing the session down (`kvHeightSession`).
-// Repeated registrations for the same key merge (highest height wins, the
-// original fallback deadline is kept so the wait can't be postponed
-// forever).
-function registerHeightWait (
+// Parks the height wait of `(contractID, key)` once its fallback gave up
+// (creating it when there is none): the fallback timer goes, the height
+// listener stays. So the slot still reloads if the contract ever reaches
+// `requiredHeight`, and `mirrorBasisUnverified` keeps refusing its mirror
+// as an `update` basis until then. The next registration for the key
+// un-parks it (see `registerHeightWait`). At most one listener per key,
+// removed when it fires, when the slot is deactivated, by
+// `_cleanupContractRuntime`, and by `chelonia/reset`. A no-op for keys
+// without an active slot, and while `chelonia/reset` is tearing the
+// session down (`kvHeightSession`).
+function parkHeightWait (
   ctx: CheloniaContext,
   {
     contractID,
@@ -886,6 +887,89 @@ function registerHeightWait (
   const waitKey = heightWaitKey(contractID, key)
   let wait = ctx.kvHeightWaits.get(waitKey)
   if (wait) {
+    if (wait.timer !== undefined) clearTimeout(wait.timer)
+    wait.timer = undefined
+    wait.off()
+    wait.requiredHeight = Math.max(wait.requiredHeight, requiredHeight)
+  } else {
+    wait = { contractID, key, requiredHeight, reason, off: () => {}, timer: undefined }
+    ctx.kvHeightWaits.set(waitKey, wait)
+  }
+  wait.parked = true
+  const target = wait
+  target.off = addHeightListener(ctx, contractID, target.requiredHeight, () => {
+    fireHeightWait(ctx, target)
+  })
+  if (isHeightReached(ctx, contractID, target.requiredHeight)) fireHeightWait(ctx, target)
+}
+
+// Starts `wait`'s fallback timer (see `heightWaitFallback`).
+function armHeightWaitFallback (ctx: CheloniaContext, wait: KvHeightWait): void {
+  const timer = setTimeout(
+    () => heightWaitFallback(ctx, wait), kvHeightTimings().pendingFallbackMs
+  )
+  // Node.js-specific: don't keep the process alive for this timer.
+  ;(timer as unknown as { unref?: () => void }).unref?.()
+  wait.timer = timer
+}
+
+// Fallback timer: force a contract sync, then either reload (height now
+// reached) or give up (see `settleHeightAheadFailure`, which parks the
+// wait).
+function heightWaitFallback (ctx: CheloniaContext, wait: KvHeightWait): void {
+  const waitKey = heightWaitKey(wait.contractID, wait.key)
+  if (ctx.kvHeightWaits.get(waitKey) !== wait) return
+  wait.timer = undefined
+  const conclude = () => {
+    // Fired (height reached) or cancelled while the sync ran.
+    if (ctx.kvHeightWaits.get(waitKey) !== wait) return
+    if (isHeightReached(ctx, wait.contractID, wait.requiredHeight)) {
+      fireHeightWait(ctx, wait)
+      return
+    }
+    settleHeightAheadFailure(ctx, wait.contractID, wait.key, wait.requiredHeight)
+  }
+  recoverContractHeight(
+    ctx, wait.contractID, new Error(`height fallback for ${waitKey}`)
+  ).catch(() => {}).then(conclude)
+}
+
+// Defers a reload of `(contractID, key)` until the local contract reaches
+// `requiredHeight`. A no-op for keys without an active slot, and while
+// `chelonia/reset` is tearing the session down (`kvHeightSession`).
+// Repeated registrations for the same key merge (highest height wins, the
+// original fallback deadline is kept so the wait can't be postponed
+// forever). A registration on a parked wait (whose fallback gave up)
+// un-parks it with a new fallback deadline: the next load or frame that
+// finds the value ahead tries again.
+//
+// Every path that finds the server value ahead goes through here (the
+// load path, the pubsub KV dispatch, `kv/sync`'s abort path, and
+// `_resumeHeightSession`), so this is also where a `'non-init'` slot,
+// settled or not, goes `'loading'`: its server value isn't absent.
+function registerHeightWait (
+  ctx: CheloniaContext,
+  {
+    contractID,
+    key,
+    requiredHeight,
+    reason
+  }: { contractID: string; key: string; requiredHeight: number; reason: KvHeightWait['reason'] }
+): void {
+  if (ctx.kvHeightSession.signal.aborted) return
+  const slot = ctx.kvSlotsByContractID.get(contractID)?.get(key)
+  if (!slot) return
+  const rootState = sbp(ctx.config.stateSelector) as ChelRootState
+  if (rootState._kv?.[contractID]?.[key]?.status === KV_LOAD_STATUS.NON_INIT) {
+    setSlotStatus(ctx, rootState, contractID, slot.contractType, key, KV_LOAD_STATUS.LOADING)
+  }
+  const waitKey = heightWaitKey(contractID, key)
+  let wait = ctx.kvHeightWaits.get(waitKey)
+  if (wait?.parked) {
+    wait.parked = false
+    armHeightWaitFallback(ctx, wait)
+  }
+  if (wait) {
     if (requiredHeight <= wait.requiredHeight) return
     wait.off()
     wait.requiredHeight = requiredHeight
@@ -893,12 +977,7 @@ function registerHeightWait (
     const created: KvHeightWait = {
       contractID, key, requiredHeight, reason, off: () => {}, timer: undefined
     }
-    const timer = setTimeout(
-      () => heightWaitFallback(ctx, created), kvHeightTimings().pendingFallbackMs
-    )
-    // Node.js-specific: don't keep the process alive for this timer.
-    ;(timer as unknown as { unref?: () => void }).unref?.()
-    created.timer = timer
+    armHeightWaitFallback(ctx, created)
     ctx.kvHeightWaits.set(waitKey, created)
     wait = created
   }
@@ -912,8 +991,12 @@ function registerHeightWait (
 // Whether the mirror entry can't serve as the basis of an `update` reducer
 // because its server value is known to be unverifiable: a load deferred on
 // height is pending (status `'loading'`: any other load holds the lane until
-// it settles), a height wait is registered for the key, or a deferred load
-// gave up (`'error'` from `settleHeightAheadFailure`, with no value).
+// it settles), or a height wait is registered for the key. That includes a
+// parked wait, whose fallback gave up: the slot keeps it until the value
+// loads, the slot is deactivated, the contract's KV runtime is cleaned up,
+// or `chelonia/reset`. The last clause covers an entry persisted as given
+// up (`'error'` from `settleHeightAheadFailure`, with no value) before its
+// first load in this session.
 function mirrorBasisUnverified (
   ctx: CheloniaContext,
   contractID: string,
@@ -1261,7 +1344,8 @@ export default (sbp('sbp/selectors/register', {
   'chelonia/kv/_endHeightSession': function (this: CheloniaContext): void {
     this.kvSuspendedHeightWaits = Array.from(
       this.kvHeightWaits.values(),
-      ({ contractID, key, requiredHeight, reason }) => ({ contractID, key, requiredHeight, reason })
+      ({ contractID, key, requiredHeight, reason, parked }) =>
+        ({ contractID, key, requiredHeight, reason, parked })
     )
     this.kvHeightSession.abort(new DOMException('Aborted by chelonia/reset', 'AbortError'))
     sbp('chelonia/kv/_clearHeightWaits')
@@ -1271,13 +1355,17 @@ export default (sbp('sbp/selectors/register', {
   // session down (e.g. its persistence hook threw): the session goes on, so
   // it gets a new height session, and the deferred reloads that
   // `_endHeightSession` dropped are registered again (with a new fallback
-  // deadline). A no-op while the height session is running.
+  // deadline). Parked ones (whose fallback already gave up) are parked
+  // again, without a fallback. A no-op while the height session is running.
   'chelonia/kv/_resumeHeightSession': function (this: CheloniaContext): void {
     if (!this.kvHeightSession.signal.aborted) return
     this.kvHeightSession = new AbortController()
     const suspended = this.kvSuspendedHeightWaits
     this.kvSuspendedHeightWaits = []
-    for (const wait of suspended) registerHeightWait(this, wait)
+    for (const { parked, ...wait } of suspended) {
+      if (parked) parkHeightWait(this, wait)
+      else registerHeightWait(this, wait)
+    }
   },
 
   // Private. Runs `attempt` with height recovery (see `withHeightRecovery`
@@ -1908,10 +1996,6 @@ export default (sbp('sbp/selectors/register', {
         return
       }
       const priorStatus = perContract[slot.key]?.status
-      // A settled `'non-init'` slot has confirmed that the server holds no
-      // value; like a loaded value, that outcome keeps being presented
-      // while a reload is deferred on height.
-      const priorSettled = perContract[slot.key]?.settled === true
       // `silent` (update's data-loss-guard reload) must hide ALL of this
       // reload's status transitions from the `update` caller: the guard
       // reload runs from an `'error'` baseline, so `suppressLoadingStatus`
@@ -2021,9 +2105,10 @@ export default (sbp('sbp/selectors/register', {
           // contract hasn't reached, so it can't be verified yet
           // (KV-REVAMPED.md §3.4). That is not a load failure: keep the
           // mirror value and etag, and reload once the contract catches up.
-          // A slot that holds a value (or is in 'error'), or that settled as
-          // 'non-init', goes back to that status; any other slot stays
-          // 'loading' (pending), without a terminal status event.
+          // A slot that holds a value (or is in 'error') goes back to that
+          // status; any other slot stays 'loading' (pending), without a
+          // terminal status event. That includes a slot that settled as
+          // 'non-init': the server value it found absent is there after all.
           registerHeightWait(this, {
             contractID,
             key: slot.key,
@@ -2032,8 +2117,7 @@ export default (sbp('sbp/selectors/register', {
           })
           if (
             priorStatus === KV_LOAD_STATUS.LOADED ||
-            priorStatus === KV_LOAD_STATUS.ERROR ||
-            (priorStatus === KV_LOAD_STATUS.NON_INIT && priorSettled)
+            priorStatus === KV_LOAD_STATUS.ERROR
           ) {
             restorePriorStatusIfStale()
           }
@@ -3300,9 +3384,9 @@ export default (sbp('sbp/selectors/register', {
       // recovery itself, so it drops the deferred reload `_loadSlotNow`
       // registers; it registers it again when it stops early (abort), and
       // leaves it in place with `onHeightAhead: 'reject'`, so the slot isn't
-      // stranded. Once the recoveries are exhausted the slot settles (see
-      // `settleHeightAheadFailure`) and the call rejects with
-      // `ChelErrorKvHeightAhead`.
+      // stranded. Once the recoveries are exhausted the slot settles, its
+      // deferred reload is parked (see `settleHeightAheadFailure`), and the
+      // call rejects with `ChelErrorKvHeightAhead`.
       const abortSignal = this.abortController.signal
       const maxRecoveries = maxHeightRecoveries ?? KV_DEFAULT_MAX_HEIGHT_RECOVERIES
       let lastHeightError: unknown
@@ -3627,9 +3711,12 @@ export default (sbp('sbp/selectors/register', {
   // Public. See KV-REVAMPED §4.10. Resolves with the slot's status once it
   // has settled (`KvMirrorEntry.settled`), i.e. once the current activation
   // has reached a terminal outcome. Unlike `status`, this tells a settled
-  // `'non-init'` (the server holds no value) apart from a pending one.
-  // While a settled slot reloads (status `'loading'`), it waits for the
-  // reload to finish, so it never resolves with `'loading'`.
+  // `'non-init'` (the last verifiable read found no value) apart from a
+  // pending one. While a settled slot reloads (status `'loading'`), it
+  // waits for the reload to finish, so it never resolves with `'loading'`.
+  // That includes a `'non-init'` slot whose server value turns out to be
+  // ahead of the local contract: it goes `'loading'` until the value loads
+  // (`'loaded'`) or the deferred load gives up (`'error'`).
   //
   // Does not require the slot to be active yet: it waits for activation
   // too, so it can be called before the contract has synced. Only an active

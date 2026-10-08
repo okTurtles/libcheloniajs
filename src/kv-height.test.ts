@@ -49,11 +49,35 @@ import {
   writeAsDeviceB
 } from './kv-height-harness.js'
 import { readHeightStamp } from './kv-height.js'
+import { KV_NOOP } from './kv.js'
 import { signedOutgoingDataWithRawKey } from './signedData.js'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 installKvHeightHooks()
+
+// Resolves once a `console.warn` containing `text` was logged.
+const untilWarned = async (text: string, ms = 3000) => {
+  const deadline = Date.now() + ms
+  while (!warnings.some((w) => String(w[0]).includes(text))) {
+    if (Date.now() > deadline) assert.fail(`no warning containing "${text}" within ${ms} ms`)
+    await sleep(10)
+  }
+}
+
+// Device A's loaded slot (V0) is refreshed by an aggregate `kv/sync`, which
+// finds VB written at height 42. The contract stays at 40 (the 300 ms
+// fallback sync doesn't catch it up), so the deferred reload gives up and
+// the slot keeps presenting V0.
+const loadedRefreshGivesUp = async () => {
+  await setupStaleDeviceA()
+  await sbp('chelonia/kv/sync', CONTRACT_ID)
+  await untilWarned('keeping the current mirror value')
+  await drainLanes()
+  assert.strictEqual(slotStatus(UNREAD), 'loaded')
+  assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), V0)
+  server.log.length = 0
+}
 
 // ---------------------------------------------------------------------------
 
@@ -220,6 +244,28 @@ describe('writes while the local contract is behind', () => {
     await assert.rejects(recordingUpdate(bases), ChelErrorKvHeightAhead)
     assert.deepStrictEqual(bases, [])
     assert.deepStrictEqual(server.posts(), [])
+  })
+
+  it("an update after a loaded slot's refresh gave up does not seed from the stale value", async () => {
+    await loadedRefreshGivesUp()
+    // KV_NOOP on V0 (no roomB entry), but writes on VB.
+    const reducer = addChatRoomUnreadMessage('roomB', 'b2', 5)
+    assert.strictEqual(reducer(V0), KV_NOOP)
+    assert.notStrictEqual(reducer(VB), KV_NOOP)
+    const bases: any[] = []
+    await assert.rejects(
+      sbp('chelonia/kv/update', {
+        contractID: CONTRACT_ID,
+        key: UNREAD,
+        updater: (prev: any) => { bases.push(prev); return reducer(prev) }
+      }),
+      ChelErrorKvHeightAhead
+    )
+    assert.deepStrictEqual(bases, [])
+    assert.deepStrictEqual(server.posts(), [])
+    assert.strictEqual(slotStatus(UNREAD), 'loaded')
+    assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), V0)
+    assert.deepStrictEqual(server.value(UNREAD), VB)
   })
 
   it('a value that becomes verifiable during the wait is merged, not overwritten', async () => {
@@ -593,6 +639,51 @@ describe('loads and pubsub frames while the local contract is behind', () => {
     assert.strictEqual(server.syncs, syncsBefore)
   })
 
+  it('a deferred reload that gave up still reloads once the contract catches up', async () => {
+    await loadedRefreshGivesUp()
+    await advanceLocalHeightOnInternalLane(42)
+    await drainLanes()
+    assert.strictEqual(server.gets().length, 1)
+    assert.strictEqual(slotStatus(UNREAD), 'loaded')
+    assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), VB)
+    assert.strictEqual(mirror(UNREAD).etag, server.etagOf(UNREAD))
+  })
+
+  it('a new load that finds the value still ahead falls back again', async () => {
+    await loadedRefreshGivesUp()
+    warnings.length = 0
+    const syncsBefore = server.syncs
+    await sbp('chelonia/kv/sync', CONTRACT_ID)
+    await untilWarned('keeping the current mirror value')
+    assert.strictEqual(server.syncs, syncsBefore + 1) // the new fallback sync
+    assert.strictEqual(server.gets().length, 1)
+    // Gave up again, and still reloads at the height.
+    await advanceLocalHeightOnInternalLane(42)
+    await drainLanes()
+    assert.strictEqual(server.gets().length, 2)
+    assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), VB)
+  })
+
+  it("cleaning up the contract's KV runtime cancels a deferred reload that gave up", async () => {
+    await loadedRefreshGivesUp()
+    sbp('chelonia/kv/_cleanupContractRuntime', CONTRACT_ID)
+    await advanceLocalHeightOnInternalLane(42)
+    await drainLanes()
+    assert.strictEqual(server.gets().length, 0)
+  })
+
+  it('deactivating the slot cancels a deferred reload that gave up', async () => {
+    await loadedRefreshGivesUp()
+    // Replacing the slot with one that doesn't match the contract
+    // deactivates it.
+    defineSlot({ key: UNREAD, match: () => false })
+    await drainLanes()
+    assert.strictEqual(mirror(UNREAD), undefined)
+    await advanceLocalHeightOnInternalLane(42)
+    await drainLanes()
+    assert.strictEqual(server.gets().length, 0)
+  })
+
   it("a deferred reload doesn't flicker a slot that another load has loaded", async () => {
     sbp('chelonia/kv/_testSetHeightTimings', { ...TEST_TIMINGS, pendingFallbackMs: 10000 })
     await writeAsDeviceB(UNREAD, VB, 42)
@@ -768,36 +859,60 @@ describe('settled / whenSettled', () => {
     assert.strictEqual(settledAs, 'non-init')
   })
 
-  it("a settled 'non-init' slot keeps its status while a refresh is deferred on height", async () => {
+  it("a settled 'non-init' slot whose server value turns out to be ahead is 'loading' until it loads", async () => {
     sbp('chelonia/kv/_testSetHeightTimings', { ...TEST_TIMINGS, pendingFallbackMs: 10000 })
     defineSlot({ key: 'absent' })
     await activateContract()
     assert.strictEqual(slotStatus('absent'), 'non-init')
     await writeAsDeviceB('absent', V0, 42)
-    // An aggregate refresh finds a value written at a height not reached.
+    const { events, off } = collectStatusEvents('absent')
+    // An aggregate refresh finds a value written at a height not reached:
+    // the server value isn't absent after all.
     await sbp('chelonia/kv/sync', CONTRACT_ID)
     await drainLanes()
-    assert.strictEqual(slotStatus('absent'), 'non-init')
+    assert.strictEqual(slotStatus('absent'), 'loading')
     assert.strictEqual(mirror('absent').settled, true)
-    assert.strictEqual(await whenSettledWithin('absent', 100), 'non-init')
+    await assert.rejects(whenSettledWithin('absent', 100), (e: any) => e.name === 'TimeoutError')
+    const settling = whenSettledWithin('absent')
     await advanceLocalHeightOnInternalLane(42)
-    await drainLanes()
-    assert.strictEqual(slotStatus('absent'), 'loaded')
+    assert.strictEqual(await settling, 'loaded')
+    off()
     assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, 'absent'), V0)
+    assert.deepStrictEqual(events.map((e) => [e.previousStatus, e.status]), [
+      ['non-init', 'loading'], ['loading', 'loaded']
+    ])
   })
 
-  it("a deferred refresh that gives up leaves a settled 'non-init' slot as it was", async () => {
-    defineSlot({ key: 'absent' })
+  it("a settled 'non-init' slot whose deferred refresh gives up settles to 'error'", async () => {
+    defineSlot({ key: UNREAD })
     await activateContract()
-    await writeAsDeviceB('absent', V0, 42)
+    assert.strictEqual(slotStatus(UNREAD), 'non-init')
+    await writeAsDeviceB(UNREAD, VB, 42)
     await sbp('chelonia/kv/sync', CONTRACT_ID)
-    await drainLanes()
     const syncsBefore = server.syncs
-    await sleep(500) // past the 300 ms fallback, whose sync doesn't catch up
+    // The 300 ms fallback sync doesn't catch the contract up.
+    assert.strictEqual(await whenSettledWithin(UNREAD), 'error')
     assert.strictEqual(server.syncs, syncsBefore + 1)
-    assert.strictEqual(slotStatus('absent'), 'non-init')
-    assert.strictEqual(mirror('absent').settled, true)
-    assert.ok(warnings.some((w) => String(w[0]).includes('keeping the current mirror value')))
+    assert.strictEqual(mirror(UNREAD).lastError?.name, 'ChelErrorKvHeightAhead')
+    assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), {})
+    // KV_NOOP on the default, but writes on VB: the reducer must not run
+    // on the default.
+    const reducer = addChatRoomUnreadMessage('roomA', 'a2', 5)
+    assert.strictEqual(reducer({}), KV_NOOP)
+    assert.notStrictEqual(reducer(VB), KV_NOOP)
+    server.log.length = 0
+    const bases: any[] = []
+    await assert.rejects(
+      sbp('chelonia/kv/update', {
+        contractID: CONTRACT_ID,
+        key: UNREAD,
+        updater: (prev: any) => { bases.push(prev); return reducer(prev) }
+      }),
+      ChelErrorKvHeightAhead
+    )
+    assert.deepStrictEqual(bases, [])
+    assert.deepStrictEqual(server.posts(), [])
+    assert.deepStrictEqual(server.value(UNREAD), VB)
   })
 
   it("a persisted entry's revalidation doesn't resolve whenSettled before the slot is active", async () => {
@@ -976,6 +1091,18 @@ describe('chelonia/reset', () => {
     // Only the height notification can reload the slot within the test.
     setLocalHeight(42)
     assert.strictEqual(await whenSettledWithin(UNREAD), 'loaded')
+    assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), VB)
+  })
+
+  it('a failed reset keeps a deferred load that gave up, without a new fallback', async () => {
+    await loadedRefreshGivesUp()
+    const syncsBefore = server.syncs
+    await failedReset()
+    await sleep(400) // a new 300 ms fallback would have synced by now
+    assert.strictEqual(server.syncs, syncsBefore)
+    await advanceLocalHeightOnInternalLane(42)
+    await drainLanes()
+    assert.strictEqual(server.gets().length, 1)
     assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), VB)
   })
 

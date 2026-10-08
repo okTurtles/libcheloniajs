@@ -239,7 +239,8 @@ against the real value (§4.2 step 5a), or rejects.
 The first attempt runs against the local mirror. When the mirror is
 known not to reflect a verifiable server value (a load of the key is
 deferred on height, a height wait is registered for it, or a deferred
-load gave up), the mirror is reloaded first; if the value still can't be
+load gave up, which keeps its height wait parked, §4.9), the mirror is
+reloaded first; if the value still can't be
 verified, the attempt fails over to the height recovery without running
 the reducer. The same reload happens after every height recovery, and a
 reload that finds the value still unverifiable fails over again rather
@@ -980,6 +981,13 @@ key or queries before sync fails loudly instead of silently getting
 > `chelonia/kv/whenSettled`, §4.10) rather than inferring it from a
 > status transition.
 >
+> A settled `'non-init'` means that the last verifiable read found no
+> value and that nothing since has found one. A load or pubsub frame that
+> finds a value written at a contract height the local contract hasn't
+> reached shows that the server value isn't absent: the slot goes
+> `'loading'` (keeping `settled`) until the value loads, or settles to
+> `'error'` if the deferred load gives up (§4.9).
+>
 > **First-load 404 emits no `CHELONIA_KV_UPDATED`.** On the very first
 > load of a never-written key the mirror `value` stays `undefined`
 > (`undefined → undefined`, no change), so only
@@ -1120,12 +1128,14 @@ if anything is still loading and nothing is failing, surface loading;
 if everything has reached `'loaded'`, surface `'loaded'`. Returns
 `'non-init'` if no slots are active for the contract.
 
-A slot that hasn't settled, whose load is deferred until the local
-contract catches up (§4.9), reports `'loading'`; a slot that holds a
-value keeps reporting `'loaded'` (and a slot that settled as
-`'non-init'` keeps reporting `'non-init'`) while its refresh is
-deferred. `status` doesn't say
-whether a `'non-init'` slot has settled; read the mirror entry's
+A slot whose load is deferred until the local contract catches up
+(§4.9) reports `'loading'`, unless it holds a value: a slot that holds
+a value keeps reporting `'loaded'` while its refresh is deferred. That
+includes a slot that had settled as `'non-init'`: a load or pubsub frame
+that finds a value written at a height not reached yet shows that the
+server value isn't absent, so the slot goes `'loading'` (and then
+`'loaded'`, or `'error'` if the deferred load gives up). `status` doesn't
+say whether a `'non-init'` slot has settled; read the mirror entry's
 `settled` flag or use `chelonia/kv/whenSettled` (§4.10).
 
 ### 4.7 `chelonia/kv/refreshFilters`
@@ -1225,17 +1235,24 @@ of the success-path sequence in the `CHELONIA_KV_UPDATED` row.
 **Loads deferred on height.** A load whose value was written at a
 contract height the local contract hasn't reached (§3.4) is neither a
 success nor a failure. The mirror keeps its value and etag; a slot that
-was `'loaded'` (or `'error'`), or had settled as `'non-init'`, returns
-to that status, any other slot stays `'loading'`, and `settled` doesn't
-change, so no terminal event fires. The library registers a deferred reload for the key, which runs
-(through the queue lane, with the original `reason`) as soon as the
-local contract reaches the value's height. If it hasn't after
+was `'loaded'` (or `'error'`) returns to that status, any other slot
+(including one that had settled as `'non-init'`: its server value isn't
+absent after all) stays `'loading'`, and `settled` doesn't change, so no
+terminal event fires. The library registers a deferred reload for the
+key, which runs (through the queue lane, with the original `reason`) as
+soon as the local contract reaches the value's height. A pubsub frame
+that is ahead registers the same deferred reload, and also turns a
+`'non-init'` slot `'loading'`. If the height isn't reached after
 `KV_HEIGHT_PENDING_FALLBACK_MS` (10 s), the library force-syncs the
-contract; if the height is still not reached, the slot settles: a slot
-that never loaded settles to `'error'` with `lastError.name ===
-'ChelErrorKvHeightAhead'`, and a `'loaded'` (or `'error'`) slot, or one
-that settled as `'non-init'`, keeps its status and value (the next load
-or frame tries again). A deferred reload
+contract; if the height is still not reached, the slot settles: a
+`'loaded'` (or `'error'`) slot keeps its status and value, any other slot
+settles to `'error'` with `lastError.name === 'ChelErrorKvHeightAhead'`.
+Giving up doesn't make the slot forget that the server holds a value it
+can't verify: the deferred reload is parked (no more fallback, but it
+still runs if the contract reaches the height later), and until then
+`update` doesn't use the mirror as its reducer's basis (§4.2). The next
+load or frame that finds the value ahead un-parks it, with a new
+fallback. A deferred reload, parked or not,
 is cancelled when its slot is deactivated, the contract is released, or
 Chelonia is reset. Once `chelonia/reset` has aborted the old session, no
 deferred reload is registered and no height-recovery sync starts (a
@@ -1243,7 +1260,8 @@ write that would need one rejects with an `AbortError`) until the reset
 completes: either would sync a contract into the next session. If the
 reset fails before tearing the session down (e.g. its persistence hook
 throws), the session goes on: a new height session starts and the
-deferred reloads the reset dropped are registered again.
+deferred reloads the reset dropped are registered again (parked ones
+parked again, without a new fallback).
 Background loads (autoload, reconnect refresh, aggregate `sync`) log
 such a deferral at debug level rather than as an error.
 
@@ -1406,6 +1424,11 @@ entry has `settled` (§4.3): immediately if it already has, otherwise on
 the first `CHELONIA_KV_STATUS_CHANGED` for the key after which that
 holds. It never resolves with `'loading'`: a settled slot that is
 reloading (status `'loading'`) is waited on until the reload finishes.
+A settled `'non-init'` therefore means that the last verifiable read
+found no value and that nothing since has found one: a `'non-init'` slot
+whose load or pubsub frame finds a value that is ahead of the local
+contract goes `'loading'` (§4.9), and is waited on until that value
+loads (`'loaded'`) or the deferred load gives up (`'error'`).
 It does not require the slot to be active yet: it also waits for the
 contract to sync and the slot to activate, so it can be called early
 (e.g. at boot, to gate work on the first load). A mirror entry persisted
@@ -2426,7 +2449,8 @@ cleared *before* emit with `added: []` and a populated `removed` list.
    GET that rejects with `ChelErrorKvHeightAhead` is not a network
    failure. The mirror keeps its value and etag, the status returns to
    `'loaded'` / `'error'` if it was one of those and otherwise stays
-   `'loading'`, `settled` is untouched, and a deferred reload is
+   `'loading'` (also for a slot that had settled as `'non-init'`),
+   `settled` is untouched, and a deferred reload is
    registered (§4.9); the error is re-thrown so explicit callers
    (single-key `sync`) can drive the recovery themselves. Every terminal
    status set by this step (`'loaded'`, a 404's `'non-init'`, `'error'`)
@@ -2882,7 +2906,9 @@ processing real contract events through `handleEvent`):
     An `update` while a first load is deferred on height (also when it
     was queued before the deferred reload, or after the load gave up)
     never runs its reducer against the default: it merges against the
-    server value once the contract catches up, or rejects.
+    server value once the contract catches up, or rejects. Likewise, an
+    `update` after a loaded slot's deferred refresh gave up doesn't run
+    its reducer against the stale value: it rejects.
 32. `queuedSet` (with an async `onconflict`, as Group Income's name
     cache uses) keeps the other device's data, recovers by syncing, and
     rejects with `ChelErrorKvHeightAhead` when recovery can't help, and
@@ -2900,9 +2926,14 @@ processing real contract events through `handleEvent`):
     `maxHeightRecoveries`, leaving the slot's deferred reload in place
     when it stops early; a frame that is ahead reloads the key (fresh
     value and etag) once the contract catches up, without calling the raw
-    KV handler (which, without a slot, is warned about); cleaning up the
+    KV handler (which, without a slot, is warned about), and turns a
+    settled `'non-init'` slot `'loading'` until it loads; cleaning up the
     contract's KV runtime cancels deferred reloads; a deferred reload
-    doesn't flicker a slot another load has loaded.
+    doesn't flicker a slot another load has loaded. A deferred reload
+    that gave up still reloads the key once the contract catches up, a
+    new load that finds the value still ahead falls back again, and
+    deactivating the slot or cleaning up the contract's KV runtime
+    cancels it.
 34. `settled` / `whenSettled`: seeding doesn't settle and a first-load
     404 does (without `onUpdate`); an abandoned load doesn't settle;
     re-activating a persisted entry resets `settled`; a committed local
@@ -2911,8 +2942,11 @@ processing real contract events through `handleEvent`):
     its value) when its deferred load, or a single-key `sync`, gives up.
     `whenSettled` never resolves with `'loading'` (it waits for a settled
     slot's reload), and a persisted entry's revalidation doesn't resolve it
-    before the slot is active; a settled `'non-init'` slot keeps its status
-    while a refresh is deferred on height, and when that refresh gives up.
+    before the slot is active; a settled `'non-init'` slot whose server
+    value turns out to be ahead is `'loading'` (and `whenSettled` waits)
+    until it loads, and settles to `'error'` when that refresh gives up,
+    after which `update` rejects instead of running its reducer on the
+    default.
 35. Height stamps: only a safe non-negative integer or its canonical
     decimal string is read; a value signed by a revoked key is rejected
     when its stamp is non-canonical (`"4e1"`, `"0.4e2"`), both by
@@ -2923,7 +2957,8 @@ processing real contract events through `handleEvent`):
     while it drains register no deferred reload and start no recovery
     sync; the next session defers and recovers again. After a reset that
     fails before tearing the session down, deferred loads (new ones, and
-    the ones it found) and write recovery keep working.
+    the ones it found, a parked one staying parked without a new
+    fallback) and write recovery keep working.
 37. Real events: a `kv/set` waiting on a stale height stamp is re-signed
     as soon as the event reaching that height is processed, and a
     deferred slot load reloads then (no test hook involved).

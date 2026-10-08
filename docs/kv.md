@@ -65,22 +65,29 @@ state, project `{ ...rootState, _kv: undefined }`.
 ### Pending vs. settled
 
 `status: 'non-init'` is both what a freshly seeded slot reports while
-its first load is still pending and what a slot reports after the server
-confirmed it holds no value (a 404, or a clear). The entry's `settled`
-flag tells them apart: it is `false` when the slot is (re)activated and
-becomes `true` on the first terminal outcome — a load (value or 404), an
-applied pubsub frame, a committed local `update` / `clear`, or a
-terminal error. A load abandoned because its slot was replaced
-mid-flight, or deferred because the server value is ahead of the local
-contract (see [Contract heights](#contract-heights)), does not settle the
-slot. `CHELONIA_KV_STATUS_CHANGED` carries `settled` and
-`previousSettled`.
+its first load is still pending and what a slot reports after the last
+verifiable read found no value (a 404, or a clear) and nothing since has
+found one. The entry's `settled` flag tells them apart: it is `false`
+when the slot is (re)activated and becomes `true` on the first terminal
+outcome — a load (value or 404), an applied pubsub frame, a committed
+local `update` / `clear`, or a terminal error. A load abandoned because
+its slot was replaced mid-flight, or deferred because the server value
+is ahead of the local contract (see [Contract heights](#contract-heights)),
+does not settle the slot. `CHELONIA_KV_STATUS_CHANGED` carries `settled`
+and `previousSettled`.
+
+A `'non-init'` slot, settled or not, whose load or pubsub frame finds a
+value written at a contract height the local contract hasn't reached
+goes `'loading'`: the server value isn't absent, it just can't be
+verified yet. It then goes `'loaded'` once the contract catches up, or
+`'error'` if it can't (see [Contract heights](#contract-heights)). So a
+settled `'non-init'` never hides a value the server is known to hold.
 
 To run code once a slot has settled, check the flag, or wait for it:
 
 ```ts
 const status = await sbp('chelonia/kv/whenSettled', contractID, 'unreadMessages', { signal })
-// 'loaded' | 'non-init' (the server has no value) | 'error'
+// 'loaded' | 'non-init' (no value found) | 'error'
 ```
 
 `whenSettled` also waits for the contract to sync and the slot to
@@ -137,12 +144,17 @@ overwrite the other device's value with a default-seeded one):
   is known to be ahead (its load is deferred, or gave up), so the reducer
   never runs against the default in place of that value.
 - A slot load or pubsub frame whose value is ahead doesn't fail: the
-  slot keeps its value and status (a slot that hasn't settled stays
-  `'loading'`) and reloads the key once the contract catches up. If it
-  hasn't after 10 s, the library syncs the contract; if that doesn't help
-  either, the slot settles: a slot that never loaded settles to `'error'`
-  (`lastError.name === 'ChelErrorKvHeightAhead'`), and a slot that holds
-  a value, or settled as `'non-init'`, keeps it. The raw
+  slot keeps its value and status (a slot that holds no value, including
+  a settled `'non-init'` one, goes or stays `'loading'`) and reloads the
+  key once the contract catches up. If it hasn't after 10 s, the library
+  syncs the contract; if that doesn't help either, the slot settles: a
+  slot that holds a value keeps it (and stays `'loaded'`), any other slot
+  settles to `'error'` (`lastError.name === 'ChelErrorKvHeightAhead'`).
+  Either way the slot remembers that the server value is ahead: it still
+  reloads the key if the contract catches up later, and `update` keeps
+  refusing to run its reducer on the stale value or the default until
+  then. The next load or frame that finds the value ahead starts over
+  (with a new 10 s fallback). The raw
   `NOTIFICATION_TYPE.KV` handler passed to `chelonia/connect` is not
   called for frames that are ahead: define a slot for the key to receive
   the value once the contract catches up.

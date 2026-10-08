@@ -273,8 +273,11 @@ export type KvMirrorEntry = {
   // `true` once the slot has reached a terminal outcome since it was last
   // activated: a load (value or 404), an applied remote frame, a committed
   // local write or clear, or a terminal error. Tells a settled `'non-init'`
-  // (the server has no value) apart from a pending one. It stays `true`
-  // while the slot reloads (status `'loading'`, unless it holds a value).
+  // (the last verifiable read found no value, and no load or frame since
+  // has found one) apart from a pending one. It stays `true` while the slot
+  // reloads (status `'loading'`, unless it holds a value), including while
+  // a `'non-init'` slot waits for the contract to reach the height of a
+  // server value it can't verify yet.
   // Always present on entries of active slots; entries persisted by older
   // versions may lack it until their slot is activated, so treat a missing
   // value as `false`. Only meaningful for an active slot: an entry
@@ -334,8 +337,14 @@ export type KvHeightWait = {
   reason: Exclude<KvUpdateCtx['reason'], 'local'>;
   // Removes the height listener backing this wait.
   off: () => void;
-  // Fallback timer; `undefined` once it has fired.
+  // Fallback timer; `undefined` once it has fired, and while parked.
   timer: ReturnType<typeof setTimeout> | undefined;
+  // `true` once the fallback gave up (the contract could not be brought to
+  // `requiredHeight`). A parked wait has no timer but keeps its height
+  // listener: the slot still reloads if the contract reaches the height,
+  // and its mirror is not used as an `update` basis until then. The next
+  // registration for the key un-parks it, with a new fallback timer.
+  parked?: boolean;
 };
 
 // Context passed to `onUpdate` and embedded in the `CHELONIA_KV_UPDATED`
@@ -630,8 +639,9 @@ export type CheloniaContext = {
   kvHeightSession: AbortController;
   // The height waits `chelonia/reset` dropped when it ended the height
   // session. If the reset fails before tearing the session down, they are
-  // registered again (`chelonia/kv/_resumeHeightSession`). Runtime-only.
-  kvSuspendedHeightWaits: Array<Pick<KvHeightWait, 'contractID' | 'key' | 'requiredHeight' | 'reason'>>;
+  // registered again, parked ones as parked
+  // (`chelonia/kv/_resumeHeightSession`). Runtime-only.
+  kvSuspendedHeightWaits: Array<Pick<KvHeightWait, 'contractID' | 'key' | 'requiredHeight' | 'reason' | 'parked'>>;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
