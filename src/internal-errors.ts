@@ -5,9 +5,11 @@
 import { ChelErrorGenerator } from './errors.js'
 
 // Thrown by the low-level `chelonia/kv/set` primitive when the
-// conflict-retry loop exhausts `maxAttempts`. The high-level slot
-// API (`chelonia/kv/update` / `chelonia/kv/clear`) catches this and
-// remaps it to the public `ChelErrorKvConflict`.
+// conflict-retry loop exhausts `maxAttempts`. `chelonia/kv/update`,
+// `chelonia/kv/clear` and `chelonia/kv/queuedSet` catch this and remap it
+// to the public `ChelErrorKvConflict`, so only raw `chelonia/kv/set`
+// rejects with it; its callers should match it with `isKvConflict(e)`
+// (`src/errors.ts`).
 //
 // Internal — not part of the published API. The package's
 // `exports` map intentionally does not expose `./internal-errors`,
@@ -15,5 +17,5 @@ import { ChelErrorGenerator } from './errors.js'
 // legitimate external consumer is the `@chelonia/lib` test suite,
 // which needs to simulate the low-level throw without going through
 // the public `ChelErrorKvConflict` mapping. Application code should
-// catch `ChelErrorKvConflict` instead.
+// use `isKvConflict(e)` instead.
 export const ChelErrorKvMaxAttempts = ChelErrorGenerator('ChelErrorKvMaxAttempts')

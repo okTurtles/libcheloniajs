@@ -201,4 +201,12 @@ export declare const ChelErrorKvReentrant: {
         cause?: unknown;
     };
 };
+export declare const ChelErrorKvHeightAhead: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
 export {};

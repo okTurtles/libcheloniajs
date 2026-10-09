@@ -5,29 +5,38 @@ Tracking: [okTurtles/group-income#2903](https://github.com/okTurtles/group-incom
 Scope: `@chelonia/lib` — new ergonomic, declarative key/value API layered on top of
 the existing `chelonia/kv/*` selectors.
 
+Revision: height-aware conflict handling and the `settled` flag. KV values
+are stamped with a contract height, and a client whose contract is behind
+can't verify them; the library no longer mistakes such a value for an
+absent one (§3.4), recovers outside the queue lane (§4.2 step 5a), defers
+loads until the contract catches up (§4.3, §4.9), and tells a pending slot
+apart from a settled one (`settled`, `chelonia/kv/whenSettled`, §4.10).
+
 ---
 
 ## 1. Background
 
 ### 1.1 The KV store today
 
-`@chelonia/lib` exposes four KV selectors (see `docs/api.md` and
-`src/chelonia.ts:2565-2750`, `src/chelonia-utils.ts:22-47`):
+`@chelonia/lib` exposes four KV selectors (see `docs/api.md`,
+`'chelonia/kv/set'` and `'chelonia/kv/get'` in `src/chelonia.ts`, and
+`src/chelonia-utils.ts`):
 
 | Selector | Purpose |
 |---|---|
-| `chelonia/kv/set` | `POST /kv/:contractID/:key`. Caller supplies `encryptionKeyId`, `signingKeyId`, `ifMatch` (etag), and an `onconflict` callback. Retries 3× on `409`/`412`. |
-| `chelonia/kv/get` | `GET /kv/:contractID/:key`. Returns the parsed encrypted/unencrypted message or `null`. |
-| `chelonia/kv/queuedSet` | Convenience wrapper that resolves `cek`/`csk` by name and runs the write through `chelonia/queueInvocation` keyed by `contractID`. |
+| `chelonia/kv/set` | `POST /kv/:contractID/:key`. Caller supplies `encryptionKeyId`, `signingKeyId`, `ifMatch` (etag), and an `onconflict` callback. `maxAttempts` (default 3) bounds the POSTs that may get a `412`; `onconflict` runs after each but the last (with `data`, at most twice). A `409` (stale height stamp) re-signs the same data once the local contract has caught up. A conflicting value the client can't verify yet (or ever, with a malformed height stamp) is never passed to `onconflict` (it rejects with `ChelErrorKvHeightAhead`, or `ChelErrorInvalidMessageHeight`) unless the caller sets `allowUnverifiedConflict` (§3.4). |
+| `chelonia/kv/get` | `GET /kv/:contractID/:key`. Returns the parsed encrypted/unencrypted message or `null`. Rejects with `ChelErrorKvHeightAhead` for a value written at a height the local contract hasn't reached. |
+| `chelonia/kv/queuedSet` | Convenience wrapper that resolves `cek`/`csk` by name and runs the write through `chelonia/queueInvocation` keyed by `contractID`, recovering from `ChelErrorKvHeightAhead` (§4.2 step 5a). Running out of `maxAttempts` rejects with `ChelErrorKvConflict`, as in `update` and `clear` (raw `kv/set` rejects with an internal error; `isKvConflict(e)` matches both). |
 | `chelonia/kv/setFilter` | Tells the pubsub server which KV keys for a given contract should be broadcast over the socket. |
 
 Updates arrive over pubsub as `NOTIFICATION_TYPE.KV` messages
-(`src/pubsub/index.ts:12`, dispatched in `src/chelonia.ts:1089-1115`). There is
+(`src/pubsub/index.ts`, dispatched by the `NOTIFICATION_TYPE.KV` handler
+that `chelonia/connect` installs). There is
 **no built-in event** in `src/events.ts` and **no local state mirror** — the
 library hands the consumer a parsed message and walks away.
 
 The single advertised conflict primitive is `ChelKvOnConflictCallback`
-(`src/types.ts:444-452`):
+(`src/types.ts`):
 
 ```ts
 type ChelKvOnConflictCallback = (args: {
@@ -36,7 +45,11 @@ type ChelKvOnConflictCallback = (args: {
   etag: string | null | undefined;
   currentData: JSONType | undefined;
   currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string]>
+} & (
+  // §3.4. 'ahead' and 'malformed' only with `allowUnverifiedConflict`.
+  | { currentStatus: 'absent' | 'present' | 'malformed'; requiredHeight?: undefined }
+  | { currentStatus: 'ahead'; requiredHeight: number }
+)) => Promise<[JSONType, string | undefined] | false>
 ```
 
 ### 1.2 What this looks like for a consumer (Group Income today)
@@ -215,6 +228,44 @@ mirror on the first attempt; the server's `currentData` on conflict
 retries) and persists the result. Etag handling and the
 `if-match` / `409` / `412` retry loop are entirely internal.
 
+**The reducer only ever sees a verified value or the genuine default.**
+On a conflict retry, `prev` is the server value after it has been
+verified, or the slot default when the server holds no value. A server
+value the client can't verify yet (it was written at a contract height
+the local contract hasn't reached, §3.4) is never passed as the
+default: the library waits, syncs the contract, and runs the reducer
+against the real value (§4.2 step 5a), or rejects.
+
+The first attempt runs against the local mirror. When the mirror is
+known not to reflect a verifiable server value (a load of the key is
+deferred on height, a height wait is registered for it, a deferred
+load gave up, which keeps its height wait parked, or a wait fired and
+its reload is still queued, §4.9), the mirror is
+reloaded first; if the value still can't be
+verified, the attempt fails over to the height recovery without running
+the reducer. The same reload happens after every height recovery, and a
+reload that finds the value still unverifiable fails over again rather
+than falling back to the mirror or the default. A slot in `'error'`
+without a value is reloaded first too: nothing tells what the server
+holds. When one of these reloads fails for another reason (e.g. a
+`500`), the reducer still runs (on the mirror, or the default) and a
+write is still guarded by its `if-match`, but a `KV_NOOP` rejects with
+the reload's error instead of resolving: nothing confirmed that there
+was nothing to write. The exception is the data-loss-guard reload of an
+`'error'` slot that still holds a value (§4.2 step 2): if it fails, the
+reducer runs on the retained value, the last one this client verified,
+and a `KV_NOOP` resolves; if it finds the value ahead, the attempt fails
+over to the height recovery.
+
+Otherwise the mirror may be stale without the library knowing it; a
+stale mirror surfaces as a `412` and the reducer is re-run against the
+server value, except when the reducer returns `KV_NOOP` against the
+stale mirror (nothing is sent, so there is no `412`). The same applies
+to a slot that has never loaded (`autoLoad: 'never'`, or `'on-demand'`
+without a `sync`): its first attempt runs against the default. Callers
+for whom a `KV_NOOP` on such a basis would be wrong should `sync` the
+slot (or `await whenSettled`, §4.10) first.
+
 Returning the sentinel `KV_NOOP` aborts the write (replaces today's
 `return null` idiom from `onconflict`).
 
@@ -261,6 +312,130 @@ throttle decision atomic with the read of the previous value (no TOCTOU
 gap between "is the throttle window open?" and "write the new
 value"), which the current external-throttle implementation cannot
 guarantee.
+
+### 3.4 Height stamps and verifiability
+
+Every KV value is stamped with the contract height at which it was
+written: `outputEncryptedOrUnencryptedMessage` signs the value with
+`key + height` as additional data and stores `height` next to the
+signature. Two consequences follow.
+
+**A client can only verify a value once its local contract has reached
+the value's height.** Signature verification checks the signing key's
+validity window (`_notBeforeHeight` / `_notAfterHeight`) against the
+local contract state, so a key added or revoked by events the client
+hasn't processed can't be judged. `parseEncryptedOrUnencryptedMessage`
+therefore refuses values stamped with a height above the local one. The
+server doesn't verify KV signatures, so this client-side check is the
+only one; relaxing it (decoding optimistically against local keys) would
+let a revoked key's signatures through.
+
+**The server only accepts a write stamped with its current contract
+height.** `POST /kv/:contractID/:key` checks, in order:
+
+1. `if-match` against the stored value's CID. A mismatch returns `412`
+   with the stored value as the body (empty when there is none).
+2. The height stamp, which must equal the server's contract height
+   exactly. A mismatch returns `409`, again with the stored value.
+
+So a `409` proves the `if-match` precondition still holds: only the
+height stamp is stale. A device that is even one event behind can't
+write until it catches up. Relaxing the server rule to `height <=
+current` would let a writer use a key after its revocation, so the rule
+stays and the client handles it.
+
+From a client's point of view a server value is therefore in one of four
+states, and each is handled differently:
+
+| State | How it is recognised | Handling |
+|---|---|---|
+| absent | empty body / 404; ETag `""` | the slot default applies |
+| present | height stamp ≤ local height | decoded (verification stays lazy, on `.data`) |
+| ahead | height stamp > local height (the stamp is readable without verification) | not an error and not absent: wait for the contract (bounded), sync it, retry; see below |
+| malformed | missing, non-integer or non-canonical height stamp (a stamp must be a safe non-negative integer or its decimal string, so not `"1e1"`, `"010"` or `" 10"`) | rejected with `ChelErrorInvalidMessageHeight`; only a blind write overwrites it (see below) |
+
+A non-canonical stamp is malformed, not merely unusual: the signature
+covers the stamp as written and the server compares `Number(stamp)` with
+its contract height, so a stamp that another parser reads differently
+(`parseInt("1e1")` is 1) would let a value be verified against a key
+validity window the server never checked, e.g. one of a key revoked
+before the current height.
+
+The rule the library follows is: **never hand a reducer, an `onconflict`
+handler or the mirror a value that couldn't be verified, and never treat
+such a value as absent.** Treating it as absent (as earlier versions did)
+either drops the write silently (a reducer that returns `KV_NOOP` on the
+default) or overwrites the server value with a default-seeded one once
+the local height catches up between the failed decode and the POST.
+
+Where "ahead" is handled:
+
+- `chelonia/kv/set`, on a `412` or fetch-first GET whose value is ahead:
+  waits passively (bounded, `KV_HEIGHT_WAIT_MS` = 1.5 s) for the local
+  contract to reach the value's height, then decodes it. If it doesn't,
+  rejects with `ChelErrorKvHeightAhead` without calling `onconflict`,
+  unless the caller set `allowUnverifiedConflict: true`, in which case
+  `onconflict` receives `currentStatus: 'ahead'` and a `currentData`
+  getter that throws.
+- `chelonia/kv/set`, on a `412` or fetch-first GET whose value has a
+  malformed stamp: rejects with `ChelErrorInvalidMessageHeight` without
+  calling `onconflict`, unless the caller set `allowUnverifiedConflict:
+  true`, in which case `onconflict` receives `currentStatus:
+  'malformed'` and a `currentData` getter that throws
+  `ChelErrorInvalidMessageHeight`. The server accepts some malformed
+  stamps (it compares `Number(stamp)`, so `"040"` passes at height 40),
+  and such a value can never be verified: `update`, slot loads and
+  `kv/get` keep rejecting, and a blind write (`clear`, or `queuedSet`
+  with the flag) is the way to recover the key.
+- `chelonia/kv/set`, on a `409`: waits the same way for the local
+  contract to move past the rejected stamp (or to the stored value's
+  stamp, when higher), then signs the **same** data again with the same
+  `if-match`. `onconflict` is not involved, and the retry doesn't count
+  against `maxAttempts` (which bounds `412` conflict resolution): a
+  `409` isn't a conflict. Re-signing is bounded separately
+  (`KV_MAX_STALE_STAMP_RETRIES` = 5 per call). If the height doesn't move,
+  or those retries run out, rejects with `ChelErrorKvHeightAhead`
+  (`exact: false`: the required height is only a lower bound).
+- `chelonia/kv/get` rejects with `ChelErrorKvHeightAhead`.
+- `chelonia/kv/update`, `chelonia/kv/clear` and `chelonia/kv/queuedSet`
+  recover outside the queue lane (§4.2 step 5a). `update` also reloads a
+  mirror known to be unverifiable before running its reducer (§3.3).
+- Slot loads and pubsub frames defer the load until the contract
+  catches up (§4.9). The raw `NOTIFICATION_TYPE.KV` handler is not called
+  for such frames; without a slot for the key, the frame is dropped with
+  a warning.
+- Single-key `chelonia/kv/sync` waits, syncs the contract and loads
+  again, up to `maxHeightRecoveries` times (§4.4).
+
+The wait is passive: it only listens for the local height to advance
+(`handleEvent` notifies after committing each event's height) and adds
+nothing to any queue, so it can't create a lane dependency. When
+`kv/set` runs inside `update`, `clear` or `queuedSet`, though, the
+caller's `queueInvocation` lane stays held during the wait (up to 1.5 s
+per conflict or stale stamp). `onHeightAhead: 'reject'` doesn't skip
+it, only the recovery sync. While there is a pubsub client whose socket
+isn't open, `kv/set` skips the wait: no contract event can arrive, so
+`update`, `clear` and `queuedSet` go straight to the recovery sync, and
+raw `kv/set` rejects at once. Without a pubsub client (server-side use,
+most unit tests) the wait stays. `kv/set` itself never syncs the
+contract; raw `kv/set` callers handle `ChelErrorKvHeightAhead`
+themselves.
+
+`ChelErrorKvHeightAhead` extends `ChelErrorInvalidMessageHeight`, so
+existing `instanceof` checks keep matching; its `name` is its own, so
+name-based checks (which work across separately loaded copies of the
+library, where `instanceof` doesn't) must use the exported
+`isKvHeightAhead(e)`. Its `.cause` (`kvHeightAheadCause(e)`) is
+`{ requiredHeight, exact, localHeight, etag, status }`: `requiredHeight`
+is read from the unverified value (or inferred from a `409`) and is only
+ever used as a wait target, so a server that inflates it can cause an
+error but never a hang.
+
+Alternatives considered and rejected: pinning a retry's height stamp to
+the height at which its conflict value was decoded (unnecessary once
+unverified values never reach `onconflict`, and it costs a round trip
+whenever the height moves); a server-provided height header (the stamp
+is already readable); decoding ahead values optimistically (see above).
 
 ---
 
@@ -335,7 +510,7 @@ payload) and early-return when they match.
 
 **Async `onUpdate` and head-of-line blocking.** The KV dispatcher
 `await`s `onUpdate`, and pubsub processing is serialised per-contract
-through `chelonia/queueInvocation` (`src/chelonia.ts:1103`). A slow
+through `chelonia/queueInvocation` (the KV dispatch in `chelonia/connect`). A slow
 async `onUpdate` therefore blocks every subsequent KV notification
 *for the same contract*. If the work doesn't need to complete before
 the next KV frame is processed, fire-and-forget it:
@@ -449,7 +624,8 @@ sbp('chelonia/kv/update', {
 
 The factory is invoked **once** per `chelonia/kv/update` call,
 closing over the caller's `value`; the returned `(prev) => next`
-reducer is what gets re-run on `409`/`412` conflict retries. All the
+reducer is what gets re-run on `412` conflict retries (a `409` re-sends
+the same value). All the
 ordinary reducer rules from §3.3 apply unchanged — including
 returning `KV_NOOP` to gate writes (e.g. a slot that throttles a
 single timestamp can encode the 30-minute window inside its
@@ -607,7 +783,10 @@ sbp('chelonia/kv/update', {
   // Optional escape hatches (most consumers should not need these):
   maxAttempts?: number,         // default 3 (matches chelonia/kv/set)
   signal?: AbortSignal,
-  ifMatch?: string              // bypass the mirror-based optimistic etag
+  ifMatch?: string,             // bypass the mirror-based optimistic etag
+  // Server value ahead of the local contract (§3.4, step 5a below):
+  onHeightAhead?: 'sync' | 'reject',  // default 'sync'
+  maxHeightRecoveries?: number        // default 2
 }): Promise<T | undefined>
 ```
 
@@ -624,14 +803,20 @@ same events; the only difference is who authors the reducer.
 | Error | Cause |
 |---|---|
 | `ChelErrorKvSlotUnknown` | No slot is registered for the resolved `(contractType, key)`, or `contractID` isn't synced. |
-| `ChelErrorKvUpdateInvalid` | Neither `updater` nor `value` was provided; **or** both were provided; **or** `value` was provided but the slot has no `defaultUpdater`; **or** the reducer threw, or returned `null` / `undefined` (use `KV_NOOP` to abort a write explicitly). The first three cases reject synchronously before any network or mirror access; reducer-side faults reject after the reducer runs but before the network write. The original thrown value (if any) is preserved on `.cause`. |
+| `ChelErrorKvUpdateInvalid` | Neither `updater` nor `value` was provided; **or** both were provided; **or** `value` was provided but the slot has no `defaultUpdater`; **or** `onHeightAhead` / `maxHeightRecoveries` is invalid; **or** the reducer threw, or returned `null` / `undefined` (use `KV_NOOP` to abort a write explicitly). The argument checks reject before any network or mirror access; reducer-side faults reject after the reducer runs but before the network write. The original thrown value (if any) is preserved on `.cause`. |
 | `ChelErrorKvValidation` | The reducer's output failed `schema.parse`, or the server's `currentData` on a conflict retry failed `schema.parse`. The underlying issue is attached as `.cause`. |
-| `ChelErrorKvConflict` | All `maxAttempts` attempts hit a 409/412 and the reducer kept producing a new value (i.e. real contention, not malformed data). The last server `currentData` and `etag` are attached on `.cause` (the same convention the journal uses for `ChelErrorJournalCorrupt`). |
+| `ChelErrorKvConflict` | All `maxAttempts` attempts hit a 412 (a `409` doesn't count) and the reducer kept producing a new value (i.e. real contention, not malformed data). The last server `currentData` and `etag` are attached on `.cause` (the same convention the journal uses for `ChelErrorJournalCorrupt`). Match it with `isKvConflict(e)` (name-based, like `isKvHeightAhead`). |
+| `ChelErrorKvHeightAhead` | The server value was written at a contract height the local contract couldn't reach: after `maxHeightRecoveries` contract syncs (or immediately with `onHeightAhead: 'reject'`), or because a sync failed or took longer than 30 s and the contract hadn't reached the height some other way. `.cause` is `{ requiredHeight, exact, localHeight, etag, status }` (§3.4). Extends `ChelErrorInvalidMessageHeight`. Nothing was written. |
+| `ChelErrorInvalidMessageHeight` | A server value (e.g. in a `412` conflict body) has a malformed height stamp (§3.4). Passed through from `chelonia/kv/set` unwrapped. Nothing was written. |
 | `AbortError` | `signal` was aborted. Mirror is unchanged; no event fires. |
-| underlying network / HTTP errors | Propagated verbatim from `chelonia/kv/set` for non-409/412 failures (e.g. 5xx, offline). The mirror is not updated by the rejected call and `status` is **not** flipped to `'error'` (that state is reserved for *load* failures). If the server committed an ambiguous write before the failure surfaced, the later pubsub notification can still reconcile the mirror as a `reason: 'remote'` update. |
+| underlying network / HTTP errors | Propagated verbatim from `chelonia/kv/set` for non-409/412 failures (e.g. 5xx, offline). The mirror is not updated by the rejected call and `status` is **not** flipped to `'error'` (that state is reserved for *load* failures). If the server committed an ambiguous write before the failure surfaced, the later pubsub notification can still reconcile the mirror as a `reason: 'remote'` update. Also the error of a reload `update` needed before running the reducer (of an `'error'` slot without a value, or after a height recovery, step 2), when the reducer then returns `KV_NOOP`. |
 
 Returning `KV_NOOP` from the reducer resolves with `undefined` and is
-not an error.
+not an error. On a conflict retry the reducer only runs against a
+verified server value or the genuine default (§3.3), so a `KV_NOOP`
+never stands for a write dropped because the server value couldn't be
+read. On the first attempt, a `KV_NOOP` rejects instead when a reload
+that step 2 needed failed (see step 3).
 
 `T` is inferred from the slot schema when available (`schema.parse`
 return type); without a schema it falls back to `JSONType`.
@@ -642,13 +827,13 @@ mirror remains at its previous value and no `CHELONIA_KV_UPDATED` event
 is emitted.
 
 > Implementation note: the existing `chelonia/kv/set`
-> (`src/chelonia.ts:2565`) passes `this.abortController.signal`
+> (`src/chelonia.ts`) passes `this.abortController.signal`
 > (Chelonia's global controller) into `fetch`. v1 takes the
 > compose-controllers approach (the only one that aborts the
 > in-flight HTTP request, not just the next retry): thread an
 > optional `signal?: AbortSignal` through `chelonia/kv/queuedSet`
 > → `chelonia/kv/set` and, at the `fetch` call sites in
-> `chelonia/kv/set` (`src/chelonia.ts:2658, 2674`), pass
+> `chelonia/kv/set`, pass
 > `AbortSignal.any([this.abortController.signal, signal].filter(Boolean))`
 > as the `fetch` `signal`. `AbortSignal.any` is available in all
 > currently supported Node/browser targets; if a target without it
@@ -656,7 +841,8 @@ is emitted.
 > and forwards `abort()` to a combined controller. The retry loop
 > inside `chelonia/kv/set` additionally checks `signal?.aborted`
 > at every loop boundary so a cancellation that lands between
-> requests is honoured without waiting for the next `fetch`.
+> requests is honoured without waiting for the next `fetch`. The
+> passive height waits (§3.4) listen to the same composed signal.
 
 Internally:
 
@@ -681,16 +867,30 @@ Internally:
       caller's `value` is closed over and stable across retries).
     All rejections in this step happen synchronously, before any
     mirror read or network access.
-2. Looks up the current `(value, etag)` from the local mirror.
+2. Looks up the current `(value, etag)` from the local mirror. The
+   mirror is reloaded inline first when its server value is known to be
+   unverifiable or stale (§3.3: a deferred, parked or fired-but-queued
+   height wait), when the slot is in `'error'` without a value, and
+   after a height recovery (step 5a). A reload that finds the value
+   ahead fails over to step 5a without running the reducer; one that
+   fails otherwise lets the reducer run on what the mirror holds, but
+   is remembered for step 3, except when the mirror's basis was known to
+   be unverifiable, in which case it rejects. An `'error'` slot that
+   still holds a value is reloaded silently instead (the data-loss
+   guard): if that fails, the reducer runs on the retained value, paired
+   with the etag the write sends, and a later successful reload clears a
+   failure remembered earlier in the attempt.
 3. Calls `updater(value)`. If the result is `KV_NOOP`, resolves with
-   `undefined` and skips the network entirely.
+   `undefined` and skips the network entirely, unless a reload that
+   step 2 needed failed: it then rejects with that reload's error.
 4. Validates the result through `schema.parse` (if defined). On
    failure, rejects with `ChelErrorKvValidation` — the network is
    never hit.
-5. Calls `chelonia/kv/queuedSet` with the validated value as `data`
-   (written raw — no wrapper). The queued primitive in turn hands
-   the value to
-   `chelonia/kv/set` → `outputEncryptedOrUnencryptedMessage`,
+5. Calls `chelonia/kv/set` (directly: steps 2–6 already run inside the
+   contract's `chelonia/queueInvocation` lane, so `queuedSet` would add
+   nothing) with the validated value as `data` (written raw — no
+   wrapper). The value goes through
+   `outputEncryptedOrUnencryptedMessage`,
    which signs/encrypts it as one opaque payload — no signature
    change is required to either primitive. An internally
    constructed `onconflict` then:
@@ -704,10 +904,49 @@ Internally:
    If the server's `currentData` itself fails validation, the conflict
    handler rejects with `ChelErrorKvValidation` carrying the Zod issue
    (the update cannot safely proceed without a sound base value).
+   A `409` (stale height stamp) doesn't reach `onconflict`: `kv/set`
+   re-signs the same value once the local contract has caught up. A
+   conflicting server value the client can't verify yet doesn't reach it
+   either: `kv/set` rejects with `ChelErrorKvHeightAhead` (§3.4), and
+   step 5a takes over.
+5a. **Height recovery, outside the lane.** When the write rejects with
+   `ChelErrorKvHeightAhead` and `onHeightAhead` is `'sync'` (the
+   default), the enqueued body has already finished, so the contract's
+   `queueInvocation` lane is free. `update` then force-syncs the
+   contract (`chelonia/private/in/sync`, `force: true`; concurrent
+   recoveries on the same contract share one sync) and enqueues the body
+   again, up to `maxHeightRecoveries` times (default 2). The re-enqueued
+   body first reloads the mirror inline (`_loadSlotNow` with
+   `suppressLoadingStatus` and `preserveStatusOnError`; not silent, so a
+   changed value fires `CHELONIA_KV_UPDATED` with `reason: 'load'`), so
+   the reducer's first input is the server value that just became
+   verifiable. When the recoveries run out, the sync fails, the sync
+   takes longer than 30 s (`KV_HEIGHT_RECOVERY_TIMEOUT_MS`; the sync keeps
+   running), or the contract isn't subscribed (a sync would subscribe
+   it), `update` rejects with `ChelErrorKvHeightAhead`. A failed or
+   timed-out sync doesn't end the recovery, though, when the local
+   contract has reached the required height anyway (e.g. pubsub delivered
+   the missing events meanwhile): the body is enqueued again. After a
+   timeout, that retry waits behind the sync, which is still running on
+   the contract's lane, so the call then takes longer than the timeout.
+   `signal` aborts
+   the wait, and so does `chelonia/reset`: an `update` started before a
+   reset is never re-enqueued after it. `onHeightAhead: 'reject'`
+   rejects straight away instead (for callers on a hot lane that prefer
+   to handle it themselves).
+
+   *Deadlock argument.* `queueInvocation(contractID)` already waits for
+   the internal `<contractID>` queue before running the body on the
+   `public:<contractID>` queue. The recovery sync waits on the same
+   internal queue, in the same direction, while the public lane is free;
+   it adds no new kind of lane dependency, only duration. Syncing
+   *inside* the body instead would hold the public lane while waiting on
+   the internal one, which deadlocks as soon as a side effect on the
+   internal queue waits for same-contract public-lane work.
 6. On success, reads the server-issued etag (the data CID) from the
    `kv/set` response (`x-cid` / `etag` header, the same fields already
-   consumed by the existing `onconflict` plumbing at
-   `src/chelonia.ts:2635`) and writes `(value, etag)` into the
+   consumed by `chelonia/kv/set`'s existing `onconflict` plumbing)
+   and writes `(value, etag)` into the
    mirror, fires `CHELONIA_KV_UPDATED` then `onUpdate` with
    `reason: 'local'`, and resolves with the stored value. The pubsub
    echo of this write will carry the same data CID in its `cid` field
@@ -761,25 +1000,59 @@ key or queries before sync fails loudly instead of silently getting
 > (the §9 Vuex mirror table, anyone subscribed via
 > `chelonia/externalStateSetup`) MUST treat `status` as the source of
 > truth: `'non-init'` means "the mirror is presenting the declared
-> default; nothing has been confirmed from the server yet", regardless
-> of what `value` looks like. The cleanest pattern in such consumers
-> is `value ?? read(contractID, key)`.
+> default", regardless of what `value` looks like. The cleanest pattern
+> in such consumers is `value ?? read(contractID, key)`.
+>
+> **Pending vs. settled.** `'non-init'` alone can't tell "nothing has
+> been confirmed from the server yet" (the entry was just seeded, or its
+> load is still queued) from "the server confirmed there is no value" (a
+> first-load 404, a clear). The mirror entry's `settled` flag does:
+> it is `false` when the entry is seeded and whenever the slot is
+> (re)activated for a contract (including an entry persisted by a
+> previous session), and becomes `true` on the first terminal outcome of
+> the activation:
+>
+> - a load that returns a value (`'loaded'`) or a 404 (`'non-init'`);
+> - an applied remote frame (including a wire-`null` clear);
+> - a committed local `update` or `clear`;
+> - a terminal error: a failed load or validation (`'error'`), or a load
+>   whose value stayed ahead of the local contract (§4.9).
+>
+> It is **not** set by a load that was abandoned because its slot was
+> replaced or released mid-flight (that load restores the prior status,
+> which can emit `loading → non-init`), by a load deferred on height
+> (§4.9), or by the internal reloads that preserve the prior status.
+> Once set, it stays `true` until the slot is re-activated.
+> `CHELONIA_KV_STATUS_CHANGED` carries `settled` and `previousSettled`
+> and also fires when only `settled` changed. Consumers that need a
+> "slot has settled" signal should use `settled` (or
+> `chelonia/kv/whenSettled`, §4.10) rather than inferring it from a
+> status transition.
+>
+> A settled `'non-init'` means that the last verifiable read found no
+> value and that nothing since has found one. A load or pubsub frame that
+> finds a value written at a contract height the local contract hasn't
+> reached shows that the server value isn't absent: the slot goes
+> `'loading'` (keeping `settled`) until the value loads, or settles to
+> `'error'` if the deferred load gives up (§4.9).
 >
 > **First-load 404 emits no `CHELONIA_KV_UPDATED`.** On the very first
 > load of a never-written key the mirror `value` stays `undefined`
 > (`undefined → undefined`, no change), so only
 > `CHELONIA_KV_STATUS_CHANGED` fires (`non-init → loading →
-> non-init`); `CHELONIA_KV_UPDATED` / `onUpdate` are intentionally
-> **not** emitted (consistent with the "value actually changed" emit
-> discipline used everywhere else). Consumers that need a "slot has
-> settled" signal MUST key off `CHELONIA_KV_STATUS_CHANGED` reaching a
-> terminal status (`non-init` / `loaded` / `error`), **not** off
-> `CHELONIA_KV_UPDATED`.
+> non-init`, the last one with `settled: true`); `CHELONIA_KV_UPDATED` /
+> `onUpdate` are intentionally **not** emitted (consistent with the
+> "value actually changed" emit discipline used everywhere else).
 
 ### 4.4 `chelonia/kv/sync`
 
 ```ts
-sbp('chelonia/kv/sync', contractID: string, key?: string): Promise<void>
+sbp('chelonia/kv/sync', contractID: string, key?: string, options?: {
+  // Single-slot form only (the aggregate form ignores them):
+  signal?: AbortSignal,
+  onHeightAhead?: 'sync' | 'reject',   // default 'sync'
+  maxHeightRecoveries?: number         // default 2
+}): Promise<void>
 ```
 
 Forces a fetch (over `chelonia/kv/get`) and refreshes the mirror.
@@ -802,16 +1075,48 @@ after the call resolves. The single-slot form (called with an
 explicit `key`) *does* reject on that slot's failure — use it when
 you need rejection-based error handling for a specific slot.
 
+A server value written at a contract height the local contract hasn't
+reached (§3.4) is not a failure. In the aggregate form the slot stays
+pending and reloads once the contract catches up (§4.9). The
+single-slot form drives the recovery itself: it waits (bounded,
+`KV_HEIGHT_WAIT_MS` = 1.5 s) for the local contract to reach the value's
+height, force-syncs the contract (outside the lane) if it doesn't, and
+loads again, up to `maxHeightRecoveries` times. Meanwhile the key's
+deferred reload is parked (no fallback, §4.9), so `update` doesn't use
+the stale mirror, and the slot still reloads at the height if a later
+round fails for another reason. When the recoveries are exhausted, it
+loads once more if the height was reached meanwhile (that load is queued
+behind a recovery sync that is still running, so the call can then take
+longer than the recovery timeout). Only then does it reject
+with `ChelErrorKvHeightAhead`, and the slot settles: a slot that never
+loaded settles to `'error'`, while a `'loaded'` slot keeps its value.
+Each round can take up to 1.5 s plus the recovery timeout (30 s), so a
+call can take about a minute with the defaults. `signal` aborts it, and
+`onHeightAhead: 'reject'` rejects on the first height error without
+waiting or syncing; in both cases the slot keeps its deferred reload
+(§4.9) rather than settling. Invalid options reject with
+`ChelErrorKvUpdateInvalid` before any request.
+
 ### 4.5 `chelonia/kv/clear`
 
 ```ts
 sbp('chelonia/kv/clear', contractID: string, key: string, options?: {
   maxAttempts?: number,    // default 3 (matches chelonia/kv/set)
-  signal?: AbortSignal     // abort the clear attempt
+  signal?: AbortSignal,    // abort the clear attempt
+  onHeightAhead?: 'sync' | 'reject',  // default 'sync' (§4.2 step 5a)
+  maxHeightRecoveries?: number        // default 2
 }): Promise<void>
 ```
 
 Resets a key to its declared default.
+
+Clearing is a blind write: the current server value doesn't matter.
+`clear` therefore passes `allowUnverifiedConflict` to `kv/set`, so a
+conflicting value the client can't verify yet (§3.4) doesn't stop it,
+nor one whose height stamp is malformed (which can never be verified).
+The write itself still needs the local contract to be at the server's
+height (a `409` otherwise), so `clear` recovers the same way as
+`update` (§4.2 step 5a).
 
 **Wire protocol.** Server-side, `clear` writes JSON `null` through the
 existing `chelonia/kv/set` (the same write path that
@@ -820,7 +1125,8 @@ clear sentinel; it is signed/encrypted normally and opaque to the
 server. (`undefined` is not an option:
 `chelonia/kv/set` treats a `data === undefined` argument as a
 fetch-first sentinel that performs a `GET` and routes through
-`onconflict` instead of a write — see `src/chelonia.ts:2649,2667-2679`.
+`onconflict` instead of a write — see the `data === undefined` branch
+of `'chelonia/kv/set'` in `src/chelonia.ts`.
 Writing JSON `null` keeps the write path active
 and produces an unambiguous payload on the wire.) On the receive
 side, `_handleRemote` recognises the
@@ -876,6 +1182,16 @@ worst observable state — if anything is failing, surface failure;
 if anything is still loading and nothing is failing, surface loading;
 if everything has reached `'loaded'`, surface `'loaded'`. Returns
 `'non-init'` if no slots are active for the contract.
+
+A slot whose load is deferred until the local contract catches up
+(§4.9) reports `'loading'`, unless it holds a value: a slot that holds
+a value keeps reporting `'loaded'` while its refresh is deferred. That
+includes a slot that had settled as `'non-init'`: a load or pubsub frame
+that finds a value written at a height not reached yet shows that the
+server value isn't absent, so the slot goes `'loading'` (and then
+`'loaded'`, or `'error'` if the deferred load gives up). `status` doesn't
+say whether a `'non-init'` slot has settled; read the mirror entry's
+`settled` flag or use `chelonia/kv/whenSettled` (§4.10).
 
 ### 4.7 `chelonia/kv/refreshFilters`
 
@@ -960,7 +1276,7 @@ default for that transition.
 | Event | When | Payload notes |
 |---|---|---|
 | `CHELONIA_KV_UPDATED` | Any change to a registered slot — `reason` is one of `'load'` (initial fetch after sync), `'remote'` (pubsub notification *not* originating from this client's own write), `'local'` (our own successful write), `'reconnect'` (refetch on websocket reconnect). The canonical replacement for Group Income's `KV_EVENT` plus all `NEW_*` constants. | `{ contractID, contractType, key, value, previousValue, reason, etag }`. On `reason: 'remote'` the `etag` is the data CID carried in the pubsub frame's `cid` field (see "Self-echo suppression" below), so the mirror etag stays authoritative across pubsub updates and a subsequent local write can use it as the default `if-match` without a guaranteed `412`. |
-| `CHELONIA_KV_STATUS_CHANGED` | Slot transitions between `non-init`/`loading`/`loaded`/`error`, **or** `lastError` changes while the status remains the same (e.g. repeated validation failures produce different error details). On a load path the sequence is `CHELONIA_KV_STATUS_CHANGED('loading')` → mirror write → `CHELONIA_KV_UPDATED` → `CHELONIA_KV_STATUS_CHANGED('loaded')`, so a consumer can rely on "about to populate" / "populated" being observable without races. | `{ contractID, contractType, key, status, previousStatus, lastError }`. `lastError` is `{ name, message }` when transitioning into `'error'` or when the error details change while already in `'error'`, and `null` otherwise. When `previousStatus === status` and only `lastError` changed, `status` and `previousStatus` are identical — consumers that only care about status transitions can skip these events by checking `previousStatus !== status`. |
+| `CHELONIA_KV_STATUS_CHANGED` | Slot transitions between `non-init`/`loading`/`loaded`/`error`, **or** `lastError` changes while the status remains the same (e.g. repeated validation failures produce different error details), **or** the slot settles without a status change (e.g. a local write on a `'loaded'` slot that hasn't settled since it was re-activated). On a load path the sequence is `CHELONIA_KV_STATUS_CHANGED('loading')` → mirror write → `CHELONIA_KV_UPDATED` → `CHELONIA_KV_STATUS_CHANGED('loaded')`, so a consumer can rely on "about to populate" / "populated" being observable without races. | `{ contractID, contractType, key, status, previousStatus, lastError, settled, previousSettled }`. `lastError` is `{ name, message }` when transitioning into `'error'` or when the error details change while already in `'error'`, and `null` otherwise. `settled` / `previousSettled` are the mirror entry's `settled` flag after and before the change (§4.3). When `previousStatus === status` and only `lastError` or `settled` changed, `status` and `previousStatus` are identical — consumers that only care about status transitions can skip these events by checking `previousStatus !== status`. |
 | `CHELONIA_KV_VALIDATION_ERROR` | `schema.parse` rejected a remote or load-path value. Carries the Zod error on `.cause`. Reducer-side validation rejects the `chelonia/kv/update` promise instead; no event fires in that case to avoid double-reporting. | `{ contractID, contractType, key, error, reason: 'load' \| 'remote' \| 'reconnect' \| 're-validate' }`. The `'re-validate'` reason fires when a `defineSlot` replacement re-runs the new schema against persisted entries (§4.1). |
 
 **Load-path failure sequence.** On the load path, the equivalent
@@ -970,6 +1286,47 @@ failure sequence is `CHELONIA_KV_STATUS_CHANGED('loading')` →
 `CHELONIA_KV_UPDATED` emitted (the mirror keeps its previous value,
 so there is no transition to broadcast). This is the mirror image
 of the success-path sequence in the `CHELONIA_KV_UPDATED` row.
+
+**Loads deferred on height.** A load whose value was written at a
+contract height the local contract hasn't reached (§3.4) is neither a
+success nor a failure. The mirror keeps its value and etag; a slot that
+was `'loaded'` (or `'error'`, with its `lastError`) returns to that
+status, any other slot
+(including one that had settled as `'non-init'`: its server value isn't
+absent after all) stays `'loading'`, and `settled` doesn't change, so no
+terminal event fires. The library registers a deferred reload for the
+key, which runs (through the queue lane, with the original `reason`) as
+soon as the local contract reaches the value's height; until that
+reload has run, `update` still doesn't use the mirror as its basis
+(§4.2). A pubsub frame
+that is ahead registers the same deferred reload, and also turns a
+`'non-init'` slot `'loading'`. So does `update`'s silent data-loss-guard
+reload. If the height isn't reached after
+`KV_HEIGHT_PENDING_FALLBACK_MS` (10 s), the library force-syncs the
+contract; if the height is still not reached, the slot settles: a
+slot that holds a value (`'loaded'`, or `'error'` with a retained value)
+keeps its status, value and `lastError`, any other slot settles to
+`'error'` with `lastError.name === 'ChelErrorKvHeightAhead'`. When the
+height was reached after all (e.g. pubsub caught up while the sync
+failed), the slot reloads instead of settling.
+Giving up doesn't make the slot forget that the server holds a value it
+can't verify: the deferred reload is parked (no more fallback, but it
+still runs if the contract reaches the height later), and until then
+`update` doesn't use the mirror as its reducer's basis (§4.2). The next
+load or frame that finds the value ahead un-parks it, with a new
+fallback. A deferred reload, parked or not,
+is cancelled when its slot is deactivated, the contract is released, or
+Chelonia is reset. Once `chelonia/reset` has aborted the old session, no
+deferred reload is registered and no height-recovery sync starts (a
+write that would need one rejects with an `AbortError`) until the reset
+completes: either would sync a contract into the next session. If the
+reset fails before tearing the session down (e.g. its persistence hook
+throws), the session goes on: a new height session starts and the
+deferred reloads the reset dropped, or that loads and syncs registered
+while it ran, are registered again (parked ones parked again, without a
+new fallback).
+Background loads (autoload, reconnect refresh, aggregate `sync`) log
+such a deferral at debug level rather than as an error.
 
 **Event-vs-status contract on the conflict-resolution path.** The
 authoritative GET that resolves a KV conflict runs with
@@ -1014,7 +1371,8 @@ value is written to the wire raw (exactly as `data` is handled today).
    `outputEncryptedOrUnencryptedMessage` as `data` — no wrapper, no
    injected fields. It gets signed and (if applicable) encrypted as
    one opaque payload, identical to how `data` is treated today
-   (`src/chelonia.ts:2778-2810`). On the receive side,
+   (`outputEncryptedOrUnencryptedMessage` in `src/chelonia.ts`). On the
+   receive side,
    `_handleRemote` calls `parseEncryptedOrUnencryptedMessage` as
    usual and passes `parsed.data` directly through `schema.parse` /
    mirror / event / `onUpdate`. The wire-level clear sentinel `null`
@@ -1025,8 +1383,10 @@ value is written to the wire raw (exactly as `data` is handled today).
    map** `kvLocalEchoCIDs` keyed by `${contractID}::${key}`. Each entry
    maps the CID to `{ expiry, fromConflict }`, where `expiry` is
    `now() + KV_ECHO_TTL_MS` (default **5 minutes**) and
-   `fromConflict` marks whether the write succeeded after a 409 / 412
-   conflict retry. The clock `now()` is `performance.now()` (monotonic),
+   `fromConflict` marks whether the write needed a `412` conflict
+   resolution (`onconflict` ran). A write that was only re-sent after a
+   `409` (stale height stamp) is not marked: the value it wrote is the
+   one it meant to write. The clock `now()` is `performance.now()` (monotonic),
    chosen over `Date.now()` so that a wall-clock/NTP step cannot
    prematurely expire a pending echo; the tradeoff is that a throttled
    background tab may advance it slowly and extend the effective TTL,
@@ -1100,9 +1460,53 @@ value is written to the wire raw (exactly as `data` is handled today).
 > registration-time guard against that shape, and the nonce-stripping
 > step on the receive path.
 
-Existing low-level pubsub plumbing (`NOTIFICATION_TYPE.KV` dispatch in
-`src/chelonia.ts:1089`) keeps firing for anyone using the raw API —
-it just additionally feeds the slot machinery.
+Existing low-level pubsub plumbing (the `NOTIFICATION_TYPE.KV` dispatch
+in `chelonia/connect`) keeps firing for anyone using the raw API —
+it just additionally feeds the slot machinery. (Except for frames that
+are ahead of the local contract, below: those reach neither.)
+
+**Pubsub frames that are ahead.** A frame whose value was written at a
+height the local contract hasn't reached can't be verified yet. It is
+not dropped: the dispatcher registers the same deferred reload as a
+load does (above), with `reason: 'remote'`, and the slot fetches the
+key once the contract catches up, so neither the value nor its etag is
+lost. The raw KV callback is not called for such a frame (it would have
+to be handed an unverifiable value); raw consumers see the value on
+their next read.
+
+### 4.10 `chelonia/kv/whenSettled`
+
+```ts
+sbp('chelonia/kv/whenSettled', contractID: string, key: string, options?: {
+  signal?: AbortSignal
+}): Promise<'non-init' | 'loaded' | 'error'>
+```
+
+Resolves with the slot's status once the slot is active and its mirror
+entry has `settled` (§4.3): immediately if it already has, otherwise on
+the first `CHELONIA_KV_STATUS_CHANGED` for the key after which that
+holds. It never resolves with `'loading'`: a settled slot that is
+reloading (status `'loading'`) is waited on until the reload finishes.
+A settled `'non-init'` therefore means that the last verifiable read
+found no value and that nothing since has found one: a `'non-init'` slot
+whose load or pubsub frame finds a value that is ahead of the local
+contract goes `'loading'` (§4.9), and is waited on until that value
+loads (`'loaded'`) or the deferred load gives up (`'error'`).
+It does not require the slot to be active yet: it also waits for the
+contract to sync and the slot to activate, so it can be called early
+(e.g. at boot, to gate work on the first load). A mirror entry persisted
+by an earlier session may still carry `settled: true` (and may be
+revalidated, emitting a status event, before its contract syncs); only
+the active slot's `settled` counts. It rejects with the abort reason when
+`signal` aborts, and with an `AbortError` on `chelonia/reset` (a later
+session's slot must not resolve an earlier session's wait). A slot that
+is never loaded (`autoLoad: 'never'`, or `'on-demand'` without a
+`sync`, `update` or `clear`) never settles, so pass a `signal` when that
+can happen.
+
+This replaces the pattern of tracking "has the slot reached a terminal
+status yet" from the event stream, which can't tell a settled
+`'non-init'` from the `loading → non-init` of an abandoned load.
 
 ---
 
@@ -1117,11 +1521,22 @@ rootState._kv = {
       value: JSONType | undefined,  // last known good value; undefined until status !== 'non-init'
       etag: string | null,    // last server etag (x-cid / etag header)
       status: 'non-init' | 'loading' | 'loaded' | 'error',
-      lastError?: { name: string; message: string }
+      lastError?: { name: string; message: string },
+      settled?: boolean       // reached a terminal outcome since activation (§4.3)
     }
   }
 }
 ```
+
+`settled` is always present on the entries of active slots. It is
+optional in the type because entries persisted by an older version lack
+it; it is reset to `false` when a slot is (re)activated anyway, since a
+value persisted by a previous session hasn't been confirmed by the
+server in this one.
+
+The height-related runtime state (deferred reloads, height listeners,
+in-flight recovery syncs; §11.2) is never persisted: after a reload, the
+normal `autoLoad` pass reloads every slot.
 
 Slot definitions themselves are not persisted — they're code, and live
 in an in-memory registry on the Chelonia context. This means:
@@ -1690,7 +2105,8 @@ local writes all converge on the same mirror entry and fire one
 The functional behaviour is preserved: the per-contract event queue
 still serializes writes (provided by the library, no longer by
 `okTurtles.eventQueue/queueEvent` in user code), conflict retries
-still happen via `if-match` / `409` / `412`, and the pubsub
+still happen via `if-match` / `412` (and stale height stamps via
+`409`), and the pubsub
 notification still drives remote-update events. The consumer simply
 stops seeing any of it.
 
@@ -1908,7 +2324,7 @@ this.kvFilterDirty = new Set<string>()
 // The CID is the `x-cid` / `etag` value returned by the `kv/set`
 // response; the pubsub dispatcher reads the matching `cid` field off the
 // incoming KV frame and compares. `fromConflict` marks writes that
-// succeeded only after a 409 / 412 retry, so non-self frames can force
+// succeeded only after a 412 conflict retry, so non-self frames can force
 // an authoritative read while their echo is still pending. A
 // `fromConflict` echo is suppressed WITHOUT deleting its entry (and
 // keeps `fromConflict` set), so an out-of-order competing frame
@@ -1916,16 +2332,63 @@ this.kvFilterDirty = new Set<string>()
 // of regressing the mirror via last-write-wins; the forced read demotes
 // the marker (`fromConflict → false`) on both success and failure.
 this.kvLocalEchoCIDs = new Map<string, Map<string, { expiry: number; fromConflict: boolean }>>()
+
+// Height awareness (§3.4; `src/kv-height.ts`). All runtime-only.
+//
+// Callbacks waiting for a contract's local height to reach a target,
+// keyed by contractID. `handleEvent.applyProcessResult` notifies them
+// after committing each event's height (whether or not processing the
+// event succeeded). Used by the passive waits in `chelonia/kv/set` and by
+// `kvHeightWaits`.
+this.kvHeightListeners = new Map<string, Set<{ minHeight: number; fire: () => void }>>()
+
+// Slot loads deferred until the local contract reaches `requiredHeight`,
+// keyed by `${contractID}::${key}`: at most one per key (registrations
+// merge, keeping the highest height and the original fallback deadline).
+// Each holds a height listener and a fallback timer (§4.9).
+this.kvHeightWaits = new Map<string, KvHeightWait>()
+
+// Fired waits whose reload is queued but hasn't settled yet, keyed like
+// `kvHeightWaits` (the value identifies the reload). Until it settles,
+// the mirror still holds the value from before the height was reached,
+// so `update` reloads before using it as a basis (§4.2 step 2).
+this.kvHeightReloadsQueued = new Map<string, object>()
+
+// In-flight forced contract syncs started to recover from
+// `ChelErrorKvHeightAhead`, keyed by contractID and shared by every
+// operation recovering on that contract. `_waitInFlight` awaits them.
+this.kvRecoveries = new Map<string, Promise<void>>()
+
+// The height session. `chelonia/reset` aborts it right after aborting
+// the old session and replaces it once that session is torn down. While
+// it is aborted, no deferred reload is registered and no recovery sync
+// starts (either would sync a contract into the next session).
+this.kvHeightSession = new AbortController()
+
+// The deferred reloads `chelonia/reset` dropped when it ended the height
+// session (`{ contractID, key, requiredHeight, reason, parked }`), plus
+// those registered or parked while it was ended. Registered again if the
+// reset fails before tearing the session down
+// (`chelonia/kv/_resumeHeightSession`); emptied when it succeeds.
+this.kvSuspendedHeightWaits = []
 ```
+
+These fields are created by `initKvRuntime` and cleared by
+`clearKvRuntime` (`src/kv-runtime.ts`), which `chelonia/_init` and
+`chelonia/reset` call.
 
 Mirror state lives in `rootState._kv` (see §5). Initialise this in
 `chelonia/_init` and clear it in `chelonia/reset`. `chelonia/reset`
-first drains in-flight `chelonia/kv/update` / `chelonia/kv/clear` writes
-via `chelonia/kv/_waitInFlight` (noop enqueued behind each active
-per-contract `chelonia/queueInvocation` lane), then clears
-`kvSlotsByContractID`, `kvActiveFilters`, `kvFilterDirty`, and
-`kvLocalEchoCIDs` — these are per-subscription state, not code-level
-state — but **leaves `kvSlots` (and `defContractKvByManifest`) intact**
+first aborts the old session and ends the height session (dropping the
+deferred reloads in `kvHeightWaits`, with their timers, and
+`kvHeightListeners`), then drains in-flight `chelonia/kv/update` /
+`chelonia/kv/clear` writes via `chelonia/kv/_waitInFlight` (noop
+enqueued behind each active per-contract `chelonia/queueInvocation`
+lane, plus any in-flight recovery sync in `kvRecoveries`), then clears
+`kvSlotsByContractID`, `kvActiveFilters`, `kvFilterDirty`,
+`kvLocalEchoCIDs` and any `kvHeightListeners` added while draining, and
+starts a new height session — these are per-subscription state, not
+code-level state — but **leaves `kvSlots` (and `defContractKvByManifest`) intact**
 because slot definitions are application code, not runtime state. After a
 `chelonia/reset`, the next contract sync replays the `_reconcileForSlot`
 pass against the surviving definitions.
@@ -1969,6 +2432,10 @@ All four mutation points must preserve this invariant simultaneously:
    *all four* of `kvSlotsByContractID[cID]`, `kvActiveFilters[cID]`,
    `kvFilterDirty.has(cID)`, and `rootState._kv[cID]`.
 
+Every mutation point that removes a key from `kvSlotsByContractID` also
+cancels that key's deferred reload, so `kvHeightWaits` only ever holds
+keys of active slots. `_assertIndexConsistent` checks this too.
+
 A private `chelonia/kv/_assertIndexConsistent` selector should be
 implemented and called from every KV test's `afterEach` (and gated
 behind a `__DEV__` / build-time flag in production builds) so any
@@ -1980,11 +2447,12 @@ in CI rather than silently leaking stale subscriptions.
 **Ordering note: `subscriptionSet` is populated before
 `CONTRACTS_MODIFIED` fires.** Every emission site adds the new
 `contractID` to `this.subscriptionSet` *before* emitting (see
-`src/internals.ts:2041-2042` and `src/internals.ts:3370-3371`), so
+`chelonia/private/in/syncContract` and `handleEvent` in
+`src/internals.ts`), so
 the `CONTRACTS_MODIFIED` listener installed in §11.4 can safely
 iterate `subscriptionSet` to drive `_reconcileForSlot` and will see
 the newly-added contract on the first pass. The same property holds
-for the reset path (`src/chelonia.ts:708-715`) where the set is
+for the reset path (`chelonia/reset` in `src/chelonia.ts`) where the set is
 cleared *before* emit with `added: []` and a populated `removed` list.
 
 1. `chelonia/kv/defineSlot` — validate the `null`-reserved rule by
@@ -2017,7 +2485,8 @@ cleared *before* emit with `added: []` and a populated `removed` list.
    `kvActiveFilters[cID]` bucket even for `autoSubscribe:false` slots,
    add the key to that bucket only for `autoSubscribe:true`, queue a
    coalesced `setFilter` flush (§11.5), ensure the mirror has a
-   `status: 'non-init'` entry, and
+   `status: 'non-init'` entry (`settled: false`; an existing entry of a
+   slot that wasn't active has `settled` reset to `false`), and
    if `autoLoad === 'on-sync'` schedule a `_loadSlot` call. On
    `false` (or on a previously-true match that has flipped to false):
    remove from both indices, drop the mirror entry, and queue a
@@ -2056,9 +2525,18 @@ cleared *before* emit with `added: []` and a populated `removed` list.
    the websocket comes back, and (b) explicit consumer-driven retries
    via `chelonia/kv/sync`. This avoids reinventing exponential-backoff
    machinery and matches the way `chelonia/contract/sync` itself
-   handles transient errors.
+   handles transient errors. **Values ahead of the local contract:** a
+   GET that rejects with `ChelErrorKvHeightAhead` is not a network
+   failure. The mirror keeps its value and etag, the status returns to
+   `'loaded'` / `'error'` if it was one of those and otherwise stays
+   `'loading'` (also for a slot that had settled as `'non-init'`),
+   `settled` is untouched, and a deferred reload is
+   registered (§4.9); the error is re-thrown so explicit callers
+   (single-key `sync`) can drive the recovery themselves. Every terminal
+   status set by this step (`'loaded'`, a 404's `'non-init'`, `'error'`)
+   settles the slot; restoring the prior status does not.
 4. `chelonia/kv/_handleRemote` (private) — invoked from the existing
-   `NOTIFICATION_TYPE.KV` dispatch in `src/chelonia.ts:1089`. Looks
+   `NOTIFICATION_TYPE.KV` dispatch in `chelonia/connect`. Looks
    up the slot via `kvSlotsByContractID[contractID][key]` (O(1) —
    no registry scan, no re-running of `match`, because
    `_reconcileForSlot` already gated entry into this index on a true
@@ -2080,7 +2558,12 @@ cleared *before* emit with `added: []` and a populated `removed` list.
    `CHELONIA_KV_STATUS_CHANGED('error')` (per §4.9). The exception
    does **not** escape the dispatch path — pubsub processing
    continues for other contracts/keys. If no slot is registered,
-   the existing raw dispatch still runs (no regression).
+   the existing raw dispatch still runs (no regression). A frame whose
+   value is ahead of the local contract never reaches `_handleRemote`:
+   the dispatch in `src/chelonia.ts` reads its height stamp first and
+   registers a deferred reload (`chelonia/kv/_registerHeightWait`,
+   §4.9) instead. An applied frame (value or clear) and a remote
+   validation failure settle the slot.
    > Signature change to `chelonia/kv/set` (additive,
    > backwards compatible): change the return type from `void` to
    > `Promise<{ etag: string | null }>`, where `etag` is the value
@@ -2101,14 +2584,15 @@ cleared *before* emit with `added: []` and a populated `removed` list.
    read (using the same error-status default substitution as
    `chelonia/kv/read`, not the retained mirror value) → reducer → noop
    check → schema validate →
-   `chelonia/kv/queuedSet` with internal `onconflict` that
+   `chelonia/kv/set` (called directly, inside the lane this body already
+   holds) with internal `onconflict` that
    schema-validates the server's `currentData` *before* re-running
    the reducer (per §4.2 step 5), then re-validates the reducer's
-   output. The validated value is handed to `queuedSet` as `data`
+   output. The validated value is handed to `kv/set` as `data`
    raw — no wrapper, no injected fields. On
    success: read the server data CID from the `kv/set` response headers
    (`x-cid` / `etag`, same fields used today by `chelonia/kv/set`'s
-   internal `onconflict` plumbing — see `src/chelonia.ts:2635`),
+   internal `onconflict` plumbing),
    record it in `kvLocalEchoCIDs` (time-decaying map keyed by
    `(contractID, key)`, entry expires after `KV_ECHO_TTL_MS` ≈ 5 min)
    for self-echo suppression, write
@@ -2120,9 +2604,12 @@ cleared *before* emit with `added: []` and a populated `removed` list.
    `etag` (`.cause` carries the conflict detail in the
    `ChelErrorGenerator` convention used by `ChelErrorJournalCorrupt`).
    Propagate `AbortError` from `signal`. Non-409/412 HTTP errors
-   propagate verbatim from `queuedSet` without flipping `status` to
+   propagate verbatim from `kv/set` without flipping `status` to
    `'error'` (per §4.2 / §4.9: `'error'` is reserved for load/validation
-   failures where the *mirror* might be stale).
+   failures where the *mirror* might be stale). `ChelErrorKvHeightAhead`
+   triggers the outside-lane recovery of §4.2 step 5a
+   (`withHeightRecovery` in `src/kv-height.ts`, shared with `clear` and
+   `queuedSet`). A committed write settles the slot.
 
    > Server-etag plumbing: today's `chelonia/kv/set` does not return
    > the response etag to its caller. v1 should expose it — either by
@@ -2131,8 +2618,38 @@ cleared *before* emit with `added: []` and a populated `removed` list.
    > `chelonia/kv/queuedSet`. Pick whichever keeps the existing
    > `chelonia/kv/set` signature intact for current consumers.
 6. `chelonia/kv/read`, `chelonia/kv/sync`, `chelonia/kv/clear`,
-   `chelonia/kv/status`, `chelonia/kv/refreshFilters` — straightforward
-   wrappers around the private helpers.
+   `chelonia/kv/status`, `chelonia/kv/refreshFilters`,
+   `chelonia/kv/whenSettled` — straightforward wrappers around the
+   private helpers.
+6a. Height awareness (§3.4), private:
+    - `chelonia/kv/_registerHeightWait({ contractID, key, requiredHeight,
+      reason })` — registers a deferred reload (§4.9); a no-op for keys
+      without an active slot. While the height session is ended, the
+      reload is only remembered in `kvSuspendedHeightWaits`.
+      Used by the pubsub KV dispatch (`_loadSlotNow` calls the
+      underlying `registerHeightWait` directly).
+    - `chelonia/kv/_clearHeightWaits()` — drops every deferred reload
+      and height listener; called by `chelonia/reset`.
+    - `chelonia/kv/_endHeightSession()` — aborts `kvHeightSession` and
+      drops every deferred reload and height listener (remembering the
+      reloads in `kvSuspendedHeightWaits`); called by `chelonia/reset`
+      right after it aborts the old session.
+    - `chelonia/kv/_resumeHeightSession()` — called by `chelonia/reset`
+      when it fails before tearing the session down (e.g. its
+      persistence hook threw): starts a new height session and registers
+      the remembered deferred reloads again (including those registered
+      while the reset ran), so the session that goes on keeps its
+      deferred loads and height recovery.
+    - `chelonia/kv/_withHeightRecovery(contractID, attempt, options,
+      label?)` — the §4.2 step 5a loop, exposed as a selector for
+      `chelonia/kv/queuedSet` (which has no access to the context).
+      `label` (`'queuedSet: cID::key'`) prefixes the message of an
+      invalid-options error.
+    - Outside production only: `chelonia/kv/_testSetHeightTimings` and
+      `chelonia/kv/_testNotifyHeight`.
+    The local height notification itself is a direct call
+    (`notifyContractHeight`) from `handleEvent.applyProcessResult`, not
+    a selector.
 7. `chelonia/kv/_registerContractSlots` (private convenience used by
    `defineContract`) — accepts the contract name, manifest, and
    `kv: { ... }` object and loops `defineSlot`. Modify
@@ -2172,7 +2689,7 @@ cleared *before* emit with `added: []` and a populated `removed` list.
 
 Four minimal patches to existing files:
 
-- `src/chelonia.ts:1089` — inside the `NOTIFICATION_TYPE.KV` branch,
+- `src/chelonia.ts`, `chelonia/connect` — inside the `NOTIFICATION_TYPE.KV` branch,
   after the existing `parseEncryptedOrUnencryptedMessage` call and
   inside the same `chelonia/queueInvocation` callback (keyed on
   `msg.channelID`), additionally invoke `chelonia/kv/_handleRemote`
@@ -2184,7 +2701,15 @@ Four minimal patches to existing files:
   Keep the
   existing dispatch path that calls into `this.pubsub` so consumers
   using the raw API are unaffected — the new handler runs in addition
-  to, not instead of, the legacy callback.
+  to, not instead of, the legacy callback. Before parsing, read the
+  frame's height stamp: a frame that is ahead of the local contract
+  registers a deferred reload and is not passed to either handler
+  (§4.9); a malformed stamp is logged as an error.
+- `src/internals.ts` (`handleEvent.applyProcessResult`) — after the
+  contract height is committed (and after `EVENT_HANDLED`), call
+  `notifyContractHeight(ctx, contractID, height)` so KV height waits and
+  deferred reloads fire. Runs even when processing the event errored,
+  because the height advanced anyway.
 - `src/chelonia.ts` — after `chelonia/contract/sync` resolves for a
   newly-added contract (and at the `CONTRACTS_MODIFIED` emission
   site, lines 708–715), iterate `this.kvSlots` and call
@@ -2424,8 +2949,139 @@ Mirror the structure of `src/journal.test.ts`:
     yet elapsed) skips the network entirely and resolves with
     `undefined`, identical to the hand-written `updater` path.
 
+Height awareness (§3.4, `src/chelonia-kv-set.test.ts`,
+`src/kv-height.test.ts` and `src/kv-height-events.test.ts`;
+`kv-height.test.ts` runs the real selectors against a simulated chel
+server, and `kv-height-events.test.ts` advances the local height only by
+processing real contract events through `handleEvent`):
+
+28. `kv/set`: a `412` whose value is ahead and doesn't become
+    verifiable rejects with `ChelErrorKvHeightAhead` (with the full
+    `.cause`) without calling `onconflict`; when the height catches up
+    during the wait, `onconflict` receives the verified value;
+    `allowUnverifiedConflict` passes `currentStatus: 'ahead'` with a
+    throwing `currentData`; an empty body is `'absent'`; a malformed
+    height stamp rejects with `ChelErrorInvalidMessageHeight`, or with
+    `allowUnverifiedConflict` is passed as `'malformed'` (a throwing
+    `currentData`) and overwritten; running
+    out of attempts on a value that is ahead reports the height error;
+    the wait honours the caller's `signal`.
+29. `kv/set` on `409`: the same data is re-signed at the new height with
+    the same `if-match`, without `onconflict` (and without needing
+    one); a height that doesn't move, or the stale-stamp retries running
+    out, rejects with `ChelErrorKvHeightAhead` (`exact: false`); the
+    stored value's stamp is used as the lower bound when higher. `409`s
+    don't count against `maxAttempts`: `409`s before a `412` leave its
+    conflict attempts intact, a `409` after conflicts doesn't end the call
+    with a height error, and running out on a `412` after a `409` reports
+    a conflict. A `chelonia/reset` during the backoff before `onconflict`
+    stops the call before `onconflict` runs. While the pubsub socket
+    isn't open, neither a `409` nor a conflicting value that is ahead is
+    waited on: `update` goes straight to its recovery sync, and raw
+    `kv/set` rejects at once.
+30. `kv/get` rejects with `ChelErrorKvHeightAhead` (still an
+    `instanceof ChelErrorInvalidMessageHeight`, and matched by
+    `isKvHeightAhead`, also for an error from another copy of the
+    library) for a value that is ahead, and with
+    `ChelErrorInvalidMessageHeight` for a malformed one. A value with a
+    malformed stamp the server accepted (`"040"`, `"40.0"`) can't be
+    updated or written with a plain `queuedSet`, but `clear` and a
+    `queuedSet` with `allowUnverifiedConflict` overwrite it.
+31. `update` against a value that is ahead: a reducer that would return
+    `KV_NOOP` on the default is merged against the real value instead
+    of dropped; a writing reducer never overwrites the server value with
+    the default; `onHeightAhead: 'reject'` rejects without writing; the
+    recovery sync runs with the queue lane released; a caller abort
+    during recovery rejects promptly and `_waitInFlight` waits for the
+    sync; invalid recovery options reject with `ChelErrorKvUpdateInvalid`
+    before any network access, naming the operation and the key (for
+    `update`, `clear`, `queuedSet` and single-key `sync`), while an
+    unknown slot rejects with `ChelErrorKvSlotUnknown` first.
+    An `update` while a first load is deferred on height (also when it
+    was queued before the deferred reload, or after the load gave up)
+    never runs its reducer against the default: it merges against the
+    server value once the contract catches up, or rejects. Likewise, an
+    `update` after a loaded slot's deferred refresh gave up doesn't run
+    its reducer against the stale value: it rejects. An `'error'` slot
+    whose retained value is ahead recovers instead of seeding from it
+    (and reloads at the height when it can't), without a `412` or a
+    passive wait for a writing reducer. An `'error'` slot without a value
+    reloads before its reducer runs; when that reload, or the reload
+    after a recovery, fails, a `KV_NOOP` rejects with the reload's error
+    (a write still merges on the `412`), while after a failed
+    data-loss-guard reload of a slot holding a value it still resolves.
+    An `update` queued ahead of a fired deferred reload, or during a
+    single-key `sync`'s wait or recovery sync, reloads first.
+32. `queuedSet` (with an async `onconflict`, as Group Income's name
+    cache uses) keeps the other device's data, recovers by syncing, and
+    rejects with `ChelErrorKvHeightAhead` when recovery can't help (after
+    `maxHeightRecoveries` syncs), passes `allowUnverifiedConflict` on to
+    `kv/set`, and rejects with `ChelErrorKvConflict` (matched by
+    `isKvConflict`, with the last `412`'s value and etag on `.cause`)
+    when it runs out of attempts;
+    `clear` succeeds against a value that is ahead; a `clear` retried
+    after a recovery doesn't carry the earlier attempt's conflict (its
+    echo isn't marked conflict-resolved, and its conflict error reports
+    the last attempt).
+33. Loads and pubsub frames that are ahead: a first load stays
+    `'loading'` without settling and loads once the contract catches up;
+    the fallback settles it to `'error'` when the contract never does,
+    or reloads it when the fallback sync brings the contract up to date;
+    single-key `sync` recovers, and keeps a loaded value when it can't;
+    single-key `sync` honours `signal`, `onHeightAhead` and
+    `maxHeightRecoveries`, leaving the slot's deferred reload in place
+    when it stops early; a frame that is ahead reloads the key (fresh
+    value and etag) once the contract catches up, without calling the raw
+    KV handler (which, without a slot, is warned about), and turns a
+    settled `'non-init'` slot `'loading'` until it loads; cleaning up the
+    contract's KV runtime cancels deferred reloads; a deferred reload
+    doesn't flicker a slot another load has loaded. A deferred reload
+    that gave up still reloads the key once the contract catches up, a
+    new load that finds the value still ahead falls back again, and
+    deactivating the slot or cleaning up the contract's KV runtime
+    cancels it. A single-key `sync` that fails with another error after
+    a height error still reloads the key at the height, and one whose
+    recovery sync times out after the height was reached loads the slot
+    (no `'error'` on the way). An `'error'` slot keeps its `lastError`
+    through a reload deferred on height (also when it gives up again);
+    one without a value that gives up gets a `ChelErrorKvHeightAhead`
+    `lastError`, and such an entry persisted into the next session is
+    reloaded before `update` runs its reducer.
+34. `settled` / `whenSettled`: seeding doesn't settle and a first-load
+    404 does (without `onUpdate`); an abandoned load doesn't settle;
+    re-activating a persisted entry resets `settled`; a committed local
+    write settles; `whenSettled` waits for activation and rejects on
+    abort and on reset; a re-activated `'loaded'` entry settles (keeping
+    its value) when its deferred load, or a single-key `sync`, gives up.
+    `whenSettled` never resolves with `'loading'` (it waits for a settled
+    slot's reload), and a persisted entry's revalidation doesn't resolve it
+    before the slot is active; a settled `'non-init'` slot whose server
+    value turns out to be ahead is `'loading'` (and `whenSettled` waits)
+    until it loads, and settles to `'error'` when that refresh gives up,
+    after which `update` rejects instead of running its reducer on the
+    default.
+35. Height stamps: only a safe non-negative integer or its canonical
+    decimal string is read; a value signed by a revoked key is rejected
+    when its stamp is non-canonical (`"4e1"`, `"0.4e2"`), both by
+    `parseEncryptedOrUnencryptedDetachedMessage` and by a slot load.
+36. `chelonia/reset`: a deferred-load fallback falling due while
+    `reset` drains starts no contract sync (and the next session doesn't
+    expect events for the torn-down contract); loads and writes started
+    while it drains register no deferred reload and start no recovery
+    sync; the next session defers and recovers again. After a reset that
+    fails before tearing the session down, deferred loads (new ones, the
+    ones it found, a parked one staying parked without a new fallback,
+    the one of a single-key `sync` it aborted, and ones registered while
+    it ran) and write recovery keep working.
+37. Real events: a `kv/set` waiting on a stale height stamp is re-signed
+    as soon as the event reaching that height is processed, and a
+    deferred slot load reloads then (no test hook involved).
+
 Use the same stubbing approach as `src/journal-integration.test.ts`
-for `fetch`/`pubsub`.
+for `fetch`/`pubsub`, and the simulated KV server in `src/test-utils.ts`
+(`makeKvServer`). The tests that call `chelonia/connect` go in their own
+file (`kv-height-pubsub.test.ts`): its listeners outlive
+`chelonia/_init`.
 
 ### 11.7 Documentation
 
@@ -2440,7 +3096,7 @@ for `fetch`/`pubsub`.
 
 ### 11.8 Definition of done
 
-- All twenty-seven test cases above pass under `npm test`.
+- All thirty-seven test cases above pass under `npm test`.
 - `npm run lint` is clean.
 - `npm run build` produces both ESM and CJS outputs with the new
   selectors exported.
@@ -2476,7 +3132,7 @@ for `fetch`/`pubsub`.
 4. **Deletion semantics.** `chelonia/kv/clear` is documented as
    "reset to default + server write of JSON `null`" (see §4.5 for why
    JSON `null`, not `undefined` — the existing
-   `chelonia/kv/set` at `src/chelonia.ts:2649,2667-2679` treats
+   `chelonia/kv/set` (its `data === undefined` branch) treats
    `data === undefined` as a fetch-first sentinel that does a `GET`
    and routes through `onconflict` instead of writing). If the
    server ever grows a proper `DELETE /kv/...` verb, the selector
@@ -2497,6 +3153,27 @@ for `fetch`/`pubsub`.
    only "commit" the change once a quorum is reached. This is
    protocol-level work, not library plumbing, but the slot API does
    not preclude it.
+8. **A separate `'absent'` status.** `settled` (§4.3) tells a settled
+   `'non-init'` apart from a pending one without changing the status
+   enum. A future major version could instead split the enum into
+   `'non-init' | 'loading' | 'loaded' | 'absent' | 'error'`, with
+   `'absent'` for a first-load 404 and a clear.
+9. **Deferred pubsub frames and the raw KV callback.** A frame that is
+   ahead of the local contract is not passed to the raw KV callback
+   (§4.9). Delivering it later, once verifiable, would need the raw
+   callback to accept out-of-order frames; revisit if a raw consumer
+   needs it.
+10. **`requiredHeight` is unverified.** It is read from a value that
+    can't be verified yet, and is only ever used as the target of a
+    bounded wait. A malicious server can make a client wait and then
+    report `ChelErrorKvHeightAhead`, but can't make it hang or accept
+    anything.
+11. **The reducer's first attempt runs against the local mirror.** A
+    stale mirror surfaces as a `412` and is merged, except when the
+    reducer returns `KV_NOOP` against it (§3.3). Keeping the mirror
+    fresh (autoload, reconnect refresh, deferred reloads) is what
+    narrows this window; closing it entirely would need a GET before
+    every write.
 
 ---
 

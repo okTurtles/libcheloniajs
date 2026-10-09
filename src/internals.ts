@@ -49,6 +49,7 @@ import {
   EVENT_PUBLISHING_ERROR
 } from './events.js'
 import { multicodes } from './functions.js'
+import { notifyContractHeight } from './kv-height.js'
 import {
   clearReingestTrackerForContract,
   noteFutureEvent,
@@ -136,6 +137,25 @@ const getMsgMeta = function (
   }
 
   return result
+}
+
+// Drops the local state of `contractID`: its reference counts, its
+// `state.contracts` entry (replaced by `null`, to remember that the
+// contract is gone, when `permanent` is set) and its contract state.
+const removeContractState = function (
+  this: CheloniaContext,
+  state: ChelRootState,
+  contractID: string,
+  permanent?: boolean
+) {
+  delete this.ephemeralReferenceCount[contractID]
+  if (permanent) {
+    // `ChelRootState` doesn't model the `null` marker.
+    this.config.reactiveSet(state.contracts, contractID, null as never)
+  } else {
+    this.config.reactiveDel(state.contracts, contractID)
+  }
+  this.config.reactiveDel(state, contractID)
 }
 
 const keysToMap = function (
@@ -633,6 +653,28 @@ export default sbp('sbp/selectors/register', {
     clearReprocessDebounceForContract(contractID)
     const contractName = state.contracts[contractID]?.type
     if (!contractName) {
+      // An entry without a type is a contract whose first sync never
+      // completed: `retain` created the entry, then the sync failed (or a
+      // re-sync failed after clearing the contract's state). It isn't
+      // subscribed (applying the first message both sets the type and
+      // subscribes) and has no destructor to call. Unless re-syncing, drop
+      // what is left of it, which would otherwise linger in (persisted)
+      // state. A contract whose first sync failed was never announced as
+      // added, so its removal isn't announced either. One whose re-sync
+      // failed was, but the failed re-sync already announced its removal
+      // (`CONTRACTS_MODIFIED` with `removed` and `resync: true`), so
+      // dropping it here for good adds no second announcement.
+      if (
+        state.contracts[contractID] &&
+        !params?.resync &&
+        !this.subscriptionSet.has(contractID)
+      ) {
+        console.debug(
+          `[chelonia/private/removeImmediately] Removing ${contractID}, which never finished syncing`
+        )
+        removeContractState.call(this, state, contractID, params?.permanent)
+        return
+      }
       console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
         contractID
       })
@@ -671,15 +713,7 @@ export default sbp('sbp/selectors/register', {
           .forEach((k) => this.config.reactiveDel(state[contractID]._volatile, k))
       }
     } else {
-      delete this.ephemeralReferenceCount[contractID]
-      if (params?.permanent) {
-        // Keep a 'null' state to remember permanently-deleted contracts
-        // (e.g., when they've been removed from the server)
-        this.config.reactiveSet(state.contracts, contractID, null)
-      } else {
-        this.config.reactiveDel(state.contracts, contractID)
-      }
-      this.config.reactiveDel(state, contractID)
+      removeContractState.call(this, state, contractID, params?.permanent)
     }
 
     // Drop per-contract KV runtime state on every removal; the
@@ -2007,6 +2041,10 @@ export default sbp('sbp/selectors/register', {
       throw new ChelErrorResourceGone('Cannot sync permanently deleted contract ' + contractID)
     }
 
+    // The entry this sync adds to `this.pending` (see below), if any. It is
+    // removed when the sync ends, however it ends: after that, `handleEvent`
+    // must only accept events for contracts that are subscribed.
+    let pendingEntry: { contractID: string } | undefined
     try {
       this.currentSyncs[contractID] = { firstSync: !state.contracts[contractID]?.type }
       sbp('okTurtles.events/emit', CONTRACT_IS_SYNCING, contractID, true)
@@ -2033,7 +2071,8 @@ export default sbp('sbp/selectors/register', {
         // we're syncing a contract for the first time, make sure to add to pending
         // so that handleEvents knows to expect events from this contract
         if (!entry) {
-          this.pending.push({ contractID })
+          pendingEntry = { contractID }
+          this.pending.push(pendingEntry)
         }
       }
       this.postSyncOperations[contractID] =
@@ -2082,10 +2121,6 @@ export default sbp('sbp/selectors/register', {
           added: [contractID],
           removed: []
         })
-        const entryIndex = this.pending.findIndex((entry) => entry?.contractID === contractID)
-        if (entryIndex !== -1) {
-          this.pending.splice(entryIndex, 1)
-        }
         console.debug(`[chelonia] added already synchronized ${contractID} to subscription set`)
       } else {
         console.debug(`[chelonia] contract ${contractID} was already synchronized`)
@@ -2099,6 +2134,13 @@ export default sbp('sbp/selectors/register', {
       this.config.hooks.syncContractError?.(e, contractID)
       throw e
     } finally {
+      // Normally already gone: applying the first event removes it. Not when
+      // the sync failed before that, e.g. on a network error, or when the
+      // contract was already up to date.
+      if (pendingEntry) {
+        const index = this.pending.indexOf(pendingEntry)
+        if (index !== -1) this.pending.splice(index, 1)
+      }
       if (state[contractID]?._volatile?.resyncing) {
         this.config.reactiveDel(state[contractID]._volatile, 'resyncing')
       }
@@ -3495,6 +3537,10 @@ const handleEvent = {
       sbp('okTurtles.events/emit', hash, contractID, message)
       sbp('okTurtles.events/emit', EVENT_HANDLED, contractID, message)
     }
+    // The local height has been committed above (even when processing
+    // errored), so KV values stamped at this height are now verifiable.
+    // Wake up KV operations waiting for it (see `src/kv-height.ts`).
+    notifyContractHeight(this, contractID, height)
   }
 }
 

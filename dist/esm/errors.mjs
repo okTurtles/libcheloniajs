@@ -41,3 +41,8 @@ export const ChelErrorKvUpdateInvalid = ChelErrorGenerator('ChelErrorKvUpdateInv
 export const ChelErrorKvValidation = ChelErrorGenerator('ChelErrorKvValidation');
 export const ChelErrorKvConflict = ChelErrorGenerator('ChelErrorKvConflict');
 export const ChelErrorKvReentrant = ChelErrorGenerator('ChelErrorKvReentrant');
+// A KV value on the server was written at a contract height the local
+// contract has not reached, so it cannot be verified yet. Extends
+// `ChelErrorInvalidMessageHeight` so existing `instanceof` checks keep
+// matching. `.cause` is a `KvHeightAheadCause` (see `src/kv-height.ts`).
+export const ChelErrorKvHeightAhead = ChelErrorGenerator('ChelErrorKvHeightAhead', ChelErrorInvalidMessageHeight);

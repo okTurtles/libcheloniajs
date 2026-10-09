@@ -24,6 +24,7 @@ import {
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
 import { KV_ECHO_CID_MAX, KV_ECHO_TTL_MS, KV_KEY_SEPARATOR } from './kv-constants.js'
+import { clearKvRuntime, initKvRuntime } from './kv-runtime.js'
 import { KV_NOOP } from './kv.js'
 import type {
   ChelKvGetResult,
@@ -175,17 +176,7 @@ sbp('sbp/selectors/register', {
     } as unknown as CheloniaConfig
     this.abortController = new AbortController()
     this.subscriptionSet = new Set()
-    this.kvSlots = new Map()
-    this.kvSlotsByContractID = new Map()
-    this.kvActiveFilters = new Map()
-    this.kvFilterDirty = new Set()
-    this.kvFilterRetry = new Set()
-    this.kvLocalEchoCIDs = new Map()
-    this.kvReconnectRefresh = new Set()
-    this.kvPendingWrites = new Map()
-    this.kvPendingLoads = new Map()
-    this.kvOnUpdateActive = new Map()
-    this.defContractKvByManifest = new Map()
+    initKvRuntime(this)
   },
 
   'chelonia/configure': function (this: CheloniaContext) {
@@ -202,8 +193,15 @@ sbp('sbp/selectors/register', {
     // before the post-cleanup hook observes state and runtime maps clear.
     this.abortController.abort()
     this.abortController = new AbortController()
-    await sbp('chelonia/kv/_waitInFlight')
-    await postCleanupFn?.()
+    sbp('chelonia/kv/_endHeightSession')
+    try {
+      await sbp('chelonia/kv/_waitInFlight')
+      await postCleanupFn?.()
+    } catch (e) {
+      // As in production: nothing was torn down, so the session goes on.
+      sbp('chelonia/kv/_resumeHeightSession')
+      throw e
+    }
     const s = this.state as Record<string, unknown>
     reactiveDel(s, 'contracts')
     reactiveSet(s, 'contracts', Object.create(null))
@@ -211,19 +209,7 @@ sbp('sbp/selectors/register', {
     reactiveSet(s, 'secretKeys', Object.create(null))
     reactiveDel(s, '_kv')
     reactiveSet(s, '_kv', Object.create(null))
-    this.kvSlotsByContractID.clear()
-    this.kvActiveFilters.clear()
-    this.kvFilterDirty.clear()
-    this.kvFilterRetry.clear()
-    if (this.kvFilterRetryTimer != null) {
-      clearTimeout(this.kvFilterRetryTimer)
-      this.kvFilterRetryTimer = undefined
-    }
-    this.kvLocalEchoCIDs.clear()
-    this.kvReconnectRefresh.clear()
-    this.kvPendingWrites.clear()
-    this.kvPendingLoads.clear()
-    this.kvOnUpdateActive.clear()
+    clearKvRuntime(this)
     this.subscriptionSet.clear()
   },
 
@@ -2303,7 +2289,7 @@ describe('KV slot API', () => {
 
   it('43a: post-success abort still echo-suppresses the committed write (update)', async () => {
     // An abort that lands between `kv/set` resolving (write committed)
-    // and the post-success `throwIfSignalAborted` check must
+    // and the post-success `throwIfAborted` check must
     // NOT leave the committed write's pubsub echo unsuppressed. The
     // documented AbortError contract (§4.2: "Mirror is unchanged; no
     // event fires") requires the echo-suppression recording to run
@@ -2657,7 +2643,7 @@ describe('KV slot API', () => {
   it('44h: post-success abort still echo-suppresses the committed write (clear)', async () => {
     // Clear analog of 43a: an abort that lands between
     // `kv/set` resolving (clear committed) and the post-success
-    // `throwIfSignalAborted` check must NOT leave the committed clear's
+    // `throwIfAborted` check must NOT leave the committed clear's
     // pubsub echo unsuppressed. The AbortError contract (§4.2) requires
     // "Mirror is unchanged; no event fires" — `recordEchoCID` must run
     // before the abort check, otherwise the unsuppressed echo would
@@ -5374,6 +5360,48 @@ describe('KV slot API', () => {
     // onconflict re-seeded from the live {x:9}, so the committed value is
     // {x:10}, NOT {x:6} from the stale retained basis.
     assert.deepStrictEqual(result, { x: 10 })
+  })
+
+  // -----------------------------------------------------------------------
+  // 83a: after a failed authoritative reload, a KV_NOOP on the retained
+  // value resolves `undefined` (KV-REVAMPED.md §4.2): the retained value is
+  // the last one this client verified, and the write it would have sent is
+  // guarded by the retained etag. Unlike a slot without a value, whose
+  // failed reload makes a KV_NOOP reject.
+  // -----------------------------------------------------------------------
+  it('83a: failed reload, KV_NOOP on the retained value resolves undefined', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'rl', contractType: CTYPE, defaultValue: { x: 0 }, autoLoad: 'never'
+    })
+    const c = 'cid-83a'
+    await setupContract(c)
+
+    const entry = rootState()._kv![c]!.rl as {
+      value: unknown; etag: string | null; status: string
+    }
+    entry.value = { x: 5 }
+    entry.etag = 'stale-etag'
+    entry.status = 'error'
+
+    let getCount = 0
+    stubGet = async () => { getCount++; throw new Error('reload failed') }
+    let setCount = 0
+    stubSet = async () => { setCount++; return { etag: 'written' } }
+
+    let seenSeed: unknown
+    const result = await sbp('chelonia/kv/update', {
+      contractID: c,
+      key: 'rl',
+      updater: (prev: JSONType) => {
+        seenSeed = prev
+        return KV_NOOP
+      }
+    })
+
+    assert.strictEqual(getCount, 1, 'authoritative reload should be attempted')
+    assert.deepStrictEqual(seenSeed, { x: 5 })
+    assert.strictEqual(result, undefined)
+    assert.strictEqual(setCount, 0)
   })
 
   // -----------------------------------------------------------------------

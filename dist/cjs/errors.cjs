@@ -2,7 +2,7 @@
 // ugly boilerplate because JavaScript is stupid
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ChelErrorKvReentrant = exports.ChelErrorKvConflict = exports.ChelErrorKvValidation = exports.ChelErrorKvUpdateInvalid = exports.ChelErrorKvSlotInvalid = exports.ChelErrorKvSlotUnknown = exports.ChelErrorJournalCorrupt = exports.ChelErrorResourceGone = exports.ChelErrorUnexpectedHttpResponseCode = exports.ChelErrorFetchServerTimeFailed = exports.ChelErrorSignatureKeyNotFound = exports.ChelErrorSignatureKeyUnauthorized = exports.ChelErrorSignatureError = exports.ChelErrorDecryptionKeyNotFound = exports.ChelErrorDecryptionError = exports.ChelErrorInvalidMessageHeight = exports.ChelErrorForkedChain = exports.ChelErrorUnrecoverable = exports.ChelErrorKeyAlreadyExists = exports.ChelErrorUnexpected = exports.ChelErrorDBConnection = exports.ChelErrorDBBadPreviousHEAD = exports.ChelErrorAlreadyProcessed = exports.ChelErrorWarning = exports.ChelErrorGenerator = void 0;
+exports.ChelErrorKvHeightAhead = exports.ChelErrorKvReentrant = exports.ChelErrorKvConflict = exports.ChelErrorKvValidation = exports.ChelErrorKvUpdateInvalid = exports.ChelErrorKvSlotInvalid = exports.ChelErrorKvSlotUnknown = exports.ChelErrorJournalCorrupt = exports.ChelErrorResourceGone = exports.ChelErrorUnexpectedHttpResponseCode = exports.ChelErrorFetchServerTimeFailed = exports.ChelErrorSignatureKeyNotFound = exports.ChelErrorSignatureKeyUnauthorized = exports.ChelErrorSignatureError = exports.ChelErrorDecryptionKeyNotFound = exports.ChelErrorDecryptionError = exports.ChelErrorInvalidMessageHeight = exports.ChelErrorForkedChain = exports.ChelErrorUnrecoverable = exports.ChelErrorKeyAlreadyExists = exports.ChelErrorUnexpected = exports.ChelErrorDBConnection = exports.ChelErrorDBBadPreviousHEAD = exports.ChelErrorAlreadyProcessed = exports.ChelErrorWarning = exports.ChelErrorGenerator = void 0;
 const ChelErrorGenerator = (name, base = Error) => class extends base {
     constructor(...params) {
         super(...params);
@@ -45,3 +45,8 @@ exports.ChelErrorKvUpdateInvalid = (0, exports.ChelErrorGenerator)('ChelErrorKvU
 exports.ChelErrorKvValidation = (0, exports.ChelErrorGenerator)('ChelErrorKvValidation');
 exports.ChelErrorKvConflict = (0, exports.ChelErrorGenerator)('ChelErrorKvConflict');
 exports.ChelErrorKvReentrant = (0, exports.ChelErrorGenerator)('ChelErrorKvReentrant');
+// A KV value on the server was written at a contract height the local
+// contract has not reached, so it cannot be verified yet. Extends
+// `ChelErrorInvalidMessageHeight` so existing `instanceof` checks keep
+// matching. `.cause` is a `KvHeightAheadCause` (see `src/kv-height.ts`).
+exports.ChelErrorKvHeightAhead = (0, exports.ChelErrorGenerator)('ChelErrorKvHeightAhead', exports.ChelErrorInvalidMessageHeight);

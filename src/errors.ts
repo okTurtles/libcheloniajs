@@ -1,6 +1,8 @@
 // ugly boilerplate because JavaScript is stupid
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
 
+import type { KvHeightAheadCause } from './types.js'
+
 type ErrorConstructorType = { new (...args: ConstructorParameters<typeof Error>): Error };
 
 export const ChelErrorGenerator = (name: string, base: ErrorConstructorType = Error) =>
@@ -60,3 +62,40 @@ export const ChelErrorKvUpdateInvalid = ChelErrorGenerator('ChelErrorKvUpdateInv
 export const ChelErrorKvValidation = ChelErrorGenerator('ChelErrorKvValidation')
 export const ChelErrorKvConflict = ChelErrorGenerator('ChelErrorKvConflict')
 export const ChelErrorKvReentrant = ChelErrorGenerator('ChelErrorKvReentrant')
+// A KV value on the server was written at a contract height the local
+// contract has not reached, so it cannot be verified yet. Extends
+// `ChelErrorInvalidMessageHeight` so existing `instanceof` checks keep
+// matching, but its `name` differs: match it with `isKvHeightAhead`.
+// `.cause` is a `KvHeightAheadCause` (`src/types.ts`).
+export const ChelErrorKvHeightAhead = ChelErrorGenerator(
+  'ChelErrorKvHeightAhead',
+  ChelErrorInvalidMessageHeight
+)
+
+// Whether `e` is a `ChelErrorKvHeightAhead`. Name-based, so it also matches
+// errors created by another loaded copy of the library (dual ESM/CJS
+// builds, bundles), where `instanceof` fails. `.cause` may be missing,
+// e.g. on a slot's `lastError`, which keeps only the name and message: read
+// it with `kvHeightAheadCause`.
+export function isKvHeightAhead (e: unknown): e is Error & { cause?: KvHeightAheadCause } {
+  return !!e && typeof e === 'object' && (e as Error).name === 'ChelErrorKvHeightAhead'
+}
+
+// The `.cause` of a `ChelErrorKvHeightAhead` (`undefined` for any other
+// error): the height to wait for, and what the server returned.
+export function kvHeightAheadCause (e: unknown): KvHeightAheadCause | undefined {
+  if (!isKvHeightAhead(e)) return undefined
+  const cause = (e as { cause?: unknown }).cause
+  return cause && typeof cause === 'object' ? cause as KvHeightAheadCause : undefined
+}
+
+// Whether `e` is a KV write that ran out of attempts resolving `412`
+// conflicts: `ChelErrorKvConflict` (from `chelonia/kv/update`,
+// `chelonia/kv/clear` and `chelonia/kv/queuedSet`), or the internal error
+// raw `chelonia/kv/set` rejects with. Name-based, like `isKvHeightAhead`.
+// `.cause`, when present, is `{ currentData, etag }`.
+export function isKvConflict (e: unknown): e is Error {
+  if (!e || typeof e !== 'object') return false
+  const name = (e as Error).name
+  return name === 'ChelErrorKvConflict' || name === 'ChelErrorKvMaxAttempts'
+}
