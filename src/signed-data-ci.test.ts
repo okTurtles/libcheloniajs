@@ -6,7 +6,9 @@
 // library's own tests on a CI service, other apps), verification must just
 // throw `ChelErrorSignatureKeyUnauthorized`.
 //
-// Runs in its own process: the last test registers `state/vuex/state`.
+// Runs in its own process: the tests after the first two register
+// `state/vuex/state`. A state that can't be serialized must not replace the
+// real error either.
 
 import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
@@ -80,6 +82,18 @@ const originalCI = process.env.CI
 const originalError = console.error
 let errors: unknown[][]
 
+// What the host app's `state/vuex/state` returns. SBP keeps the first
+// registration of a selector, so it is registered once, by the first test
+// that needs it, and reads this variable.
+let appState: unknown
+let appStateRegistered = false
+const useAppState = (state: unknown) => {
+  appState = state
+  if (appStateRegistered) return
+  sbp('sbp/selectors/register', { 'state/vuex/state': () => appState })
+  appStateRegistered = true
+}
+
 describe('signature verification with an unauthorized key', () => {
   beforeEach(() => {
     sbp('chelonia/_init')
@@ -109,7 +123,7 @@ describe('signature verification with an unauthorized key', () => {
   })
 
   it('logs the app state and leaves a rejection under CI when the host app has one', async () => {
-    sbp('sbp/selectors/register', { 'state/vuex/state': () => ({ app: 'state' }) })
+    useAppState({ app: 'state' })
     process.env.CI = 'true'
     const { thrown, rejections } = await capture(readRevokedKeyValue())
     assert.ok(thrown instanceof ChelErrorSignatureKeyUnauthorized)
@@ -118,4 +132,22 @@ describe('signature verification with an unauthorized key', () => {
     assert.strictEqual(errors.length, 1)
     assert.deepStrictEqual((errors[0][1] as { state: unknown }).state, { app: 'state' })
   })
+
+  // `JSON.parse(JSON.stringify(state))` throws for each of these.
+  const circular: Record<string, unknown> = {}
+  circular.self = circular
+  for (const [label, state] of [
+    ['undefined', undefined], ['circular', circular], ['BigInt', { n: BigInt(1) }]
+  ] as const) {
+    it(`still throws the real error under CI when the app state is ${label}`, async () => {
+      useAppState(state)
+      process.env.CI = 'true'
+      const { thrown, rejections } = await capture(readRevokedKeyValue())
+      assert.ok(thrown instanceof ChelErrorSignatureKeyUnauthorized)
+      assert.strictEqual(rejections.length, 1)
+      assert.ok(rejections[0] instanceof ChelErrorSignatureKeyUnauthorized)
+      assert.strictEqual(errors.length, 1)
+      assert.match(String(errors[0][0]), /could not serialize the app state/)
+    })
+  }
 })

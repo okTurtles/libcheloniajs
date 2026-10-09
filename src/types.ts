@@ -295,7 +295,10 @@ export type KvMirrorEntry = {
 //                which may still throw.
 //   - 'ahead':   the server value was written at a contract height the
 //                local contract has not reached, so it cannot be verified.
-export type KvServerValueStatus = 'absent' | 'present' | 'ahead';
+//   - 'malformed': the stored value's height stamp is malformed, so it can
+//                never be verified. Only reported with
+//                `allowUnverifiedConflict`.
+export type KvServerValueStatus = 'absent' | 'present' | 'ahead' | 'malformed';
 
 // `.cause` of `ChelErrorKvHeightAhead`.
 export type KvHeightAheadCause = {
@@ -314,10 +317,10 @@ export type KvHeightAheadCause = {
   status: number;
 };
 
-// What `chelonia/kv/update`, `chelonia/kv/clear` and
-// `chelonia/kv/queuedSet` do when the server value is ahead of the local
-// contract: sync the contract outside the queue lane and try again
-// (`'sync'`, the default), or reject with `ChelErrorKvHeightAhead`.
+// What `chelonia/kv/update`, `chelonia/kv/clear`, `chelonia/kv/queuedSet`
+// and single-key `chelonia/kv/sync` do when the server value is ahead of
+// the local contract: sync the contract outside the queue lane and try
+// again (`'sync'`, the default), or reject with `ChelErrorKvHeightAhead`.
 export type KvHeightAheadMode = 'sync' | 'reject';
 
 // A callback waiting for a contract to reach `minHeight`. See
@@ -627,6 +630,12 @@ export type CheloniaContext = {
   // `${contractID}::${key}`. The slot reloads once the height is reached;
   // a fallback timer forces a contract sync if it isn't. Runtime-only.
   kvHeightWaits: Map<string, KvHeightWait>;
+  // Height waits that fired and whose reload is queued but hasn't settled
+  // yet, keyed like `kvHeightWaits`; the value identifies the reload, so
+  // that only its own completion removes the key. Until then `update`
+  // doesn't use the mirror as a basis (it reloads first): the value it
+  // holds is known to be stale. Runtime-only.
+  kvHeightReloadsQueued: Map<string, object>;
   // In-flight forced contract syncs started to recover from
   // `ChelErrorKvHeightAhead`, keyed by contractID and shared by every
   // operation recovering on that contract. Awaited by
@@ -857,7 +866,8 @@ export type ChelKvOnConflictCallback = (args: {
    * signature verification the first time it is read, and may reject
    * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`, also
    * when `currentStatus` is `'present'`. When `currentStatus` is
-   * `'ahead'` it throws `ChelErrorKvHeightAhead`.
+   * `'ahead'` it throws `ChelErrorKvHeightAhead`, and when it is
+   * `'malformed'` it throws `ChelErrorInvalidMessageHeight`.
    * Access it inside a `try`/`catch` (falling back to `undefined` or
    * re-throwing as appropriate), or read `currentValue.data` directly
    * with the same precaution. The bundled slot API (`chelonia/kv/update`,
@@ -870,12 +880,14 @@ export type ChelKvOnConflictCallback = (args: {
 
 /**
  * What `chelonia/kv/set` tells `onconflict` about the server value (see
- * `KvServerValueStatus` and KV-REVAMPED.md §3.4). `'ahead'` is only ever
- * passed when the caller set `allowUnverifiedConflict: true`; without it,
- * `chelonia/kv/set` rejects with `ChelErrorKvHeightAhead` instead of
- * calling `onconflict`. `requiredHeight` is then the contract height the
- * local contract must reach before the server value can be verified.
+ * `KvServerValueStatus` and KV-REVAMPED.md §3.4). `'ahead'` and
+ * `'malformed'` are only ever passed when the caller set
+ * `allowUnverifiedConflict: true`; without it, `chelonia/kv/set` rejects
+ * with `ChelErrorKvHeightAhead` (or `ChelErrorInvalidMessageHeight`)
+ * instead of calling `onconflict`. With `'ahead'`, `requiredHeight` is the
+ * contract height the local contract must reach before the server value
+ * can be verified.
  */
 export type KvConflictServerValue =
-  | { currentStatus: 'absent' | 'present'; requiredHeight?: undefined }
+  | { currentStatus: 'absent' | 'present' | 'malformed'; requiredHeight?: undefined }
   | { currentStatus: 'ahead'; requiredHeight: number };

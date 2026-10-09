@@ -11,6 +11,7 @@ import { afterEach, describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
+import { isKvHeightAhead } from './errors.js'
 import { CHELONIA_KV_UPDATED } from './events.js'
 import {
   CONTRACT_ID,
@@ -21,6 +22,8 @@ import {
   activateContract,
   addChatRoomUnreadMessage,
   advanceLocalHeightOnInternalLane,
+  cekId,
+  cskId,
   debugs,
   defineSlot,
   drainLanes,
@@ -137,6 +140,52 @@ describe('pubsub frames while the local contract is behind', () => {
     await drainLanes()
     assert.deepStrictEqual(mirror(UNREAD).value, V2)
     assert.strictEqual(server.gets().length, getsBefore)
+  })
+})
+
+// `connect` uses the harness's manual connection options, so the client's
+// socket never opens: no contract event can arrive, and `kv/set` doesn't
+// wait for one.
+describe('kv/set while the pubsub socket is closed', () => {
+  it('a stale stamp (409) goes straight to the recovery sync', async () => {
+    sbp('chelonia/kv/_testSetHeightTimings', { ...TEST_TIMINGS, waitMs: 1500 })
+    await writeAsDeviceB(UNREAD, V0, 40)
+    defineSlot({ key: UNREAD })
+    await activateContract()
+    connect()
+    // The server moved on without changing the key (e.g. a contract event
+    // this device missed while its socket was down).
+    server.height = 41
+    server.catchUpOnSync = true
+    server.log.length = 0
+    const started = Date.now()
+    await sbp('chelonia/kv/update', {
+      contractID: CONTRACT_ID, key: UNREAD, updater: addChatRoomUnreadMessage('roomA', 'a2', 5)
+    })
+    const firstSync = server.requests.find((r) =>
+      r.at >= started && r.path.startsWith('/latestHEADinfo/')
+    )
+    assert.ok(firstSync, 'no recovery sync')
+    assert.ok(firstSync.at - started < 500, `first sync after ${firstSync.at - started} ms`)
+    assert.deepStrictEqual(server.posts().map((p) => p.status), [409, 204])
+  })
+
+  it('raw kv/set rejects a conflicting value that is ahead without waiting', async () => {
+    sbp('chelonia/kv/_testSetHeightTimings', { ...TEST_TIMINGS, waitMs: 1500 })
+    const { e0 } = await setupStaleDeviceA()
+    connect()
+    const started = Date.now()
+    await assert.rejects(
+      sbp('chelonia/kv/set', CONTRACT_ID, UNREAD, { x: 1 }, {
+        ifMatch: e0,
+        signingKeyId: cskId,
+        encryptionKeyId: cekId,
+        onconflict: async ({ etag }: any) => [{ x: 1 }, etag]
+      }),
+      (e: any) => isKvHeightAhead(e)
+    )
+    assert.ok(Date.now() - started < 500)
+    assert.deepStrictEqual(server.posts().map((p) => p.status), [412])
   })
 })
 

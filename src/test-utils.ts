@@ -2,6 +2,7 @@
 // `test` script never runs it directly, and it registers no SBP selectors,
 // so any test file may import it without contaminating registrations.
 import sbp from '@sbp/sbp'
+import { afterEach, beforeEach } from 'node:test'
 import { createCID, multicodes } from './functions.js'
 
 export const waitMicrotasks = async (): Promise<void> => {
@@ -19,6 +20,36 @@ export const sleep = (ms: number): Promise<void> =>
 // KV helpers
 // ---------------------------------------------------------------------------
 
+const originalRandom = Math.random
+
+// `kv/set` backs off randomIntFromRange(0, 1500) ms between 412 retries;
+// with this stub the backoff is 0 ms. Undone by `restoreKvTestStubs`.
+export const stubKvBackoff = (): void => {
+  Math.random = () => 0
+}
+
+// Undoes `stubKvBackoff` (and any other `Math.random` stub) and resets the
+// height timings to the production defaults.
+export const restoreKvTestStubs = (): void => {
+  Math.random = originalRandom
+  sbp('chelonia/kv/_testSetHeightTimings')
+}
+
+// Registers the `beforeEach` / `afterEach` pair of a `describe` that calls
+// `chelonia/kv/set` directly: a fresh `chelonia/_init` before each test, and
+// one after it so that a stubbed `fetch` doesn't leak past the suite (`_init`
+// rebuilds the default config).
+export const useKvSetHooks = (): void => {
+  beforeEach(() => {
+    sbp('chelonia/_init')
+    stubKvBackoff()
+  })
+  afterEach(() => {
+    restoreKvTestStubs()
+    sbp('chelonia/_init')
+  })
+}
+
 type ContractMeta = { height?: number; HEAD?: string }
 const contractMeta = (contractID: string): ContractMeta | undefined =>
   (sbp('chelonia/private/state') as { contracts?: Record<string, ContractMeta> })
@@ -28,22 +59,29 @@ const contractMeta = (contractID: string): ContractMeta | undefined =>
 // `height` (restored once `fn`, or the promise it returns, settles). Used to
 // sign a value as another device at another height would, or to decode one
 // regardless of the local height.
+//
+// The height is only restored if it is still `height`: when the contract
+// moved on meanwhile (e.g. it processed events while `fn` was awaiting),
+// restoring would move it back.
 export const withLocalHeight = <T>(contractID: string, height: number, fn: () => T): T => {
   const meta = contractMeta(contractID)
   if (!meta) throw new Error(`withLocalHeight: no contract ${contractID}`)
   const saved = meta.height
   meta.height = height
+  const restore = () => {
+    if (meta.height === height) meta.height = saved
+  }
   let result: T
   try {
     result = fn()
   } catch (e) {
-    meta.height = saved
+    restore()
     throw e
   }
   if (result instanceof Promise) {
-    return result.finally(() => { meta.height = saved }) as T
+    return result.finally(restore) as T
   }
-  meta.height = saved
+  restore()
   return result
 }
 
@@ -121,7 +159,8 @@ export const makeKvServer = (initialHeight = 0) => {
     // Called before the stored value is read, so a hook that writes to
     // `store` models another device's write that won the race.
     onPost: null as ((n: number) => void) | null,
-    // While set, GETs wait for it before answering.
+    // While set, GETs wait for it before answering, with the value stored
+    // when the request arrived.
     holdGet: null as Promise<void> | null,
     posts: () => log.filter((e) => e.method === 'POST'),
     gets: () => log.filter((e) => e.method === 'GET'),

@@ -659,8 +659,11 @@ export default sbp('sbp/selectors/register', {
       // subscribed (applying the first message both sets the type and
       // subscribes) and has no destructor to call. Unless re-syncing, drop
       // what is left of it, which would otherwise linger in (persisted)
-      // state. It was never announced as added, so its removal isn't
-      // announced either.
+      // state. A contract whose first sync failed was never announced as
+      // added, so its removal isn't announced either. One whose re-sync
+      // failed was, but the failed re-sync already announced its removal
+      // (`CONTRACTS_MODIFIED` with `removed` and `resync: true`), so
+      // dropping it here for good adds no second announcement.
       if (
         state.contracts[contractID] &&
         !params?.resync &&

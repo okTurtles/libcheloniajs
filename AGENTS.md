@@ -84,6 +84,7 @@ src/
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
 ├── kv-height.ts          # KV contract-height awareness (waits, recovery; internal)
+├── kv-runtime.ts         # KV runtime maps: created by _init, cleared by reset (internal)
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time synchronization via monotonic offsets
 ├── chelonia-utils.ts     # Optional utility selectors (e.g., chelonia/kv/queuedSet)
@@ -228,8 +229,9 @@ Full documentation:
   accepts writes stamped with its current height. Never treat an
   unverifiable value as absent; see
   [docs/kv.md](docs/kv.md#contract-heights) and
-  [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md). Detect the resulting
-  error with `isKvHeightAhead(e)` (`src/errors.ts`), not by name.
+  [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-and-verifiability).
+  Detect the resulting error with `isKvHeightAhead(e)` (`src/errors.ts`),
+  not with `instanceof`, and not by name.
 
 ### Contract State Structure
 

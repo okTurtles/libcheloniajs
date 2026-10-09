@@ -1,4 +1,5 @@
 import sbp from '@sbp/sbp'
+import { ChelErrorKvConflict } from './errors.js'
 import type { ChelKvOnConflictCallback, JSONType, KvHeightAheadMode } from './types.js'
 
 // This file contains non-core parts of Chelonia, i.e., functionality that is
@@ -21,6 +22,9 @@ export default sbp('sbp/selectors/register', {
   // `chelonia/kv/set`. However, the `chelonia/kv/set` primitive is needed if
   // the queueing logic needs to be more advanced, the key to use requires
   // custom logic or _if the `onconflict` callback also needs to be queued_.
+  // Raw `chelonia/kv/set` never syncs the contract, though: its callers
+  // handle `isKvHeightAhead(e)` themselves (sync the contract with
+  // `chelonia/contract/sync`, outside the queue, then retry).
   //
   // When the server value is ahead of the local contract
   // (`ChelErrorKvHeightAhead`), the contract is synced outside the queue and
@@ -28,6 +32,11 @@ export default sbp('sbp/selectors/register', {
   // `maxHeightRecoveries` times. Pass `onHeightAhead: 'reject'` to get the
   // error instead. See KV-REVAMPED.md §4.2 step 5a. `allowUnverifiedConflict`
   // is passed on to `chelonia/kv/set`.
+  //
+  // Running out of `maxAttempts` resolving `412` conflicts rejects with
+  // `ChelErrorKvConflict` (`.cause` is `{ currentData, etag }`), like
+  // `chelonia/kv/update` and `chelonia/kv/clear`; match it with
+  // `isKvConflict(e)`.
   'chelonia/kv/queuedSet': ({
     contractID,
     key,
@@ -67,6 +76,19 @@ export default sbp('sbp/selectors/register', {
           signal
         })
       })
-    }, { onHeightAhead, maxHeightRecoveries, signal })
+    }, { onHeightAhead, maxHeightRecoveries, signal }, `queuedSet: ${contractID}::${key}`)
+      .catch((e: unknown) => {
+        // `kv/set`'s internal error for running out of attempts (only
+        // `ChelErrorKvHeightAhead` is retried above, so this is outside the
+        // recovery loop). The cause keeps its `{ currentData, etag }` shape.
+        if ((e as Error | undefined)?.name === 'ChelErrorKvMaxAttempts') {
+          throw new ChelErrorKvConflict(
+            `[chelonia/kv] queuedSet: ${contractID}::${key} ran out of attempts ` +
+            'resolving conflicts',
+            { cause: (e as Error).cause }
+          )
+        }
+        throw e
+      })
   }
 }) as string[]

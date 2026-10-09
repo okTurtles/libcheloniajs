@@ -21,7 +21,8 @@ import {
   ChelErrorInvalidMessageHeight,
   ChelErrorKvHeightAhead,
   ChelErrorKvUpdateInvalid,
-  isKvHeightAhead
+  isKvHeightAhead,
+  kvHeightAheadCause
 } from './errors.js'
 import type {
   CheloniaContext,
@@ -138,7 +139,7 @@ export function kvHeightAheadError (
   // the height is then only a lower bound for the server's contract height.
   const required = exact
     ? `the server value was written at contract height ${requiredHeight}`
-    : `the server requires contract height at least ${requiredHeight}`
+    : `the server requires a contract height of at least ${requiredHeight}`
   const local = localHeight === undefined
     ? 'is not loaded'
     : `is at height ${localHeight}`
@@ -211,6 +212,47 @@ export function notifyContractHeight (
   if (listeners.size === 0) ctx.kvHeightListeners.delete(contractID)
 }
 
+type Settle<T> = { resolve: (value: T) => void; reject: (reason: unknown) => void }
+
+// A promise that `start` settles through the `resolve` / `reject` it
+// receives, unless `timeoutMs` elapses first (`onTimeout` settles it then)
+// or one of `signals` aborts first (it rejects with the abort reason).
+// Whichever settles it first wins; the timer, the abort listeners and the
+// cleanup function `start` returns are released at that point.
+function withDeadline<T> (
+  { signals, timeoutMs, onTimeout }: {
+    signals: AbortSignal[];
+    timeoutMs: number;
+    onTimeout: (settle: Settle<T>) => void;
+  },
+  start: (settle: Settle<T>) => (() => void) | void
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    // Replaced by the cleanup function `start` returns.
+    let stop: (() => void) | void = () => {}
+    const release = (): boolean => {
+      if (settled) return false
+      settled = true
+      clearTimeout(timer)
+      for (const s of signals) s.removeEventListener('abort', onAbort)
+      stop?.()
+      return true
+    }
+    const settle: Settle<T> = {
+      resolve: (value) => { if (release()) resolve(value) },
+      reject: (reason) => { if (release()) reject(reason) }
+    }
+    // Only called by an `abort` event, so one of the signals is aborted.
+    const onAbort = () => settle.reject(abortReason(signals.find((s) => s.aborted)!))
+    const timer = setTimeout(() => onTimeout(settle), timeoutMs)
+    for (const s of signals) s.addEventListener('abort', onAbort, { once: true })
+    stop = start(settle)
+    // `start` settled it synchronously, before `stop` was known.
+    if (settled) stop?.()
+  })
+}
+
 // Waits, without touching any queue, until the local contract reaches
 // `minHeight`. Resolves `true` when it does and `false` when `timeoutMs`
 // elapses first. Rejects with the abort reason if any of `signals` aborts.
@@ -228,27 +270,11 @@ export function waitForContractHeight (
   const alreadyAborted = active.find((s) => s.aborted)
   if (alreadyAborted) return Promise.reject(abortReason(alreadyAborted))
   if (!(timeoutMs > 0)) return Promise.resolve(false)
-  return new Promise<boolean>((resolve, reject) => {
-    const cleanup = () => {
-      clearTimeout(timer)
-      off()
-      for (const s of active) s.removeEventListener('abort', onAbort)
-    }
-    const onAbort = () => {
-      cleanup()
-      // Only called by an `abort` event, so one of the signals is aborted.
-      reject(abortReason(active.find((s) => s.aborted)!))
-    }
-    const off = addHeightListener(ctx, contractID, minHeight, () => {
-      cleanup()
-      resolve(true)
-    })
-    const timer = setTimeout(() => {
-      cleanup()
-      resolve(isHeightReached(ctx, contractID, minHeight))
-    }, timeoutMs)
-    for (const s of active) s.addEventListener('abort', onAbort, { once: true })
-  })
+  return withDeadline<boolean>({
+    signals: active,
+    timeoutMs,
+    onTimeout: ({ resolve }) => resolve(isHeightReached(ctx, contractID, minHeight))
+  }, ({ resolve }) => addHeightListener(ctx, contractID, minHeight, () => resolve(true)))
 }
 
 // Starts (or joins) a forced sync of `contractID`. Concurrent recoveries on
@@ -273,52 +299,52 @@ function startRecoverySync (ctx: CheloniaContext, contractID: string): Promise<v
 // `ChelErrorKvHeightAhead`). Resolves once the forced sync completes.
 // Rejects with `error` when the contract is not subscribed (syncing it
 // would re-subscribe a released contract), when the sync fails, or when it
-// takes longer than the recovery timeout (the sync keeps running). Rejects
-// with the abort reason if either signal, or the height session
-// (`kvHeightSession`, ended by `chelonia/reset`), aborts; an already
-// aborted one rejects before any sync starts, since after a reset the sync
-// would run into the next session.
+// takes longer than the recovery timeout (the sync keeps running), unless
+// the local contract has reached `error`'s required height by then (e.g.
+// pubsub delivered the missing events meanwhile): the operation can then
+// succeed, so this resolves. Note that after a timeout the retried
+// operation's lane work still waits behind the sync, which runs on the
+// contract's lane. Rejects with the abort reason if the caller's signal,
+// the session's (`ctx.abortController`'s, captured when the operation
+// started) or the height session (`kvHeightSession`, ended by
+// `chelonia/reset`) aborts; an already aborted one rejects before any sync
+// starts, since after a reset the sync would run into the next session.
 export function recoverContractHeight (
   ctx: CheloniaContext,
   contractID: string,
   error: unknown,
-  { signal, abortSignal }: { signal?: AbortSignal; abortSignal?: AbortSignal } = {}
+  { callerSignal, sessionSignal }: { callerSignal?: AbortSignal; sessionSignal?: AbortSignal } = {}
 ): Promise<void> {
   if (!ctx.subscriptionSet.has(contractID)) return Promise.reject(error)
-  const signals = [signal, abortSignal, ctx.kvHeightSession.signal]
+  const signals = [callerSignal, sessionSignal, ctx.kvHeightSession.signal]
     .filter(Boolean) as AbortSignal[]
   const alreadyAborted = signals.find((s) => s.aborted)
   if (alreadyAborted) return Promise.reject(abortReason(alreadyAborted))
   const sync = startRecoverySync(ctx, contractID)
-  return new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      clearTimeout(timer)
-      for (const s of signals) s.removeEventListener('abort', onAbort)
-    }
-    const onAbort = () => {
-      cleanup()
-      // Only called by an `abort` event, so one of the signals is aborted.
-      reject(abortReason(signals.find((s) => s.aborted)!))
-    }
-    const timer = setTimeout(() => {
-      cleanup()
+  // The sync failed or timed out: retrying can still succeed if the height
+  // was reached some other way.
+  const fail = ({ resolve, reject }: Settle<void>) => {
+    const required = kvHeightAheadCause(error)?.requiredHeight
+    if (required !== undefined && isHeightReached(ctx, contractID, required)) resolve()
+    else reject(error)
+  }
+  return withDeadline<void>({
+    signals,
+    timeoutMs: recoveryTimeoutMs,
+    onTimeout: (settle) => {
       console.warn(
         `[chelonia/kv] contract sync for ${contractID} did not finish within ` +
         `${recoveryTimeoutMs} ms; giving up on height recovery`
       )
-      reject(error)
-    }, recoveryTimeoutMs)
-    for (const s of signals) s.addEventListener('abort', onAbort, { once: true })
-    sync.then(() => {
-      cleanup()
-      resolve()
-    }, (syncError: unknown) => {
-      cleanup()
+      fail(settle)
+    }
+  }, (settle) => {
+    sync.then(() => settle.resolve(), (syncError: unknown) => {
       console.warn(
         `[chelonia/kv] contract sync for ${contractID} failed during height recovery`,
         syncError
       )
-      reject(error)
+      fail(settle)
     })
   })
 }
@@ -330,21 +356,29 @@ export type KvHeightRecoveryOptions = {
 }
 
 // Validates the height-recovery options shared by `update`, `clear`,
-// `queuedSet` (through `withHeightRecovery`) and single-key `sync`. Returns
-// the error message for invalid input, or `undefined`.
-export function invalidHeightRecoveryOptions (
+// `queuedSet` (through `withHeightRecovery`) and single-key `sync`, and
+// fills in the defaults. Invalid input throws `ChelErrorKvUpdateInvalid`,
+// whose message starts with `[chelonia/kv] ${label}: ` (e.g. `label` is
+// `'update: cID::key'`).
+export function resolveHeightRecoveryOptions (
+  label: string,
   { onHeightAhead, maxHeightRecoveries }: KvHeightRecoveryOptions
-): string | undefined {
+): { mode: KvHeightAheadMode; maxRecoveries: number } {
+  const invalid = (message: string) =>
+    new ChelErrorKvUpdateInvalid(`[chelonia/kv] ${label}: ${message}`)
   if (onHeightAhead !== undefined && onHeightAhead !== 'sync' && onHeightAhead !== 'reject') {
-    return "`onHeightAhead` must be 'sync' or 'reject'"
+    throw invalid("`onHeightAhead` must be 'sync' or 'reject'")
   }
   if (
     maxHeightRecoveries !== undefined &&
     (!Number.isSafeInteger(maxHeightRecoveries) || maxHeightRecoveries < 0)
   ) {
-    return '`maxHeightRecoveries` must be a non-negative integer'
+    throw invalid('`maxHeightRecoveries` must be a non-negative integer')
   }
-  return undefined
+  return {
+    mode: onHeightAhead ?? 'sync',
+    maxRecoveries: maxHeightRecoveries ?? KV_DEFAULT_MAX_HEIGHT_RECOVERIES
+  }
 }
 
 // Runs `attempt` and, while it rejects with `ChelErrorKvHeightAhead`, syncs
@@ -365,22 +399,21 @@ export async function withHeightRecovery<T> (
   { onHeightAhead, maxHeightRecoveries, signal }: KvHeightRecoveryOptions = {},
   label: string = contractID
 ): Promise<T> {
-  const invalid = invalidHeightRecoveryOptions({ onHeightAhead, maxHeightRecoveries })
-  if (invalid) throw new ChelErrorKvUpdateInvalid(`[chelonia/kv] ${label}: ${invalid}`)
-  const mode = onHeightAhead ?? 'sync'
-  const maxRecoveries = maxHeightRecoveries ?? KV_DEFAULT_MAX_HEIGHT_RECOVERIES
+  const { mode, maxRecoveries } = resolveHeightRecoveryOptions(
+    label, { onHeightAhead, maxHeightRecoveries }
+  )
   // Captured once: `chelonia/reset` aborts this controller and replaces it.
-  const abortSignal = ctx.abortController.signal
+  const sessionSignal = ctx.abortController.signal
   for (let recoveries = 0; ; recoveries++) {
     try {
       return await attempt(recoveries)
     } catch (e) {
       if (!isKvHeightAhead(e) || mode === 'reject' || recoveries >= maxRecoveries) throw e
       throwIfAborted(signal)
-      throwIfAborted(abortSignal)
-      await recoverContractHeight(ctx, contractID, e, { signal, abortSignal })
+      throwIfAborted(sessionSignal)
+      await recoverContractHeight(ctx, contractID, e, { callerSignal: signal, sessionSignal })
       throwIfAborted(signal)
-      throwIfAborted(abortSignal)
+      throwIfAborted(sessionSignal)
     }
   }
 }

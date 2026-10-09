@@ -52,6 +52,7 @@ import {
   throwIfAborted,
   waitForContractHeight
 } from './kv-height.js'
+import { clearKvRuntime, initKvRuntime } from './kv-runtime.js'
 import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './events.js'
 import { SPMessage } from './SPMessage.js'
 import type { Secret } from './Secret.js'
@@ -110,11 +111,13 @@ import {
 import type { Options as PubSubOptions, PubSubClient } from './pubsub/index.js'
 
 // A server KV value as seen by this client (KV-REVAMPED.md §3.4). See
-// `classifyKvValue`.
-type KvBody<T> =
+// `classifyKvValue`. `malformed` (a height stamp that can never be read) is
+// only reported to blind writers (`allowUnverifiedConflict` in `kv/set`).
+type KvServerValue<T> =
   | { kind: 'absent' }
   | { kind: 'present'; parsed: ParsedEncryptedOrUnencryptedMessage<T> }
   | { kind: 'ahead'; requiredHeight: number }
+  | { kind: 'malformed'; error: Error }
 
 // TODO: define ChelContractType for /defineContract
 
@@ -443,29 +446,8 @@ export default sbp('sbp/selectors/register', {
     // when there is a third contract (for example, a group chatroom) using
     // those rotated keys as foreign keys.
     this.subscriptionSet = new Set()
-    // KV slot registry — see KV-REVAMPED.md §11.2.
-    // `kvSlots` and `defContractKvByManifest` survive `chelonia/reset`
-    // because slot definitions are application code.
-    this.kvSlots = new Map()
-    this.kvSlotsByContractID = new Map()
-    this.kvActiveFilters = new Map()
-    this.kvFilterDirty = new Set()
-    this.kvFilterRetry = new Set()
-    this.kvFlushInFlight = false
-    this.kvLocalEchoCIDs = new Map()
-    this.kvReconnectRefresh = new Set()
-    this.kvPendingWrites = new Map()
-    this.kvPendingLoads = new Map()
-    this.kvOnUpdateActive = new Map()
-    this.kvHeightListeners = new Map()
-    this.kvHeightWaits = new Map()
-    this.kvRecoveries = new Map()
-    this.kvHeightSession = new AbortController()
-    this.kvSuspendedHeightWaits = []
-    // Name for `defContractKvByManifest` doesn't start with
-    // `kv`, like the preceding keys, for consistency with
-    // `defContractManifest`.
-    this.defContractKvByManifest = new Map()
+    // KV slot registry and height waits; see KV-REVAMPED.md §11.2.
+    initKvRuntime(this)
     // pending includes contracts that are scheduled for syncing or in the
     // process of syncing for the first time. After sync completes for the
     // first time, they are removed from pending and added to subscriptionSet
@@ -787,16 +769,17 @@ export default sbp('sbp/selectors/register', {
     // registering a new wait, while the steps below are pending would
     // otherwise start a contract sync that runs into the next session.
     sbp('chelonia/kv/_endHeightSession')
-    const result = await (async () => {
+    let result: void
+    try {
       await sbp('chelonia/kv/_waitInFlight')
       await sbp('chelonia/contract/wait')
-      return await postCleanupFn?.()
-    })().catch((e: unknown) => {
+      result = await postCleanupFn?.()
+    } catch (e) {
       // Nothing has been torn down yet, so this session goes on: it needs
       // its height-deferred loads and height recovery back.
       sbp('chelonia/kv/_resumeHeightSession')
       throw e
-    })
+    }
     // The following are all synchronous operations
     const rootState = sbp(this.config.stateSelector)
     // Cancel all outgoing messages by replacing this._instance
@@ -808,34 +791,10 @@ export default sbp('sbp/selectors/register', {
     // Re-seed the KV mirror — `reactiveClearObject` above stripped it
     // along with everything else. Slot definitions (`kvSlots`) and the
     // per-manifest cache (`defContractKvByManifest`) survive reset
-    // because they are code-level state; the five per-subscription maps
-    // are cleared alongside `subscriptionSet` below. In-flight KV writes
-    // were already drained via `chelonia/kv/_waitInFlight` above, so
-    // clearing `kvLocalEchoCIDs` / `kvPendingWrites` here cannot strand a
-    // continuation mid-write.
+    // because they are code-level state; the per-subscription maps are
+    // cleared alongside `subscriptionSet` below (`clearKvRuntime`).
     this.config.reactiveSet(rootState, '_kv', Object.create(null))
-    this.kvSlotsByContractID.clear()
-    this.kvActiveFilters.clear()
-    this.kvFilterDirty.clear()
-    this.kvFilterRetry.clear()
-    if (this.kvFilterRetryTimer != null) {
-      clearTimeout(this.kvFilterRetryTimer)
-      this.kvFilterRetryTimer = undefined
-    }
-    this.kvFlushInFlight = false
-    this.kvLocalEchoCIDs.clear()
-    this.kvReconnectRefresh.clear()
-    this.kvPendingWrites.clear()
-    this.kvPendingLoads.clear()
-    this.kvOnUpdateActive.clear()
-    // Height waits can't have been registered since the height session
-    // ended (above), but listeners of passive height waits started while
-    // draining can. Drop them, then start the next session's height
-    // session. `kvRecoveries` was drained by `_waitInFlight` above.
-    sbp('chelonia/kv/_clearHeightWaits')
-    this.kvHeightSession = new AbortController()
-    this.kvSuspendedHeightWaits = []
-    this.kvRecoveries.clear()
+    clearKvRuntime(this)
     clearObject(this.ephemeralReferenceCount)
     this.pending.splice(0)
     clearObject(this.currentSyncs)
@@ -2931,6 +2890,14 @@ export default sbp('sbp/selectors/register', {
   // height, the call rejects with `ChelErrorKvHeightAhead` instead of handing
   // `onconflict` an unverified (or missing) value, unless the caller opts in
   // with `allowUnverifiedConflict`.
+  //
+  // `kv/set` never syncs the contract: after the bounded wait (or once the
+  // 409 re-signs run out) it rejects with `ChelErrorKvHeightAhead`. Callers
+  // handle `isKvHeightAhead(e)` themselves (sync the contract with
+  // `chelonia/contract/sync`, outside the contract's queue, then retry), or
+  // use `chelonia/kv/queuedSet` / `chelonia/kv/update`, which do. Running
+  // out of `maxAttempts` rejects with an internal error that
+  // `isKvConflict(e)` matches.
   'chelonia/kv/set': async function (
     this: CheloniaContext,
     contractID: string,
@@ -2954,8 +2921,11 @@ export default sbp('sbp/selectors/register', {
       onconflict?: ChelKvOnConflictCallback | null | undefined;
       // Call `onconflict` with `currentStatus: 'ahead'` (and a `currentData`
       // getter that throws `ChelErrorKvHeightAhead`) when the conflicting
-      // server value cannot be verified yet, instead of rejecting. For blind
-      // writes that don't depend on the current value.
+      // server value cannot be verified yet, and with `currentStatus:
+      // 'malformed'` (a getter that throws `ChelErrorInvalidMessageHeight`)
+      // when its height stamp is malformed, so that it can never be
+      // verified, instead of rejecting. For blind writes that don't depend
+      // on the current value.
       allowUnverifiedConflict?: boolean;
       signal?: AbortSignal;
     }
@@ -2998,22 +2968,46 @@ export default sbp('sbp/selectors/register', {
     ) => kvHeightAheadError(this, contractID, key, {
       requiredHeight: required, exact, etag, status
     })
-    // Classifies a server value (see `KvBody`). A value that is ahead is
+    // The passive wait for the local contract to reach `required`. Skipped
+    // (it resolves `false` at once unless the height is already reached)
+    // while the pubsub socket isn't open: no contract event arrives then, so
+    // waiting can't help, and `update` / `clear` / `queuedSet` go straight
+    // to their recovery sync. Without a pubsub client (e.g. server-side
+    // use), the wait stays.
+    const waitForHeight = (required: number) =>
+      waitForContractHeight(this, contractID, required, {
+        timeoutMs: pubsubSocketClosed(this) ? 0 : undefined,
+        signals: [fetchSignal]
+      })
+    // Classifies a server value (see `KvServerValue`). A value that is ahead is
     // first given a bounded, passive wait for the local contract to catch up
     // (only when `wait` is set). An empty body means there is no stored
-    // value.
+    // value. A malformed height stamp throws, unless the caller writes
+    // blindly (`allowUnverifiedConflict`): such a value can never be
+    // verified, so overwriting it is the only way to recover the key.
     const classifyBody = async (
       serializedDataText: string,
       wait: boolean
-    ): Promise<KvBody<JSONType>> => {
+    ): Promise<KvServerValue<JSONType>> => {
       if (!serializedDataText) return { kind: 'absent' }
       const serializedData = JSON.parse(serializedDataText)
-      const body = classifyKvValue<JSONType>(this, contractID, key, serializedData)
+      const classify = (): KvServerValue<JSONType> => {
+        try {
+          return classifyKvValue<JSONType>(this, contractID, key, serializedData)
+        } catch (e) {
+          if (
+            allowUnverifiedConflict &&
+            (e as Error | undefined)?.name === 'ChelErrorInvalidMessageHeight'
+          ) {
+            return { kind: 'malformed', error: e as Error }
+          }
+          throw e
+        }
+      }
+      const body = classify()
       if (body.kind !== 'ahead' || !wait) return body
-      await waitForContractHeight(this, contractID, body.requiredHeight, {
-        signals: [fetchSignal]
-      })
-      return classifyKvValue<JSONType>(this, contractID, key, serializedData)
+      await waitForHeight(body.requiredHeight)
+      return classify()
     }
     // Reads what the current `response` (a 412, or the fetch-first GET) says
     // about the server value, doing at most one recovery GET per `kv/set`
@@ -3021,9 +3015,9 @@ export default sbp('sbp/selectors/register', {
     // passive wait for the local contract to catch up.
     const readServerValue = async (
       wait: boolean
-    ): Promise<{ body: KvBody<JSONType>; etag: string | null }> => {
-      let body: KvBody<JSONType> = { kind: 'absent' }
-      let etag = response.headers.get('x-cid') || response.headers.get('etag')
+    ): Promise<{ body: KvServerValue<JSONType>; etag: string | null }> => {
+      let body: KvServerValue<JSONType> = { kind: 'absent' }
+      let etag = responseEtag(response)
       if (etag) conflictEtag = etag
       // Rationale:
       //  * response.ok could be the result of `GET` (no initial data)
@@ -3067,7 +3061,7 @@ export default sbp('sbp/selectors/register', {
         })
         if (getResp.ok) {
           body = await classifyBody(await getResp.text(), wait)
-          etag = getResp.headers.get('x-cid') || getResp.headers.get('etag')
+          etag = responseEtag(getResp)
         } else {
           console.warn(
             `[kv/set] recovery GET for ${contractID}/${key} returned ` +
@@ -3102,6 +3096,8 @@ export default sbp('sbp/selectors/register', {
         throwIfAborted(fetchSignal)
       }
       const value = body.kind === 'present' ? body.parsed : undefined
+      // Only set with `allowUnverifiedConflict` (see `classifyBody`).
+      const malformedError = body.kind === 'malformed' ? body.error : undefined
       const serverValue: KvConflictServerValue = body.kind === 'ahead'
         ? { currentStatus: 'ahead', requiredHeight: body.requiredHeight }
         : { currentStatus: body.kind }
@@ -3118,6 +3114,7 @@ export default sbp('sbp/selectors/register', {
         ...serverValue,
         get currentData () {
           if (aheadError) throw aheadError
+          if (malformedError) throw malformedError
           return value?.data
         },
         currentValue: value
@@ -3181,7 +3178,7 @@ export default sbp('sbp/selectors/register', {
             // the local contract to move past the stamp, then sign the same
             // data again. The stored value's own stamp, when the body
             // carries one, is a better lower bound for the server height.
-            const etag = response.headers.get('x-cid') || response.headers.get('etag')
+            const etag = responseEtag(response)
             if (etag) conflictEtag = etag
             const required = Math.max(
               postedHeight + 1,
@@ -3191,9 +3188,7 @@ export default sbp('sbp/selectors/register', {
               throw heightAheadError(required, false, etag, response.status)
             }
             throwIfAborted(fetchSignal)
-            const reached = await waitForContractHeight(this, contractID, required, {
-              signals: [fetchSignal]
-            })
+            const reached = await waitForHeight(required)
             if (!reached) throw heightAheadError(required, false, etag, response.status)
             continue
           }
@@ -3239,7 +3234,7 @@ export default sbp('sbp/selectors/register', {
         // Successful write: capture the server-issued etag (x-cid /
         // etag header) so the resolved value reflects the freshest
         // version. See KV-REVAMPED.md §4.2 step 6.
-        successEtag = response.headers.get('x-cid') || response.headers.get('etag')
+        successEtag = responseEtag(response)
         break
       }
       return { etag: successEtag }
@@ -3265,7 +3260,7 @@ export default sbp('sbp/selectors/register', {
         `[kv/get] ${httpErrorMessage(response)}`, { cause: response.status }
       )
     }
-    const etag = response.headers.get('x-cid') || response.headers.get('etag')
+    const etag = responseEtag(response)
     // A value written at a height the local contract hasn't reached can't be
     // verified yet (KV-REVAMPED.md §3.4). Report it as such, with the height
     // to wait for; a malformed height stamp is reported as the invalid
@@ -3391,6 +3386,20 @@ function outputEncryptedOrUnencryptedMessage (
   return serializedData
 }
 
+// The etag of a KV response: the `x-cid` header, or else `etag`. `null`
+// when it has neither.
+function responseEtag (response: Response): string | null {
+  return response.headers.get('x-cid') || response.headers.get('etag')
+}
+
+// Whether there is a pubsub client whose socket isn't open, so that no
+// contract event can arrive through it. `false` without a pubsub client
+// (e.g. server-side use, or before `chelonia/connect`).
+function pubsubSocketClosed (ctx: CheloniaContext): boolean {
+  const client = ctx.pubsub as PubSubClient | undefined
+  return !!client && client.socket?.readyState !== WebSocket.OPEN
+}
+
 // Classifies a parsed server KV value. A value stamped with a height the
 // local contract hasn't reached is `ahead`: it cannot be verified yet, and
 // its (unverified) height stamp says how far the contract must advance.
@@ -3401,7 +3410,7 @@ function classifyKvValue<T> (
   contractID: string,
   key: string,
   serializedData: unknown
-): Exclude<KvBody<T>, { kind: 'absent' }> {
+): Extract<KvServerValue<T>, { kind: 'present' | 'ahead' }> {
   const height = readHeightStamp(serializedData)
   if (!isHeightReached(ctx, contractID, height)) {
     return { kind: 'ahead', requiredHeight: height }

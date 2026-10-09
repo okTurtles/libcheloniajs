@@ -22,8 +22,10 @@ import { CHELONIA_KV_STATUS_CHANGED } from './events.js'
 import { KV_NOOP } from './kv.js'
 import {
   makeKvServer,
+  restoreKvTestStubs,
   setLocalHeight as setContractHeight,
   sleep,
+  stubKvBackoff,
   whenSettledWithin as whenContractSlotSettledWithin,
   withLocalHeight,
   type KvFetchOptions
@@ -112,7 +114,6 @@ const originalWarn = console.warn
 const originalDebug = console.debug
 const originalInfo = console.info
 const originalError = console.error
-const originalRandom = Math.random
 
 export const setupContract = (height: number) => {
   const csk = keygen(EDWARDS25519SHA512BATCH)
@@ -174,6 +175,38 @@ export const drainLanes = async () => {
     await sbp('chelonia/queueInvocation', CONTRACT_ID, () => {})
     await sleep(5)
   }
+}
+
+// Makes the next `n` KV GETs answer `status` (default 500), only counting
+// those made while `when()` holds. Returns a function that restores the
+// server's handler.
+export const failKvGets = (n: number, status = 500, when: () => boolean = () => true) => {
+  const real = server.handleKv
+  let left = n
+  server.handleKv = async (pathname: string, opts: KvFetchOptions = {}) => {
+    if ((opts.method ?? 'GET') === 'GET' && pathname.startsWith('/kv/') && left > 0 && when()) {
+      left--
+      const key = decodeURIComponent(pathname.split('/').pop()!)
+      server.log.push({ method: 'GET', key, status })
+      return new Response('', { status })
+    }
+    return real(pathname, opts)
+  }
+  return () => { server.handleKv = real }
+}
+
+// Holds the next contract sync (`/latestHEADinfo`) until `release` is
+// called; `started` resolves once it has begun. Later syncs aren't held.
+export const holdNextSync = () => {
+  let resolveSync: (() => void) | undefined
+  let signalStarted!: () => void
+  const started = new Promise<void>((resolve) => { signalStarted = resolve })
+  server.onSync = () => new Promise<void>((resolve) => {
+    server.onSync = null
+    resolveSync = resolve
+    signalStarted()
+  })
+  return { started, release: () => resolveSync?.() }
 }
 
 // `chelonia/private/in/sync` adds an up-to-date contract to the subscription
@@ -248,6 +281,14 @@ export const initChatRoomUnreadMessages = (
       [contractID]: { readUntil: { messageHash, createdHeight }, unreadMessages: [] }
     }
   }
+// A KV_NOOP when the room isn't in the value, otherwise removes it.
+export const deleteChatRoomUnreadMessages = (contractID: string) =>
+  (prev: any = {}) => {
+    if (!(contractID in prev)) return KV_NOOP
+    const next = { ...prev }
+    delete next[contractID]
+    return next
+  }
 
 export const room = (hash: string, h: number, unread: any[] = []) => ({
   readUntil: { messageHash: hash, createdHeight: h }, unreadMessages: unread
@@ -289,24 +330,25 @@ export const installKvHeightHooks = () => {
     console.debug = (...args: unknown[]) => { debugs.push(args) }
     console.info = () => {}
     console.error = () => {}
-    // `kv/set` backs off randomIntFromRange(0, 1500) ms between 412 retries.
-    Math.random = () => 0
+    stubKvBackoff()
   })
 
   // Restores everything even when the index check fails, so one failure
   // doesn't leave timers, listeners or stubs behind for the next tests.
+  // Unlike `useKvSetHooks` (`test-utils.ts`), no `chelonia/_init` here: run
+  // before the index check and `_clearHeightWaits`, it would empty the maps
+  // they inspect and leak the old timers.
   afterEach(() => {
     try {
       sbp('chelonia/kv/_assertIndexConsistent')
     } finally {
       for (const off of offs.splice(0)) off()
       sbp('chelonia/kv/_clearHeightWaits')
-      sbp('chelonia/kv/_testSetHeightTimings')
+      restoreKvTestStubs()
       console.warn = originalWarn
       console.debug = originalDebug
       console.info = originalInfo
       console.error = originalError
-      Math.random = originalRandom
       sbp('chelonia/private/stopClockSync')
     }
   })
