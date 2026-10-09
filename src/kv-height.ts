@@ -21,9 +21,11 @@ import {
   ChelErrorInvalidMessageHeight,
   ChelErrorKvHeightAhead,
   ChelErrorKvUpdateInvalid,
+  ChelErrorUnexpected,
   isKvHeightAhead,
   kvHeightAheadCause
 } from './errors.js'
+import type { PubSubClient } from './pubsub/index.js'
 import type {
   CheloniaContext,
   KvHeightAheadCause,
@@ -68,14 +70,20 @@ export const kvHeightTimings = (): KvHeightTimings => ({
   recoveryTimeoutMs
 })
 
+export type KvHeightTimingOverrides = Partial<Record<keyof KvHeightTimings, number | null>>
+
 // Test hook (exposed through `chelonia/kv/_testSetHeightTimings` outside
-// production). Omitted or `null` fields reset to the defaults.
+// production). Merges `overrides` into the current timings: an omitted
+// field keeps its current value and a `null` one resets to its default.
+// No argument (or `null`) resets all three.
 export const setKvHeightTimings = (
-  overrides?: Partial<KvHeightTimings> | null
+  overrides?: KvHeightTimingOverrides | null
 ): KvHeightTimings => {
-  heightWaitMs = overrides?.waitMs ?? KV_HEIGHT_WAIT_MS
-  pendingFallbackMs = overrides?.pendingFallbackMs ?? KV_HEIGHT_PENDING_FALLBACK_MS
-  recoveryTimeoutMs = overrides?.recoveryTimeoutMs ?? KV_HEIGHT_RECOVERY_TIMEOUT_MS
+  const { waitMs, pendingFallbackMs: fallbackMs, recoveryTimeoutMs: recoveryMs } =
+    overrides ?? { waitMs: null, pendingFallbackMs: null, recoveryTimeoutMs: null }
+  if (waitMs !== undefined) heightWaitMs = waitMs ?? KV_HEIGHT_WAIT_MS
+  if (fallbackMs !== undefined) pendingFallbackMs = fallbackMs ?? KV_HEIGHT_PENDING_FALLBACK_MS
+  if (recoveryMs !== undefined) recoveryTimeoutMs = recoveryMs ?? KV_HEIGHT_RECOVERY_TIMEOUT_MS
   return kvHeightTimings()
 }
 
@@ -94,6 +102,16 @@ export function isHeightReached (
 ): boolean {
   const height = localContractHeight(ctx, contractID)
   return height !== undefined && height >= minHeight
+}
+
+// Whether there is a pubsub client whose socket isn't open (closed, or
+// still connecting or closing), so that no contract event can arrive
+// through it: a passive wait for the local contract to reach a height can't
+// help then. `false` without a pubsub client (e.g. server-side use, or
+// before `chelonia/connect`).
+export function pubsubSocketNotOpen (ctx: CheloniaContext): boolean {
+  const client = ctx.pubsub as PubSubClient | undefined
+  return !!client && client.socket?.readyState !== WebSocket.OPEN
 }
 
 // The canonical decimal form of a height stamp, as this library writes it
@@ -281,11 +299,24 @@ export function waitForContractHeight (
 // the same contract share one sync. The sync runs on the contract's
 // internal queue; callers MUST NOT hold the contract's public
 // (`queueInvocation`) lane while awaiting it.
+//
+// The subscription is checked again on the lane, right before syncing.
+// `chelonia/contract/release` only queues the removal on that same lane,
+// so a removal queued ahead of this sync has unsubscribed the contract by
+// the time it runs; syncing it anyway would subscribe it again, with no
+// reference left to ever release it.
 function startRecoverySync (ctx: CheloniaContext, contractID: string): Promise<void> {
   const existing = ctx.kvRecoveries.get(contractID)
   if (existing) return existing
   const sync: Promise<void> = Promise.resolve()
-    .then(() => sbp('chelonia/private/in/sync', contractID, { force: true }))
+    .then(() => sbp('chelonia/private/queueEvent', contractID, () => {
+      if (!ctx.subscriptionSet.has(contractID)) {
+        throw new ChelErrorUnexpected(
+          `[chelonia/kv] ${contractID} was removed before its height-recovery sync ran`
+        )
+      }
+      return sbp('chelonia/private/in/syncContract', contractID, { force: true })
+    }))
     .then(() => undefined)
   const clear = () => {
     if (ctx.kvRecoveries.get(contractID) === sync) ctx.kvRecoveries.delete(contractID)
@@ -298,7 +329,9 @@ function startRecoverySync (ctx: CheloniaContext, contractID: string): Promise<v
 // Brings the local contract up to date after `error` (a
 // `ChelErrorKvHeightAhead`). Resolves once the forced sync completes.
 // Rejects with `error` when the contract is not subscribed (syncing it
-// would re-subscribe a released contract), when the sync fails, or when it
+// would re-subscribe a released contract; checked here as a fast path, and
+// again on the contract's lane by `startRecoverySync`), when the sync
+// fails, or when it
 // takes longer than the recovery timeout (the sync keeps running), unless
 // the local contract has reached `error`'s required height by then (e.g.
 // pubsub delivered the missing events meanwhile): the operation can then
@@ -322,30 +355,31 @@ export function recoverContractHeight (
   if (alreadyAborted) return Promise.reject(abortReason(alreadyAborted))
   const sync = startRecoverySync(ctx, contractID)
   // The sync failed or timed out: retrying can still succeed if the height
-  // was reached some other way.
-  const fail = ({ resolve, reject }: Settle<void>) => {
+  // was reached some other way. The warning says which way it went.
+  const fail = ({ resolve, reject }: Settle<void>, why: string, cause?: unknown) => {
     const required = kvHeightAheadCause(error)?.requiredHeight
-    if (required !== undefined && isHeightReached(ctx, contractID, required)) resolve()
+    const reached = required !== undefined && isHeightReached(ctx, contractID, required)
+    const message = reached
+      ? `${why}; retrying, since the contract reached height ${required} anyway`
+      : `${why}; giving up on height recovery`
+    if (cause === undefined) console.warn(message)
+    else console.warn(message, cause)
+    if (reached) resolve()
     else reject(error)
   }
   return withDeadline<void>({
     signals,
     timeoutMs: recoveryTimeoutMs,
-    onTimeout: (settle) => {
-      console.warn(
-        `[chelonia/kv] contract sync for ${contractID} did not finish within ` +
-        `${recoveryTimeoutMs} ms; giving up on height recovery`
-      )
-      fail(settle)
-    }
+    onTimeout: (settle) => fail(
+      settle,
+      `[chelonia/kv] contract sync for ${contractID} did not finish within ${recoveryTimeoutMs} ms`
+    )
   }, (settle) => {
-    sync.then(() => settle.resolve(), (syncError: unknown) => {
-      console.warn(
-        `[chelonia/kv] contract sync for ${contractID} failed during height recovery`,
-        syncError
-      )
-      fail(settle)
-    })
+    sync.then(() => settle.resolve(), (syncError: unknown) => fail(
+      settle,
+      `[chelonia/kv] contract sync for ${contractID} failed during height recovery`,
+      syncError
+    ))
   })
 }
 

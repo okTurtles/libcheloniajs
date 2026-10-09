@@ -1,5 +1,6 @@
 import sbp from '@sbp/sbp'
 import { ChelErrorKvConflict } from './errors.js'
+import { isKvMaxAttempts } from './internal-errors.js'
 import type { ChelKvOnConflictCallback, JSONType, KvHeightAheadMode } from './types.js'
 
 // This file contains non-core parts of Chelonia, i.e., functionality that is
@@ -24,7 +25,11 @@ export default sbp('sbp/selectors/register', {
   // custom logic or _if the `onconflict` callback also needs to be queued_.
   // Raw `chelonia/kv/set` never syncs the contract, though: its callers
   // handle `isKvHeightAhead(e)` themselves (sync the contract with
-  // `chelonia/contract/sync`, outside the queue, then retry).
+  // `chelonia/contract/sync`, outside the queue, then retry; see
+  // docs/kv.md). Such a loop doesn't share one sync among concurrent
+  // writes, isn't aborted by `chelonia/reset`, and doesn't retry when its
+  // sync fails but the contract reached the height anyway, as this
+  // selector does.
   //
   // When the server value is ahead of the local contract
   // (`ChelErrorKvHeightAhead`), the contract is synced outside the queue and
@@ -33,10 +38,10 @@ export default sbp('sbp/selectors/register', {
   // error instead. See KV-REVAMPED.md §4.2 step 5a. `allowUnverifiedConflict`
   // is passed on to `chelonia/kv/set`.
   //
-  // Running out of `maxAttempts` resolving `412` conflicts rejects with
-  // `ChelErrorKvConflict` (`.cause` is `{ currentData, etag }`), like
-  // `chelonia/kv/update` and `chelonia/kv/clear`; match it with
-  // `isKvConflict(e)`.
+  // Running out of `maxAttempts` resolving `412` conflicts, or a `412`
+  // without `onconflict`, rejects with `ChelErrorKvConflict` (`.cause` is
+  // `{ currentData, etag }`), like `chelonia/kv/update` and
+  // `chelonia/kv/clear`; match it with `isKvConflict(e)`.
   'chelonia/kv/queuedSet': ({
     contractID,
     key,
@@ -78,13 +83,18 @@ export default sbp('sbp/selectors/register', {
       })
     }, { onHeightAhead, maxHeightRecoveries, signal }, `queuedSet: ${contractID}::${key}`)
       .catch((e: unknown) => {
-        // `kv/set`'s internal error for running out of attempts (only
-        // `ChelErrorKvHeightAhead` is retried above, so this is outside the
-        // recovery loop). The cause keeps its `{ currentData, etag }` shape.
-        if ((e as Error | undefined)?.name === 'ChelErrorKvMaxAttempts') {
+        // `kv/set`'s internal error for running out of attempts, or for a
+        // `412` without `onconflict` (only `ChelErrorKvHeightAhead` is
+        // retried above, so this is outside the recovery loop). The cause
+        // keeps its `{ currentData, etag }` shape: there is no slot to
+        // normalize it against.
+        if (isKvMaxAttempts(e)) {
           throw new ChelErrorKvConflict(
-            `[chelonia/kv] queuedSet: ${contractID}::${key} ran out of attempts ` +
-            'resolving conflicts',
+            `[chelonia/kv] queuedSet: ${contractID}::${key} ` + (
+              typeof onconflict === 'function'
+                ? 'ran out of attempts resolving conflicts'
+                : 'conflicts with the server value, and no onconflict handler was provided'
+            ),
             { cause: (e as Error).cause }
           )
         }

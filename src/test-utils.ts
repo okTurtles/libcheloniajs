@@ -2,6 +2,7 @@
 // `test` script never runs it directly, and it registers no SBP selectors,
 // so any test file may import it without contaminating registrations.
 import sbp from '@sbp/sbp'
+import * as assert from 'node:assert'
 import { afterEach, beforeEach } from 'node:test'
 import { createCID, multicodes } from './functions.js'
 
@@ -15,6 +16,26 @@ export const waitMicrotasks = async (): Promise<void> => {
 
 export const sleep = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+// Polls `cond` every 5 ms until it holds. Fails with `label` after `ms`
+// instead of looping forever when a regression means it never holds.
+export const until = async (cond: () => boolean, label: string, ms = 3000): Promise<void> => {
+  const deadline = Date.now() + ms
+  while (!cond()) {
+    if (Date.now() > deadline) assert.fail(`${label} (within ${ms} ms)`)
+    await sleep(5)
+  }
+}
+
+// Settles like `promise`, or rejects with `label` after `ms`, so that a
+// regression that leaves it pending fails the test instead of hanging it.
+export const within = <T>(promise: Promise<T>, label: string, ms = 3000): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} (within ${ms} ms)`)), ms)
+  })
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
+}
 
 // ---------------------------------------------------------------------------
 // KV helpers
@@ -135,10 +156,27 @@ export type KvFetchOptions = {
 
 export type KvLogEntry = {
   method: string;
+  contractID?: string;
   key: string;
   status: number;
   ifMatch?: string | null;
   height?: string;
+}
+
+type KvStored = { body: string; cid: string }
+
+// Resolves with `held`, or rejects with the signal's reason if `signal` is
+// aborted first (as `fetch` does).
+const unlessAborted = (held: Promise<void>, signal?: AbortSignal): Promise<void> => {
+  if (!signal) return held
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    held.then(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, reject)
+  })
 }
 
 // A simulated chel server, KV routes only (`handleKv`), with the same
@@ -148,23 +186,48 @@ export type KvLogEntry = {
 // none); then the height stamp must equal the server's contract height (409,
 // again with the stored value); then the value is stored and a 204 carries
 // the quoted CID as ETag. A `GET` returns the stored value (404 without).
-export const makeKvServer = (initialHeight = 0) => {
-  const store = new Map<string, { body: string; cid: string }>()
+//
+// Like chel, it keeps keys and heights per contract when `contractID` is
+// given: `store`, `height` and `etagOf` address that contract, and
+// `storeOf` / `heightOf` / `setHeight` any other one (which starts empty, at
+// `initialHeight`). Without `contractID`, every contract shares one key space
+// and one height, for tests that create their contract after the server.
+export const makeKvServer = (initialHeight = 0, contractID?: string) => {
+  const SHARED = '*'
+  const scope = (id: string) => contractID === undefined ? SHARED : id
+  const stores = new Map<string, Map<string, KvStored>>()
+  const heights = new Map<string, number>()
+  const storeOf = (id: string): Map<string, KvStored> => {
+    let kvStore = stores.get(scope(id))
+    if (!kvStore) {
+      kvStore = new Map()
+      stores.set(scope(id), kvStore)
+    }
+    return kvStore
+  }
+  const heightOf = (id: string): number => heights.get(scope(id)) ?? initialHeight
+  const setHeight = (id: string, height: number): void => { heights.set(scope(id), height) }
+  const primary = contractID ?? SHARED
+  const store = storeOf(primary)
   const log: KvLogEntry[] = []
   const quote = (cid: string) => `"${cid}"`
   const server = {
-    height: initialHeight,
+    get height (): number { return heightOf(primary) },
+    set height (height: number) { setHeight(primary, height) },
     store,
+    storeOf,
+    heightOf,
+    setHeight,
     log,
     // Called before the stored value is read, so a hook that writes to
     // `store` models another device's write that won the race.
     onPost: null as ((n: number) => void) | null,
     // While set, GETs wait for it before answering, with the value stored
-    // when the request arrived.
+    // when the request arrived. An abort meanwhile rejects the GET.
     holdGet: null as Promise<void> | null,
     posts: () => log.filter((e) => e.method === 'POST'),
     gets: () => log.filter((e) => e.method === 'GET'),
-    etagOf: (key: string) => quote(store.get(key)?.cid ?? ''),
+    etagOf: (key: string, id: string = primary) => quote(storeOf(id).get(key)?.cid ?? ''),
     // Answers a KV route, or resolves `undefined` for any other path.
     handleKv: async (
       pathname: string,
@@ -173,13 +236,15 @@ export const makeKvServer = (initialHeight = 0) => {
       const m = /^\/kv\/([^/]+)\/([^/]+)$/.exec(pathname)
       if (!m) return undefined
       opts.signal?.throwIfAborted()
+      const id = decodeURIComponent(m[1])
       const key = decodeURIComponent(m[2])
+      const kvStore = storeOf(id)
       const method = opts.method ?? 'GET'
       if (method === 'GET') {
-        const existing = store.get(key)
-        if (server.holdGet) await server.holdGet
+        const existing = kvStore.get(key)
+        if (server.holdGet) await unlessAborted(server.holdGet, opts.signal)
         const status = existing ? 200 : 404
-        log.push({ method, key, status })
+        log.push({ method, contractID: id, key, status })
         return existing
           ? new Response(existing.body, {
             status, headers: { ETag: quote(existing.cid), 'x-cid': quote(existing.cid) }
@@ -188,10 +253,12 @@ export const makeKvServer = (initialHeight = 0) => {
       }
       const ifMatch = new Headers(opts.headers).get('if-match')
       const postHeight = JSON.parse(opts.body!).height as string
-      const entry: KvLogEntry = { method, key, status: 0, ifMatch, height: postHeight }
+      const entry: KvLogEntry = {
+        method, contractID: id, key, status: 0, ifMatch, height: postHeight
+      }
       log.push(entry)
       server.onPost?.(server.posts().length)
-      const existing = store.get(key)
+      const existing = kvStore.get(key)
       const etag = quote(existing ? existing.cid : '')
       if (!ifMatch) {
         entry.status = 400
@@ -203,14 +270,14 @@ export const makeKvServer = (initialHeight = 0) => {
           status: 412, headers: { ETag: etag, 'x-cid': etag }
         })
       }
-      if (server.height !== Number(postHeight)) {
+      if (heightOf(id) !== Number(postHeight)) {
         entry.status = 409
         return new Response(existing?.body ?? '', {
           status: 409, headers: { ETag: etag, 'x-cid': etag }
         })
       }
       const cid = createCID(opts.body!, multicodes.RAW)
-      store.set(key, { body: opts.body!, cid })
+      kvStore.set(key, { body: opts.body!, cid })
       entry.status = 204
       return new Response(null, { status: 204, headers: { ETag: quote(cid), 'x-cid': quote(cid) } })
     }

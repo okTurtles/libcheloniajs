@@ -48,6 +48,7 @@ import {
   KV_MAX_STALE_STAMP_RETRIES,
   isHeightReached,
   kvHeightAheadError,
+  pubsubSocketNotOpen,
   readHeightStamp,
   throwIfAborted,
   waitForContractHeight
@@ -1229,11 +1230,28 @@ export default sbp('sbp/selectors/register', {
             // can't be verified yet (KV-REVAMPED.md §3.4). Instead of
             // dropping it, have the slot (if any) reload the key once the
             // contract catches up. The raw KV callback is not called for
-            // such frames, so without a slot the notification is lost. A
-            // malformed height stamp throws and is logged below.
-            const frame = classifyKvValue<object>(
-              this, msg.channelID, msg.key, JSON.parse(Buffer.from(msg.data).toString())
-            )
+            // such frames, so without a slot the notification is lost.
+            //
+            // A malformed height stamp throws and is logged below. A slot
+            // for the key reloads it then, so that it ends up as a load
+            // would: `'error'` with `ChelErrorInvalidMessageHeight` when
+            // the stored value is malformed, or the current value when the
+            // frame was a stale one. Not awaited: `_loadSlot` queues on
+            // this same lane, and records its outcome on the slot.
+            let frame: Extract<KvServerValue<object>, { kind: 'present' | 'ahead' }>
+            try {
+              frame = classifyKvValue<object>(
+                this, msg.channelID, msg.key, JSON.parse(Buffer.from(msg.data).toString())
+              )
+            } catch (e) {
+              const slot = this.kvSlotsByContractID.get(msg.channelID)?.get(msg.key)
+              if (slot && (e as Error | undefined)?.name === 'ChelErrorInvalidMessageHeight') {
+                sbp('chelonia/kv/_loadSlot', {
+                  contractID: msg.channelID, slot, reason: 'remote'
+                }).catch(() => {})
+              }
+              throw e
+            }
             if (frame.kind === 'ahead') {
               const height = frame.requiredHeight
               if (this.kvSlotsByContractID.get(msg.channelID)?.has(msg.key)) {
@@ -2894,10 +2912,13 @@ export default sbp('sbp/selectors/register', {
   // `kv/set` never syncs the contract: after the bounded wait (or once the
   // 409 re-signs run out) it rejects with `ChelErrorKvHeightAhead`. Callers
   // handle `isKvHeightAhead(e)` themselves (sync the contract with
-  // `chelonia/contract/sync`, outside the contract's queue, then retry), or
-  // use `chelonia/kv/queuedSet` / `chelonia/kv/update`, which do. Running
-  // out of `maxAttempts` rejects with an internal error that
-  // `isKvConflict(e)` matches.
+  // `chelonia/contract/sync`, outside the contract's queue, then retry; see
+  // docs/kv.md), or use `chelonia/kv/queuedSet` / `chelonia/kv/update`,
+  // which do, and also share one sync among concurrent writes, abort on
+  // `chelonia/reset`, and retry when a failed sync reached the height
+  // anyway. Running
+  // out of `maxAttempts`, or a `412` without `onconflict`, rejects with an
+  // internal error that `isKvConflict(e)` matches.
   'chelonia/kv/set': async function (
     this: CheloniaContext,
     contractID: string,
@@ -2976,7 +2997,7 @@ export default sbp('sbp/selectors/register', {
     // use), the wait stays.
     const waitForHeight = (required: number) =>
       waitForContractHeight(this, contractID, required, {
-        timeoutMs: pubsubSocketClosed(this) ? 0 : undefined,
+        timeoutMs: pubsubSocketNotOpen(this) ? 0 : undefined,
         signals: [fetchSignal]
       })
     // Classifies a server value (see `KvServerValue`). A value that is ahead is
@@ -3045,7 +3066,10 @@ export default sbp('sbp/selectors/register', {
       // body, the retry loop cannot recover — it would re-send
       // if-match: '""' and loop until maxAttempts. Do at most one GET
       // per set call to recover the current etag and value so
-      // onconflict can produce a valid retry.
+      // onconflict can produce a valid retry. chel's 412 carries the
+      // stored value as its body (empty when there is none), so a
+      // body-less 412 does mean absent: this GET only recovers the etag,
+      // and if it fails, `'absent'` stands rather than failing the write.
       if (
         !recoveryGetAttempted &&
         !etag &&
@@ -3098,9 +3122,11 @@ export default sbp('sbp/selectors/register', {
       const value = body.kind === 'present' ? body.parsed : undefined
       // Only set with `allowUnverifiedConflict` (see `classifyBody`).
       const malformedError = body.kind === 'malformed' ? body.error : undefined
-      const serverValue: KvConflictServerValue = body.kind === 'ahead'
-        ? { currentStatus: 'ahead', requiredHeight: body.requiredHeight }
-        : { currentStatus: body.kind }
+      const serverValue: KvConflictServerValue = body.kind === 'present'
+        ? { currentStatus: 'present', currentValue: body.parsed }
+        : body.kind === 'ahead'
+          ? { currentStatus: 'ahead', currentValue: undefined, requiredHeight: body.requiredHeight }
+          : { currentStatus: body.kind, currentValue: undefined }
       const result = await onconflict!({
         contractID,
         key,
@@ -3116,8 +3142,7 @@ export default sbp('sbp/selectors/register', {
           if (aheadError) throw aheadError
           if (malformedError) throw malformedError
           return value?.data
-        },
-        currentValue: value
+        }
       })
       if (!result) return false
 
@@ -3194,11 +3219,16 @@ export default sbp('sbp/selectors/register', {
           }
           // Rationale: 412 indicates conflict resolution is needed
           if (response.status === 412) {
-            if (--maxAttempts <= 0) {
+            // Without `onconflict` the conflict can't be resolved at all;
+            // report it like running out of attempts.
+            if (!hasOnconflict || --maxAttempts <= 0) {
               // Report what is known about the server value: one that is
               // ahead as such, otherwise the last value that was decoded.
+              // Not "ahead" without a handler: no height recovery can make
+              // a write that conflicts without a merge succeed, so callers
+              // that recover (`queuedSet`) mustn't sync for it.
               const last = await readServerValue(false).catch(() => undefined)
-              if (last?.body.kind === 'ahead') {
+              if (hasOnconflict && last?.body.kind === 'ahead') {
                 throw heightAheadError(
                   last.body.requiredHeight, true, conflictEtag, response.status
                 )
@@ -3207,20 +3237,17 @@ export default sbp('sbp/selectors/register', {
               try {
                 currentData = lastRecoveredValue?.data
               } catch {}
-              throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
-                cause: { currentData, etag: conflictEtag ?? null }
-              })
+              throw new ChelErrorKvMaxAttempts(
+                hasOnconflict
+                  ? 'kv/set conflict setting KV value'
+                  : `kv/set failed with status ${response.status} and no onconflict handler was provided`,
+                { cause: { currentData, etag: conflictEtag ?? null } }
+              )
             }
             // Honour an abort (the caller's, or `chelonia/reset`'s) at every
             // retry boundary, so a cancellation that lands between requests
             // is respected without waiting for the next fetch.
             throwIfAborted(fetchSignal)
-            if (!hasOnconflict) {
-              // Can't resolve automatically if there's no conflict handler
-              throw new Error(
-                `kv/set failed with status ${response.status} and no onconflict handler was provided`
-              )
-            }
             if (await resolveData({ backoff: true })) {
               continue
             } else {
@@ -3390,14 +3417,6 @@ function outputEncryptedOrUnencryptedMessage (
 // when it has neither.
 function responseEtag (response: Response): string | null {
   return response.headers.get('x-cid') || response.headers.get('etag')
-}
-
-// Whether there is a pubsub client whose socket isn't open, so that no
-// contract event can arrive through it. `false` without a pubsub client
-// (e.g. server-side use, or before `chelonia/connect`).
-function pubsubSocketClosed (ctx: CheloniaContext): boolean {
-  const client = ctx.pubsub as PubSubClient | undefined
-  return !!client && client.socket?.readyState !== WebSocket.OPEN
 }
 
 // Classifies a parsed server KV value. A value stamped with a height the

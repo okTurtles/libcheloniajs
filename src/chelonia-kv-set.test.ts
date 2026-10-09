@@ -1,7 +1,7 @@
 import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert'
-import { afterEach, beforeEach, describe, it } from 'node:test'
+import { describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
@@ -17,7 +17,13 @@ import {
 import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import { KV_MAX_STALE_STAMP_RETRIES } from './kv-height.js'
 import { setLocalHeightLater, sleep, useKvSetHooks, withLocalHeight } from './test-utils.js'
-import type { ChelRootState, CheloniaConfig, JSONType } from './types.js'
+import type {
+  ChelKvOnConflictCallback,
+  ChelRootState,
+  CheloniaConfig,
+  JSONType,
+  ParsedEncryptedOrUnencryptedMessage
+} from './types.js'
 
 const setupContract = (): { contractID: string; signingKeyId: string } => {
   const contractID = 'cid-kv-set-recovery'
@@ -443,6 +449,41 @@ describe('chelonia/kv/set', () => {
     assert.deepStrictEqual(seen, [['absent', undefined, '""']])
   })
 
+  // Type-checked: the test file fails to compile if `currentValue` stops
+  // being tied to `currentStatus`.
+  it('types currentValue by currentStatus for onconflict', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    const seen: unknown[] = []
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async () => seen.length === 0
+        ? new Response('', { status: 412, headers: { etag: '""' } })
+        : new Response(null, { status: 204, headers: { etag: 'e1' } })
+    } as Partial<CheloniaConfig>)
+    type Parsed = ParsedEncryptedOrUnencryptedMessage<JSONType>
+    const onconflict: ChelKvOnConflictCallback = async (args) => {
+      // @ts-expect-error `currentValue` is `undefined` unless 'present'
+      const unnarrowed: Parsed = args.currentValue
+      assert.strictEqual(unnarrowed, undefined)
+      if (args.currentStatus === 'present') {
+        const parsed: Parsed = args.currentValue
+        seen.push([args.currentStatus, parsed])
+      } else if (args.currentStatus === 'ahead') {
+        const requiredHeight: number = args.requiredHeight
+        const none: undefined = args.currentValue
+        seen.push([args.currentStatus, requiredHeight, none])
+      } else {
+        const none: undefined = args.currentValue
+        seen.push([args.currentStatus, none])
+      }
+      return [{ x: 2 }, args.etag ?? undefined]
+    }
+    await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+      signingKeyId, ifMatch: '"stale"', onconflict
+    })
+    assert.deepStrictEqual(seen, [['absent', undefined]])
+  })
+
   it("reports 'present' for a value verified lazily: currentData can still throw", async () => {
     const { contractID, signingKeyId } = setupContract()
     const stored = JSON.parse(await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 1))
@@ -623,6 +664,7 @@ describe('chelonia/kv/set', () => {
     const stored = await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 1)
     Math.random = () => 0.2 // a ~300 ms backoff before onconflict
     let resetting: Promise<unknown> | undefined
+    let resetTimer: ReturnType<typeof setTimeout> | undefined
     let conflicts = 0
     sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
@@ -630,13 +672,15 @@ describe('chelonia/kv/set', () => {
         opts.signal?.throwIfAborted()
         // `reset` aborts the global signal right away, then waits in its
         // persistence hook while the backoff is still running.
-        setTimeout(() => { resetting = sbp('chelonia/reset', () => sleep(500)) }, 50)
+        resetTimer ??= setTimeout(() => {
+          resetting = sbp('chelonia/reset', () => sleep(500))
+        }, 50)
         return new Response(stored, { status: 412, headers: { etag: '"cid-1"' } })
       }
     } as unknown as Partial<CheloniaConfig>)
 
-    // Awaits the reset even when an assertion fails, so it doesn't run into
-    // the next test.
+    // Cancels a reset that hasn't started, and awaits one that has, even
+    // when an assertion fails, so that it doesn't run into the next test.
     try {
       await assert.rejects(
         () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
@@ -650,6 +694,7 @@ describe('chelonia/kv/set', () => {
       )
       assert.strictEqual(conflicts, 0)
     } finally {
+      clearTimeout(resetTimer)
       await resetting
     }
   })
@@ -665,12 +710,14 @@ describe('chelonia/kv/set on 409', () => {
 
   it('re-signs the same data at the new height without calling onconflict', async () => {
     const { contractID, signingKeyId } = setupContract()
-    const posts: Array<{ height: string; message: string; ifMatch: string | null }> = []
+    type Post = { body: string; height: string; message: string; ifMatch: string | null }
+    const posts: Post[] = []
     sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
       fetch: async (_url: string, opts: { body: string; headers: Headers }) => {
         const body = JSON.parse(opts.body)
         posts.push({
+          body: opts.body,
           height: body.height,
           message: signedMessage(opts.body),
           ifMatch: new Headers(opts.headers).get('if-match')
@@ -692,6 +739,13 @@ describe('chelonia/kv/set on 409', () => {
     assert.deepStrictEqual(posts.map((p) => p.height), ['1', '2'])
     assert.strictEqual(posts[0].message, posts[1].message)
     assert.deepStrictEqual(posts.map((p) => p.ifMatch), ['"cid-0"', '"cid-0"'])
+    // Signed again, for the new height: reusing the first signature would
+    // only change the unsigned stamp, and the body wouldn't verify.
+    const signatureOf = (body: string): string => JSON.parse(body)._signedData[2]
+    assert.notStrictEqual(signatureOf(posts[0].body), signatureOf(posts[1].body))
+    assert.deepStrictEqual(sbp('chelonia/parseEncryptedOrUnencryptedDetachedMessage', {
+      contractID, serializedData: JSON.parse(posts[1].body), meta: 'settings'
+    }).data, { x: 1 })
   })
 
   it('never calls onconflict for a 409', async () => {
@@ -884,14 +938,7 @@ describe('chelonia/kv/set on 409', () => {
 })
 
 describe('chelonia/kv/get', () => {
-  beforeEach(() => {
-    sbp('chelonia/_init')
-  })
-
-  // Same leak-prevention as the `chelonia/kv/set` block above.
-  afterEach(() => {
-    sbp('chelonia/_init')
-  })
+  useKvSetHooks()
 
   it('rejects with a descriptive height error for height-ahead values', async () => {
     const { contractID, signingKeyId } = setupContract()

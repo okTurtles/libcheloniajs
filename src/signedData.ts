@@ -166,16 +166,15 @@ const verifySignatureData = function <T, U extends object = object> (
     // throw in place of `ChelErrorSignatureKeyUnauthorized`, and the
     // unhandled rejection would fail unrelated tests. The diagnostics must
     // never replace the real error, so a state that can't be serialized is
-    // only reported.
-    const vuexState = process.env.CI
-      ? sbp('sbp/selectors/fn', 'state/vuex/state') as (() => unknown) | undefined
-      : undefined
-    if (vuexState) {
+    // only reported. The lookup is only an existence check: the state is
+    // read through `sbp`, so that the selector's filters and `this` apply.
+    const hasVuexState = !!process.env.CI && !!sbp('sbp/selectors/fn', 'state/vuex/state')
+    if (hasVuexState) {
       try {
         console.error(`Key ${sKeyId} is unauthorized or expired for the current contract`, {
           designatedKey,
           height,
-          state: JSON.parse(JSON.stringify(vuexState()))
+          state: JSON.parse(JSON.stringify(sbp('state/vuex/state')))
         })
       } catch (e) {
         console.error('[chelonia] could not serialize the app state for diagnostics', e)

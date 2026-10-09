@@ -651,6 +651,17 @@ export default sbp('sbp/selectors/register', {
     // against a contract we've already given up on.
     clearReingestTrackerForContract(contractID)
     clearReprocessDebounceForContract(contractID)
+    // Drop per-contract KV runtime state on every removal, including the
+    // early returns below; the `CONTRACTS_MODIFIED` listener also performs
+    // this cleanup via `_onContractsModified`, so the direct call is an
+    // idempotent fast path.
+    const cleanupKvRuntime = () => {
+      try {
+        sbp('chelonia/kv/_cleanupContractRuntime', contractID)
+      } catch (e) {
+        console.error('[chelonia] KV cleanup on contract removal failed', e)
+      }
+    }
     const contractName = state.contracts[contractID]?.type
     if (!contractName) {
       // An entry without a type is a contract whose first sync never
@@ -663,21 +674,24 @@ export default sbp('sbp/selectors/register', {
       // added, so its removal isn't announced either. One whose re-sync
       // failed was, but the failed re-sync already announced its removal
       // (`CONTRACTS_MODIFIED` with `removed` and `resync: true`), so
-      // dropping it here for good adds no second announcement.
-      if (
-        state.contracts[contractID] &&
-        !params?.resync &&
-        !this.subscriptionSet.has(contractID)
-      ) {
-        console.debug(
-          `[chelonia/private/removeImmediately] Removing ${contractID}, which never finished syncing`
-        )
-        removeContractState.call(this, state, contractID, params?.permanent)
+      // dropping it here for good adds no second announcement. Re-syncing
+      // such an entry is expected too: there is nothing to clear, and the
+      // re-sync starts over from the first message. Either way, the
+      // contract's KV runtime state goes, as on every removal below.
+      if (state.contracts[contractID] && !this.subscriptionSet.has(contractID)) {
+        if (!params?.resync) {
+          console.debug(
+            `[chelonia/private/removeImmediately] Removing ${contractID}, which never finished syncing`
+          )
+          removeContractState.call(this, state, contractID, params?.permanent)
+        }
+        cleanupKvRuntime()
         return
       }
       console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
         contractID
       })
+      cleanupKvRuntime()
       return
     }
 
@@ -716,14 +730,7 @@ export default sbp('sbp/selectors/register', {
       removeContractState.call(this, state, contractID, params?.permanent)
     }
 
-    // Drop per-contract KV runtime state on every removal; the
-    // `CONTRACTS_MODIFIED` listener also performs this cleanup via
-    // `_onContractsModified`, so the direct call is an idempotent fast path.
-    try {
-      sbp('chelonia/kv/_cleanupContractRuntime', contractID)
-    } catch (e) {
-      console.error('[chelonia] KV cleanup on contract removal failed', e)
-    }
+    cleanupKvRuntime()
 
     this.subscriptionSet.delete(contractID)
     // (Tracker + debounce cancellation moved to the top of this selector

@@ -26,24 +26,25 @@ import {
   setLocalHeight as setContractHeight,
   sleep,
   stubKvBackoff,
+  until,
   whenSettledWithin as whenContractSlotSettledWithin,
   withLocalHeight,
+  within,
   type KvFetchOptions
 } from './test-utils.js'
 import type { ChelRootState, CheloniaConfig, JSONType, KvMirrorEntry } from './types.js'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-export { sleep }
+export { sleep, until, within }
 
 export const CONTRACT_ID = 'zKvHeightTestIdentityContract'
 export const CTYPE = 'test-identity'
 export const UNREAD = 'unreadMessages'
 export const NS_CACHE = 'namespace-cache'
 
-// Height timings for every test (see `chelonia/kv/_testSetHeightTimings`;
-// omitted fields reset to the production defaults, so spread this object
-// when overriding one field).
+// Height timings for every test (see `chelonia/kv/_testSetHeightTimings`,
+// which merges the fields it is given into the current timings).
 export const TEST_TIMINGS = { waitMs: 50, pendingFallbackMs: 300, recoveryTimeoutMs: 2000 }
 
 export const rootState = (): ChelRootState & Record<string, any> => sbp('chelonia/private/state')
@@ -55,7 +56,7 @@ export const rootState = (): ChelRootState & Record<string, any> => sbp('cheloni
 type RequestEntry = { path: string; at: number }
 
 const makeServer = (initialHeight: number) => {
-  const kv = makeKvServer(initialHeight)
+  const kv = makeKvServer(initialHeight, CONTRACT_ID)
   const server = Object.assign(kv, {
     // Every request, including contract syncs (`/latestHEADinfo`,
     // `/eventsAfter`), with the time it was made.
@@ -186,8 +187,8 @@ export const failKvGets = (n: number, status = 500, when: () => boolean = () => 
   server.handleKv = async (pathname: string, opts: KvFetchOptions = {}) => {
     if ((opts.method ?? 'GET') === 'GET' && pathname.startsWith('/kv/') && left > 0 && when()) {
       left--
-      const key = decodeURIComponent(pathname.split('/').pop()!)
-      server.log.push({ method: 'GET', key, status })
+      const [contractID, key] = pathname.split('/').slice(2).map(decodeURIComponent)
+      server.log.push({ method: 'GET', contractID, key, status })
       return new Response('', { status })
     }
     return real(pathname, opts)
@@ -196,17 +197,87 @@ export const failKvGets = (n: number, status = 500, when: () => boolean = () => 
 }
 
 // Holds the next contract sync (`/latestHEADinfo`) until `release` is
-// called; `started` resolves once it has begun. Later syncs aren't held.
-export const holdNextSync = () => {
+// called. `started` resolves once that sync has begun, and rejects if none
+// begins within `ms`. Later syncs aren't held. `release` before the sync
+// starts cancels the hold; a hold the test leaves is released after it, so
+// it can't block the contract's lane for the next tests.
+export const holdNextSync = (ms = 3000) => {
   let resolveSync: (() => void) | undefined
   let signalStarted!: () => void
-  const started = new Promise<void>((resolve) => { signalStarted = resolve })
-  server.onSync = () => new Promise<void>((resolve) => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const started = new Promise<void>((resolve, reject) => {
+    signalStarted = resolve
+    timer = setTimeout(() => reject(new Error(`no contract sync started within ${ms} ms`)), ms)
+  })
+  // Only a test that awaits `started` sees its rejection.
+  started.catch(() => {})
+  const hold = () => new Promise<void>((resolve) => {
     server.onSync = null
+    clearTimeout(timer)
     resolveSync = resolve
     signalStarted()
   })
-  return { started, release: () => resolveSync?.() }
+  server.onSync = hold
+  const release = () => {
+    clearTimeout(timer)
+    if (server.onSync === hold) server.onSync = null
+    resolveSync?.()
+  }
+  offs.push(release)
+  return { started, release }
+}
+
+// Holds the contract's public lane (`chelonia/queueInvocation`) until
+// `open` is called; `held` settles once the holding task has run. Opened
+// after the test if the test doesn't.
+export const gateLane = () => {
+  let open!: () => void
+  const gate = new Promise<void>((resolve) => { open = resolve })
+  const held = sbp('chelonia/queueInvocation', CONTRACT_ID, () => gate) as Promise<void>
+  offs.push(open)
+  return { open, held }
+}
+
+// Makes KV GETs wait (answering with the value stored when they arrived)
+// until `release` is called. Released after the test if the test doesn't.
+export const holdGets = () => {
+  let resolveHold!: () => void
+  server.holdGet = new Promise<void>((resolve) => { resolveHold = resolve })
+  const release = () => {
+    server.holdGet = null
+    resolveHold()
+  }
+  offs.push(release)
+  return { release }
+}
+
+// `setTimeout` that is cleared after the test, so that a timer the test no
+// longer waits for (it failed, or returned early) can't fire into the next.
+export const later = (fn: () => void, ms: number): void => {
+  const timer = setTimeout(fn, ms)
+  offs.push(() => clearTimeout(timer))
+}
+
+// Resolves once a `console.warn` containing `text` was logged.
+export const untilWarned = (text: string, ms = 3000) => until(
+  () => warnings.some((w) => String(w[0]).includes(text)),
+  `no warning containing "${text}"`,
+  ms
+)
+
+// From now on, each contract sync records whether the contract's public
+// lane (`chelonia/queueInvocation`) is free (`'free'`) or held (`'busy'`)
+// while it runs: a recovery must never sync with the lane held, or a
+// caller that holds it waits for itself.
+export const probePublicLaneOnSync = (): string[] => {
+  const laneState: string[] = []
+  server.onSync = async () => {
+    laneState.push(await Promise.race([
+      sbp('chelonia/private/queueEvent', `public:${CONTRACT_ID}`, () => 'free'),
+      sleep(300).then(() => 'busy')
+    ]))
+  }
+  return laneState
 }
 
 // `chelonia/private/in/sync` adds an up-to-date contract to the subscription

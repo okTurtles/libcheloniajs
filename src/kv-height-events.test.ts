@@ -179,10 +179,15 @@ describe('height waits woken by processed events', () => {
     sbp('chelonia/kv/_onContractsModified', { added: [contractID], removed: [] })
     await sbp('chelonia/queueInvocation', contractID, () => {})
     await sleep(10)
-    // The value was written at height 1: the load is deferred.
+    // The value was written at height 1: the load is deferred. A load that
+    // is merely in flight is 'loading' too, so check that it ran once and
+    // isn't retried until the height is reached.
     assert.strictEqual(sbp('chelonia/kv/status', contractID, KEY), 'loading')
+    await sleep(100)
+    assert.strictEqual(server.gets().length, 1)
     await handle(nextEvent(first))
     assert.strictEqual(await whenSettledWithin(contractID, KEY, 2000), 'loaded')
+    assert.strictEqual(server.gets().length, 2)
     assert.deepStrictEqual(sbp('chelonia/kv/read', contractID, KEY), { name: 'bob' })
   })
 })

@@ -5758,3 +5758,28 @@ describe('KV slot API', () => {
     )
   })
 })
+
+describe('KV runtime fields across chelonia/reset', () => {
+  it('only the slot definitions keep their content', () => {
+    const ctx = {} as CheloniaContext
+    initKvRuntime(ctx)
+    const fields = ctx as unknown as Record<string, unknown>
+    const marked: string[] = []
+    for (const [name, value] of Object.entries(fields)) {
+      if (value instanceof Map) value.set('__marker__', 1)
+      else if (value instanceof Set) value.add('__marker__')
+      else if (Array.isArray(value)) value.push('__marker__')
+      else continue
+      marked.push(name)
+    }
+    clearKvRuntime(ctx)
+    const kept = marked.filter((name) => {
+      const value = fields[name]
+      return value instanceof Map || value instanceof Set
+        ? value.has('__marker__')
+        : Array.isArray(value) && value.includes('__marker__')
+    })
+    assert.deepStrictEqual(kept.sort(), ['defContractKvByManifest', 'kvSlots'])
+    assert.ok(marked.length > 10, `only ${marked.length} collections were created`)
+  })
+})

@@ -13,9 +13,9 @@ import './chelonia.js'
 import './internals.js'
 import { isKvHeightAhead } from './errors.js'
 import { CHELONIA_KV_UPDATED } from './events.js'
+import { createCID, multicodes } from './functions.js'
 import {
   CONTRACT_ID,
-  TEST_TIMINGS,
   UNREAD,
   V0,
   VB,
@@ -66,15 +66,57 @@ afterEach(() => {
 // Delivers the value stored for `key` as a pubsub KV frame.
 const deliverKvFrame = (key = UNREAD) => {
   const stored = server.store.get(key)!
+  deliverBody(key, stored.body, stored.cid)
+  return stored
+}
+
+const deliverBody = (key: string, body: string, cid = createCID(body, multicodes.RAW)) => {
   client.messageHandlers[NOTIFICATION_TYPE.KV].call(client, {
     type: NOTIFICATION_TYPE.KV,
     channelID: CONTRACT_ID,
     key,
-    data: stored.body,
-    cid: `"${stored.cid}"`
+    data: body,
+    cid: `"${cid}"`
   })
-  return stored
 }
+
+// The body of the value stored for `key`, with its height stamp replaced.
+const restamped = (key: string, stamp: string): string =>
+  JSON.stringify({ ...JSON.parse(server.store.get(key)!.body), height: stamp })
+
+describe('pubsub frames with a malformed height stamp', () => {
+  it("reload the slot, which goes 'error' when the stored value is malformed", async () => {
+    await writeAsDeviceB(UNREAD, V0, 40)
+    defineSlot({ key: UNREAD })
+    await activateContract()
+    connect()
+    await writeAsDeviceB(UNREAD, VB, 40)
+    const body = restamped(UNREAD, '040')
+    server.store.set(UNREAD, { body, cid: createCID(body, multicodes.RAW) })
+    server.log.length = 0
+    deliverBody(UNREAD, body)
+    await drainLanes()
+    assert.strictEqual(server.gets().length, 1)
+    assert.strictEqual(slotStatus(UNREAD), 'error')
+    assert.strictEqual(mirror(UNREAD).lastError?.name, 'ChelErrorInvalidMessageHeight')
+    assert.strictEqual(mirror(UNREAD).settled, true)
+  })
+
+  it('reload the slot, which loads the stored value when the frame was a stale one', async () => {
+    await writeAsDeviceB(UNREAD, V0, 40)
+    defineSlot({ key: UNREAD })
+    await activateContract()
+    connect()
+    const malformed = restamped(UNREAD, '1e1')
+    await writeAsDeviceB(UNREAD, VB, 40)
+    server.log.length = 0
+    deliverBody(UNREAD, malformed)
+    await drainLanes()
+    assert.strictEqual(server.gets().length, 1)
+    assert.strictEqual(slotStatus(UNREAD), 'loaded')
+    assert.deepStrictEqual(mirror(UNREAD).value, VB)
+  })
+})
 
 describe('pubsub frames while the local contract is behind', () => {
   it('a frame that is ahead reloads the key once the contract catches up', async () => {
@@ -100,7 +142,7 @@ describe('pubsub frames while the local contract is behind', () => {
   })
 
   it("a frame that is ahead makes a settled 'non-init' slot 'loading' until it loads", async () => {
-    sbp('chelonia/kv/_testSetHeightTimings', { ...TEST_TIMINGS, pendingFallbackMs: 10000 })
+    sbp('chelonia/kv/_testSetHeightTimings', { pendingFallbackMs: 10000 })
     defineSlot({ key: UNREAD })
     await activateContract()
     assert.strictEqual(slotStatus(UNREAD), 'non-init')
@@ -148,7 +190,7 @@ describe('pubsub frames while the local contract is behind', () => {
 // wait for one.
 describe('kv/set while the pubsub socket is closed', () => {
   it('a stale stamp (409) goes straight to the recovery sync', async () => {
-    sbp('chelonia/kv/_testSetHeightTimings', { ...TEST_TIMINGS, waitMs: 1500 })
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500 })
     await writeAsDeviceB(UNREAD, V0, 40)
     defineSlot({ key: UNREAD })
     await activateContract()
@@ -171,7 +213,7 @@ describe('kv/set while the pubsub socket is closed', () => {
   })
 
   it('raw kv/set rejects a conflicting value that is ahead without waiting', async () => {
-    sbp('chelonia/kv/_testSetHeightTimings', { ...TEST_TIMINGS, waitMs: 1500 })
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500 })
     const { e0 } = await setupStaleDeviceA()
     connect()
     const started = Date.now()
@@ -186,6 +228,36 @@ describe('kv/set while the pubsub socket is closed', () => {
     )
     assert.ok(Date.now() - started < 500)
     assert.deepStrictEqual(server.posts().map((p) => p.status), [412])
+  })
+
+  // Time from `started` to the first contract sync requested after it.
+  const firstSyncAfter = (started: number): number | undefined => server.requests.find((r) =>
+    r.at >= started && r.path.startsWith('/latestHEADinfo/')
+  )?.at
+
+  it('single-key kv/sync goes straight to the recovery sync', async () => {
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500, pendingFallbackMs: 60000 })
+    await setupStaleDeviceA()
+    connect()
+    const started = Date.now()
+    await assert.rejects(sbp('chelonia/kv/sync', CONTRACT_ID, UNREAD), (e: unknown) => isKvHeightAhead(e))
+    const firstSync = firstSyncAfter(started)
+    assert.ok(firstSync !== undefined, 'no recovery sync')
+    assert.ok(firstSync - started < 500, `first sync after ${firstSync - started} ms`)
+    // Two rounds, neither waiting 1.5 s first.
+    assert.ok(Date.now() - started < 1000, `rejected after ${Date.now() - started} ms`)
+  })
+
+  it('single-key kv/sync loads as soon as its recovery sync catches up', async () => {
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500, pendingFallbackMs: 60000 })
+    await setupStaleDeviceA()
+    connect()
+    server.catchUpOnSync = true
+    const started = Date.now()
+    await sbp('chelonia/kv/sync', CONTRACT_ID, UNREAD)
+    assert.ok(Date.now() - started < 500, `loaded after ${Date.now() - started} ms`)
+    assert.strictEqual(slotStatus(UNREAD), 'loaded')
+    assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), VB)
   })
 })
 

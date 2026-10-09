@@ -84,13 +84,20 @@ let errors: unknown[][]
 
 // What the host app's `state/vuex/state` returns. SBP keeps the first
 // registration of a selector, so it is registered once, by the first test
-// that needs it, and reads this variable.
+// that needs it, and reads this variable. Like an app's store, it reads the
+// state through its SBP domain's `this`, and a filter counts its calls: the
+// diagnostics must call it through `sbp`.
 let appState: unknown
 let appStateRegistered = false
+let appStateCalls = 0
 const useAppState = (state: unknown) => {
   appState = state
   if (appStateRegistered) return
-  sbp('sbp/selectors/register', { 'state/vuex/state': () => appState })
+  sbp('sbp/selectors/register', {
+    'state/_init': function (this: { read?: () => unknown }) { this.read = () => appState },
+    'state/vuex/state': function (this: { read: () => unknown }) { return this.read() }
+  })
+  sbp('sbp/filters/selector/add', 'state/vuex/state', () => { appStateCalls++ })
   appStateRegistered = true
 }
 
@@ -125,12 +132,14 @@ describe('signature verification with an unauthorized key', () => {
   it('logs the app state and leaves a rejection under CI when the host app has one', async () => {
     useAppState({ app: 'state' })
     process.env.CI = 'true'
+    const callsBefore = appStateCalls
     const { thrown, rejections } = await capture(readRevokedKeyValue())
     assert.ok(thrown instanceof ChelErrorSignatureKeyUnauthorized)
     assert.strictEqual(rejections.length, 1)
     assert.ok(rejections[0] instanceof ChelErrorSignatureKeyUnauthorized)
     assert.strictEqual(errors.length, 1)
     assert.deepStrictEqual((errors[0][1] as { state: unknown }).state, { app: 'state' })
+    assert.strictEqual(appStateCalls, callsBefore + 1)
   })
 
   // `JSON.parse(JSON.stringify(state))` throws for each of these.

@@ -231,7 +231,10 @@ Full documentation:
   [docs/kv.md](docs/kv.md#contract-heights) and
   [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-and-verifiability).
   Detect the resulting error with `isKvHeightAhead(e)` (`src/errors.ts`),
-  not with `instanceof`, and not by name.
+  not with `instanceof` and not by comparing `e.name` yourself (the old
+  `'ChelErrorInvalidMessageHeight'` name now only means a malformed
+  stamp). Likewise `isKvConflict(e)` for a conflict that ran out of
+  attempts.
 
 ### Contract State Structure
 
@@ -339,6 +342,10 @@ Shared helpers live in plain modules that register no selectors and are
 excluded from the CJS build: `src/test-utils.ts` (incl. a simulated KV
 server, `makeKvServer`) and `src/kv-height-harness.ts` (the harness of the
 `kv-height*.test.ts` files). Test files may import those, never each other.
+A test must fail rather than hang when the behaviour it checks regresses:
+poll with `until(cond, label)` and bound a promise that might never settle
+with `within(promise, label)` (both in `src/test-utils.ts`); `npm test`
+also runs with `--test-timeout=60000`.
 
 Test files use `.test.ts` suffix and are discovered automatically: `npm test` runs every
 `src/**/*.test.ts` file via the Node test runner, each in its own process (fresh SBP

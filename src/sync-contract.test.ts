@@ -19,14 +19,17 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
+import { ChelErrorKvHeightAhead, isKvHeightAhead } from './errors.js'
 import { CONTRACTS_MODIFIED } from './events.js'
 import { strToB64 } from './functions.js'
 import { SPMessage } from './SPMessage.js'
 import type { SPKey, SPOpContract, SPOpValue } from './SPMessage.js'
 import { signedOutgoingDataWithRawKey } from './signedData.js'
+import { sleep } from './test-utils.js'
 import type { ChelRootState, CheloniaConfig } from './types.js'
 
 const rootState = (): ChelRootState => sbp('chelonia/private/state')
+const CONTRACT_TYPE = 'test/sync-contract'
 
 const contractKey = (
   key: ReturnType<typeof keygen>,
@@ -47,7 +50,7 @@ const firstMessage = (): SPMessage => {
   const csk = keygen(EDWARDS25519SHA512BATCH)
   const sak = keygen(EDWARDS25519SHA512BATCH)
   const payload: SPOpContract = {
-    type: 'test/sync-contract',
+    type: CONTRACT_TYPE,
     keys: [
       contractKey(csk, '#csk', ['sig'], '*'),
       // A server accounting key may not have permissions.
@@ -67,6 +70,7 @@ let contractID: string
 // Status of `/eventsAfter` responses: 200 serves the contract's events.
 let eventsAfterStatus: number
 let warnings: string[]
+let errors: string[]
 let added: string[]
 let removed: string[]
 let offModified: () => void
@@ -76,6 +80,15 @@ const originalError = console.error
 const originalDebug = console.debug
 const originalInfo = console.info
 const originalLog = console.log
+
+// Every `chelonia/kv/_cleanupContractRuntime` call, by contract ID (SBP
+// filters can't be removed, so this one is registered once).
+const kvCleanups: string[] = []
+sbp('sbp/filters/selector/add', 'chelonia/kv/_cleanupContractRuntime', (
+  _domain: string, _selector: string, data: unknown[]
+) => {
+  kvCleanups.push(data[0] as string)
+})
 
 beforeEach(() => {
   sbp('chelonia/_init')
@@ -103,6 +116,8 @@ beforeEach(() => {
     }
   } as unknown as Partial<CheloniaConfig>)
   warnings = []
+  errors = []
+  kvCleanups.length = 0
   added = []
   removed = []
   offModified = sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (
@@ -112,7 +127,7 @@ beforeEach(() => {
     removed.push(...change.removed)
   })
   console.warn = (...args: unknown[]) => { warnings.push(String(args[0])) }
-  console.error = () => {}
+  console.error = (...args: unknown[]) => { errors.push(String(args[0])) }
   console.debug = () => {}
   console.info = () => {}
   console.log = () => {}
@@ -171,6 +186,13 @@ describe('a first sync that fails', () => {
     assert.ok(!(contractID in rootState().contracts))
   })
 
+  it("cleans up the contract's KV runtime once it is released", async () => {
+    await failedRetain()
+    kvCleanups.length = 0
+    await sbp('chelonia/contract/release', contractID)
+    assert.deepStrictEqual(kvCleanups, [contractID])
+  })
+
   it('leaves a null entry once the contract is removed permanently', async () => {
     await failedRetain()
     await sbp('chelonia/contract/remove', contractID, { permanent: true })
@@ -199,6 +221,8 @@ describe('a re-sync that fails', () => {
     eventsAfterStatus = 200
     // Still retained: releasing it removes it.
     assert.deepStrictEqual({ ...rootState().contracts[contractID] }, { references: 1 })
+    // An entry without a type is expected here: nothing is reported.
+    assert.deepStrictEqual(errors.filter((e) => e.includes('Missing contract name')), [])
     await sbp('chelonia/contract/release', contractID)
     assert.ok(!(contractID in rootState().contracts))
   })
@@ -249,5 +273,78 @@ describe('a sync that succeeds', () => {
     await sbp('chelonia/contract/release', contractID)
     assert.ok(!(contractID in rootState().contracts))
     assert.deepStrictEqual(await deliverFromOutside(), { ignored: true, subscribed: false })
+  })
+})
+
+// `chelonia/contract/release` drops the reference count at once, but only
+// queues the removal on the contract's lane. A KV height recovery (of a
+// write, or of a slot's deferred load) that starts in between must not
+// sync the contract after the removal ran: that would subscribe it again,
+// with no reference left to release it.
+describe('a KV height recovery racing a release', () => {
+  beforeEach(() => {
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 50, pendingFallbackMs: 100 })
+  })
+
+  afterEach(() => {
+    sbp('chelonia/kv/_clearHeightWaits')
+    sbp('chelonia/kv/_testSetHeightTimings')
+  })
+
+  // Holds the contract's internal lane (e.g. an event being processed), so
+  // that the removal `release` queues waits behind it.
+  const holdLane = () => {
+    let open!: () => void
+    const gate = new Promise<void>((resolve) => { open = resolve })
+    sbp('chelonia/private/queueEvent', contractID, () => gate)
+    return { open }
+  }
+
+  const retainAndForgetChanges = async () => {
+    await sbp('chelonia/contract/retain', contractID)
+    added.length = 0
+    removed.length = 0
+  }
+
+  const assertRemoved = () => {
+    assert.deepStrictEqual(removed, [contractID])
+    assert.deepStrictEqual(added, [])
+    assert.ok(!(contractID in rootState().contracts))
+  }
+
+  it("rejects a write's recovery with the original error", async () => {
+    await retainAndForgetChanges()
+    const lane = holdLane()
+    const releasing = sbp('chelonia/contract/release', contractID)
+    let attempts = 0
+    const recovering = sbp('chelonia/kv/_withHeightRecovery', contractID, async () => {
+      attempts++
+      throw new ChelErrorKvHeightAhead('[test] ahead', {
+        cause: { requiredHeight: 5, exact: true, localHeight: 0, etag: null, status: 412 }
+      })
+    })
+    await sleep(20)
+    lane.open()
+    await releasing
+    await assert.rejects(recovering, (e: unknown) => isKvHeightAhead(e))
+    assert.strictEqual(attempts, 1)
+    assertRemoved()
+  })
+
+  it("doesn't let a deferred slot load's fallback sync it", async () => {
+    sbp('chelonia/kv/defineSlot', { contractType: CONTRACT_TYPE, key: 'k', defaultValue: {} })
+    await retainAndForgetChanges()
+    sbp('chelonia/kv/_onContractsModified', { added: [contractID], removed: [] })
+    await sbp('chelonia/queueInvocation', contractID, () => {})
+    sbp('chelonia/kv/_registerHeightWait', {
+      contractID, key: 'k', requiredHeight: 99, reason: 'load'
+    })
+    const lane = holdLane()
+    const releasing = sbp('chelonia/contract/release', contractID)
+    await sleep(200) // the 100 ms fallback starts its sync while the removal waits
+    lane.open()
+    await releasing
+    await sleep(100)
+    assertRemoved()
   })
 })
