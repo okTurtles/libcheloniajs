@@ -7,7 +7,7 @@
 
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert'
-import { afterEach, describe, it } from 'node:test'
+import { describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
@@ -21,6 +21,7 @@ import {
   VB,
   activateContract,
   addChatRoomUnreadMessage,
+  addTeardown,
   advanceLocalHeightOnInternalLane,
   cekId,
   cskId,
@@ -30,6 +31,7 @@ import {
   installKvHeightHooks,
   mirror,
   onEvent,
+  restampedBody,
   room,
   server,
   setLocalHeight,
@@ -51,17 +53,18 @@ let client: any
 // Messages passed to the raw KV callback, when `connect` installs one.
 let rawFrames: unknown[]
 
+// The client is destroyed by the harness's cleanup, which also runs when
+// its index check fails (a separate `afterEach` would then be skipped).
 const connect = ({ rawHandler = false } = {}) => {
   rawFrames = []
   client = sbp('chelonia/connect', rawHandler
     ? { messageHandlers: { [NOTIFICATION_TYPE.KV]: (msg: unknown) => { rawFrames.push(msg) } } }
     : {})
+  addTeardown(() => {
+    client?.destroy()
+    client = undefined
+  })
 }
-
-afterEach(() => {
-  client?.destroy()
-  client = undefined
-})
 
 // Delivers the value stored for `key` as a pubsub KV frame.
 const deliverKvFrame = (key = UNREAD) => {
@@ -80,10 +83,6 @@ const deliverBody = (key: string, body: string, cid = createCID(body, multicodes
   })
 }
 
-// The body of the value stored for `key`, with its height stamp replaced.
-const restamped = (key: string, stamp: string): string =>
-  JSON.stringify({ ...JSON.parse(server.store.get(key)!.body), height: stamp })
-
 describe('pubsub frames with a malformed height stamp', () => {
   it("reload the slot, which goes 'error' when the stored value is malformed", async () => {
     await writeAsDeviceB(UNREAD, V0, 40)
@@ -91,7 +90,7 @@ describe('pubsub frames with a malformed height stamp', () => {
     await activateContract()
     connect()
     await writeAsDeviceB(UNREAD, VB, 40)
-    const body = restamped(UNREAD, '040')
+    const body = restampedBody(UNREAD, '040')
     server.store.set(UNREAD, { body, cid: createCID(body, multicodes.RAW) })
     server.log.length = 0
     deliverBody(UNREAD, body)
@@ -107,7 +106,7 @@ describe('pubsub frames with a malformed height stamp', () => {
     defineSlot({ key: UNREAD })
     await activateContract()
     connect()
-    const malformed = restamped(UNREAD, '1e1')
+    const malformed = restampedBody(UNREAD, '1e1')
     await writeAsDeviceB(UNREAD, VB, 40)
     server.log.length = 0
     deliverBody(UNREAD, malformed)
@@ -188,7 +187,12 @@ describe('pubsub frames while the local contract is behind', () => {
 // `connect` uses the harness's manual connection options, so the client's
 // socket never opens: no contract event can arrive, and `kv/set` doesn't
 // wait for one.
-describe('kv/set while the pubsub socket is closed', () => {
+describe('writes and loads while the pubsub socket is closed', () => {
+  // Time of the first contract sync requested at or after `started`.
+  const firstSyncAfter = (started: number): number | undefined => server.requests.find((r) =>
+    r.at >= started && r.path.startsWith('/latestHEADinfo/')
+  )?.at
+
   it('a stale stamp (409) goes straight to the recovery sync', async () => {
     sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500 })
     await writeAsDeviceB(UNREAD, V0, 40)
@@ -204,11 +208,9 @@ describe('kv/set while the pubsub socket is closed', () => {
     await sbp('chelonia/kv/update', {
       contractID: CONTRACT_ID, key: UNREAD, updater: addChatRoomUnreadMessage('roomA', 'a2', 5)
     })
-    const firstSync = server.requests.find((r) =>
-      r.at >= started && r.path.startsWith('/latestHEADinfo/')
-    )
-    assert.ok(firstSync, 'no recovery sync')
-    assert.ok(firstSync.at - started < 500, `first sync after ${firstSync.at - started} ms`)
+    const firstSync = firstSyncAfter(started)
+    assert.ok(firstSync !== undefined, 'no recovery sync')
+    assert.ok(firstSync - started < 500, `first sync after ${firstSync - started} ms`)
     assert.deepStrictEqual(server.posts().map((p) => p.status), [409, 204])
   })
 
@@ -229,11 +231,6 @@ describe('kv/set while the pubsub socket is closed', () => {
     assert.ok(Date.now() - started < 500)
     assert.deepStrictEqual(server.posts().map((p) => p.status), [412])
   })
-
-  // Time from `started` to the first contract sync requested after it.
-  const firstSyncAfter = (started: number): number | undefined => server.requests.find((r) =>
-    r.at >= started && r.path.startsWith('/latestHEADinfo/')
-  )?.at
 
   it('single-key kv/sync goes straight to the recovery sync', async () => {
     sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500, pendingFallbackMs: 60000 })

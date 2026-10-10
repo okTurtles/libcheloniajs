@@ -1,10 +1,14 @@
 // Shared test helpers. This is a plain module, not a `*.test.ts` file: the
 // `test` script never runs it directly, and it registers no SBP selectors,
 // so any test file may import it without contaminating registrations.
+import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert'
 import { afterEach, beforeEach } from 'node:test'
 import { createCID, multicodes } from './functions.js'
+import { SPMessage } from './SPMessage.js'
+import type { SPKey, SPOpContract, SPOpValue } from './SPMessage.js'
+import { signedOutgoingDataWithRawKey } from './signedData.js'
 
 export const waitMicrotasks = async (): Promise<void> => {
   // The code under test queues work onto okTurtles.eventQueue/queueEvent;
@@ -35,6 +39,84 @@ export const within = <T>(promise: Promise<T>, label: string, ms = 3000): Promis
     timer = setTimeout(() => reject(new Error(`${label} (within ${ms} ms)`)), ms)
   })
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
+}
+
+// Settles like `promise` if it settles within `ms`, and otherwise resolves
+// with `pending`: for tests that check whether a promise is still pending.
+// Unlike a race against `sleep`, it leaves no timer behind.
+export const settledOr = <T, P>(promise: Promise<T>, ms: number, pending: P): Promise<T | P> => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<P>((resolve) => {
+    timer = setTimeout(() => resolve(pending), ms)
+  })
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
+}
+
+// Silences the console for a test, recording the arguments of each
+// `console.warn`, `console.error` and `console.debug` call (`info` and `log`
+// are dropped). `restore` puts the original functions back.
+export const captureConsole = () => {
+  const { warn, error, debug, info, log } = console
+  const warnings: unknown[][] = []
+  const errors: unknown[][] = []
+  const debugs: unknown[][] = []
+  console.warn = (...args: unknown[]) => { warnings.push(args) }
+  console.error = (...args: unknown[]) => { errors.push(args) }
+  console.debug = (...args: unknown[]) => { debugs.push(args) }
+  console.info = () => {}
+  console.log = () => {}
+  const restore = (): void => {
+    Object.assign(console, { warn, error, debug, info, log })
+  }
+  return { warnings, errors, debugs, restore }
+}
+
+// Whether one of the recorded console calls (`captureConsole`) has a first
+// argument containing `text`.
+export const logged = (calls: unknown[][], text: string): boolean =>
+  calls.some((args) => String(args[0]).includes(text))
+
+// ---------------------------------------------------------------------------
+// Contract fixtures
+// ---------------------------------------------------------------------------
+
+// A key entry of an `OP_CONTRACT`. `'*'` permissions also allow every
+// action.
+export const contractKey = (
+  key: ReturnType<typeof keygen>,
+  name: string,
+  purpose: string[],
+  permissions: '*' | string[]
+) => ({
+  id: keyId(key),
+  name,
+  purpose,
+  ringLevel: 0,
+  permissions,
+  ...(permissions === '*' && { allowedActions: '*' }),
+  data: serializeKey(key, false)
+}) as SPKey
+
+// The first message of a new contract of type `type`: a self-signed
+// `OP_CONTRACT` with a `#csk` (signing, all permissions) and a `#sak` (a
+// server accounting key, which may not have permissions). Returns the keys,
+// to sign later messages and to fill `rootState.secretKeys`.
+export const makeSelfSignedContract = (
+  { type, manifest = 'test-manifest' }: { type: string; manifest?: string }
+) => {
+  const csk = keygen(EDWARDS25519SHA512BATCH)
+  const sak = keygen(EDWARDS25519SHA512BATCH)
+  const payload: SPOpContract = {
+    type,
+    keys: [contractKey(csk, '#csk', ['sig'], '*'), contractKey(sak, '#sak', ['sak'], [])]
+  }
+  const message = SPMessage.createV1_0({
+    contractID: null,
+    height: 0,
+    op: [SPMessage.OP_CONTRACT, signedOutgoingDataWithRawKey<SPOpValue, object>(csk, payload)],
+    manifest
+  })
+  return { message, csk, sak }
 }
 
 // ---------------------------------------------------------------------------

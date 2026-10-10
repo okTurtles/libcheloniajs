@@ -4,11 +4,11 @@
 // a signature by an unauthorized key logs the app state and leaves an
 // unhandled rejection behind, to make Cypress fail. Anywhere else (this
 // library's own tests on a CI service, other apps), verification must just
-// throw `ChelErrorSignatureKeyUnauthorized`.
+// throw `ChelErrorSignatureKeyUnauthorized`. A state that can't be
+// serialized must not replace the real error either.
 //
 // Runs in its own process: the tests after the first two register
-// `state/vuex/state`. A state that can't be serialized must not replace the
-// real error either.
+// `state/vuex/state`.
 
 import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'

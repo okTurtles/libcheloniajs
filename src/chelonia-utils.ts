@@ -1,6 +1,7 @@
 import sbp from '@sbp/sbp'
 import { ChelErrorKvConflict } from './errors.js'
 import { isKvMaxAttempts } from './internal-errors.js'
+import { kvSetHeightWaitMs } from './kv-height.js'
 import type { ChelKvOnConflictCallback, JSONType, KvHeightAheadMode } from './types.js'
 
 // This file contains non-core parts of Chelonia, i.e., functionality that is
@@ -24,24 +25,31 @@ export default sbp('sbp/selectors/register', {
   // the queueing logic needs to be more advanced, the key to use requires
   // custom logic or _if the `onconflict` callback also needs to be queued_.
   // Raw `chelonia/kv/set` never syncs the contract, though: its callers
-  // handle `isKvHeightAhead(e)` themselves (sync the contract with
-  // `chelonia/contract/sync`, outside the queue, then retry; see
-  // docs/kv.md). Such a loop doesn't share one sync among concurrent
-  // writes, isn't aborted by `chelonia/reset`, and doesn't retry when its
-  // sync fails but the contract reached the height anyway, as this
-  // selector does.
+  // handle `isKvHeightAhead(e)` themselves (pass `heightWaitMs: 0`, sync the
+  // contract with `chelonia/contract/sync`, outside the queue, then retry,
+  // keeping the write's error if the sync fails; see docs/kv.md). Such a
+  // loop doesn't share one sync among concurrent writes, isn't aborted by
+  // `chelonia/reset`, and doesn't retry when its sync fails but the
+  // contract reached the height anyway, as this selector does.
   //
   // When the server value is ahead of the local contract
   // (`ChelErrorKvHeightAhead`), the contract is synced outside the queue and
   // the write is retried (`onHeightAhead: 'sync'`, the default), up to
-  // `maxHeightRecoveries` times. Pass `onHeightAhead: 'reject'` to get the
-  // error instead. See KV-REVAMPED.md §4.2 step 5a. `allowUnverifiedConflict`
+  // `maxHeightRecoveries` times, without `kv/set`'s passive wait for the
+  // height. Pass `onHeightAhead: 'reject'` to get the error instead (after
+  // that wait). See KV-REVAMPED.md §4.2 step 5a. `allowUnverifiedConflict`
   // is passed on to `chelonia/kv/set`.
   //
   // Running out of `maxAttempts` resolving `412` conflicts, or a `412`
-  // without `onconflict`, rejects with `ChelErrorKvConflict` (`.cause` is
-  // `{ currentData, etag }`), like `chelonia/kv/update` and
-  // `chelonia/kv/clear`; match it with `isKvConflict(e)`.
+  // without `onconflict`, rejects with `ChelErrorKvConflict`, like
+  // `chelonia/kv/update` and `chelonia/kv/clear`; match it with
+  // `isKvConflict(e)`. Its `.cause` is `kv/set`'s: `{ currentStatus,
+  // currentData, etag }` from the last server response, with `currentData`
+  // only when that value is known (`'present'` and decodable, or
+  // `'absent'`). The exception is a conflict whose last value is ahead of
+  // the local contract (with an `onconflict`): `kv/set` rejects with
+  // `ChelErrorKvHeightAhead`, which is recovered from as above (and is the
+  // rejection once the recoveries run out).
   'chelonia/kv/queuedSet': ({
     contractID,
     key,
@@ -78,6 +86,8 @@ export default sbp('sbp/selectors/register', {
           onconflict,
           allowUnverifiedConflict,
           maxAttempts,
+          // The recovery below syncs: no passive wait with the lane held.
+          heightWaitMs: kvSetHeightWaitMs({ onHeightAhead, maxHeightRecoveries }),
           signal
         })
       })
@@ -86,8 +96,7 @@ export default sbp('sbp/selectors/register', {
         // `kv/set`'s internal error for running out of attempts, or for a
         // `412` without `onconflict` (only `ChelErrorKvHeightAhead` is
         // retried above, so this is outside the recovery loop). The cause
-        // keeps its `{ currentData, etag }` shape: there is no slot to
-        // normalize it against.
+        // keeps `kv/set`'s shape: there is no slot to normalize it against.
         if (isKvMaxAttempts(e)) {
           throw new ChelErrorKvConflict(
             `[chelonia/kv] queuedSet: ${contractID}::${key} ` + (

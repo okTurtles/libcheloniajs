@@ -74,9 +74,11 @@ export const ChelErrorKvHeightAhead = ChelErrorGenerator(
 
 // Whether `e` is a `ChelErrorKvHeightAhead`. Name-based, so it also matches
 // errors created by another loaded copy of the library (dual ESM/CJS
-// builds, bundles), where `instanceof` fails. `.cause` may be missing,
-// e.g. on a slot's `lastError`, which keeps only the name and message: read
-// it with `kvHeightAheadCause`.
+// builds, bundles), where `instanceof` fails. It also matches a plain
+// `{ name, message }` object, such as a slot's `lastError`, although the
+// guard narrows to `Error`: only rely on `name`, `message` and `cause`
+// after it. `.cause` may be missing (a `lastError` keeps only the name and
+// message): read it with `kvHeightAheadCause`.
 export function isKvHeightAhead (e: unknown): e is Error & { cause?: KvHeightAheadCause } {
   return !!e && typeof e === 'object' && (e as Error).name === 'ChelErrorKvHeightAhead'
 }
@@ -92,8 +94,12 @@ export function kvHeightAheadCause (e: unknown): KvHeightAheadCause | undefined 
 // Whether `e` is a KV write that ran out of attempts resolving `412`
 // conflicts: `ChelErrorKvConflict` (from `chelonia/kv/update`,
 // `chelonia/kv/clear` and `chelonia/kv/queuedSet`), or the internal error
-// raw `chelonia/kv/set` rejects with. Name-based, like `isKvHeightAhead`.
-// `.cause`, when present, is `{ currentData, etag }`.
+// raw `chelonia/kv/set` rejects with. Name-based, like `isKvHeightAhead`
+// (and, like it, also true for a plain `{ name, message }` object such as a
+// slot's `lastError`).
+// `.cause`, when present, is `{ currentData, etag }` from one server
+// response (`update`, `clear`), plus `currentStatus` for raw `kv/set` and
+// `queuedSet`; `currentData` is omitted when the value is unknown.
 export function isKvConflict (e: unknown): e is Error {
   if (!e || typeof e !== 'object') return false
   const name = (e as Error).name

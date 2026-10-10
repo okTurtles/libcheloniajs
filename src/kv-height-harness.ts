@@ -1,7 +1,8 @@
 // Shared harness for the height-aware KV tests (`kv-height.test.ts`,
 // `kv-height-pubsub.test.ts`). A plain module, not a `*.test.ts` file: it
-// registers no SBP selectors. Call `installKvHeightHooks()` once at the top
-// level of a test file.
+// registers no SBP selectors. Import `./chelonia.js` (which registers the
+// selectors under test) before calling `installKvHeightHooks()`, once at the
+// top level of a test file.
 //
 // The tests run the real `chelonia/kv/*` selectors, slot loader and pubsub
 // KV dispatch against a simulated chel server (`makeKvServer`, plus the
@@ -19,8 +20,9 @@ import * as assert from 'node:assert'
 import { afterEach, beforeEach } from 'node:test'
 
 import { CHELONIA_KV_STATUS_CHANGED } from './events.js'
-import { KV_NOOP } from './kv.js'
+import { KV_NOOP } from './kv-constants.js'
 import {
+  captureConsole,
   makeKvServer,
   restoreKvTestStubs,
   setLocalHeight as setContractHeight,
@@ -53,7 +55,7 @@ export const rootState = (): ChelRootState & Record<string, any> => sbp('cheloni
 // Simulated chel server
 // ---------------------------------------------------------------------------
 
-type RequestEntry = { path: string; at: number }
+type RequestEntry = { path: string; method: string; at: number }
 
 const makeServer = (initialHeight: number) => {
   const kv = makeKvServer(initialHeight, CONTRACT_ID)
@@ -80,7 +82,7 @@ const makeServer = (initialHeight: number) => {
     },
     fetch: async (url: string, opts: KvFetchOptions = {}): Promise<Response> => {
       const { pathname } = new URL(url)
-      server.requests.push({ path: pathname, at: Date.now() })
+      server.requests.push({ path: pathname, method: opts.method ?? 'GET', at: Date.now() })
       opts.signal?.throwIfAborted()
       if (pathname.startsWith('/latestHEADinfo/')) {
         server.syncs++
@@ -111,10 +113,7 @@ export let cekId: string
 export let warnings: unknown[][]
 export let debugs: unknown[][]
 const offs: Array<() => void> = []
-const originalWarn = console.warn
-const originalDebug = console.debug
-const originalInfo = console.info
-const originalError = console.error
+let restoreConsole: () => void = () => {}
 
 export const setupContract = (height: number) => {
   const csk = keygen(EDWARDS25519SHA512BATCH)
@@ -147,6 +146,12 @@ export const setupContract = (height: number) => {
 
 export const localHeight = (): number => rootState().contracts[CONTRACT_ID].height
 
+// KV GETs requested so far. Unlike `server.gets()`, which logs a GET when it
+// is answered, this counts a GET held by `holdGets` too.
+export const kvGetsRequested = (): number => server.requests.filter((r) =>
+  r.method === 'GET' && r.path.startsWith('/kv/')
+).length
+
 export function setLocalHeight (to: number) {
   const c = rootState().contracts[CONTRACT_ID]
   if (!c) return
@@ -169,6 +174,11 @@ export const writeAsDeviceB = async (key: string, value: JSONType, atHeight: num
   )
   return server.store.get(key)!
 }
+
+// The value stored for `key`, with its height stamp replaced by `stamp`
+// (the rest, signature included, unchanged).
+export const restampedBody = (key: string, stamp: string): string =>
+  JSON.stringify({ ...JSON.parse(server.store.get(key)!.body), height: stamp })
 
 // Wait for the internal lane and then the public lane to drain.
 export const drainLanes = async () => {
@@ -199,14 +209,17 @@ export const failKvGets = (n: number, status = 500, when: () => boolean = () => 
 // Holds the next contract sync (`/latestHEADinfo`) until `release` is
 // called. `started` resolves once that sync has begun, and rejects if none
 // begins within `ms`. Later syncs aren't held. `release` before the sync
-// starts cancels the hold; a hold the test leaves is released after it, so
-// it can't block the contract's lane for the next tests.
+// starts cancels the hold and rejects `started`; a hold the test leaves is
+// released after it, so it can't block the contract's lane for the next
+// tests.
 export const holdNextSync = (ms = 3000) => {
   let resolveSync: (() => void) | undefined
   let signalStarted!: () => void
+  let rejectStarted!: (e: Error) => void
   let timer: ReturnType<typeof setTimeout> | undefined
   const started = new Promise<void>((resolve, reject) => {
     signalStarted = resolve
+    rejectStarted = reject
     timer = setTimeout(() => reject(new Error(`no contract sync started within ${ms} ms`)), ms)
   })
   // Only a test that awaits `started` sees its rejection.
@@ -221,10 +234,17 @@ export const holdNextSync = (ms = 3000) => {
   const release = () => {
     clearTimeout(timer)
     if (server.onSync === hold) server.onSync = null
-    resolveSync?.()
+    if (resolveSync) resolveSync()
+    else rejectStarted(new Error('holdNextSync released before any sync started'))
   }
   offs.push(release)
   return { started, release }
+}
+
+// Runs `fn` after the test, with the harness's own cleanup (also when the
+// test or the index check fails).
+export const addTeardown = (fn: () => void): void => {
+  offs.push(fn)
 }
 
 // Holds the contract's public lane (`chelonia/queueInvocation`) until
@@ -395,12 +415,7 @@ export const installKvHeightHooks = () => {
     } as unknown as Partial<CheloniaConfig>)
     sbp('chelonia/kv/_testSetHeightTimings', TEST_TIMINGS)
     setupContract(40)
-    warnings = []
-    debugs = []
-    console.warn = (...args: unknown[]) => { warnings.push(args) }
-    console.debug = (...args: unknown[]) => { debugs.push(args) }
-    console.info = () => {}
-    console.error = () => {}
+    ;({ warnings, debugs, restore: restoreConsole } = captureConsole())
     stubKvBackoff()
   })
 
@@ -409,18 +424,24 @@ export const installKvHeightHooks = () => {
   // Unlike `useKvSetHooks` (`test-utils.ts`), no `chelonia/_init` here: run
   // before the index check and `_clearHeightWaits`, it would empty the maps
   // they inspect and leak the old timers.
-  afterEach(() => {
+  //
+  // The work that the cleanup released (held syncs, gates, GETs) still reads
+  // the live `server` and the shared `CONTRACT_ID`: wait for the lanes to
+  // drain, so that it can't run into the next test. A test that leaves work
+  // stuck on a lane fails here.
+  afterEach(async () => {
     try {
       sbp('chelonia/kv/_assertIndexConsistent')
     } finally {
-      for (const off of offs.splice(0)) off()
-      sbp('chelonia/kv/_clearHeightWaits')
-      restoreKvTestStubs()
-      console.warn = originalWarn
-      console.debug = originalDebug
-      console.info = originalInfo
-      console.error = originalError
-      sbp('chelonia/private/stopClockSync')
+      try {
+        for (const off of offs.splice(0)) off()
+        sbp('chelonia/kv/_clearHeightWaits')
+        await within(drainLanes(), 'lanes drained after the test', 2000)
+      } finally {
+        restoreKvTestStubs()
+        restoreConsole()
+        sbp('chelonia/private/stopClockSync')
+      }
     }
   })
 }

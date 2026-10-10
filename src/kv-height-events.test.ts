@@ -9,7 +9,8 @@
 // so no contract source has to be served, and `acceptAllMessages` lets the
 // contract be created without syncing it from a server.
 
-import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/crypto'
+import { keyId, serializeKey } from '@chelonia/crypto'
+import type { keygen } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert'
 import { afterEach, beforeEach, describe, it } from 'node:test'
@@ -17,9 +18,17 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 import './chelonia.js'
 import './internals.js'
 import { SPMessage } from './SPMessage.js'
-import type { SPKey, SPOpContract, SPOpValue } from './SPMessage.js'
+import type { SPOpValue } from './SPMessage.js'
 import { signedOutgoingDataWithRawKey } from './signedData.js'
-import { makeKvServer, sleep, whenSettledWithin, withLocalHeight } from './test-utils.js'
+import {
+  captureConsole,
+  makeKvServer,
+  makeSelfSignedContract,
+  sleep,
+  until,
+  whenSettledWithin,
+  withLocalHeight
+} from './test-utils.js'
 import type { ChelRootState, CheloniaConfig, JSONType } from './types.js'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -33,21 +42,7 @@ const rootState = (): ChelRootState & Record<string, any> => sbp('chelonia/priva
 let server: ReturnType<typeof makeKvServer>
 let csk: ReturnType<typeof keygen>
 let contractID: string
-
-const contractKey = (
-  key: ReturnType<typeof keygen>,
-  name: string,
-  purpose: string[],
-  permissions: '*' | string[]
-) => ({
-  id: keyId(key),
-  name,
-  purpose,
-  ringLevel: 0,
-  permissions,
-  ...(permissions === '*' && { allowedActions: '*' }),
-  data: serializeKey(key, false)
-}) as SPKey
+let restoreConsole: () => void
 
 // Events are handled on the contract's internal queue, as the pubsub and
 // sync paths do.
@@ -59,26 +54,13 @@ const handle = (message: SPMessage): Promise<void> =>
 // Creates the contract (a self-signed OP_CONTRACT with a `#csk` and a
 // `#sak`) and processes its first message: the local height is 0.
 const createContract = async (): Promise<SPMessage> => {
-  csk = keygen(EDWARDS25519SHA512BATCH)
-  const sak = keygen(EDWARDS25519SHA512BATCH)
-  const payload: SPOpContract = {
-    type: CTYPE,
-    keys: [
-      contractKey(csk, '#csk', ['sig'], '*'),
-      // A server accounting key may not have permissions.
-      contractKey(sak, '#sak', ['sak'], [])
-    ]
-  }
-  const first = SPMessage.createV1_0({
-    contractID: null,
-    height: 0,
-    op: [SPMessage.OP_CONTRACT, signedOutgoingDataWithRawKey<SPOpValue, object>(csk, payload)],
-    manifest: MANIFEST
-  })
+  const created = makeSelfSignedContract({ type: CTYPE, manifest: MANIFEST })
+  const first = created.message
+  csk = created.csk
   contractID = first.contractID()
   rootState().secretKeys = {
     [keyId(csk)]: serializeKey(csk, true),
-    [keyId(sak)]: serializeKey(sak, true)
+    [keyId(created.sak)]: serializeKey(created.sak, true)
   }
   await handle(first)
   assert.strictEqual(rootState().contracts[contractID]?.height, 0)
@@ -112,11 +94,6 @@ const writeAsOtherDevice = async (value: JSONType, atHeight: number) => {
   server.log.length = 0
 }
 
-const originalWarn = console.warn
-const originalDebug = console.debug
-const originalInfo = console.info
-const originalLog = console.log
-
 beforeEach(() => {
   sbp('chelonia/_init')
   server = makeKvServer(0)
@@ -127,19 +104,13 @@ beforeEach(() => {
     fetch: async (url: string, opts: Parameters<typeof server.handleKv>[1]) =>
       await server.handleKv(new URL(url).pathname, opts) ?? new Response('', { status: 404 })
   } as unknown as Partial<CheloniaConfig>)
-  console.warn = () => {}
-  console.debug = () => {}
-  console.info = () => {}
-  console.log = () => {}
+  restoreConsole = captureConsole().restore
 })
 
 afterEach(() => {
   sbp('chelonia/kv/_clearHeightWaits')
   sbp('chelonia/kv/_testSetHeightTimings')
-  console.warn = originalWarn
-  console.debug = originalDebug
-  console.info = originalInfo
-  console.log = originalLog
+  restoreConsole()
 })
 
 describe('height waits woken by processed events', () => {
@@ -178,11 +149,12 @@ describe('height waits woken by processed events', () => {
     sbp('chelonia/kv/defineSlot', { contractType: CTYPE, key: KEY, defaultValue: {} })
     sbp('chelonia/kv/_onContractsModified', { added: [contractID], removed: [] })
     await sbp('chelonia/queueInvocation', contractID, () => {})
-    await sleep(10)
+    await until(() => server.gets().length === 1, 'the first load never issued its GET')
     // The value was written at height 1: the load is deferred. A load that
     // is merely in flight is 'loading' too, so check that it ran once and
     // isn't retried until the height is reached.
     assert.strictEqual(sbp('chelonia/kv/status', contractID, KEY), 'loading')
+    // Only for the negative check: give a retry the time to show up.
     await sleep(100)
     assert.strictEqual(server.gets().length, 1)
     await handle(nextEvent(first))

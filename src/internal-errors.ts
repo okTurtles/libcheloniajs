@@ -24,8 +24,8 @@ export const ChelErrorKvMaxAttempts = ChelErrorGenerator('ChelErrorKvMaxAttempts
 // Realm-safe detection of `ChelErrorKvMaxAttempts`, for the selectors that
 // remap it. `ChelErrorGenerator` assigns `.name` from a string literal, so
 // it survives a dual ESM/CJS or cross-realm load of `@chelonia/lib` where
-// `instanceof` would fail. (`isKvConflict` in `src/errors.ts`, which this
-// module imports, matches the name itself.)
+// `instanceof` would fail. Matches any object with that name (as
+// `isKvConflict` in `src/errors.ts` does).
 export function isKvMaxAttempts (e: unknown): boolean {
-  return e instanceof Error && e.name === 'ChelErrorKvMaxAttempts'
+  return !!e && typeof e === 'object' && (e as Error).name === 'ChelErrorKvMaxAttempts'
 }

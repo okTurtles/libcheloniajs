@@ -275,9 +275,13 @@ export type KvMirrorEntry = {
   // local write or clear, or a terminal error. Tells a settled `'non-init'`
   // (the last verifiable read found no value, and no load or frame since
   // has found one) apart from a pending one. It stays `true` while the slot
-  // reloads (status `'loading'`, unless it holds a value), including while
-  // a `'non-init'` slot waits for the contract to reach the height of a
-  // server value it can't verify yet.
+  // reloads, including while a `'non-init'` slot waits for the contract to
+  // reach the height of a server value it can't verify yet. A reload
+  // reports `'loading'` meanwhile, except that a `'loaded'` slot keeps its
+  // status during the reloads that preserve it (deferred reloads,
+  // `update`'s reloads, the reload after a pubsub conflict, the later
+  // rounds of a single-key `sync`); `sync`'s own loads and reconnect or
+  // resync reloads take it through `'loading'` too.
   // Always present on entries of active slots; entries persisted by older
   // versions may lack it until their slot is activated, so treat a missing
   // value as `false`. Only meaningful for an active slot: an entry
@@ -288,7 +292,10 @@ export type KvMirrorEntry = {
   // height the local contract hasn't reached (`requiredHeight`). `value`,
   // if any, is then the last verified one, not the server's, whatever the
   // status says (a `'loaded'` slot keeps presenting it). Cleared when a load
-  // verifies the key (or finds none). Changes are announced with
+  // verifies the key (or finds none), when a local write commits (unless a
+  // newer wait was registered meanwhile), and once the deferred reload
+  // started by reaching the height settles: if its GET failed, the slot is
+  // `'error'`, which `update` reloads anyway. Changes are announced with
   // `CHELONIA_KV_STATUS_CHANGED`, possibly with an unchanged status.
   // See KV-REVAMPED.md §4.9.
   heightAhead?: { requiredHeight: number };
@@ -313,18 +320,20 @@ export type KvServerValueStatus = 'absent' | 'present' | 'ahead' | 'malformed';
 // `.cause` of `ChelErrorKvHeightAhead`.
 export type KvHeightAheadCause = {
   // The local contract must reach this height before the operation can
-  // succeed. Read from the unverified server value (or inferred from a 409);
-  // only ever used as a wait target.
+  // succeed. Read from the unverified server value (or inferred from a 409).
+  // It is the target of the passive wait, of up to `maxHeightRecoveries`
+  // forced contract syncs, and of the slot's `heightAhead` marker (all
+  // bounded).
   requiredHeight: number;
-  // `true` when `requiredHeight` is the height stamp of a value the server
-  // returned; `false` when it is a lower bound inferred from a 409.
+  // `true`: `requiredHeight` is the height stamp of a value the server
+  // returned. `false`: a lower bound inferred from a 409.
   exact: boolean;
   // The local contract height when the error was raised.
   localHeight: number | undefined;
   // The server's ETag for the key, when the response carried one.
   etag: string | null;
   // HTTP status of the response that revealed the height gap.
-  status: number;
+  httpStatus: number;
 };
 
 // What `chelonia/kv/update`, `chelonia/kv/clear`, `chelonia/kv/queuedSet`
@@ -353,7 +362,8 @@ export type KvHeightWait = {
   // Fallback timer; `undefined` once it has fired, and while parked.
   timer: ReturnType<typeof setTimeout> | undefined;
   // `true` once the fallback gave up (the contract could not be brought to
-  // `requiredHeight`). A parked wait has no timer but keeps its height
+  // `requiredHeight`), or while single-key `chelonia/kv/sync` drives the
+  // recovery itself. A parked wait has no timer but keeps its height
   // listener: the slot still reloads if the contract reaches the height,
   // and its mirror is not used as an `update` basis until then. The next
   // registration for the key un-parks it, with a new fallback timer.
@@ -411,13 +421,15 @@ export type KvSlotDefinition = {
   autoSubscribe?: boolean;
   autoLoad?: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
   refreshOnReconnect?: boolean;
-  // Called after the mirror value changes (load, remote frame, local write,
-  // reconnect), and when a load's 404 replaces a value the slot held. NOT
+  // Called after every successful load, applied remote frame or committed
+  // local write, including reconnect reloads (also when the value didn't
+  // change), and when a load's 404 replaces a value the slot held. NOT
   // called when a slot's first load finds no value (404): use
   // `chelonia/kv/whenSettled` (or `KvMirrorEntry.settled`, or
   // `CHELONIA_KV_STATUS_CHANGED`) to learn that a slot settled as empty.
-  // Must not throw, and must not synchronously call a KV write or
-  // `whenSettled` for the same contract (`ChelErrorKvReentrant`).
+  // Must not throw, and must not synchronously call `update`, `clear`,
+  // `sync`, or a `whenSettled` that would wait, for the same contract
+  // (`ChelErrorKvReentrant`).
   onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
 };
 
@@ -634,8 +646,9 @@ export type CheloniaContext = {
   kvPendingLoads: Map<string, number>;
   // Per-contract count of `onUpdate` callbacks currently executing
   // inside the contract's `chelonia/queueInvocation` lane. A KV write
-  // selector (`update`/`clear`/`sync`) invoked while this is non-zero
-  // for the same contract would enqueue behind the lane that is blocked
+  // selector (`update`/`clear`/`sync`), or a `whenSettled` that would wait,
+  // invoked while this is non-zero for the same contract would enqueue
+  // behind (or wait for a load queued behind) the lane that is blocked
   // awaiting the callback → permanent deadlock, so those selectors
   // reject with `ChelErrorKvReentrant` instead. Keyed by `contractID`
   // to match the lane granularity exactly (cross-contract writes from
@@ -668,6 +681,12 @@ export type CheloniaContext = {
   // aborted, no height wait can be registered and no height-recovery sync
   // can start: either would run into the next session. Runtime-only.
   kvHeightSession: AbortController;
+  // The `chelonia/reset` calls in progress (between ending the height
+  // session and tearing the old session down, or failing). Resets can
+  // overlap: the height session only resumes when the last one fails, and
+  // a reset that succeeds while another still drains starts the new height
+  // session already ended. Survives `chelonia/reset`. Runtime-only.
+  kvHeightSessionHolds: number;
   // The height waits `chelonia/reset` dropped when it ended the height
   // session. If the reset fails before tearing the session down, they are
   // registered again, parked ones as parked

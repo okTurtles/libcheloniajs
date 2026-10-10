@@ -3,7 +3,7 @@
 // `chelonia/reset`. One definition for both, and for the stand-ins of those
 // selectors in `kv.test.ts`, so that a new field can't be missed in one of
 // them. Internal: not re-exported from `index.ts`.
-import sbp from '@sbp/sbp'
+import { clearHeightWaits } from './kv-height.js'
 import type { CheloniaContext } from './types.js'
 
 // Creates every per-session KV field of the context: everything but the
@@ -39,6 +39,9 @@ export const initKvRuntime = (ctx: CheloniaContext): void => {
   // Name for `defContractKvByManifest` doesn't start with `kv`, like the
   // preceding keys, for consistency with `defContractManifest`.
   ctx.defContractKvByManifest = new Map()
+  // Counts the `chelonia/reset` calls in progress, across the resets
+  // themselves (see `clearKvRuntime`).
+  ctx.kvHeightSessionHolds = 0
   initKvSession(ctx)
 }
 
@@ -53,7 +56,15 @@ export const clearKvRuntime = (ctx: CheloniaContext): void => {
   // Height waits can't have been registered since the height session
   // ended (`chelonia/kv/_endHeightSession`), but listeners of passive
   // height waits started while draining can. Drop them (and their
-  // fallback timers) before the next session starts.
-  sbp('chelonia/kv/_clearHeightWaits')
+  // fallback timers) before the next session starts: those of `ctx`, which
+  // isn't necessarily the context the selectors are registered with.
+  clearHeightWaits(ctx)
   initKvSession(ctx)
+  // This reset is done. While another one is still draining (resets can
+  // overlap), the new height session starts ended: that reset may still
+  // fail and resume it (`chelonia/kv/_resumeHeightSession`).
+  ctx.kvHeightSessionHolds = Math.max(0, (ctx.kvHeightSessionHolds ?? 0) - 1)
+  if (ctx.kvHeightSessionHolds > 0) {
+    ctx.kvHeightSession.abort(new DOMException('Aborted by chelonia/reset', 'AbortError'))
+  }
 }

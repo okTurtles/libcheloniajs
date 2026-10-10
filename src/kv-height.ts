@@ -30,7 +30,8 @@ import type {
   CheloniaContext,
   KvHeightAheadCause,
   KvHeightAheadMode,
-  KvHeightListener
+  KvHeightListener,
+  KvHeightWait
 } from './types.js'
 
 // How long `chelonia/kv/set` (and single-key `chelonia/kv/sync`) wait for
@@ -149,10 +150,10 @@ export function kvHeightAheadError (
   ctx: CheloniaContext,
   contractID: string,
   key: string,
-  { requiredHeight, exact, etag, status }: Omit<KvHeightAheadCause, 'localHeight'>
+  { requiredHeight, exact, etag, httpStatus }: Omit<KvHeightAheadCause, 'localHeight'>
 ): Error & { cause: KvHeightAheadCause } {
   const localHeight = localContractHeight(ctx, contractID)
-  const cause: KvHeightAheadCause = { requiredHeight, exact, localHeight, etag, status }
+  const cause: KvHeightAheadCause = { requiredHeight, exact, localHeight, etag, httpStatus }
   // `exact: false` comes from a 409, which may carry no stored value at all:
   // the height is then only a lower bound for the server's contract height.
   const required = exact
@@ -230,6 +231,33 @@ export function notifyContractHeight (
   if (listeners.size === 0) ctx.kvHeightListeners.delete(contractID)
 }
 
+// Stops the fallback timer of a height-deferred load (see `src/kv.ts`,
+// "Height-deferred loads").
+export function clearWaitTimer (wait: KvHeightWait): void {
+  if (wait.timer !== undefined) clearTimeout(wait.timer)
+  wait.timer = undefined
+}
+
+// Drops a height-deferred load: its fallback timer, its height listener,
+// and its registry entry, unless a newer wait replaced it there.
+export function dropHeightWait (ctx: CheloniaContext, waitKey: string, wait: KvHeightWait): void {
+  clearWaitTimer(wait)
+  wait.off()
+  if (ctx.kvHeightWaits.get(waitKey) === wait) ctx.kvHeightWaits.delete(waitKey)
+}
+
+// Drops every height-deferred load and height listener of `ctx`. Used by
+// `chelonia/kv/_clearHeightWaits` and by `clearKvRuntime`
+// (`kv-runtime.ts`), which must clear the context it is given rather than
+// the one the selectors are registered with.
+export function clearHeightWaits (ctx: CheloniaContext): void {
+  for (const [waitKey, wait] of Array.from(ctx.kvHeightWaits)) {
+    dropHeightWait(ctx, waitKey, wait)
+  }
+  ctx.kvHeightListeners.clear()
+  ctx.kvHeightReloadsQueued.clear()
+}
+
 type Settle<T> = { resolve: (value: T) => void; reject: (reason: unknown) => void }
 
 // A promise that `start` settles through the `resolve` / `reject` it
@@ -271,6 +299,17 @@ function withDeadline<T> (
   })
 }
 
+// Resolves after `ms`, unless one of `signals` aborts first: it then
+// rejects with the abort reason (at once when one already has).
+export function delayUnlessAborted (ms: number, signals: AbortSignal[]): Promise<void> {
+  const aborted = signals.find((s) => s.aborted)
+  if (aborted) return Promise.reject(abortReason(aborted))
+  return withDeadline<void>(
+    { signals, timeoutMs: ms, onTimeout: ({ resolve }) => resolve() },
+    () => {}
+  )
+}
+
 // Waits, without touching any queue, until the local contract reaches
 // `minHeight`. Resolves `true` when it does and `false` when `timeoutMs`
 // elapses first. Rejects with the abort reason if any of `signals` aborts.
@@ -295,10 +334,12 @@ export function waitForContractHeight (
   }, ({ resolve }) => addHeightListener(ctx, contractID, minHeight, () => resolve(true)))
 }
 
-// Starts (or joins) a forced sync of `contractID`. Concurrent recoveries on
-// the same contract share one sync. The sync runs on the contract's
-// internal queue; callers MUST NOT hold the contract's public
-// (`queueInvocation`) lane while awaiting it.
+// Starts (or joins) a sync of `contractID`. Concurrent recoveries on the
+// same contract share one sync. The sync runs on the contract's internal
+// queue; callers MUST NOT hold the contract's public (`queueInvocation`)
+// lane, nor its internal lane (e.g. by awaiting from one of the
+// contract's `sideEffect`s), while awaiting it. The internal lane stalls
+// the sync until the recovery timeout (`recoveryTimeoutMs`).
 //
 // The subscription is checked again on the lane, right before syncing.
 // `chelonia/contract/release` only queues the removal on that same lane,
@@ -315,7 +356,7 @@ function startRecoverySync (ctx: CheloniaContext, contractID: string): Promise<v
           `[chelonia/kv] ${contractID} was removed before its height-recovery sync ran`
         )
       }
-      return sbp('chelonia/private/in/syncContract', contractID, { force: true })
+      return sbp('chelonia/private/in/syncContract', contractID)
     }))
     .then(() => undefined)
   const clear = () => {
@@ -331,33 +372,49 @@ function startRecoverySync (ctx: CheloniaContext, contractID: string): Promise<v
 // Rejects with `error` when the contract is not subscribed (syncing it
 // would re-subscribe a released contract; checked here as a fast path, and
 // again on the contract's lane by `startRecoverySync`), when the sync
-// fails, or when it
-// takes longer than the recovery timeout (the sync keeps running), unless
-// the local contract has reached `error`'s required height by then (e.g.
-// pubsub delivered the missing events meanwhile): the operation can then
-// succeed, so this resolves. Note that after a timeout the retried
-// operation's lane work still waits behind the sync, which runs on the
-// contract's lane. Rejects with the abort reason if the caller's signal,
-// the session's (`ctx.abortController`'s, captured when the operation
-// started) or the height session (`kvHeightSession`, ended by
+// fails, or when it takes longer than the recovery timeout (the sync keeps
+// running), unless the local contract has reached the required height by
+// then (e.g. pubsub delivered the missing events meanwhile): the operation
+// can then succeed, so this resolves. The required height is
+// `requiredHeight`, or else `error`'s. Note that after a timeout the
+// retried operation's lane work still waits behind the sync, which runs on
+// the contract's lane. Rejects with the abort reason if the caller's
+// signal, the session's (`ctx.abortController`'s, captured when the
+// operation started) or the height session (`kvHeightSession`, ended by
 // `chelonia/reset`) aborts; an already aborted one rejects before any sync
 // starts, since after a reset the sync would run into the next session.
+// Once settled, it logs nothing more: a sync that fails after the timeout
+// or an abort is the outcome of whoever still waits for it.
 export function recoverContractHeight (
   ctx: CheloniaContext,
   contractID: string,
   error: unknown,
-  { callerSignal, sessionSignal }: { callerSignal?: AbortSignal; sessionSignal?: AbortSignal } = {}
+  { callerSignal, sessionSignal, requiredHeight }: {
+    callerSignal?: AbortSignal;
+    sessionSignal?: AbortSignal;
+    requiredHeight?: number;
+  } = {}
 ): Promise<void> {
   if (!ctx.subscriptionSet.has(contractID)) return Promise.reject(error)
   const signals = [callerSignal, sessionSignal, ctx.kvHeightSession.signal]
     .filter(Boolean) as AbortSignal[]
   const alreadyAborted = signals.find((s) => s.aborted)
   if (alreadyAborted) return Promise.reject(abortReason(alreadyAborted))
-  const sync = startRecoverySync(ctx, contractID)
+  const required = requiredHeight ?? kvHeightAheadCause(error)?.requiredHeight
+  const joined = ctx.kvRecoveries.has(contractID)
+  let sync = startRecoverySync(ctx, contractID)
+  // A sync this call joined may have read the server's HEAD before the
+  // server reached `required`: when it ends short of it, start one fresh
+  // sync (or join one started since). Both run within the deadline below.
+  if (joined && required !== undefined) {
+    sync = sync.then(() => {
+      if (isHeightReached(ctx, contractID, required) || signals.some((s) => s.aborted)) return
+      return startRecoverySync(ctx, contractID)
+    })
+  }
   // The sync failed or timed out: retrying can still succeed if the height
   // was reached some other way. The warning says which way it went.
   const fail = ({ resolve, reject }: Settle<void>, why: string, cause?: unknown) => {
-    const required = kvHeightAheadCause(error)?.requiredHeight
     const reached = required !== undefined && isHeightReached(ctx, contractID, required)
     const message = reached
       ? `${why}; retrying, since the contract reached height ${required} anyway`
@@ -375,11 +432,16 @@ export function recoverContractHeight (
       `[chelonia/kv] contract sync for ${contractID} did not finish within ${recoveryTimeoutMs} ms`
     )
   }, (settle) => {
-    sync.then(() => settle.resolve(), (syncError: unknown) => fail(
-      settle,
-      `[chelonia/kv] contract sync for ${contractID} failed during height recovery`,
-      syncError
-    ))
+    let done = false
+    sync.then(() => settle.resolve(), (syncError: unknown) => {
+      if (done) return
+      fail(
+        settle,
+        `[chelonia/kv] contract sync for ${contractID} failed during height recovery`,
+        syncError
+      )
+    })
+    return () => { done = true }
   })
 }
 
@@ -413,6 +475,19 @@ export function resolveHeightRecoveryOptions (
     mode: onHeightAhead ?? 'sync',
     maxRecoveries: maxHeightRecoveries ?? KV_DEFAULT_MAX_HEIGHT_RECOVERIES
   }
+}
+
+// The `heightWaitMs` that an operation recovering with `options` (see
+// `withHeightRecovery`) passes to `chelonia/kv/set`. `0` when it will
+// recover anyway (sync the contract and retry): `kv/set` then rejects with
+// `ChelErrorKvHeightAhead` at once instead of first waiting passively for
+// the height, with the contract's lane held. `undefined` (the default
+// wait) with `onHeightAhead: 'reject'` or no recoveries, where that wait is
+// the write's only chance. `options` must be valid (they are once
+// `withHeightRecovery` runs the attempt).
+export function kvSetHeightWaitMs (options: KvHeightRecoveryOptions): 0 | undefined {
+  const { mode, maxRecoveries } = resolveHeightRecoveryOptions('kv/set', options)
+  return mode === 'reject' || maxRecoveries === 0 ? undefined : 0
 }
 
 // Runs `attempt` and, while it rejects with `ChelErrorKvHeightAhead`, syncs

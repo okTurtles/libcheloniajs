@@ -3,7 +3,6 @@ import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
 import {
   cloneDeep,
-  delay,
   difference,
   has,
   intersection,
@@ -46,6 +45,7 @@ import {
 import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import {
   KV_MAX_STALE_STAMP_RETRIES,
+  delayUnlessAborted,
   isHeightReached,
   kvHeightAheadError,
   pubsubSocketNotOpen,
@@ -106,14 +106,16 @@ import {
   JSONType,
   JournalConfig,
   KvConflictServerValue,
+  KvServerValueStatus,
   ParsedEncryptedOrUnencryptedMessage,
   ChelKvGetResult
 } from './types.js'
 import type { Options as PubSubOptions, PubSubClient } from './pubsub/index.js'
 
 // A server KV value as seen by this client (KV-REVAMPED.md §3.4). See
-// `classifyKvValue`. `malformed` (a height stamp that can never be read) is
-// only reported to blind writers (`allowUnverifiedConflict` in `kv/set`).
+// `classifyKvValue`. `malformed` is a value whose height stamp can never be
+// read; `kv/set` only reports it to blind writers (`allowUnverifiedConflict`)
+// and throws its `error` otherwise.
 type KvServerValue<T> =
   | { kind: 'absent' }
   | { kind: 'present'; parsed: ParsedEncryptedOrUnencryptedMessage<T> }
@@ -1232,25 +1234,23 @@ export default sbp('sbp/selectors/register', {
             // contract catches up. The raw KV callback is not called for
             // such frames, so without a slot the notification is lost.
             //
-            // A malformed height stamp throws and is logged below. A slot
+            // A malformed height stamp is thrown and logged below. A slot
             // for the key reloads it then, so that it ends up as a load
             // would: `'error'` with `ChelErrorInvalidMessageHeight` when
             // the stored value is malformed, or the current value when the
             // frame was a stale one. Not awaited: `_loadSlot` queues on
             // this same lane, and records its outcome on the slot.
-            let frame: Extract<KvServerValue<object>, { kind: 'present' | 'ahead' }>
-            try {
-              frame = classifyKvValue<object>(
-                this, msg.channelID, msg.key, JSON.parse(Buffer.from(msg.data).toString())
-              )
-            } catch (e) {
+            const frame = classifyKvValue<object>(
+              this, msg.channelID, msg.key, JSON.parse(Buffer.from(msg.data).toString())
+            )
+            if (frame.kind === 'malformed') {
               const slot = this.kvSlotsByContractID.get(msg.channelID)?.get(msg.key)
-              if (slot && (e as Error | undefined)?.name === 'ChelErrorInvalidMessageHeight') {
+              if (slot) {
                 sbp('chelonia/kv/_loadSlot', {
                   contractID: msg.channelID, slot, reason: 'remote'
                 }).catch(() => {})
               }
-              throw e
+              throw frame.error
             }
             if (frame.kind === 'ahead') {
               const height = frame.requiredHeight
@@ -2911,14 +2911,17 @@ export default sbp('sbp/selectors/register', {
   //
   // `kv/set` never syncs the contract: after the bounded wait (or once the
   // 409 re-signs run out) it rejects with `ChelErrorKvHeightAhead`. Callers
-  // handle `isKvHeightAhead(e)` themselves (sync the contract with
-  // `chelonia/contract/sync`, outside the contract's queue, then retry; see
-  // docs/kv.md), or use `chelonia/kv/queuedSet` / `chelonia/kv/update`,
-  // which do, and also share one sync among concurrent writes, abort on
-  // `chelonia/reset`, and retry when a failed sync reached the height
-  // anyway. Running
-  // out of `maxAttempts`, or a `412` without `onconflict`, rejects with an
-  // internal error that `isKvConflict(e)` matches.
+  // handle `isKvHeightAhead(e)` themselves (pass `heightWaitMs: 0`, sync the
+  // contract with `chelonia/contract/sync`, outside the contract's queue,
+  // then retry, keeping the write's error if the sync fails; see
+  // docs/kv.md), or use `chelonia/kv/queuedSet`, `chelonia/kv/update` or
+  // `chelonia/kv/clear`, which do, and also share one sync among concurrent
+  // writes, abort on `chelonia/reset`, and retry when a failed sync reached
+  // the height anyway. `heightWaitMs: 0` skips the passive wait (up to
+  // `KV_HEIGHT_WAIT_MS` per stale stamp, while holding whatever lane the
+  // caller holds), as those selectors do. Running out of `maxAttempts`, or
+  // a `412` without `onconflict`, rejects with an internal error that
+  // `isKvConflict(e)` matches.
   'chelonia/kv/set': async function (
     this: CheloniaContext,
     contractID: string,
@@ -2932,6 +2935,7 @@ export default sbp('sbp/selectors/register', {
       maxAttempts,
       onconflict,
       allowUnverifiedConflict,
+      heightWaitMs,
       signal: callerSignal
     }: {
       ifMatch?: string;
@@ -2948,9 +2952,22 @@ export default sbp('sbp/selectors/register', {
       // verified, instead of rejecting. For blind writes that don't depend
       // on the current value.
       allowUnverifiedConflict?: boolean;
+      // The longest passive wait for the local contract to reach a height
+      // the server requires (a `409`, or a conflicting value that is
+      // ahead), per wait. Defaults to `KV_HEIGHT_WAIT_MS` (1.5 s). `0`
+      // skips the wait: the call rejects with `ChelErrorKvHeightAhead` at
+      // once unless the height is already reached. For callers that sync
+      // and retry on that error anyway.
+      heightWaitMs?: number | null;
       signal?: AbortSignal;
     }
   ) {
+    if (
+      heightWaitMs != null &&
+      !(typeof heightWaitMs === 'number' && Number.isFinite(heightWaitMs) && heightWaitMs >= 0)
+    ) {
+      throw new TypeError('[chelonia/kv] set: `heightWaitMs` must be a finite number >= 0')
+    }
     maxAttempts = maxAttempts ?? 3
     const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`
     const hasOnconflict = typeof onconflict === 'function'
@@ -2970,9 +2987,6 @@ export default sbp('sbp/selectors/register', {
     let response: Response
     let conflictEtag: string | null = null
     let successEtag: string | null = null
-    // The last server value that could be decoded (reported when conflict
-    // resolution runs out of attempts).
-    let lastRecoveredValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined
     let recoveryGetAttempted = false
     // Height stamp of the most recent POST.
     let postedHeight = 0
@@ -2985,19 +2999,18 @@ export default sbp('sbp/selectors/register', {
       required: number,
       exact: boolean,
       etag: string | null,
-      status: number
+      httpStatus: number
     ) => kvHeightAheadError(this, contractID, key, {
-      requiredHeight: required, exact, etag, status
+      requiredHeight: required, exact, etag, httpStatus
     })
-    // The passive wait for the local contract to reach `required`. Skipped
-    // (it resolves `false` at once unless the height is already reached)
-    // while the pubsub socket isn't open: no contract event arrives then, so
-    // waiting can't help, and `update` / `clear` / `queuedSet` go straight
-    // to their recovery sync. Without a pubsub client (e.g. server-side
-    // use), the wait stays.
+    // The passive wait for the local contract to reach `required`, of up to
+    // `heightWaitMs`. Skipped (it resolves `false` at once unless the
+    // height is already reached) while the pubsub socket isn't open: no
+    // contract event arrives then, so waiting can't help. Without a pubsub
+    // client (e.g. server-side use), the wait stays.
     const waitForHeight = (required: number) =>
       waitForContractHeight(this, contractID, required, {
-        timeoutMs: pubsubSocketNotOpen(this) ? 0 : undefined,
+        timeoutMs: pubsubSocketNotOpen(this) ? 0 : heightWaitMs ?? undefined,
         signals: [fetchSignal]
       })
     // Classifies a server value (see `KvServerValue`). A value that is ahead is
@@ -3013,17 +3026,9 @@ export default sbp('sbp/selectors/register', {
       if (!serializedDataText) return { kind: 'absent' }
       const serializedData = JSON.parse(serializedDataText)
       const classify = (): KvServerValue<JSONType> => {
-        try {
-          return classifyKvValue<JSONType>(this, contractID, key, serializedData)
-        } catch (e) {
-          if (
-            allowUnverifiedConflict &&
-            (e as Error | undefined)?.name === 'ChelErrorInvalidMessageHeight'
-          ) {
-            return { kind: 'malformed', error: e as Error }
-          }
-          throw e
-        }
+        const value = classifyKvValue<JSONType>(this, contractID, key, serializedData)
+        if (value.kind === 'malformed' && !allowUnverifiedConflict) throw value.error
+        return value
       }
       const body = classify()
       if (body.kind !== 'ahead' || !wait) return body
@@ -3094,7 +3099,6 @@ export default sbp('sbp/selectors/register', {
         }
         if (etag) conflictEtag = etag
       }
-      if (body.kind === 'present') lastRecoveredValue = body.parsed
       return { body, etag }
     }
     // The `resolveData` function is tasked with computing merged data, as in
@@ -3113,10 +3117,10 @@ export default sbp('sbp/selectors/register', {
         : undefined
       if (aheadError && !allowUnverifiedConflict) throw aheadError
       if (backoff && !aheadError) {
-        // Spread out retries from clients contending for the same key.
-        await delay(randomIntFromRange(0, 1500))
-        // Honour an abort (the caller's, or `chelonia/reset`'s) that landed
-        // during the backoff before running `onconflict`.
+        // Spread out retries from clients contending for the same key. An
+        // abort (the caller's, or `chelonia/reset`'s) ends the backoff at
+        // once, before `onconflict` runs.
+        await delayUnlessAborted(randomIntFromRange(0, 1500), [fetchSignal])
         throwIfAborted(fetchSignal)
       }
       const value = body.kind === 'present' ? body.parsed : undefined
@@ -3222,26 +3226,46 @@ export default sbp('sbp/selectors/register', {
             // Without `onconflict` the conflict can't be resolved at all;
             // report it like running out of attempts.
             if (!hasOnconflict || --maxAttempts <= 0) {
-              // Report what is known about the server value: one that is
-              // ahead as such, otherwise the last value that was decoded.
-              // Not "ahead" without a handler: no height recovery can make
-              // a write that conflicts without a merge succeed, so callers
-              // that recover (`queuedSet`) mustn't sync for it.
-              const last = await readServerValue(false).catch(() => undefined)
+              // Report what the last response says about the server value,
+              // with that response's etag: one that is ahead as such,
+              // otherwise its status and (when known) its value. Not
+              // "ahead" without a handler: no height recovery can make a
+              // write that conflicts without a merge succeed, so callers
+              // that recover (`queuedSet`) mustn't sync for it. A failed
+              // read isn't a conflict when the call was aborted.
+              const last = await readServerValue(false).catch(() => {
+                throwIfAborted(fetchSignal)
+                return undefined
+              })
               if (hasOnconflict && last?.body.kind === 'ahead') {
                 throw heightAheadError(
                   last.body.requiredHeight, true, conflictEtag, response.status
                 )
               }
+              let currentStatus: KvServerValueStatus | undefined = last?.body.kind
               let currentData: JSONType | undefined
-              try {
-                currentData = lastRecoveredValue?.data
-              } catch {}
+              if (last?.body.kind === 'present') {
+                try {
+                  currentData = last.body.parsed.data
+                } catch {
+                  currentStatus = undefined
+                }
+              }
               throw new ChelErrorKvMaxAttempts(
                 hasOnconflict
                   ? 'kv/set conflict setting KV value'
                   : `kv/set failed with status ${response.status} and no onconflict handler was provided`,
-                { cause: { currentData, etag: conflictEtag ?? null } }
+                {
+                  cause: {
+                    // Only when the value is known: present (and decoded),
+                    // or absent.
+                    ...((currentStatus === 'present' || currentStatus === 'absent') && {
+                      currentData
+                    }),
+                    currentStatus,
+                    etag: (last ? last.etag : conflictEtag) ?? null
+                  }
+                }
               )
             }
             // Honour an abort (the caller's, or `chelonia/reset`'s) at every
@@ -3293,9 +3317,10 @@ export default sbp('sbp/selectors/register', {
     // to wait for; a malformed height stamp is reported as the invalid
     // value it is (`ChelErrorInvalidMessageHeight`).
     const body = classifyKvValue(this, contractID, key, await response.json())
+    if (body.kind === 'malformed') throw body.error
     if (body.kind === 'ahead') {
       throw kvHeightAheadError(this, contractID, key, {
-        requiredHeight: body.requiredHeight, exact: true, etag, status: response.status
+        requiredHeight: body.requiredHeight, exact: true, etag, httpStatus: response.status
       })
     }
     const parsed = body.parsed
@@ -3421,16 +3446,28 @@ function responseEtag (response: Response): string | null {
 
 // Classifies a parsed server KV value. A value stamped with a height the
 // local contract hasn't reached is `ahead`: it cannot be verified yet, and
-// its (unverified) height stamp says how far the contract must advance.
-// Otherwise the value is parsed (verification stays lazy, on `.data`). A
-// malformed height stamp throws `ChelErrorInvalidMessageHeight`.
+// its (unverified) height stamp says how far the contract must advance. A
+// missing or malformed height stamp is `malformed`, with a
+// `ChelErrorInvalidMessageHeight` that names the key (its `cause` is the
+// stamp error). Otherwise the value is parsed (verification stays lazy, on
+// `.data`).
 function classifyKvValue<T> (
   ctx: CheloniaContext,
   contractID: string,
   key: string,
   serializedData: unknown
-): Extract<KvServerValue<T>, { kind: 'present' | 'ahead' }> {
-  const height = readHeightStamp(serializedData)
+): Exclude<KvServerValue<T>, { kind: 'absent' }> {
+  let height: number
+  try {
+    height = readHeightStamp(serializedData)
+  } catch (e) {
+    return {
+      kind: 'malformed',
+      error: new ChelErrorInvalidMessageHeight(
+        `[chelonia/kv] ${contractID}::${key}: ${(e as Error).message}`, { cause: e }
+      )
+    }
+  }
   if (!isHeightReached(ctx, contractID, height)) {
     return { kind: 'ahead', requiredHeight: height }
   }
