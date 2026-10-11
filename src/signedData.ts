@@ -168,10 +168,14 @@ const verifySignatureData = function <T, U extends object = object> (
     // never replace the real error, so a state that can't be serialized is
     // only reported. The lookup is only an existence check: the state is
     // read through `sbp`, so that the selector's filters and `this` apply.
+    // It only finds a selector registered under its own name: one that a
+    // star selector (e.g. `state/*`) provides isn't detected, so the switch
+    // stays off for it.
+    const message = `Key ${sKeyId} is unauthorized or expired for the current contract`
     const hasVuexState = !!process.env.CI && !!sbp('sbp/selectors/fn', 'state/vuex/state')
     if (hasVuexState) {
       try {
-        console.error(`Key ${sKeyId} is unauthorized or expired for the current contract`, {
+        console.error(message, {
           designatedKey,
           height,
           state: JSON.parse(JSON.stringify(sbp('state/vuex/state')))
@@ -180,15 +184,9 @@ const verifySignatureData = function <T, U extends object = object> (
         console.error('[chelonia] could not serialize the app state for diagnostics', e)
       }
       // An unhandled promise rejection will cause Cypress to fail
-      Promise.reject(
-        new ChelErrorSignatureKeyUnauthorized(
-          `Key ${sKeyId} is unauthorized or expired for the current contract`
-        )
-      )
+      Promise.reject(new ChelErrorSignatureKeyUnauthorized(message))
     }
-    throw new ChelErrorSignatureKeyUnauthorized(
-      `Key ${sKeyId} is unauthorized or expired for the current contract`
-    )
+    throw new ChelErrorSignatureKeyUnauthorized(message)
   }
 
   // TODO

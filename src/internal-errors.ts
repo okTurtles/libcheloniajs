@@ -2,6 +2,7 @@
 // intentionally kept out of `src/errors.ts` (and therefore out of the
 // package-root `export *`) so that adding new internal error types
 // does not widen the public taxonomy.
+import { hasErrorName } from './error-names.js'
 import { ChelErrorGenerator } from './errors.js'
 
 // Thrown by the low-level `chelonia/kv/set` primitive when the
@@ -26,6 +27,6 @@ export const ChelErrorKvMaxAttempts = ChelErrorGenerator('ChelErrorKvMaxAttempts
 // it survives a dual ESM/CJS or cross-realm load of `@chelonia/lib` where
 // `instanceof` would fail. Matches any object with that name (as
 // `isKvConflict` in `src/errors.ts` does).
-export function isKvMaxAttempts (e: unknown): boolean {
-  return !!e && typeof e === 'object' && (e as Error).name === 'ChelErrorKvMaxAttempts'
+export function isKvMaxAttempts (e: unknown): e is Error & { name: 'ChelErrorKvMaxAttempts' } {
+  return hasErrorName(e, 'ChelErrorKvMaxAttempts')
 }

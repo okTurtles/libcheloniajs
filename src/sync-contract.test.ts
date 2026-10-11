@@ -191,6 +191,8 @@ describe('a re-sync that fails', () => {
     await sbp('chelonia/contract/release', contractID)
     assert.ok(!(contractID in rootState().contracts))
     assert.ok(!(contractID in rootState()))
+    // Its removal is announced once, by the failed re-sync or the release.
+    assert.deepStrictEqual(removed, [contractID])
   })
 })
 
@@ -268,7 +270,7 @@ describe('a KV height recovery racing a release', () => {
     const lane = holdLane()
     const releasing = sbp('chelonia/contract/release', contractID)
     let attempts = 0
-    const recovering = sbp('chelonia/kv/_withHeightRecovery', contractID, async () => {
+    const recovering = sbp('chelonia/kv/withHeightRecovery', contractID, async () => {
       attempts++
       throw new ChelErrorKvHeightAhead('[test] ahead', {
         cause: { requiredHeight: 5, exact: true, localHeight: 0, etag: null, httpStatus: 412 }

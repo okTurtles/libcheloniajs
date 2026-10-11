@@ -23,6 +23,7 @@ import { CHELONIA_KV_STATUS_CHANGED } from './events.js'
 import { KV_NOOP } from './kv-constants.js'
 import {
   captureConsole,
+  logged,
   makeKvServer,
   restoreKvTestStubs,
   setLocalHeight as setContractHeight,
@@ -67,7 +68,8 @@ const makeServer = (initialHeight: number) => {
     // server height (as processing the missing events would).
     catchUpOnSync: false,
     syncs: 0,
-    onSync: null as (() => Promise<void> | void) | null,
+    // Called with the sync request's abort signal.
+    onSync: null as ((signal?: AbortSignal) => Promise<void> | void) | null,
     // Test oracle: what a fully-synced device reads from the server.
     value: (key: string): any => {
       const stored = kv.store.get(key)
@@ -86,7 +88,7 @@ const makeServer = (initialHeight: number) => {
       opts.signal?.throwIfAborted()
       if (pathname.startsWith('/latestHEADinfo/')) {
         server.syncs++
-        await server.onSync?.()
+        await server.onSync?.(opts.signal)
         opts.signal?.throwIfAborted()
         if (server.catchUpOnSync) setLocalHeight(server.height)
         // After `chelonia/reset` the contract has no local state.
@@ -111,6 +113,7 @@ export let server: ReturnType<typeof makeServer>
 export let cskId: string
 export let cekId: string
 export let warnings: unknown[][]
+export let errors: unknown[][]
 export let debugs: unknown[][]
 const offs: Array<() => void> = []
 let restoreConsole: () => void = () => {}
@@ -211,8 +214,10 @@ export const failKvGets = (n: number, status = 500, when: () => boolean = () => 
 // begins within `ms`. Later syncs aren't held. `release` before the sync
 // starts cancels the hold and rejects `started`; a hold the test leaves is
 // released after it, so it can't block the contract's lane for the next
-// tests.
-export const holdNextSync = (ms = 3000) => {
+// tests. Like a real request, the held sync rejects with the abort reason
+// as soon as its request's signal (the session's, which `chelonia/reset`
+// aborts) or `signal` aborts.
+export const holdNextSync = (ms = 3000, { signal }: { signal?: AbortSignal } = {}) => {
   let resolveSync: (() => void) | undefined
   let signalStarted!: () => void
   let rejectStarted!: (e: Error) => void
@@ -224,11 +229,28 @@ export const holdNextSync = (ms = 3000) => {
   })
   // Only a test that awaits `started` sees its rejection.
   started.catch(() => {})
-  const hold = () => new Promise<void>((resolve) => {
+  const hold = (requestSignal?: AbortSignal) => new Promise<void>((resolve, reject) => {
     server.onSync = null
     clearTimeout(timer)
-    resolveSync = resolve
+    const signals = [requestSignal, signal].filter((s): s is AbortSignal => !!s)
+    const onAbort = function (this: AbortSignal) {
+      unlisten()
+      reject(this.reason)
+    }
+    const unlisten = () => {
+      for (const s of signals) s.removeEventListener('abort', onAbort)
+    }
+    resolveSync = () => {
+      unlisten()
+      resolve()
+    }
     signalStarted()
+    const aborted = signals.find((s) => s.aborted)
+    if (aborted) {
+      reject(aborted.reason)
+      return
+    }
+    for (const s of signals) s.addEventListener('abort', onAbort, { once: true })
   })
   server.onSync = hold
   const release = () => {
@@ -280,7 +302,7 @@ export const later = (fn: () => void, ms: number): void => {
 
 // Resolves once a `console.warn` containing `text` was logged.
 export const untilWarned = (text: string, ms = 3000) => until(
-  () => warnings.some((w) => String(w[0]).includes(text)),
+  () => logged(warnings, text),
   `no warning containing "${text}"`,
   ms
 )
@@ -387,14 +409,20 @@ export const room = (hash: string, h: number, unread: any[] = []) => ({
 export const V0 = { roomA: room('a1', 1) }
 export const VB = { roomA: room('a1', 1), roomB: room('b1', 1) }
 
+// This device and the server are at height 40, and the slot for `key` has
+// loaded V0.
+export const loadV0At40 = async (key = UNREAD) => {
+  await writeAsDeviceB(key, V0, 40)
+  defineSlot({ key })
+  await activateContract()
+}
+
 // Common starting point: this device (A) and the server are at height 40
 // and A has loaded V0 (mirror etag E0). Then device B advances the contract
 // to 42 and writes VB. A's local contract is still at 40: its mirror etag
 // is stale and the server value is ahead of it.
 export const setupStaleDeviceA = async () => {
-  await writeAsDeviceB(UNREAD, V0, 40)
-  defineSlot({ key: UNREAD })
-  await activateContract()
+  await loadV0At40()
   assert.strictEqual(slotStatus(UNREAD), 'loaded')
   assert.deepStrictEqual(mirror(UNREAD).value, V0)
   const e0 = mirror(UNREAD).etag
@@ -415,7 +443,7 @@ export const installKvHeightHooks = () => {
     } as unknown as Partial<CheloniaConfig>)
     sbp('chelonia/kv/_testSetHeightTimings', TEST_TIMINGS)
     setupContract(40)
-    ;({ warnings, debugs, restore: restoreConsole } = captureConsole())
+    ;({ warnings, errors, debugs, restore: restoreConsole } = captureConsole())
     stubKvBackoff()
   })
 
@@ -430,11 +458,20 @@ export const installKvHeightHooks = () => {
   // drain, so that it can't run into the next test. A test that leaves work
   // stuck on a lane fails here.
   afterEach(async () => {
+    // Every teardown callback runs, even after one throws; their errors are
+    // reported once the cleanup is done.
+    const teardownErrors: unknown[] = []
     try {
       sbp('chelonia/kv/_assertIndexConsistent')
     } finally {
       try {
-        for (const off of offs.splice(0)) off()
+        for (const off of offs.splice(0)) {
+          try {
+            off()
+          } catch (e) {
+            teardownErrors.push(e)
+          }
+        }
         sbp('chelonia/kv/_clearHeightWaits')
         await within(drainLanes(), 'lanes drained after the test', 2000)
       } finally {
@@ -443,5 +480,7 @@ export const installKvHeightHooks = () => {
         sbp('chelonia/private/stopClockSync')
       }
     }
+    if (teardownErrors.length === 1) throw teardownErrors[0]
+    if (teardownErrors.length > 1) throw new AggregateError(teardownErrors, 'teardown callbacks threw')
   })
 }

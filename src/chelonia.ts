@@ -37,6 +37,7 @@ import {
 } from '@chelonia/crypto'
 import {
   ChelErrorInvalidMessageHeight,
+  ChelErrorKvHeightMalformed,
   ChelErrorResourceGone,
   ChelErrorUnexpected,
   ChelErrorUnexpectedHttpResponseCode,
@@ -115,12 +116,14 @@ import type { Options as PubSubOptions, PubSubClient } from './pubsub/index.js'
 // A server KV value as seen by this client (KV-REVAMPED.md §3.4). See
 // `classifyKvValue`. `malformed` is a value whose height stamp can never be
 // read; `kv/set` only reports it to blind writers (`allowUnverifiedConflict`)
-// and throws its `error` otherwise.
-type KvServerValue<T> =
+// and throws its `error` otherwise. `kind` is the value's
+// `KvServerValueStatus`.
+type KvServerValue<T> = { kind: KvServerValueStatus } & (
   | { kind: 'absent' }
   | { kind: 'present'; parsed: ParsedEncryptedOrUnencryptedMessage<T> }
   | { kind: 'ahead'; requiredHeight: number }
   | { kind: 'malformed'; error: Error }
+)
 
 // TODO: define ChelContractType for /defineContract
 
@@ -779,8 +782,17 @@ export default sbp('sbp/selectors/register', {
       result = await postCleanupFn?.()
     } catch (e) {
       // Nothing has been torn down yet, so this session goes on: it needs
-      // its height-deferred loads and height recovery back.
-      sbp('chelonia/kv/_resumeHeightSession')
+      // its height-deferred loads and height recovery back, and its clock
+      // sync. The caller gets the hook's (or the drain's) error, even if
+      // resuming fails too.
+      try {
+        sbp('chelonia/kv/_resumeHeightSession')
+      } catch (resumeError) {
+        console.error('[chelonia] reset: failed to resume the KV height session', resumeError)
+      }
+      if (this.pubsub) {
+        sbp('chelonia/private/startClockSync')
+      }
       throw e
     }
     // The following are all synchronous operations
@@ -798,6 +810,7 @@ export default sbp('sbp/selectors/register', {
     // cleared alongside `subscriptionSet` below (`clearKvRuntime`).
     this.config.reactiveSet(rootState, '_kv', Object.create(null))
     clearKvRuntime(this)
+    sbp('chelonia/kv/_finishHeightSession')
     clearObject(this.ephemeralReferenceCount)
     this.pending.splice(0)
     clearObject(this.currentSyncs)
@@ -827,6 +840,20 @@ export default sbp('sbp/selectors/register', {
       Object.entries(newState).forEach(([key, value]) => {
         this.config.reactiveSet(rootState, key, value)
       })
+      // No slot is active yet (no contract is subscribed), so a restored KV
+      // mirror entry's `settled` describes an earlier session: a store
+      // reading the raw flag mustn't take it for this one's.
+      const restoredKv = (rootState as ChelRootState)._kv
+      if (restoredKv && typeof restoredKv === 'object') {
+        for (const perContract of Object.values(restoredKv)) {
+          if (!perContract || typeof perContract !== 'object') continue
+          for (const entry of Object.values(perContract)) {
+            if (entry && typeof entry === 'object' && entry.settled !== false) {
+              this.config.reactiveSet(entry, 'settled', false)
+            }
+          }
+        }
+      }
     }
     return result
   },
@@ -1236,7 +1263,7 @@ export default sbp('sbp/selectors/register', {
             //
             // A malformed height stamp is thrown and logged below. A slot
             // for the key reloads it then, so that it ends up as a load
-            // would: `'error'` with `ChelErrorInvalidMessageHeight` when
+            // would: `'error'` with `ChelErrorKvHeightMalformed` when
             // the stored value is malformed, or the current value when the
             // frame was a stale one. Not awaited: `_loadSlot` queues on
             // this same lane, and records its outcome on the slot.
@@ -1254,24 +1281,32 @@ export default sbp('sbp/selectors/register', {
             }
             if (frame.kind === 'ahead') {
               const height = frame.requiredHeight
-              if (this.kvSlotsByContractID.get(msg.channelID)?.has(msg.key)) {
-                console.debug(
-                  `[chelonia] kv pubsub frame for ${msg.channelID}::${msg.key} was written at ` +
-                  `height ${height}, ahead of local state; reloading the slot once the contract ` +
-                  'catches up'
+              const hasSlot = !!this.kvSlotsByContractID.get(msg.channelID)?.has(msg.key)
+              // Whenever a raw handler misses a frame, say so, slot or not:
+              // the slot reloads its own copy, not the raw handler's.
+              if (rawKvHandler) {
+                console.warn(
+                  `[chelonia] dropping kv pubsub frame for ${msg.channelID}::${msg.key}: written ` +
+                  `at height ${height}, ahead of local state. The raw KV handler is not called ` +
+                  'for such frames' + (hasSlot
+                    ? '; the slot reloads the key once the contract catches up'
+                    : '; define a slot for the key to have it reloaded')
                 )
+              }
+              if (hasSlot) {
+                if (!rawKvHandler) {
+                  console.debug(
+                    `[chelonia] kv pubsub frame for ${msg.channelID}::${msg.key} was written at ` +
+                    `height ${height}, ahead of local state; reloading the slot once the ` +
+                    'contract catches up'
+                  )
+                }
                 sbp('chelonia/kv/_registerHeightWait', {
                   contractID: msg.channelID,
                   key: msg.key,
                   requiredHeight: height,
                   reason: 'remote'
                 })
-              } else if (rawKvHandler) {
-                console.warn(
-                  `[chelonia] dropping kv pubsub frame for ${msg.channelID}::${msg.key}: written ` +
-                  `at height ${height}, ahead of local state. The raw KV handler is not called ` +
-                  'for such frames; define a slot for the key to have it reloaded'
-                )
               }
               return
             }
@@ -2947,10 +2982,12 @@ export default sbp('sbp/selectors/register', {
       // Call `onconflict` with `currentStatus: 'ahead'` (and a `currentData`
       // getter that throws `ChelErrorKvHeightAhead`) when the conflicting
       // server value cannot be verified yet, and with `currentStatus:
-      // 'malformed'` (a getter that throws `ChelErrorInvalidMessageHeight`)
+      // 'malformed'` (a getter that throws `ChelErrorKvHeightMalformed`)
       // when its height stamp is malformed, so that it can never be
       // verified, instead of rejecting. For blind writes that don't depend
-      // on the current value.
+      // on the current value: such a value is neither waited for, nor
+      // reported as `ChelErrorKvHeightAhead` when the attempts run out (that
+      // is a conflict, as for any other value).
       allowUnverifiedConflict?: boolean;
       // The longest passive wait for the local contract to reach a height
       // the server requires (a `409`, or a conflicting value that is
@@ -3015,7 +3052,8 @@ export default sbp('sbp/selectors/register', {
       })
     // Classifies a server value (see `KvServerValue`). A value that is ahead is
     // first given a bounded, passive wait for the local contract to catch up
-    // (only when `wait` is set). An empty body means there is no stored
+    // (only when `wait` is set, and never for a blind writer, which doesn't
+    // depend on the value). An empty body means there is no stored
     // value. A malformed height stamp throws, unless the caller writes
     // blindly (`allowUnverifiedConflict`): such a value can never be
     // verified, so overwriting it is the only way to recover the key.
@@ -3031,7 +3069,7 @@ export default sbp('sbp/selectors/register', {
         return value
       }
       const body = classify()
-      if (body.kind !== 'ahead' || !wait) return body
+      if (body.kind !== 'ahead' || !wait || allowUnverifiedConflict) return body
       await waitForHeight(body.requiredHeight)
       return classify()
     }
@@ -3231,15 +3269,18 @@ export default sbp('sbp/selectors/register', {
               // otherwise its status and (when known) its value. Not
               // "ahead" without a handler: no height recovery can make a
               // write that conflicts without a merge succeed, so callers
-              // that recover (`queuedSet`) mustn't sync for it. A failed
+              // that recover (`queuedSet`) mustn't sync for it. Nor for a
+              // blind writer (`allowUnverifiedConflict`): its merge doesn't
+              // depend on the value, so a recovery can't help it either, and
+              // running out of attempts is plain contention. A failed
               // read isn't a conflict when the call was aborted.
               const last = await readServerValue(false).catch(() => {
                 throwIfAborted(fetchSignal)
                 return undefined
               })
-              if (hasOnconflict && last?.body.kind === 'ahead') {
+              if (hasOnconflict && !allowUnverifiedConflict && last?.body.kind === 'ahead') {
                 throw heightAheadError(
-                  last.body.requiredHeight, true, conflictEtag, response.status
+                  last.body.requiredHeight, true, last.etag, response.status
                 )
               }
               let currentStatus: KvServerValueStatus | undefined = last?.body.kind
@@ -3315,7 +3356,7 @@ export default sbp('sbp/selectors/register', {
     // A value written at a height the local contract hasn't reached can't be
     // verified yet (KV-REVAMPED.md §3.4). Report it as such, with the height
     // to wait for; a malformed height stamp is reported as the invalid
-    // value it is (`ChelErrorInvalidMessageHeight`).
+    // value it is (`ChelErrorKvHeightMalformed`).
     const body = classifyKvValue(this, contractID, key, await response.json())
     if (body.kind === 'malformed') throw body.error
     if (body.kind === 'ahead') {
@@ -3448,9 +3489,10 @@ function responseEtag (response: Response): string | null {
 // local contract hasn't reached is `ahead`: it cannot be verified yet, and
 // its (unverified) height stamp says how far the contract must advance. A
 // missing or malformed height stamp is `malformed`, with a
-// `ChelErrorInvalidMessageHeight` that names the key (its `cause` is the
-// stamp error). Otherwise the value is parsed (verification stays lazy, on
-// `.data`).
+// `ChelErrorKvHeightMalformed` that names the key (its `cause` is the stamp
+// error, also a `ChelErrorKvHeightMalformed`, so that no error in the cause
+// chain carries the generic `ChelErrorInvalidMessageHeight` name).
+// Otherwise the value is parsed (verification stays lazy, on `.data`).
 function classifyKvValue<T> (
   ctx: CheloniaContext,
   contractID: string,
@@ -3459,11 +3501,11 @@ function classifyKvValue<T> (
 ): Exclude<KvServerValue<T>, { kind: 'absent' }> {
   let height: number
   try {
-    height = readHeightStamp(serializedData)
+    height = readHeightStamp(serializedData, ChelErrorKvHeightMalformed)
   } catch (e) {
     return {
       kind: 'malformed',
-      error: new ChelErrorInvalidMessageHeight(
+      error: new ChelErrorKvHeightMalformed(
         `[chelonia/kv] ${contractID}::${key}: ${(e as Error).message}`, { cause: e }
       )
     }

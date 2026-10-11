@@ -133,7 +133,8 @@ Often the source file's default export is an array of the selector names it regi
 | `chelonia/journal/*` | `journal.ts` | Public journal API — get, reconstruct, clear |
 | `chelonia/private/journal/*` | `journal.ts` | Internal journal recorder — recordEvent |
 | `chelonia/kv/queuedSet` | `chelonia-utils.ts` | Optional queued raw KV setter |
-| `chelonia/kv/{defineSlot,update,read,sync,clear,status,whenSettled,refreshFilters}` | `kv.ts` | KV slots — declarative typed key/value API |
+| `chelonia/kv/{defineSlot,update,read,sync,clear,status,settledStatus,whenSettled,refreshFilters}` | `kv.ts` | KV slots — declarative typed key/value API |
+| `chelonia/kv/withHeightRecovery` | `kv.ts` | Height recovery (sync and retry) around raw `kv/get` / `kv/set` calls |
 | `chelonia/externalStateSetup` | `local-selectors/` | External state synchronization |
 
 #### Key Public Selectors
@@ -222,8 +223,10 @@ Full documentation:
 - Selector reference and events: [docs/api.md](docs/api.md#kv-slots)
 - Public selectors: `chelonia/kv/defineSlot`, `chelonia/kv/update`,
   `chelonia/kv/read`, `chelonia/kv/sync`, `chelonia/kv/clear`,
-  `chelonia/kv/status`, `chelonia/kv/whenSettled`,
-  `chelonia/kv/refreshFilters`
+  `chelonia/kv/status`, `chelonia/kv/settledStatus`,
+  `chelonia/kv/whenSettled`, `chelonia/kv/refreshFilters`, and
+  `chelonia/kv/withHeightRecovery` (the slots' height recovery, for raw
+  `kv/get` / `kv/set` calls)
 - Contract heights: a KV value can only be verified once the local
   contract has reached the height it was written at, and the server only
   accepts writes stamped with its current height. Never treat an
@@ -231,12 +234,13 @@ Full documentation:
   [docs/kv.md](docs/kv.md#contract-heights) and
   [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-and-verifiability).
   Detect the resulting error with `isKvHeightAhead(e)` (`src/errors.ts`),
-  not with `instanceof` and not by comparing `e.name` yourself. From the
-  KV selectors, the old `'ChelErrorInvalidMessageHeight'` name now only
-  means a malformed stamp; lower-level parsing
-  (`chelonia/parseEncryptedOrUnencryptedDetachedMessage`) still throws it
-  for a value that is ahead. Likewise `isKvConflict(e)` for a conflict
-  that ran out of attempts.
+  not with `instanceof` and not by comparing `e.name` yourself. A value
+  whose stamp is missing or malformed (it can never be verified; syncing
+  doesn't help) is `isKvHeightMalformed(e)`. The KV selectors never reject
+  with the old `'ChelErrorInvalidMessageHeight'` name any more; lower-level
+  parsing (`chelonia/parseEncryptedOrUnencryptedDetachedMessage`) still
+  throws it, both for a value that is ahead and for a malformed stamp.
+  Likewise `isKvConflict(e)` for a conflict that ran out of attempts.
 
 ### Contract State Structure
 

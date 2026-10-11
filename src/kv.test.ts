@@ -26,6 +26,7 @@ import {
 import { KV_ECHO_CID_MAX, KV_ECHO_TTL_MS, KV_KEY_SEPARATOR } from './kv-constants.js'
 import { clearKvRuntime, initKvRuntime } from './kv-runtime.js'
 import { KV_NOOP } from './kv.js'
+import { captureConsole, logged } from './test-utils.js'
 import type {
   ChelKvGetResult,
   ChelRootState,
@@ -210,6 +211,7 @@ sbp('sbp/selectors/register', {
     reactiveDel(s, '_kv')
     reactiveSet(s, '_kv', Object.create(null))
     clearKvRuntime(this)
+    sbp('chelonia/kv/_finishHeightSession')
     this.subscriptionSet.clear()
   },
 
@@ -1356,29 +1358,28 @@ describe('KV slot API', () => {
   // 24
   // -----------------------------------------------------------------------
   it('24: async onUpdate rejection caught', async () => {
-    const origError = console.error
-    const errs: unknown[] = []
-    console.error = (...a: unknown[]) => errs.push(a)
+    const { errors, restore } = captureConsole()
+    try {
+      sbp('chelonia/kv/defineSlot', {
+        key: 'bc',
+        contractType: CTYPE,
+        defaultValue: { x: 0 },
+        schema: objectSchema,
+        onUpdate: async () => { throw new Error('boom') }
+      })
+      const c = 'cid-24'
+      await setupContract(c)
 
-    sbp('chelonia/kv/defineSlot', {
-      key: 'bc',
-      contractType: CTYPE,
-      defaultValue: { x: 0 },
-      schema: objectSchema,
-      onUpdate: async () => { throw new Error('boom') }
-    })
-    const c = 'cid-24'
-    await setupContract(c)
+      sbp('chelonia/kv/_handleRemote', c, 'bc', fakeParsed({ x: 5 }))
+      await new Promise((resolve) => setTimeout(resolve, 0))
 
-    sbp('chelonia/kv/_handleRemote', c, 'bc', fakeParsed({ x: 5 }))
-    await new Promise((resolve) => setTimeout(resolve, 0))
-
-    assert.deepStrictEqual(
-      (rootState()._kv![c]!.bc as { value: unknown }).value, { x: 5 }
-    )
-    assert.ok(errs.length > 0)
-
-    console.error = origError
+      assert.deepStrictEqual(
+        (rootState()._kv![c]!.bc as { value: unknown }).value, { x: 5 }
+      )
+      assert.ok(errors.length > 0)
+    } finally {
+      restore()
+    }
   })
 
   // -----------------------------------------------------------------------
@@ -2619,9 +2620,7 @@ describe('KV slot API', () => {
     const c = 'cid-44d'
     await setupContract(c)
 
-    const originalWarn = console.warn
-    const warnings: unknown[][] = []
-    console.warn = (...args: unknown[]) => { warnings.push(args) }
+    const { warnings, restore } = captureConsole()
     stubSet = async () => ({ etag: null })
     try {
       await sbp('chelonia/kv/update', {
@@ -2629,7 +2628,7 @@ describe('KV slot API', () => {
       })
       await sbp('chelonia/kv/clear', c, 'noEtag')
     } finally {
-      console.warn = originalWarn
+      restore()
     }
 
     assert.strictEqual(warnings.length, 2)
@@ -3627,13 +3626,11 @@ describe('KV slot API', () => {
       getCalls++
       throw new Error('network down')
     }
-    const errs: unknown[][] = []
-    const origError = console.error
-    console.error = (...args: unknown[]) => { errs.push(args) }
+    const { errors: errs, restore } = captureConsole()
     try {
       await sbp('chelonia/kv/_handleRemote', c, 'preserveErr', fakeParsed({ x: 1 }), 'e-remote')
     } finally {
-      console.error = origError
+      restore()
     }
 
     assert.strictEqual(getCalls, 1)
@@ -3643,7 +3640,7 @@ describe('KV slot API', () => {
     assert.deepStrictEqual(rootState()._kv![c]!.preserveErr.value, { x: 3 })
     assert.deepStrictEqual(sbp('chelonia/kv/read', c, 'preserveErr'), { x: 3 })
     // The failure was logged and the conflict markers demoted.
-    assert.ok(errs.some((a) => String(a[0]).includes('conflict-resolution GET failed')))
+    assert.ok(logged(errs, 'conflict-resolution GET failed'))
     assert.strictEqual(
       sbp('chelonia/test/echoCIDFromConflict', `${c}::preserveErr`, 'e-local'), false
     )
@@ -3779,16 +3776,14 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     stubGet = async () => { throw new Error('agg load down') }
-    const errs: unknown[][] = []
-    const origError = console.error
-    console.error = (...args: unknown[]) => { errs.push(args) }
+    const { errors, restore } = captureConsole()
     try {
       // Aggregate form (no key) must resolve even though the load fails.
       await sbp('chelonia/kv/sync', c)
     } finally {
-      console.error = origError
+      restore()
     }
-    assert.ok(errs.some((a) => String(a[0]).includes('aggregate sync')))
+    assert.ok(logged(errors, 'aggregate sync'))
   })
 
   it('64d: clear conflict exhaustion reports server currentData', async () => {
@@ -3817,7 +3812,7 @@ describe('KV slot API', () => {
     )
   })
 
-  it('64e: clear conflict exhaustion falls back to null without server data', async () => {
+  it('64e: clear conflict exhaustion without server data reports only the etag', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'clearNoData', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
     })
@@ -3834,10 +3829,10 @@ describe('KV slot API', () => {
       () => sbp('chelonia/kv/clear', c, 'clearNoData'),
       (e: unknown) => {
         assert.ok(e instanceof ChelErrorKvConflict)
-        // `kv/set` didn't report the value (no `currentData` key), so the
-        // fallback is used, value and etag together: `null` (clear's
-        // intended write value) and no etag (no `onconflict` ran).
-        assert.deepStrictEqual(e.cause, { currentData: null, etag: null })
+        // `kv/set` didn't report the value (no `currentData` key): the
+        // cause is what it reported, the last response's etag, with no
+        // made-up value.
+        assert.deepStrictEqual(e.cause, { etag: 'e-final' })
         return true
       }
     )
@@ -3879,7 +3874,7 @@ describe('KV slot API', () => {
     assert.deepStrictEqual(sbp('chelonia/kv/read', c, 'clrDecode'), { x: 0 })
   })
 
-  it('64g: clear conflict exhaustion with undecodable server data falls back to null', async () => {
+  it('64g: clear conflict exhaustion with undecodable server data reports the last response', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'clrDecodeExhaust', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
     })
@@ -3900,10 +3895,10 @@ describe('KV slot API', () => {
       () => sbp('chelonia/kv/clear', c, 'clrDecodeExhaust'),
       (e: unknown) => {
         assert.ok(e instanceof ChelErrorKvConflict)
-        // Server data couldn't be captured (getter threw), and `kv/set`
-        // didn't report a value, so the fallback pair is used: `null`,
-        // clear's intended write value, with the etag `onconflict` saw.
-        assert.deepStrictEqual(e.cause, { currentData: null, etag: 'e-clr' })
+        // Server data couldn't be decoded, and `kv/set` didn't report a
+        // value: the cause is the last response's etag, not the one
+        // `onconflict` saw an attempt earlier.
+        assert.deepStrictEqual(e.cause, { etag: 'e-final' })
         return true
       }
     )

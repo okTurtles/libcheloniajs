@@ -11,10 +11,12 @@
 //   - waiting, passively, for the local contract to reach a height (nothing
 //     is added to any queue, so a wait never creates a lane dependency);
 //   - recovering from `ChelErrorKvHeightAhead` by force-syncing the contract
-//     outside any queue lane and retrying the operation.
+//     (on its internal lane; the operation waits for that sync holding no
+//     lane) and retrying the operation.
 //
 // Everything here is internal: this module is deliberately not re-exported
-// from `src/index.ts`.
+// from `src/index.ts` (the recovery is public as the
+// `chelonia/kv/withHeightRecovery` selector, in `src/kv.ts`).
 
 import sbp from '@sbp/sbp'
 import {
@@ -121,7 +123,8 @@ const CANONICAL_HEIGHT = /^(?:0|[1-9][0-9]*)$/
 
 // Reads the height stamp of a serialized message (a KV value, or any other
 // message parsed by `parseEncryptedOrUnencryptedMessage`) without verifying
-// it. Throws `ChelErrorInvalidMessageHeight` for a missing or malformed
+// it. Throws `ErrorClass` (`ChelErrorInvalidMessageHeight` by default; the
+// KV paths pass `ChelErrorKvHeightMalformed`) for a missing or malformed
 // stamp: such a value can never become verifiable, so it must not be
 // mistaken for "not yet verifiable" (or, as before, for "absent").
 //
@@ -131,7 +134,10 @@ const CANONICAL_HEIGHT = /^(?:0|[1-9][0-9]*)$/
 // `Number(stamp)` against its contract height, so a stamp that parses to a
 // different height elsewhere (`parseInt("1e1")` is 1) could get a value
 // verified against a key window the server never checked.
-export function readHeightStamp (serializedData: unknown): number {
+export function readHeightStamp (
+  serializedData: unknown,
+  ErrorClass: new (message: string) => Error = ChelErrorInvalidMessageHeight
+): number {
   const raw = (serializedData as { height?: unknown } | null | undefined)?.height
   const height = typeof raw === 'number'
     ? raw
@@ -139,11 +145,32 @@ export function readHeightStamp (serializedData: unknown): number {
       ? Number(raw)
       : NaN
   if (!Number.isSafeInteger(height) || height < 0) {
-    throw new ChelErrorInvalidMessageHeight(
+    throw new ErrorClass(
       `[chelonia] Invalid height stamp ${JSON.stringify(raw)}`
     )
   }
   return height
+}
+
+// What a `ChelErrorKvHeightAhead` for `(contractID, key)` says: the
+// height the server requires, and the local contract's. Also the message
+// of a slot's `lastError` when its deferred load gives up.
+export function kvHeightAheadMessage (
+  ctx: CheloniaContext,
+  contractID: string,
+  key: string,
+  { requiredHeight, exact }: Pick<KvHeightAheadCause, 'requiredHeight' | 'exact'>
+): string {
+  const localHeight = localContractHeight(ctx, contractID)
+  // `exact: false` comes from a 409, which may carry no stored value at all:
+  // the height is then only a lower bound for the server's contract height.
+  const required = exact
+    ? `the server value was written at contract height ${requiredHeight}`
+    : `the server requires a contract height of at least ${requiredHeight}`
+  const local = localHeight === undefined
+    ? 'is not loaded'
+    : `is at height ${localHeight}`
+  return `[chelonia/kv] ${contractID}::${key}: ${required}, but the local contract ${local}`
 }
 
 export function kvHeightAheadError (
@@ -154,17 +181,9 @@ export function kvHeightAheadError (
 ): Error & { cause: KvHeightAheadCause } {
   const localHeight = localContractHeight(ctx, contractID)
   const cause: KvHeightAheadCause = { requiredHeight, exact, localHeight, etag, httpStatus }
-  // `exact: false` comes from a 409, which may carry no stored value at all:
-  // the height is then only a lower bound for the server's contract height.
-  const required = exact
-    ? `the server value was written at contract height ${requiredHeight}`
-    : `the server requires a contract height of at least ${requiredHeight}`
-  const local = localHeight === undefined
-    ? 'is not loaded'
-    : `is at height ${localHeight}`
   return new ChelErrorKvHeightAhead(
-    `[chelonia/kv] ${contractID}::${key}: ${required}, but the local contract ` +
-    `${local}; sync the contract and retry`,
+    `${kvHeightAheadMessage(ctx, contractID, key, { requiredHeight, exact })}; ` +
+    'sync the contract and retry',
     { cause }
   ) as Error & { cause: KvHeightAheadCause }
 }
@@ -180,6 +199,40 @@ export function abortReason (signal: AbortSignal): unknown {
 
 export function throwIfAborted (signal?: AbortSignal): void {
   if (signal?.aborted) throw abortReason(signal)
+}
+
+// Settles as `promise` does, unless one of `signals` aborts first (or
+// already has): it then rejects with the abort reason. `promise` keeps
+// running (e.g. a slot load, which records its outcome on the slot); once
+// abandoned, its rejection is handled.
+export function raceAbort<T> (
+  promise: Promise<T>,
+  signals: Array<AbortSignal | undefined>
+): Promise<T> {
+  const active = signals.filter((s): s is AbortSignal => !!s)
+  if (active.length === 0) return promise
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => {
+      for (const s of active) s.removeEventListener('abort', onAbort)
+    }
+    const abandon = (signal: AbortSignal) => {
+      cleanup()
+      promise.catch(() => {})
+      reject(abortReason(signal))
+    }
+    // Only called by an `abort` event, so one of the signals is aborted.
+    const onAbort = () => abandon(active.find((s) => s.aborted)!)
+    const aborted = active.find((s) => s.aborted)
+    if (aborted) {
+      abandon(aborted)
+      return
+    }
+    for (const s of active) s.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => { cleanup(); resolve(value) },
+      (e) => { cleanup(); reject(e) }
+    )
+  })
 }
 
 // Registers `fire` to run (once) when the local height of `contractID`
@@ -211,7 +264,9 @@ export function addHeightListener (
 // `handleEvent.applyProcessResult`, whether or not processing the event
 // succeeded). Fires, synchronously, every listener whose target is reached.
 // Listeners must not throw and must not block: they only resolve promises
-// or schedule work.
+// or schedule work. A listener may remove another (or replace the set):
+// one removed while this runs is skipped, and the map entry is only
+// dropped while it is still this set.
 export function notifyContractHeight (
   ctx: CheloniaContext,
   contractID: string,
@@ -220,7 +275,7 @@ export function notifyContractHeight (
   const listeners = ctx.kvHeightListeners.get(contractID)
   if (!listeners) return
   for (const listener of Array.from(listeners)) {
-    if (height < listener.minHeight) continue
+    if (height < listener.minHeight || !listeners.has(listener)) continue
     listeners.delete(listener)
     try {
       listener.fire()
@@ -228,7 +283,9 @@ export function notifyContractHeight (
       console.error(`[chelonia/kv] height listener for ${contractID} threw`, e)
     }
   }
-  if (listeners.size === 0) ctx.kvHeightListeners.delete(contractID)
+  if (listeners.size === 0 && ctx.kvHeightListeners.get(contractID) === listeners) {
+    ctx.kvHeightListeners.delete(contractID)
+  }
 }
 
 // Stops the fallback timer of a height-deferred load (see `src/kv.ts`,
@@ -247,9 +304,10 @@ export function dropHeightWait (ctx: CheloniaContext, waitKey: string, wait: KvH
 }
 
 // Drops every height-deferred load and height listener of `ctx`. Used by
-// `chelonia/kv/_clearHeightWaits` and by `clearKvRuntime`
-// (`kv-runtime.ts`), which must clear the context it is given rather than
-// the one the selectors are registered with.
+// `chelonia/kv/_endHeightSession`, the test-only
+// `chelonia/kv/_clearHeightWaits`, and `clearKvRuntime` (`kv-runtime.ts`),
+// which must clear the context it is given rather than the one the
+// selectors are registered with.
 export function clearHeightWaits (ctx: CheloniaContext): void {
   for (const [waitKey, wait] of Array.from(ctx.kvHeightWaits)) {
     dropHeightWait(ctx, waitKey, wait)
@@ -339,7 +397,8 @@ export function waitForContractHeight (
 // queue; callers MUST NOT hold the contract's public (`queueInvocation`)
 // lane, nor its internal lane (e.g. by awaiting from one of the
 // contract's `sideEffect`s), while awaiting it. The internal lane stalls
-// the sync until the recovery timeout (`recoveryTimeoutMs`).
+// the sync until the recovery timeout (`recoveryTimeoutMs`), and the
+// retried attempt, which queues on that lane too, then never runs.
 //
 // The subscription is checked again on the lane, right before syncing.
 // `chelonia/contract/release` only queues the removal on that same lane,
@@ -477,17 +536,24 @@ export function resolveHeightRecoveryOptions (
   }
 }
 
-// The `heightWaitMs` that an operation recovering with `options` (see
-// `withHeightRecovery`) passes to `chelonia/kv/set`. `0` when it will
-// recover anyway (sync the contract and retry): `kv/set` then rejects with
-// `ChelErrorKvHeightAhead` at once instead of first waiting passively for
-// the height, with the contract's lane held. `undefined` (the default
-// wait) with `onHeightAhead: 'reject'` or no recoveries, where that wait is
-// the write's only chance. `options` must be valid (they are once
+// The `heightWaitMs` that attempt number `recoveries` (counted from 0) of an
+// operation recovering with `options` (see `withHeightRecovery`) passes to
+// `chelonia/kv/set`. `0` when a recovery (sync the contract and retry)
+// follows: `kv/set` then rejects with `ChelErrorKvHeightAhead` at once
+// instead of first waiting passively for the height, with the contract's
+// lane held. `0` with `onHeightAhead: 'reject'` too: such a caller wants the
+// error fast (e.g. on a hot lane), as single-key `sync` does. `undefined`
+// (the default wait) for the last attempt of `'sync'`, where that wait is
+// the write's only chance; so `maxHeightRecoveries: 0` means "wait
+// passively, never sync". `options` must be valid (they are once
 // `withHeightRecovery` runs the attempt).
-export function kvSetHeightWaitMs (options: KvHeightRecoveryOptions): 0 | undefined {
+export function kvSetHeightWaitMs (
+  options: KvHeightRecoveryOptions,
+  recoveries: number
+): 0 | undefined {
   const { mode, maxRecoveries } = resolveHeightRecoveryOptions('kv/set', options)
-  return mode === 'reject' || maxRecoveries === 0 ? undefined : 0
+  if (mode === 'reject') return 0
+  return recoveries >= maxRecoveries ? undefined : 0
 }
 
 // Runs `attempt` and, while it rejects with `ChelErrorKvHeightAhead`, syncs

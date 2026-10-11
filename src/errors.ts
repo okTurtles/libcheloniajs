@@ -1,6 +1,7 @@
 // ugly boilerplate because JavaScript is stupid
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
 
+import { hasErrorName } from './error-names.js'
 import type { KvHeightAheadCause } from './types.js'
 
 type ErrorConstructorType = { new (...args: ConstructorParameters<typeof Error>): Error };
@@ -65,10 +66,22 @@ export const ChelErrorKvReentrant = ChelErrorGenerator('ChelErrorKvReentrant')
 // A KV value on the server was written at a contract height the local
 // contract has not reached, so it cannot be verified yet. Extends
 // `ChelErrorInvalidMessageHeight` so existing `instanceof` checks keep
-// matching, but its `name` differs: match it with `isKvHeightAhead`.
-// `.cause` is a `KvHeightAheadCause` (`src/types.ts`).
+// matching. Its `name` differs on purpose, as does that of
+// `ChelErrorKvHeightMalformed`: a name-based guard must not mistake either
+// error for the other (syncing helps one, never the other). Match it with
+// `isKvHeightAhead`. `.cause` is a `KvHeightAheadCause` (`src/types.ts`).
 export const ChelErrorKvHeightAhead = ChelErrorGenerator(
   'ChelErrorKvHeightAhead',
+  ChelErrorInvalidMessageHeight
+)
+// A KV value whose height stamp is missing or malformed: it can never be
+// verified, and syncing doesn't help (`clear` the key instead). Extends
+// `ChelErrorInvalidMessageHeight`, the name it had before, for `instanceof`;
+// match it with `isKvHeightMalformed`. Only the KV selectors throw it:
+// `chelonia/parseEncryptedOrUnencryptedDetachedMessage` keeps
+// `ChelErrorInvalidMessageHeight`, since it parses non-KV messages too.
+export const ChelErrorKvHeightMalformed = ChelErrorGenerator(
+  'ChelErrorKvHeightMalformed',
   ChelErrorInvalidMessageHeight
 )
 
@@ -76,11 +89,23 @@ export const ChelErrorKvHeightAhead = ChelErrorGenerator(
 // errors created by another loaded copy of the library (dual ESM/CJS
 // builds, bundles), where `instanceof` fails. It also matches a plain
 // `{ name, message }` object, such as a slot's `lastError`, although the
-// guard narrows to `Error`: only rely on `name`, `message` and `cause`
-// after it. `.cause` may be missing (a `lastError` keeps only the name and
-// message): read it with `kvHeightAheadCause`.
-export function isKvHeightAhead (e: unknown): e is Error & { cause?: KvHeightAheadCause } {
-  return !!e && typeof e === 'object' && (e as Error).name === 'ChelErrorKvHeightAhead'
+// guard narrows to `Error & { name }`: only rely on `name`, `message` and
+// `cause` after it. `.cause` may be missing (a `lastError` keeps only the
+// name and message): read it with `kvHeightAheadCause`.
+export function isKvHeightAhead (
+  e: unknown
+): e is Error & { name: 'ChelErrorKvHeightAhead'; cause?: KvHeightAheadCause } {
+  return hasErrorName(e, 'ChelErrorKvHeightAhead')
+}
+
+// Whether `e` is a `ChelErrorKvHeightMalformed`: a KV value whose height
+// stamp is missing or malformed. Name-based, like `isKvHeightAhead` (and,
+// like it, also true for a plain `{ name, message }` object such as a slot's
+// `lastError`). `.cause` is the stamp error.
+export function isKvHeightMalformed (
+  e: unknown
+): e is Error & { name: 'ChelErrorKvHeightMalformed' } {
+  return hasErrorName(e, 'ChelErrorKvHeightMalformed')
 }
 
 // The `.cause` of a `ChelErrorKvHeightAhead` (`undefined` for any other
@@ -97,11 +122,11 @@ export function kvHeightAheadCause (e: unknown): KvHeightAheadCause | undefined 
 // raw `chelonia/kv/set` rejects with. Name-based, like `isKvHeightAhead`
 // (and, like it, also true for a plain `{ name, message }` object such as a
 // slot's `lastError`).
-// `.cause`, when present, is `{ currentData, etag }` from one server
-// response (`update`, `clear`), plus `currentStatus` for raw `kv/set` and
-// `queuedSet`; `currentData` is omitted when the value is unknown.
-export function isKvConflict (e: unknown): e is Error {
-  if (!e || typeof e !== 'object') return false
-  const name = (e as Error).name
-  return name === 'ChelErrorKvConflict' || name === 'ChelErrorKvMaxAttempts'
+// `.cause`, when present, is `{ currentStatus, currentData, etag }` from the
+// last server response (`update` and `clear` normalize `currentData` for
+// the slot); `currentData` is omitted when the value is unknown.
+export function isKvConflict (
+  e: unknown
+): e is Error & { name: 'ChelErrorKvConflict' | 'ChelErrorKvMaxAttempts' } {
+  return hasErrorName(e, 'ChelErrorKvConflict', 'ChelErrorKvMaxAttempts')
 }

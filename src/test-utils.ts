@@ -248,16 +248,14 @@ export type KvLogEntry = {
 type KvStored = { body: string; cid: string }
 
 // Resolves with `held`, or rejects with the signal's reason if `signal` is
-// aborted first (as `fetch` does).
+// aborted first, or already is (as `fetch` does).
 const unlessAborted = (held: Promise<void>, signal?: AbortSignal): Promise<void> => {
   if (!signal) return held
+  if (signal.aborted) return Promise.reject(signal.reason)
   return new Promise<void>((resolve, reject) => {
     const onAbort = () => reject(signal.reason)
     signal.addEventListener('abort', onAbort, { once: true })
-    held.then(() => {
-      signal.removeEventListener('abort', onAbort)
-      resolve()
-    }, reject)
+    held.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
   })
 }
 

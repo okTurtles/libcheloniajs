@@ -339,7 +339,8 @@ export type KvHeightAheadCause = {
 // What `chelonia/kv/update`, `chelonia/kv/clear`, `chelonia/kv/queuedSet`
 // and single-key `chelonia/kv/sync` do when the server value is ahead of
 // the local contract: sync the contract outside the queue lane and try
-// again (`'sync'`, the default), or reject with `ChelErrorKvHeightAhead`.
+// again (`'sync'`, the default), or reject with `ChelErrorKvHeightAhead` at
+// once, without waiting passively for the height or syncing (`'reject'`).
 export type KvHeightAheadMode = 'sync' | 'reject';
 
 // A callback waiting for a contract to reach `minHeight`. See
@@ -692,6 +693,11 @@ export type CheloniaContext = {
   // registered again, parked ones as parked
   // (`chelonia/kv/_resumeHeightSession`). Runtime-only.
   kvSuspendedHeightWaits: Array<Pick<KvHeightWait, 'contractID' | 'key' | 'requiredHeight' | 'reason' | 'parked'>>;
+  // The pending `chelonia/kv/whenSettled` calls, keyed by
+  // `${contractID}::${key}`: the function that rejects each one, called
+  // when the slot it waits for is deactivated (it would never settle).
+  // Runtime-only.
+  kvSettleWaiters: Map<string, Set<(e: Error) => void>>;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
@@ -908,7 +914,7 @@ export type ChelKvOnConflictCallback = (args: {
    * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`, also
    * when `currentStatus` is `'present'`. When `currentStatus` is
    * `'ahead'` it throws `ChelErrorKvHeightAhead`, and when it is
-   * `'malformed'` it throws `ChelErrorInvalidMessageHeight`.
+   * `'malformed'` it throws `ChelErrorKvHeightMalformed`.
    * Access it inside a `try`/`catch` (falling back to `undefined` or
    * re-throwing as appropriate), or check `currentStatus` first and read
    * `currentValue.data` with the same precaution: `currentValue` is
@@ -925,7 +931,7 @@ export type ChelKvOnConflictCallback = (args: {
  * `KvServerValueStatus` and KV-REVAMPED.md §3.4). `'ahead'` and
  * `'malformed'` are only ever passed when the caller set
  * `allowUnverifiedConflict: true`; without it, `chelonia/kv/set` rejects
- * with `ChelErrorKvHeightAhead` (or `ChelErrorInvalidMessageHeight`)
+ * with `ChelErrorKvHeightAhead` (or `ChelErrorKvHeightMalformed`)
  * instead of calling `onconflict`. With `'ahead'`, `requiredHeight` is the
  * contract height the local contract must reach before the server value
  * can be verified. `currentValue` is the parsed server value (whose `data`

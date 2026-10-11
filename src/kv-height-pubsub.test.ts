@@ -11,7 +11,7 @@ import { describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
-import { isKvHeightAhead } from './errors.js'
+import { isKvHeightAhead, isKvHeightMalformed } from './errors.js'
 import { CHELONIA_KV_UPDATED } from './events.js'
 import { createCID, multicodes } from './functions.js'
 import {
@@ -28,7 +28,9 @@ import {
   debugs,
   defineSlot,
   drainLanes,
+  errors,
   installKvHeightHooks,
+  loadV0At40,
   mirror,
   onEvent,
   restampedBody,
@@ -44,6 +46,7 @@ import {
   writeAsDeviceB
 } from './kv-height-harness.js'
 import { NOTIFICATION_TYPE } from './pubsub/index.js'
+import { logged } from './test-utils.js'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -85,9 +88,7 @@ const deliverBody = (key: string, body: string, cid = createCID(body, multicodes
 
 describe('pubsub frames with a malformed height stamp', () => {
   it("reload the slot, which goes 'error' when the stored value is malformed", async () => {
-    await writeAsDeviceB(UNREAD, V0, 40)
-    defineSlot({ key: UNREAD })
-    await activateContract()
+    await loadV0At40()
     connect()
     await writeAsDeviceB(UNREAD, VB, 40)
     const body = restampedBody(UNREAD, '040')
@@ -97,14 +98,12 @@ describe('pubsub frames with a malformed height stamp', () => {
     await drainLanes()
     assert.strictEqual(server.gets().length, 1)
     assert.strictEqual(slotStatus(UNREAD), 'error')
-    assert.strictEqual(mirror(UNREAD).lastError?.name, 'ChelErrorInvalidMessageHeight')
+    assert.strictEqual(isKvHeightMalformed(mirror(UNREAD).lastError), true)
     assert.strictEqual(mirror(UNREAD).settled, true)
   })
 
   it('reload the slot, which loads the stored value when the frame was a stale one', async () => {
-    await writeAsDeviceB(UNREAD, V0, 40)
-    defineSlot({ key: UNREAD })
-    await activateContract()
+    await loadV0At40()
     connect()
     const malformed = restampedBody(UNREAD, '1e1')
     await writeAsDeviceB(UNREAD, VB, 40)
@@ -195,9 +194,7 @@ describe('writes and loads while the pubsub socket is closed', () => {
 
   it('a stale stamp (409) goes straight to the recovery sync', async () => {
     sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500 })
-    await writeAsDeviceB(UNREAD, V0, 40)
-    defineSlot({ key: UNREAD })
-    await activateContract()
+    await loadV0At40()
     connect()
     // The server moved on without changing the key (e.g. a contract event
     // this device missed while its socket was down).
@@ -212,6 +209,25 @@ describe('writes and loads while the pubsub socket is closed', () => {
     assert.ok(firstSync !== undefined, 'no recovery sync')
     assert.ok(firstSync - started < 500, `first sync after ${firstSync - started} ms`)
     assert.deepStrictEqual(server.posts().map((p) => p.status), [409, 204])
+  })
+
+  // `update` passes `heightWaitMs: 0` anyway: only raw `kv/set` with the
+  // default wait shows that the closed socket skips it.
+  it('raw kv/set rejects a stale stamp (409) without waiting', async () => {
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500 })
+    await loadV0At40()
+    connect()
+    server.height = 41
+    server.log.length = 0
+    const started = Date.now()
+    await assert.rejects(
+      sbp('chelonia/kv/set', CONTRACT_ID, UNREAD, VB, {
+        ifMatch: '*', signingKeyId: cskId, encryptionKeyId: cekId
+      }),
+      (e: any) => isKvHeightAhead(e)
+    )
+    assert.ok(Date.now() - started < 500, `rejected after ${Date.now() - started} ms`)
+    assert.deepStrictEqual(server.posts().map((p) => p.status), [409])
   })
 
   it('raw kv/set rejects a conflicting value that is ahead without waiting', async () => {
@@ -276,7 +292,7 @@ describe('the raw KV callback', () => {
     deliverKvFrame('other')
     await drainLanes()
     assert.strictEqual(rawFrames.length, 0)
-    assert.ok(warnings.some((w) => String(w[0]).includes('dropping kv pubsub frame')))
+    assert.ok(logged(warnings, 'dropping kv pubsub frame'))
     // Nothing reloads it once the contract catches up.
     setLocalHeight(42)
     await drainLanes()
@@ -285,7 +301,7 @@ describe('the raw KV callback', () => {
     assert.strictEqual(server.gets().length, 0)
   })
 
-  it("isn't called for a frame that is ahead even when a slot reloads its key", async () => {
+  it("isn't called for a frame that is ahead even when a slot reloads its key, and says so", async () => {
     await setupStaleDeviceA()
     connect({ rawHandler: true })
     deliverKvFrame()
@@ -294,6 +310,63 @@ describe('the raw KV callback', () => {
     await drainLanes()
     assert.deepStrictEqual(mirror(UNREAD).value, VB)
     assert.strictEqual(rawFrames.length, 0)
-    assert.ok(!warnings.some((w) => String(w[0]).includes('dropping kv pubsub frame')))
+    const dropped = warnings.filter((w) => String(w[0]).includes('dropping kv pubsub frame'))
+    assert.strictEqual(dropped.length, 1)
+    assert.ok(String(dropped[0][0]).includes('the slot reloads the key once the contract catches up'))
+  })
+})
+
+// `chelonia/connect` starts clock sync, which `chelonia/reset` stops while
+// it drains.
+describe('chelonia/reset failing in its persistence hook', () => {
+  // Whether clock sync is running: starting it again throws then.
+  const clockSyncRunning = (): boolean => {
+    try {
+      sbp('chelonia/private/startClockSync')
+    } catch {
+      return true
+    }
+    sbp('chelonia/private/stopClockSync')
+    return false
+  }
+
+  it("rejects with the hook's error even when resuming fails, and restarts clock sync", async () => {
+    // A settled 'non-init' slot. While the reset drains, a wait is
+    // registered for it, which is only remembered (the height session is
+    // ended): resuming registers it, and moves the slot to 'loading'
+    // through `reactiveSet`, which then fails.
+    defineSlot({ key: 'absent' })
+    await activateContract()
+    connect()
+    assert.strictEqual(clockSyncRunning(), true)
+    let failSets = false
+    sbp('chelonia/configure', {
+      reactiveSet: (obj: any, key: string, value: unknown) => {
+        if (failSets) throw new Error('reactiveSet failed')
+        obj[key] = value
+        return value
+      }
+    })
+    await assert.rejects(sbp('chelonia/reset', () => {
+      sbp('chelonia/kv/_registerHeightWait', {
+        contractID: CONTRACT_ID, key: 'absent', requiredHeight: 42, reason: 'remote'
+      })
+      failSets = true
+      throw new Error('persistence hook failed')
+    }), /persistence hook failed/)
+    failSets = false
+    assert.ok(logged(errors, 'failed to resume the KV height session'))
+    assert.strictEqual(clockSyncRunning(), true)
+  })
+
+  it('restarts clock sync when resuming succeeds', async () => {
+    await loadV0At40()
+    connect()
+    await assert.rejects(
+      sbp('chelonia/reset', () => { throw new Error('persistence hook failed') }),
+      /persistence hook failed/
+    )
+    assert.strictEqual(clockSyncRunning(), true)
+    assert.strictEqual(slotStatus(UNREAD), 'loaded')
   })
 })

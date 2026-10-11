@@ -28,6 +28,7 @@ const initKvSession = (ctx: CheloniaContext): void => {
   ctx.kvRecoveries = new Map()
   ctx.kvHeightSession = new AbortController()
   ctx.kvSuspendedHeightWaits = []
+  ctx.kvSettleWaiters = new Map()
 }
 
 // Creates every KV field of the context. Not `kvReconnectListener` /
@@ -40,7 +41,7 @@ export const initKvRuntime = (ctx: CheloniaContext): void => {
   // preceding keys, for consistency with `defContractManifest`.
   ctx.defContractKvByManifest = new Map()
   // Counts the `chelonia/reset` calls in progress, across the resets
-  // themselves (see `clearKvRuntime`).
+  // themselves (see `chelonia/kv/_finishHeightSession`).
   ctx.kvHeightSessionHolds = 0
   initKvSession(ctx)
 }
@@ -50,7 +51,8 @@ export const initKvRuntime = (ctx: CheloniaContext): void => {
 // session's KV writes and loads were drained (`chelonia/kv/_waitInFlight`,
 // which also drains `kvRecoveries`), so dropping `kvLocalEchoCIDs` /
 // `kvPendingWrites` can't strand a continuation mid-write. The caller
-// re-seeds the `_kv` mirror.
+// re-seeds the `_kv` mirror, and then releases its reset's hold on the
+// height session (`chelonia/kv/_finishHeightSession`).
 export const clearKvRuntime = (ctx: CheloniaContext): void => {
   if (ctx.kvFilterRetryTimer != null) clearTimeout(ctx.kvFilterRetryTimer)
   // Height waits can't have been registered since the height session
@@ -60,11 +62,4 @@ export const clearKvRuntime = (ctx: CheloniaContext): void => {
   // isn't necessarily the context the selectors are registered with.
   clearHeightWaits(ctx)
   initKvSession(ctx)
-  // This reset is done. While another one is still draining (resets can
-  // overlap), the new height session starts ended: that reset may still
-  // fail and resume it (`chelonia/kv/_resumeHeightSession`).
-  ctx.kvHeightSessionHolds = Math.max(0, (ctx.kvHeightSessionHolds ?? 0) - 1)
-  if (ctx.kvHeightSessionHolds > 0) {
-    ctx.kvHeightSession.abort(new DOMException('Aborted by chelonia/reset', 'AbortError'))
-  }
 }
