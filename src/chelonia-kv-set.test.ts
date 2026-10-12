@@ -7,7 +7,6 @@ import './chelonia.js'
 import './internals.js'
 import {
   ChelErrorInvalidMessageHeight,
-  ChelErrorKvConflict,
   ChelErrorKvHeightAhead,
   ChelErrorUnexpectedHttpResponseCode,
   isKvConflict,
@@ -17,7 +16,7 @@ import {
 } from './errors.js'
 import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import { KV_MAX_STALE_STAMP_RETRIES } from './kv-height.js'
-import { captureConsole, setLocalHeightLater, sleep, useKvSetHooks, withLocalHeight, within } from './test-utils.js'
+import { captureConsole, setContractHeightLater, sleep, useKvSetHooks, withLocalHeight, within } from './test-utils.js'
 import type {
   ChelKvOnConflictCallback,
   ChelRootState,
@@ -93,6 +92,55 @@ const replyRestamped = (
     onRequest?.(opts)
     captured ||= opts?.body ?? ''
     return new Response(JSON.stringify({ ...JSON.parse(captured), height }), init)
+  }
+}
+
+// Calls `kv/set` against a server that answers every request with
+// `respond()`, and aborts the call 50 ms after the first request, with
+// `chelonia/reset` or with the caller's signal. Checks that the call rejects
+// at once, not when the wait it was in (a 412's backoff, or the passive wait
+// after a 409) ends. A reset that started is awaited, even when an
+// assertion fails, so that it doesn't run into the next test.
+const abortDuringWait = async (
+  by: 'reset' | 'signal',
+  { contractID, signingKeyId }: { contractID: string; signingKeyId: string },
+  respond: () => Response,
+  options: Record<string, unknown> = {}
+): Promise<void> => {
+  const controller = new AbortController()
+  let abortedAt: number | undefined
+  let resetting: Promise<unknown> | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  sbp('chelonia/configure', {
+    connectionURL: 'https://example.test',
+    fetch: async (_url: string, opts: { signal?: AbortSignal }) => {
+      opts.signal?.throwIfAborted()
+      timer ??= setTimeout(() => {
+        abortedAt = Date.now()
+        if (by === 'signal') {
+          controller.abort()
+          return
+        }
+        resetting = sbp('chelonia/reset')
+        // Awaited below; an early rejection mustn't be unhandled meanwhile.
+        resetting!.catch(() => {})
+      }, 50)
+      return respond()
+    }
+  } as unknown as Partial<CheloniaConfig>)
+
+  try {
+    await assert.rejects(
+      within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+        signingKeyId, ...(by === 'signal' && { signal: controller.signal }), ...options
+      }), 'kv/set'),
+      { name: 'AbortError' }
+    )
+    assert.ok(abortedAt !== undefined)
+    assert.ok(Date.now() - abortedAt < 300, `rejected ${Date.now() - abortedAt} ms after the abort`)
+  } finally {
+    clearTimeout(timer)
+    await within(resetting ?? Promise.resolve(), 'chelonia/reset')
   }
 }
 
@@ -267,6 +315,8 @@ describe('chelonia/kv/set', () => {
     assert.deepStrictEqual(result, { etag: null })
   })
 
+  // The last value is unknown: the cause leaves out `currentStatus` (and
+  // `currentData`) rather than setting them to `undefined`.
   it('throws max-attempts when diagnostic conflict parsing fails', async () => {
     const { contractID, signingKeyId } = setupContract()
     sbp('chelonia/configure', {
@@ -280,8 +330,38 @@ describe('chelonia/kv/set', () => {
         maxAttempts: 1,
         onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, 'etag-1']
       }),
-      (e: unknown) => e instanceof ChelErrorKvMaxAttempts &&
-        (e as { cause?: { etag?: string | null } }).cause?.etag === 'etag-1'
+      (e: unknown) => {
+        assert.ok(e instanceof ChelErrorKvMaxAttempts)
+        assert.deepStrictEqual((e as { cause?: unknown }).cause, { etag: 'etag-1' })
+        return true
+      }
+    )
+  })
+
+  it("throws max-attempts without a currentStatus when the last value can't be decoded", async () => {
+    const { contractID, signingKeyId } = setupContract()
+    const stored = JSON.parse(await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 1))
+    const other = JSON.parse(await signedBodyAt(contractID, signingKeyId, 'settings', { x: 6 }, 1))
+    // The payload no longer matches its signature.
+    stored._signedData[0] = other._signedData[0]
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async () => new Response(JSON.stringify(stored), {
+        status: 412, headers: { etag: '"cid-1"' }
+      })
+    } as Partial<CheloniaConfig>)
+
+    await assert.rejects(
+      () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+        signingKeyId,
+        maxAttempts: 1,
+        onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, undefined]
+      }),
+      (e: unknown) => {
+        assert.ok(e instanceof ChelErrorKvMaxAttempts)
+        assert.deepStrictEqual((e as { cause?: unknown }).cause, { etag: '"cid-1"' })
+        return true
+      }
     )
   })
 
@@ -344,9 +424,9 @@ describe('chelonia/kv/set', () => {
         }
       }),
       (e: unknown) => {
-        assert.ok(e instanceof ChelErrorKvHeightAhead)
+        assert.ok(isKvHeightAhead(e))
         assert.ok(e instanceof ChelErrorInvalidMessageHeight)
-        assert.deepStrictEqual((e as Error).cause, {
+        assert.deepStrictEqual(kvHeightAheadCause(e), {
           requiredHeight: 5, exact: true, localHeight: 1, etag: 'etag-ahead', httpStatus: 412
         })
         return true
@@ -367,7 +447,7 @@ describe('chelonia/kv/set', () => {
         postedHeights.push(JSON.parse(opts!.body!).height)
         if (postedHeights.length === 1) {
           // Event 2 finishes processing while the conflict is resolved.
-          setLocalHeightLater(contractID, 2, 20)
+          setContractHeightLater(contractID, 2, 20)
           return new Response(stored, { status: 412, headers: { etag: 'etag-2' } })
         }
         return new Response(null, { status: 204, headers: { etag: 'etag-3' } })
@@ -491,41 +571,42 @@ describe('chelonia/kv/set', () => {
     await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
       signingKeyId,
       onconflict: async (args: ConflictArgs) => {
-        let readError: Error | undefined
-        try {
-          assert.notStrictEqual(args.currentData, undefined)
-        } catch (e) {
-          readError = e as Error
-        }
-        seen.push([args.currentStatus, readError?.name])
+        assert.throws(() => args.currentData, { name: 'ChelErrorSignatureError' })
+        seen.push(args.currentStatus)
         return false
       }
     })
-    assert.deepStrictEqual(seen, [['present', 'ChelErrorSignatureError']])
+    assert.deepStrictEqual(seen, ['present'])
   })
 
   it('rejects a malformed height stamp instead of treating the value as absent', async () => {
     const { contractID, signingKeyId } = setupContract()
-    // '01' is how a server comparing `Number(stamp)` sees height 1.
+    // '01' is how a server comparing `Number(stamp)` sees height 1. With
+    // `maxAttempts: 1` the first 412 is also the last: reported the same.
     for (const stamp of ['not-a-height', '01']) {
-      let conflicts = 0
-      sbp('chelonia/configure', {
-        connectionURL: 'https://example.test',
-        fetch: replyRestamped(stamp, { status: 412, headers: { etag: 'e' } })
-      } as Partial<CheloniaConfig>)
+      for (const maxAttempts of [1, 3]) {
+        const label = `${stamp}, maxAttempts: ${maxAttempts}`
+        let conflicts = 0
+        sbp('chelonia/configure', {
+          connectionURL: 'https://example.test',
+          fetch: replyRestamped(stamp, { status: 412, headers: { etag: 'e' } })
+        } as Partial<CheloniaConfig>)
 
-      await assert.rejects(
-        () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
-          signingKeyId,
-          onconflict: async (): Promise<[JSONType, string | undefined]> => {
-            conflicts++
-            return [{ x: 2 }, undefined]
-          }
-        }),
-        (e: unknown) => isKvHeightMalformed(e) && e instanceof ChelErrorInvalidMessageHeight,
-        stamp
-      )
-      assert.strictEqual(conflicts, 0, stamp)
+        await assert.rejects(
+          () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+            signingKeyId,
+            maxAttempts,
+            onconflict: async (): Promise<[JSONType, string | undefined]> => {
+              conflicts++
+              return [{ x: 2 }, undefined]
+            }
+          }),
+          (e: unknown) => isKvHeightMalformed(e) && !isKvConflict(e) &&
+            e instanceof ChelErrorInvalidMessageHeight,
+          label
+        )
+        assert.strictEqual(conflicts, 0, label)
+      }
     }
   })
 
@@ -574,12 +655,11 @@ describe('chelonia/kv/set', () => {
         maxAttempts: 1,
         onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, undefined]
       }),
-      (e: unknown) => e instanceof ChelErrorKvHeightAhead &&
-        (e as { cause: { requiredHeight: number } }).cause.requiredHeight === 5
+      (e: unknown) => kvHeightAheadCause(e)?.requiredHeight === 5
     )
   })
 
-  it("that height error carries the last 412's etag, not an earlier one's", async () => {
+  it("the height error of attempts that ran out carries the last 412's etag, not an earlier one's", async () => {
     const { contractID, signingKeyId } = setupContract()
     let posts = 0
     const verifiable = replyRestamped('1', { status: 412, headers: { etag: 'e1' } })
@@ -689,8 +769,7 @@ describe('chelonia/kv/set', () => {
           return [{ x: 2 }, undefined]
         }
       }),
-      (e: unknown) => e instanceof ChelErrorKvHeightAhead &&
-        (e as { cause: { etag: string } }).cause.etag === 'etag-recovered'
+      (e: unknown) => kvHeightAheadCause(e)?.etag === 'etag-recovered'
     )
     assert.strictEqual(posts, 1)
     assert.strictEqual(gets, 1)
@@ -740,76 +819,22 @@ describe('chelonia/kv/set', () => {
     }
   })
 
-  it('rejects as soon as chelonia/reset aborts, not when the backoff ends', async () => {
-    const { contractID, signingKeyId } = setupContract()
-    const stored = await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 1)
-    Math.random = () => 0.9999 // a ~1500 ms backoff before onconflict
-    let abortedAt: number | undefined
-    let resetting: Promise<unknown> | undefined
-    let resetTimer: ReturnType<typeof setTimeout> | undefined
-    sbp('chelonia/configure', {
-      connectionURL: 'https://example.test',
-      fetch: async (_url: string, opts: { signal?: AbortSignal }) => {
-        opts.signal?.throwIfAborted()
-        resetTimer ??= setTimeout(() => {
-          abortedAt = Date.now()
-          resetting = sbp('chelonia/reset')
-          resetting!.catch(() => {})
-        }, 50)
-        return new Response(stored, { status: 412, headers: { etag: '"cid-1"' } })
-      }
-    } as unknown as Partial<CheloniaConfig>)
-
-    try {
-      await assert.rejects(
-        within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
-          signingKeyId,
-          onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, undefined]
-        }), 'kv/set'),
-        { name: 'AbortError' }
+  for (const by of ['reset', 'signal'] as const) {
+    const what = by === 'reset' ? 'chelonia/reset' : "the caller's signal"
+    it(`rejects as soon as ${what} aborts the backoff, not when the backoff ends`, async () => {
+      const contract = setupContract()
+      const stored = await signedBodyAt(
+        contract.contractID, contract.signingKeyId, 'settings', { x: 7 }, 1
       )
-      assert.ok(abortedAt !== undefined)
-      assert.ok(Date.now() - abortedAt < 300, `rejected ${Date.now() - abortedAt} ms after the abort`)
-    } finally {
-      clearTimeout(resetTimer)
-      await within(resetting ?? Promise.resolve(), 'chelonia/reset')
-    }
-  })
-
-  it("rejects as soon as the caller's signal aborts during the backoff", async () => {
-    const { contractID, signingKeyId } = setupContract()
-    const stored = await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 1)
-    Math.random = () => 0.9999 // a ~1500 ms backoff before onconflict
-    const controller = new AbortController()
-    let abortedAt: number | undefined
-    let abortTimer: ReturnType<typeof setTimeout> | undefined
-    sbp('chelonia/configure', {
-      connectionURL: 'https://example.test',
-      fetch: async (_url: string, opts: { signal?: AbortSignal }) => {
-        opts.signal?.throwIfAborted()
-        abortTimer ??= setTimeout(() => {
-          abortedAt = Date.now()
-          controller.abort()
-        }, 50)
-        return new Response(stored, { status: 412, headers: { etag: '"cid-1"' } })
-      }
-    } as unknown as Partial<CheloniaConfig>)
-
-    try {
-      await assert.rejects(
-        within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
-          signingKeyId,
-          signal: controller.signal,
-          onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, undefined]
-        }), 'kv/set'),
-        { name: 'AbortError' }
+      Math.random = () => 0.9999 // a ~1500 ms backoff before onconflict
+      await abortDuringWait(
+        by,
+        contract,
+        () => new Response(stored, { status: 412, headers: { etag: '"cid-1"' } }),
+        { onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, undefined] }
       )
-      assert.ok(abortedAt !== undefined)
-      assert.ok(Date.now() - abortedAt < 300, `rejected ${Date.now() - abortedAt} ms after the abort`)
-    } finally {
-      clearTimeout(abortTimer)
-    }
-  })
+    })
+  }
 })
 
 // A 409 means the server accepted the `if-match` precondition but not the
@@ -835,7 +860,7 @@ describe('chelonia/kv/set on 409', () => {
           ifMatch: new Headers(opts.headers).get('if-match')
         })
         if (posts.length === 1) {
-          setLocalHeightLater(contractID, 2, 20)
+          setContractHeightLater(contractID, 2, 20)
           return new Response('', { status: 409, headers: { etag: '"cid-0"' } })
         }
         return new Response(null, { status: 204, headers: { etag: '"cid-1"' } })
@@ -867,7 +892,7 @@ describe('chelonia/kv/set on 409', () => {
       connectionURL: 'https://example.test',
       fetch: async () => {
         if (++posts === 1) {
-          setLocalHeightLater(contractID, 2, 20)
+          setContractHeightLater(contractID, 2, 20)
           return new Response('', { status: 409 })
         }
         return new Response(null, { status: 204 })
@@ -898,8 +923,8 @@ describe('chelonia/kv/set on 409', () => {
     await assert.rejects(
       () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, { signingKeyId }),
       (e: unknown) => {
-        assert.ok(e instanceof ChelErrorKvHeightAhead)
-        assert.deepStrictEqual((e as Error).cause, {
+        assert.ok(isKvHeightAhead(e))
+        assert.deepStrictEqual(kvHeightAheadCause(e), {
           requiredHeight: 2, exact: false, localHeight: 1, etag: '"cid-0"', httpStatus: 409
         })
         // A 409 only gives a lower bound, and may carry no stored value.
@@ -911,6 +936,16 @@ describe('chelonia/kv/set on 409', () => {
     )
     assert.strictEqual(posts, 1)
   })
+
+  // The passive wait after a 409 (here up to 10 s: no pubsub client, so
+  // it isn't skipped) ends with the call.
+  for (const by of ['reset', 'signal'] as const) {
+    const what = by === 'reset' ? 'chelonia/reset' : "the caller's signal"
+    it(`rejects as soon as ${what} aborts the passive wait, not when the wait ends`, async () => {
+      sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 10000 })
+      await abortDuringWait(by, setupContract(), () => new Response('', { status: 409 }))
+    })
+  }
 
   it('uses the stored value height as the lower bound when it is higher', async () => {
     const { contractID, signingKeyId } = setupContract()
@@ -926,8 +961,7 @@ describe('chelonia/kv/set on 409', () => {
         signingKeyId,
         ifMatch: '"cid-4"'
       }),
-      (e: unknown) => e instanceof ChelErrorKvHeightAhead &&
-        (e as { cause: { requiredHeight: number } }).cause.requiredHeight === 4
+      (e: unknown) => kvHeightAheadCause(e)?.requiredHeight === 4
     )
   })
 
@@ -941,9 +975,9 @@ describe('chelonia/kv/set on 409', () => {
         // The server keeps moving one event ahead of us, also past the last
         // allowed re-sign: only the retry limit can end the call at this
         // POST (without it, the next POST would go out and require one more
-        // height). `setLocalHeightLater` ignores a timer that outlives the
+        // height). `setContractHeightLater` ignores a timer that outlives the
         // test.
-        if (n <= KV_MAX_STALE_STAMP_RETRIES + 1) setLocalHeightLater(contractID, n + 1, 5)
+        if (n <= KV_MAX_STALE_STAMP_RETRIES + 1) setContractHeightLater(contractID, n + 1, 5)
         return new Response('', { status: 409 })
       }
     } as Partial<CheloniaConfig>)
@@ -955,10 +989,9 @@ describe('chelonia/kv/set on 409', () => {
         maxAttempts: 1
       }),
       (e: unknown) => {
-        assert.ok(e instanceof ChelErrorKvHeightAhead)
-        const cause = (e as { cause: { exact: boolean; requiredHeight: number } }).cause
-        assert.strictEqual(cause.exact, false)
-        assert.strictEqual(cause.requiredHeight, KV_MAX_STALE_STAMP_RETRIES + 2)
+        const cause = kvHeightAheadCause(e)
+        assert.strictEqual(cause?.exact, false)
+        assert.strictEqual(cause?.requiredHeight, KV_MAX_STALE_STAMP_RETRIES + 2)
         return true
       }
     )
@@ -977,9 +1010,10 @@ describe('chelonia/kv/set on 409', () => {
       fetch: async (_url: string, opts: { body: string }) => {
         heights.push(JSON.parse(opts.body).height)
         const step = script[heights.length - 1]
+        if (!step) throw new Error(`unexpected request #${heights.length}`)
         if (step.status === 409) {
           // The client catches up with the server shortly after.
-          setLocalHeightLater(contractID, Number(heights[heights.length - 1]) + 1, 5)
+          setContractHeightLater(contractID, Number(heights[heights.length - 1]) + 1, 5)
           return new Response('', { status: 409 })
         }
         if (step.status === 412) {
@@ -992,9 +1026,9 @@ describe('chelonia/kv/set on 409', () => {
     } as unknown as Partial<CheloniaConfig>)
     return heights
   }
-  const mergeX = (seen: unknown[]) => async (args: {
-    currentStatus: string; currentData: JSONType | undefined; etag: string | null | undefined
-  }): Promise<[JSONType, string | undefined]> => {
+  const mergeX = (seen: unknown[]) => async (
+    args: ConflictArgs
+  ): Promise<[JSONType, string | undefined]> => {
     seen.push([args.currentStatus, args.currentData, args.etag])
     return [{ x: 8 }, args.etag ?? undefined]
   }
@@ -1105,7 +1139,7 @@ describe('chelonia/kv/get', () => {
 
     await assert.rejects(
       () => sbp('chelonia/kv/get', contractID, 'settings'),
-      (e: unknown) => e instanceof ChelErrorKvHeightAhead &&
+      (e: unknown) => isKvHeightAhead(e) &&
         /the server value was written at contract height 5, but the local contract is not loaded;/
           .test((e as Error).message)
     )
@@ -1148,41 +1182,5 @@ describe('chelonia/kv/get', () => {
         (e as Error).cause === 503 &&
         (e as Error).message === '[kv/get] 503: Service Unavailable'
     )
-  })
-})
-
-describe('isKvHeightAhead / kvHeightAheadCause / isKvConflict', () => {
-  it('isKvHeightAhead matches by name, so errors from another copy of the library match', () => {
-    const foreign = Object.assign(new Error('from another bundle'), {
-      name: 'ChelErrorKvHeightAhead',
-      cause: { requiredHeight: 7, exact: true, localHeight: 3, etag: null, httpStatus: 200 }
-    })
-    assert.ok(isKvHeightAhead(foreign))
-    assert.strictEqual(kvHeightAheadCause(foreign)?.requiredHeight, 7)
-    assert.ok(!isKvHeightAhead(new ChelErrorInvalidMessageHeight('malformed')))
-    assert.strictEqual(kvHeightAheadCause(new Error('other')), undefined)
-    assert.ok(!isKvHeightAhead(undefined))
-  })
-
-  it("isKvHeightAhead matches a slot's lastError, which has no cause", () => {
-    const lastError = { name: 'ChelErrorKvHeightAhead', message: 'ahead' }
-    assert.ok(isKvHeightAhead(lastError))
-    assert.strictEqual(lastError.cause, undefined)
-    assert.strictEqual(kvHeightAheadCause(lastError), undefined)
-  })
-
-  it('isKvConflict matches both conflict errors by name', () => {
-    assert.ok(isKvConflict(new ChelErrorKvConflict('conflict')))
-    assert.ok(isKvConflict(new ChelErrorKvMaxAttempts('raw kv/set')))
-    for (const name of ['ChelErrorKvConflict', 'ChelErrorKvMaxAttempts']) {
-      // E.g. from another copy of the library.
-      assert.ok(isKvConflict(Object.assign(new Error('foreign'), { name })), name)
-      assert.ok(isKvConflict({ name, message: 'plain object' }), name)
-    }
-    assert.ok(!isKvConflict(new ChelErrorKvHeightAhead('ahead')))
-    assert.ok(!isKvConflict(new Error('other')))
-    assert.ok(!isKvConflict(undefined))
-    assert.ok(!isKvConflict(null))
-    assert.ok(!isKvConflict('ChelErrorKvConflict'))
   })
 })

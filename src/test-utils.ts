@@ -190,21 +190,21 @@ export const withLocalHeight = <T>(contractID: string, height: number, fn: () =>
 
 // Moves the local contract to `height` and wakes up height waits, as
 // processing contract events does. A no-op when the contract is gone.
-export const setLocalHeight = (contractID: string, height: number): void => {
+export const setContractHeight = (contractID: string, height: number): void => {
   const meta = contractMeta(contractID)
   if (!meta) return
   meta.height = height
   sbp('chelonia/kv/_testNotifyHeight', contractID)
 }
 
-// `setLocalHeight` after `ms`, unless the test that scheduled it has ended
+// `setContractHeight` after `ms`, unless the test that scheduled it has ended
 // by then (`chelonia/_init` replaces the root state object). Tests usually
 // share contract IDs, so a stray timer would otherwise move the next test's
 // contract.
-export const setLocalHeightLater = (contractID: string, height: number, ms: number): void => {
+export const setContractHeightLater = (contractID: string, height: number, ms: number): void => {
   const state = sbp('chelonia/private/state')
   setTimeout(() => {
-    if (sbp('chelonia/private/state') === state) setLocalHeight(contractID, height)
+    if (sbp('chelonia/private/state') === state) setContractHeight(contractID, height)
   }, ms)
 }
 
@@ -217,7 +217,9 @@ export const setLocalHeightLater = (contractID: string, height: number, ms: numb
 // only on those would leave the loop empty, and Node 22's test runner then
 // cancels the test ("Promise resolution is still pending but the event
 // loop has already resolved").
-export const whenSettledWithin = (contractID: string, key: string, ms = 3000): Promise<string> => {
+export const whenContractSlotSettledWithin = (
+  contractID: string, key: string, ms = 3000
+): Promise<string> => {
   const controller = new AbortController()
   const timer = setTimeout(() => {
     controller.abort(new DOMException(
@@ -291,6 +293,12 @@ export const makeKvServer = (initialHeight = 0, contractID?: string) => {
   const store = storeOf(primary)
   const log: KvLogEntry[] = []
   const quote = (cid: string) => `"${cid}"`
+  // Stores `body` under `key` with its CID, as a successful write does.
+  const put = (key: string, body: string, id: string = primary): KvStored => {
+    const stored = { body, cid: createCID(body, multicodes.RAW) }
+    storeOf(id).set(key, stored)
+    return stored
+  }
   const server = {
     get height (): number { return heightOf(primary) },
     set height (height: number) { setHeight(primary, height) },
@@ -298,6 +306,7 @@ export const makeKvServer = (initialHeight = 0, contractID?: string) => {
     storeOf,
     heightOf,
     setHeight,
+    put,
     log,
     // Called before the stored value is read, so a hook that writes to
     // `store` models another device's write that won the race.
@@ -356,8 +365,7 @@ export const makeKvServer = (initialHeight = 0, contractID?: string) => {
           status: 409, headers: { ETag: etag, 'x-cid': etag }
         })
       }
-      const cid = createCID(opts.body!, multicodes.RAW)
-      kvStore.set(key, { body: opts.body!, cid })
+      const { cid } = put(key, opts.body!, id)
       entry.status = 204
       return new Response(null, { status: 204, headers: { ETag: quote(cid), 'x-cid': quote(cid) } })
     }

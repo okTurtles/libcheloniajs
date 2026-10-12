@@ -3,7 +3,8 @@
 // it through a test hook; here the height advances only because
 // `chelonia/private/in/handleEvent` processes a real `SPMessage`, so these
 // tests fail if its height notification (`notifyContractHeight` in
-// `applyProcessResult`) is removed or runs before the height is committed.
+// `applyProcessResult`) is removed, or moved ahead of the `await` that
+// precedes the height commit.
 //
 // `skipActionProcessing` keeps `processMessage` from loading a manifest,
 // so no contract source has to be served, and `acceptAllMessages` lets the
@@ -26,8 +27,9 @@ import {
   makeSelfSignedContract,
   sleep,
   until,
-  whenSettledWithin,
-  withLocalHeight
+  whenContractSlotSettledWithin,
+  withLocalHeight,
+  within
 } from './test-utils.js'
 import type { ChelRootState, CheloniaConfig, JSONType } from './types.js'
 
@@ -108,7 +110,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  sbp('chelonia/kv/_clearHeightWaits')
+  sbp('chelonia/kv/_testClearHeightWaits')
   sbp('chelonia/kv/_testSetHeightTimings')
   restoreConsole()
 })
@@ -132,7 +134,7 @@ describe('height waits woken by processed events', () => {
       ifMatch: '""', signingKeyId: keyId(csk)
     })
     const elapsed = Date.now() - startedAt
-    await handled
+    await within(handled ?? Promise.resolve(), 'the event was never handled')
     assert.strictEqual(rootState().contracts[contractID].height, 1)
     assert.deepStrictEqual(server.posts().map((p) => [p.status, p.height]), [
       [409, '0'], [204, '1']
@@ -157,8 +159,8 @@ describe('height waits woken by processed events', () => {
     // Only for the negative check: give a retry the time to show up.
     await sleep(100)
     assert.strictEqual(server.gets().length, 1)
-    await handle(nextEvent(first))
-    assert.strictEqual(await whenSettledWithin(contractID, KEY, 2000), 'loaded')
+    await within(handle(nextEvent(first)), 'the event was never handled')
+    assert.strictEqual(await whenContractSlotSettledWithin(contractID, KEY, 2000), 'loaded')
     assert.strictEqual(server.gets().length, 2)
     assert.deepStrictEqual(sbp('chelonia/kv/read', contractID, KEY), { name: 'bob' })
   })

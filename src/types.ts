@@ -294,8 +294,11 @@ export type KvMirrorEntry = {
   // status says (a `'loaded'` slot keeps presenting it). Cleared when a load
   // verifies the key (or finds none), when a local write commits (unless a
   // newer wait was registered meanwhile), and once the deferred reload
-  // started by reaching the height settles: if its GET failed, the slot is
-  // `'error'`, which `update` reloads anyway. Changes are announced with
+  // started by reaching the height succeeds. A deferred reload that fails
+  // (or can't start) leaves it, even though the height was reached: nothing
+  // verified the key, so `update` keeps reloading before running its
+  // reducer, and rejects with the reload's error if that fails too, until a
+  // load verifies the key. Changes are announced with
   // `CHELONIA_KV_STATUS_CHANGED`, possibly with an unchanged status.
   // See KV-REVAMPED.md §4.9.
   heightAhead?: { requiredHeight: number };
@@ -585,7 +588,7 @@ export type CheloniaContext = {
   kvReconnectListener?: (client: import('./pubsub/index.js').PubSubClient) => void;
   kvContractsModifiedListener?: (
     contracts: string[],
-    { added, removed }: { added: string[]; removed: string[] },
+    { added, removed }: { added: string[]; removed: string[]; resync?: boolean },
   ) => void;
   defContractSelectors: string[];
   defContractManifest: string;
@@ -695,9 +698,16 @@ export type CheloniaContext = {
   kvSuspendedHeightWaits: Array<Pick<KvHeightWait, 'contractID' | 'key' | 'requiredHeight' | 'reason' | 'parked'>>;
   // The pending `chelonia/kv/whenSettled` calls, keyed by
   // `${contractID}::${key}`: the function that rejects each one, called
-  // when the slot it waits for is deactivated (it would never settle).
-  // Runtime-only.
+  // when the slot it waits for can't settle any more (deactivated, not
+  // active once reconciled, not defined for the contract's type, or its
+  // contract removed other than for a resync). Runtime-only.
   kvSettleWaiters: Map<string, Set<(e: Error) => void>>;
+  // Subscribed contracts whose slots have been reconciled since they were
+  // subscribed (`chelonia/kv/_onContractsModified`, `refreshFilters`);
+  // dropped when the contract is removed. For such a contract, a slot that
+  // isn't active won't activate unless its `match` changes, so
+  // `whenSettled` rejects at once. Runtime-only.
+  kvReconciledContracts: Set<string>;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;

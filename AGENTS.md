@@ -78,6 +78,7 @@ src/
 ├── functions.ts          # CID creation, blake32Hash, base64 utilities
 ├── utils.ts              # Key lookup, permissions, event stream utilities
 ├── errors.ts             # Custom error classes via ChelErrorGenerator factory
+├── error-names.ts        # Name-based error check behind the realm-safe predicates (internal)
 ├── events.ts             # Event name constants
 ├── constants.ts          # INVITE_STATUS enum
 ├── persistent-actions.ts # PersistentAction queue with retry
@@ -234,13 +235,14 @@ Full documentation:
   [docs/kv.md](docs/kv.md#contract-heights) and
   [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-and-verifiability).
   Detect the resulting error with `isKvHeightAhead(e)` (`src/errors.ts`),
-  not with `instanceof` and not by comparing `e.name` yourself. A value
-  whose stamp is missing or malformed (it can never be verified; syncing
-  doesn't help) is `isKvHeightMalformed(e)`. The KV selectors never reject
-  with the old `'ChelErrorInvalidMessageHeight'` name any more; lower-level
-  parsing (`chelonia/parseEncryptedOrUnencryptedDetachedMessage`) still
-  throws it, both for a value that is ahead and for a malformed stamp.
-  Likewise `isKvConflict(e)` for a conflict that ran out of attempts.
+  not with `instanceof` and not by comparing `e.name` yourself. Detect the
+  error for a value whose stamp is missing or malformed (it can never be
+  verified; syncing doesn't help) with `isKvHeightMalformed(e)`. The KV
+  selectors never reject with the old `'ChelErrorInvalidMessageHeight'`
+  name any more; lower-level parsing
+  (`chelonia/parseEncryptedOrUnencryptedDetachedMessage`) still throws it,
+  both for a value that is ahead and for a malformed stamp. Likewise
+  `isKvConflict(e)` for a conflict that ran out of attempts.
 
 ### Contract State Structure
 
@@ -346,8 +348,9 @@ describe('Feature name', () => {
 
 Shared helpers live in plain modules that register no selectors and are
 excluded from the CJS build: `src/test-utils.ts` (incl. a simulated KV
-server, `makeKvServer`) and `src/kv-height-harness.ts` (the harness of the
-`kv-height*.test.ts` files). Test files may import those, never each other.
+server, `makeKvServer`) and `src/kv-height-harness.ts` (the harness of
+`kv-height.test.ts` and `kv-height-pubsub.test.ts`). Test files may import
+those, never each other.
 A test must fail rather than hang when the behaviour it checks regresses:
 poll with `until(cond, label)` and bound a promise that might never settle
 with `within(promise, label)` (both in `src/test-utils.ts`); `npm test`

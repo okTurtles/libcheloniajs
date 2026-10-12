@@ -41,7 +41,8 @@ import {
   ChelErrorResourceGone,
   ChelErrorUnexpected,
   ChelErrorUnexpectedHttpResponseCode,
-  ChelErrorUnrecoverable
+  ChelErrorUnrecoverable,
+  isKvHeightMalformed
 } from './errors.js'
 import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import {
@@ -775,6 +776,14 @@ export default sbp('sbp/selectors/register', {
     // registering a new wait, while the steps below are pending would
     // otherwise start a contract sync that runs into the next session.
     sbp('chelonia/kv/_endHeightSession')
+    // `startClockSync` throws while clock sync runs (an overlapping reset
+    // may have restarted it already); `stopClockSync` is a no-op when it
+    // doesn't.
+    const restartClockSync = () => {
+      if (!this.pubsub) return
+      sbp('chelonia/private/stopClockSync')
+      sbp('chelonia/private/startClockSync')
+    }
     let result: void
     try {
       await sbp('chelonia/kv/_waitInFlight')
@@ -790,8 +799,10 @@ export default sbp('sbp/selectors/register', {
       } catch (resumeError) {
         console.error('[chelonia] reset: failed to resume the KV height session', resumeError)
       }
-      if (this.pubsub) {
-        sbp('chelonia/private/startClockSync')
+      try {
+        restartClockSync()
+      } catch (clockError) {
+        console.error('[chelonia] reset: failed to restart clock sync', clockError)
       }
       throw e
     }
@@ -833,9 +844,7 @@ export default sbp('sbp/selectors/register', {
       added: [],
       removed: removedContractIDs
     })
-    if (this.pubsub) {
-      sbp('chelonia/private/startClockSync')
-    }
+    restartClockSync()
     if (newState) {
       Object.entries(newState).forEach(([key, value]) => {
         this.config.reactiveSet(rootState, key, value)
@@ -1385,7 +1394,7 @@ export default sbp('sbp/selectors/register', {
       // so multi-instance deployments dispatch against the correct context.
       this.kvContractsModifiedListener = (
         _contracts: string[],
-        payload: { added: string[]; removed: string[] }
+        payload: { added: string[]; removed: string[]; resync?: boolean }
       ) => {
         try {
           sbp('chelonia/kv/_onContractsModified', payload)
@@ -2945,18 +2954,15 @@ export default sbp('sbp/selectors/register', {
   // with `allowUnverifiedConflict`.
   //
   // `kv/set` never syncs the contract: after the bounded wait (or once the
-  // 409 re-signs run out) it rejects with `ChelErrorKvHeightAhead`. Callers
-  // handle `isKvHeightAhead(e)` themselves (pass `heightWaitMs: 0`, sync the
-  // contract with `chelonia/contract/sync`, outside the contract's queue,
-  // then retry, keeping the write's error if the sync fails; see
-  // docs/kv.md), or use `chelonia/kv/queuedSet`, `chelonia/kv/update` or
-  // `chelonia/kv/clear`, which do, and also share one sync among concurrent
-  // writes, abort on `chelonia/reset`, and retry when a failed sync reached
-  // the height anyway. `heightWaitMs: 0` skips the passive wait (up to
-  // `KV_HEIGHT_WAIT_MS` per stale stamp, while holding whatever lane the
-  // caller holds), as those selectors do. Running out of `maxAttempts`, or
-  // a `412` without `onconflict`, rejects with an internal error that
-  // `isKvConflict(e)` matches.
+  // 409 re-signs run out) it rejects with `ChelErrorKvHeightAhead`. Wrap raw
+  // calls in `chelonia/kv/withHeightRecovery` (passing its `heightWaitMs` on
+  // to this selector), or use `chelonia/kv/queuedSet`, `chelonia/kv/update`
+  // or `chelonia/kv/clear`, which do so already (docs/kv.md, "Replacing an
+  // app-level height guard"). `heightWaitMs: 0` skips the passive wait (up
+  // to `KV_HEIGHT_WAIT_MS` per stale stamp, while holding whatever lane the
+  // caller holds), as those selectors do while a recovery follows. Running
+  // out of `maxAttempts`, or a `412` without `onconflict`, rejects with an
+  // internal error that `isKvConflict(e)` matches.
   'chelonia/kv/set': async function (
     this: CheloniaContext,
     contractID: string,
@@ -3273,9 +3279,14 @@ export default sbp('sbp/selectors/register', {
               // blind writer (`allowUnverifiedConflict`): its merge doesn't
               // depend on the value, so a recovery can't help it either, and
               // running out of attempts is plain contention. A failed
-              // read isn't a conflict when the call was aborted.
-              const last = await readServerValue(false).catch(() => {
+              // read isn't a conflict when the call was aborted, nor when
+              // the value's height stamp is malformed: that is reported as
+              // on any earlier attempt. (A blind writer gets `'malformed'`
+              // from `classifyBody` instead of a throw; without
+              // `onconflict` it stays a conflict, as `'ahead'` does below.)
+              const last = await readServerValue(false).catch((e: unknown) => {
                 throwIfAborted(fetchSignal)
+                if (hasOnconflict && isKvHeightMalformed(e)) throw e
                 return undefined
               })
               if (hasOnconflict && !allowUnverifiedConflict && last?.body.kind === 'ahead') {
@@ -3299,11 +3310,13 @@ export default sbp('sbp/selectors/register', {
                 {
                   cause: {
                     // Only when the value is known: present (and decoded),
-                    // or absent.
+                    // or absent. `currentStatus` is left out when the last
+                    // value is unknown (the read failed, or the value
+                    // couldn't be decoded).
                     ...((currentStatus === 'present' || currentStatus === 'absent') && {
                       currentData
                     }),
-                    currentStatus,
+                    ...(currentStatus !== undefined && { currentStatus }),
                     etag: (last ? last.etag : conflictEtag) ?? null
                   }
                 }

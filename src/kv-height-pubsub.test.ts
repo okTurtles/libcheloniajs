@@ -33,6 +33,7 @@ import {
   loadV0At40,
   mirror,
   onEvent,
+  restamp,
   restampedBody,
   room,
   server,
@@ -41,8 +42,10 @@ import {
   sleep,
   slotStatus,
   subscribeContract,
+  until,
   warnings,
   whenSettledWithin,
+  within,
   writeAsDeviceB
 } from './kv-height-harness.js'
 import { NOTIFICATION_TYPE } from './pubsub/index.js'
@@ -91,8 +94,7 @@ describe('pubsub frames with a malformed height stamp', () => {
     await loadV0At40()
     connect()
     await writeAsDeviceB(UNREAD, VB, 40)
-    const body = restampedBody(UNREAD, '040')
-    server.store.set(UNREAD, { body, cid: createCID(body, multicodes.RAW) })
+    const body = restamp(UNREAD, '040')
     server.log.length = 0
     deliverBody(UNREAD, body)
     await drainLanes()
@@ -123,11 +125,14 @@ describe('pubsub frames while the local contract is behind', () => {
     const stored = deliverKvFrame()
     await drainLanes()
     assert.deepStrictEqual(mirror(UNREAD).value, V0)
+    // Loaded, but known to be stale.
+    assert.deepStrictEqual(mirror(UNREAD).heightAhead, { requiredHeight: 42 })
     const updates: any[] = []
     onEvent(CHELONIA_KV_UPDATED, (p: any) => updates.push(p))
     await advanceLocalHeightOnInternalLane(42)
     await drainLanes()
     assert.deepStrictEqual(mirror(UNREAD).value, VB)
+    assert.ok(!('heightAhead' in mirror(UNREAD)))
     assert.strictEqual(mirror(UNREAD).etag, `"${stored.cid}"`)
     assert.deepStrictEqual(updates.map((u) => u.reason), ['remote'])
     assert.ok(debugs.some((d) => String(d[0]).includes('reloading the slot')))
@@ -151,11 +156,13 @@ describe('pubsub frames while the local contract is behind', () => {
     deliverKvFrame()
     await drainLanes()
     assert.strictEqual(slotStatus(UNREAD), 'loading')
+    assert.deepStrictEqual(mirror(UNREAD).heightAhead, { requiredHeight: 42 })
     await assert.rejects(whenSettledWithin(UNREAD, 100), (e: any) => e.name === 'TimeoutError')
     const settling = whenSettledWithin(UNREAD)
     await advanceLocalHeightOnInternalLane(42)
     assert.strictEqual(await settling, 'loaded')
     assert.deepStrictEqual(mirror(UNREAD).value, VB)
+    assert.ok(!('heightAhead' in mirror(UNREAD)))
   })
 
   it("a clear retried after a recovery doesn't carry the first attempt's conflict", async () => {
@@ -193,7 +200,6 @@ describe('writes and loads while the pubsub socket is closed', () => {
   )?.at
 
   it('a stale stamp (409) goes straight to the recovery sync', async () => {
-    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500 })
     await loadV0At40()
     connect()
     // The server moved on without changing the key (e.g. a contract event
@@ -211,8 +217,31 @@ describe('writes and loads while the pubsub socket is closed', () => {
     assert.deepStrictEqual(server.posts().map((p) => p.status), [409, 204])
   })
 
-  // `update` passes `heightWaitMs: 0` anyway: only raw `kv/set` with the
-  // default wait shows that the closed socket skips it.
+  // With no recovery left, `update`'s only attempt is its last, which
+  // takes `kv/set`'s default wait: only the closed socket skips it.
+  it('update with maxHeightRecoveries: 0 rejects a stale stamp (409) without waiting', async () => {
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500 })
+    await loadV0At40()
+    connect()
+    server.height = 41
+    server.log.length = 0
+    const syncsBefore = server.syncs
+    const started = Date.now()
+    await assert.rejects(
+      sbp('chelonia/kv/update', {
+        contractID: CONTRACT_ID,
+        key: UNREAD,
+        updater: addChatRoomUnreadMessage('roomA', 'a2', 5),
+        maxHeightRecoveries: 0
+      }),
+      (e: unknown) => isKvHeightAhead(e)
+    )
+    assert.ok(Date.now() - started < 500, `rejected after ${Date.now() - started} ms`)
+    assert.deepStrictEqual(server.posts().map((p) => p.status), [409])
+    assert.strictEqual(server.syncs, syncsBefore)
+  })
+
+  // Raw `kv/set` takes the default wait, which the closed socket skips.
   it('raw kv/set rejects a stale stamp (409) without waiting', async () => {
     sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 1500 })
     await loadV0At40()
@@ -282,6 +311,9 @@ describe('the raw KV callback', () => {
     deliverKvFrame('other')
     await drainLanes()
     assert.strictEqual(rawFrames.length, 1)
+    const [key, parsed] = rawFrames[0] as [string, any]
+    assert.strictEqual(key, 'other')
+    assert.deepStrictEqual(parsed.data, V0)
   })
 
   it("isn't called for a frame that is ahead, and without a slot a warning says it was dropped", async () => {
@@ -340,6 +372,8 @@ describe('chelonia/reset failing in its persistence hook', () => {
     connect()
     assert.strictEqual(clockSyncRunning(), true)
     let failSets = false
+    // Also when an assertion below fails first.
+    addTeardown(() => { failSets = false })
     sbp('chelonia/configure', {
       reactiveSet: (obj: any, key: string, value: unknown) => {
         if (failSets) throw new Error('reactiveSet failed')
@@ -369,4 +403,42 @@ describe('chelonia/reset failing in its persistence hook', () => {
     assert.strictEqual(clockSyncRunning(), true)
     assert.strictEqual(slotStatus(UNREAD), 'loaded')
   })
+
+  // Whichever of two overlapping resets restarts clock sync first, the
+  // other one's restart must neither throw (clock sync is running again)
+  // nor replace its outcome.
+  for (const aFailsFirst of [true, false]) {
+    it(`overlapping resets keep their outcomes, and clock sync runs (${aFailsFirst ? 'the failing one' : 'the succeeding one'} ends first)`, async () => {
+      await loadV0At40()
+      connect()
+      let failA: ((e: Error) => void) | undefined
+      const resetA = sbp('chelonia/reset', () => new Promise<void>((_resolve, reject) => {
+        failA = reject
+      }))
+      let finishB: (() => void) | undefined
+      const resetB = sbp('chelonia/reset', () => new Promise<void>((resolve) => {
+        finishB = resolve
+      }))
+      addTeardown(() => {
+        resetA.catch(() => {})
+        resetB.catch(() => {})
+        failA?.(new Error('released after the test'))
+        finishB?.()
+      })
+      await until(() => !!failA && !!finishB, 'both persistence hooks run')
+      if (aFailsFirst) {
+        failA!(new Error('A failed'))
+        await assert.rejects(within(resetA, 'reset A'), /A failed/)
+        finishB!()
+        await within(resetB, 'reset B')
+      } else {
+        finishB!()
+        await within(resetB, 'reset B')
+        failA!(new Error('A failed'))
+        await assert.rejects(within(resetA, 'reset A'), /A failed/)
+      }
+      assert.strictEqual(clockSyncRunning(), true)
+      assert.ok(!logged(errors, 'failed to restart clock sync'))
+    })
+  }
 })

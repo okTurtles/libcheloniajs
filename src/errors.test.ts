@@ -9,6 +9,7 @@ import {
   ChelErrorKvConflict,
   ChelErrorKvHeightAhead,
   ChelErrorKvHeightMalformed,
+  ChelErrorKvValidation,
   isKvConflict,
   isKvHeightAhead,
   isKvHeightMalformed,
@@ -100,6 +101,8 @@ describe('KV error predicates', () => {
     assert.ok(malformed instanceof ChelErrorInvalidMessageHeight)
     assert.strictEqual(isKvHeightMalformed(ahead), false)
     assert.strictEqual(isKvHeightAhead(malformed), false)
+    assert.strictEqual(isKvConflict(ahead), false)
+    assert.strictEqual(isKvConflict(malformed), false)
     assert.strictEqual(malformed.name, 'ChelErrorKvHeightMalformed')
   })
 
@@ -109,6 +112,9 @@ describe('KV error predicates', () => {
       kvHeightAheadCause(new ChelErrorKvHeightAhead('x', { cause })), cause
     )
     assert.strictEqual(kvHeightAheadCause(new ChelErrorKvHeightAhead('x')), undefined)
+    // Also from another realm.
+    const foreign = Object.assign(foreignError('ChelErrorKvHeightAhead') as object, { cause })
+    assert.deepStrictEqual(kvHeightAheadCause(foreign), cause)
   })
 
   it('narrow to their names, so that an Error keeps its members after a failed check', () => {
@@ -121,5 +127,18 @@ describe('KV error predicates', () => {
     assert.strictEqual(heightAheadThenMessage(new ChelErrorKvHeightAhead('x')), 'ahead')
     assert.strictEqual(malformedThenMessage(new ChelErrorKvHeightMalformed('x')), 'malformed')
     assert.strictEqual(maxAttemptsThenMessage(new ChelErrorKvMaxAttempts('x')), 'max attempts')
+  })
+
+  // The library never wraps its own KV errors (the KV tests check its
+  // rejections with these predicates), so they don't walk `.cause`: only
+  // an app that wraps errors itself needs to.
+  it('match only the error itself, not one wrapped in a cause', () => {
+    const wrap = (cause: Error) => new ChelErrorKvValidation('wrapper', { cause })
+    const ahead = wrap(new ChelErrorKvHeightAhead('x', { cause: { requiredHeight: 42 } }))
+    assert.strictEqual(isKvHeightAhead(ahead), false)
+    assert.strictEqual(kvHeightAheadCause(ahead), undefined)
+    assert.strictEqual(isKvHeightMalformed(wrap(new ChelErrorKvHeightMalformed('x'))), false)
+    assert.strictEqual(isKvConflict(wrap(new ChelErrorKvConflict('x'))), false)
+    assert.strictEqual(isKvMaxAttempts(wrap(new ChelErrorKvMaxAttempts('x'))), false)
   })
 })

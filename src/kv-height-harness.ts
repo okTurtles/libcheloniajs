@@ -26,11 +26,11 @@ import {
   logged,
   makeKvServer,
   restoreKvTestStubs,
-  setLocalHeight as setContractHeight,
+  setContractHeight,
   sleep,
   stubKvBackoff,
   until,
-  whenSettledWithin as whenContractSlotSettledWithin,
+  whenContractSlotSettledWithin,
   withLocalHeight,
   within,
   type KvFetchOptions
@@ -183,6 +183,11 @@ export const writeAsDeviceB = async (key: string, value: JSONType, atHeight: num
 export const restampedBody = (key: string, stamp: string): string =>
   JSON.stringify({ ...JSON.parse(server.store.get(key)!.body), height: stamp })
 
+// Replaces the stored value's height stamp (see `restampedBody`), and
+// returns the new body.
+export const restamp = (key: string, stamp: string): string =>
+  server.put(key, restampedBody(key, stamp)).body
+
 // Wait for the internal lane and then the public lane to drain.
 export const drainLanes = async () => {
   for (let i = 0; i < 3; i++) {
@@ -216,9 +221,11 @@ export const failKvGets = (n: number, status = 500, when: () => boolean = () => 
 // released after it, so it can't block the contract's lane for the next
 // tests. Like a real request, the held sync rejects with the abort reason
 // as soon as its request's signal (the session's, which `chelonia/reset`
-// aborts) or `signal` aborts.
+// aborts) or `signal` aborts. `fail(error)` ends the held sync with
+// `error` instead of letting it succeed.
 export const holdNextSync = (ms = 3000, { signal }: { signal?: AbortSignal } = {}) => {
   let resolveSync: (() => void) | undefined
+  let rejectSync: ((e: Error) => void) | undefined
   let signalStarted!: () => void
   let rejectStarted!: (e: Error) => void
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -244,6 +251,10 @@ export const holdNextSync = (ms = 3000, { signal }: { signal?: AbortSignal } = {
       unlisten()
       resolve()
     }
+    rejectSync = (e: Error) => {
+      unlisten()
+      reject(e)
+    }
     signalStarted()
     const aborted = signals.find((s) => s.aborted)
     if (aborted) {
@@ -259,8 +270,14 @@ export const holdNextSync = (ms = 3000, { signal }: { signal?: AbortSignal } = {
     if (resolveSync) resolveSync()
     else rejectStarted(new Error('holdNextSync released before any sync started'))
   }
+  const fail = (error: Error) => {
+    clearTimeout(timer)
+    if (server.onSync === hold) server.onSync = null
+    if (rejectSync) rejectSync(error)
+    else rejectStarted(new Error('holdNextSync failed before any sync started'))
+  }
   offs.push(release)
-  return { started, release }
+  return { started, release, fail }
 }
 
 // Runs `fn` after the test, with the harness's own cleanup (also when the
@@ -270,15 +287,20 @@ export const addTeardown = (fn: () => void): void => {
 }
 
 // Holds the contract's public lane (`chelonia/queueInvocation`) until
-// `open` is called; `held` settles once the holding task has run. Opened
-// after the test if the test doesn't.
+// `open` is called; `released` settles once the holding task has run, so
+// only after `open`. Opened after the test if the test doesn't.
 export const gateLane = () => {
   let open!: () => void
   const gate = new Promise<void>((resolve) => { open = resolve })
-  const held = sbp('chelonia/queueInvocation', CONTRACT_ID, () => gate) as Promise<void>
+  const released = sbp('chelonia/queueInvocation', CONTRACT_ID, () => gate) as Promise<void>
   offs.push(open)
-  return { open, held }
+  return { open, released }
 }
+
+// The number of tasks queued on the contract's public lane
+// (`chelonia/queueInvocation`), the running one included.
+export const publicLaneQueued = (): number =>
+  (sbp('okTurtles.eventQueue/queuedInvocations', `public:${CONTRACT_ID}`) as unknown[]).length
 
 // Makes KV GETs wait (answering with the value stored when they arrived)
 // until `release` is called. Released after the test if the test doesn't.
@@ -450,7 +472,7 @@ export const installKvHeightHooks = () => {
   // Restores everything even when the index check fails, so one failure
   // doesn't leave timers, listeners or stubs behind for the next tests.
   // Unlike `useKvSetHooks` (`test-utils.ts`), no `chelonia/_init` here: run
-  // before the index check and `_clearHeightWaits`, it would empty the maps
+  // before the index check and `_testClearHeightWaits`, it would empty the maps
   // they inspect and leak the old timers.
   //
   // The work that the cleanup released (held syncs, gates, GETs) still reads
@@ -458,29 +480,28 @@ export const installKvHeightHooks = () => {
   // drain, so that it can't run into the next test. A test that leaves work
   // stuck on a lane fails here.
   afterEach(async () => {
-    // Every teardown callback runs, even after one throws; their errors are
-    // reported once the cleanup is done.
-    const teardownErrors: unknown[] = []
-    try {
-      sbp('chelonia/kv/_assertIndexConsistent')
-    } finally {
+    // Every step runs, even after one throws (the index check, a teardown
+    // callback, the drain); their errors are reported once the cleanup is
+    // done. Height waits are cleared before the drain, so that no fallback
+    // fires during it, and again after it, for a wait that the work the
+    // cleanup released registered meanwhile.
+    const failures: unknown[] = []
+    const step = async (fn: () => unknown) => {
       try {
-        for (const off of offs.splice(0)) {
-          try {
-            off()
-          } catch (e) {
-            teardownErrors.push(e)
-          }
-        }
-        sbp('chelonia/kv/_clearHeightWaits')
-        await within(drainLanes(), 'lanes drained after the test', 2000)
-      } finally {
-        restoreKvTestStubs()
-        restoreConsole()
-        sbp('chelonia/private/stopClockSync')
+        await fn()
+      } catch (e) {
+        failures.push(e)
       }
     }
-    if (teardownErrors.length === 1) throw teardownErrors[0]
-    if (teardownErrors.length > 1) throw new AggregateError(teardownErrors, 'teardown callbacks threw')
+    await step(() => sbp('chelonia/kv/_assertIndexConsistent'))
+    for (const off of offs.splice(0)) await step(off)
+    await step(() => sbp('chelonia/kv/_testClearHeightWaits'))
+    await step(() => within(drainLanes(), 'lanes drained after the test', 2000))
+    await step(() => sbp('chelonia/kv/_testClearHeightWaits'))
+    restoreKvTestStubs()
+    restoreConsole()
+    sbp('chelonia/private/stopClockSync')
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) throw new AggregateError(failures, 'the cleanup after the test failed')
   })
 }

@@ -31,10 +31,15 @@ export default sbp('sbp/selectors/register', {
   // `maxHeightRecoveries` times, without `kv/set`'s passive wait for the
   // height, except on the last attempt, where that wait is the write's only
   // chance. Pass `onHeightAhead: 'reject'` to get the error at once, without
-  // waiting or syncing (e.g. on a hot lane), or `maxHeightRecoveries: 0` to
-  // wait passively without syncing. See KV-REVAMPED.md §4.2 step 5a.
-  // Awaited from one of the contract's `sideEffect`s, it never settles (see
-  // docs/kv.md, "Contract heights").
+  // waiting or syncing: nothing retries the write then (a deferred reload
+  // only refreshes a slot's mirror, and only for a value that is ahead, not
+  // after a stale-stamp `409`), so only when the caller re-issues it itself.
+  // Pass `maxHeightRecoveries: 0` to wait passively without syncing. See
+  // KV-REVAMPED.md §4.2 step 5a. A write that recovers is enqueued again,
+  // so a later write to the same key can commit before it (as with an
+  // app-level retry). Awaited from one of the contract's `sideEffect`s, or
+  // from an `onUpdate` of one of its slots, it never settles: both run on
+  // the contract's lanes (see docs/kv.md, "Contract heights").
   // `allowUnverifiedConflict` is passed on to `chelonia/kv/set`.
   //
   // Running out of `maxAttempts` resolving `412` conflicts, or a `412`
@@ -43,7 +48,8 @@ export default sbp('sbp/selectors/register', {
   // `isKvConflict(e)`. Its `.cause` is `kv/set`'s: `{ currentStatus,
   // currentData, etag }` from the last server response, with `currentData`
   // only when that value is known (`'present'` and decodable, or
-  // `'absent'`). The exception is a conflict whose last value is ahead of
+  // `'absent'`), and `currentStatus` only when the last response could be
+  // read and decoded. The exception is a conflict whose last value is ahead of
   // the local contract (with an `onconflict`, and without
   // `allowUnverifiedConflict`): `kv/set` rejects with
   // `ChelErrorKvHeightAhead`, which is recovered from as above (and is the

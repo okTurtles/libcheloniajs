@@ -7,9 +7,12 @@ import { clearHeightWaits } from './kv-height.js'
 import type { CheloniaContext } from './types.js'
 
 // Creates every per-session KV field of the context: everything but the
-// slot definitions (`kvSlots`, `defContractKvByManifest`). New instances
-// rather than `.clear()`: nothing keeps a reference to these maps, every
-// user reads them from the context when it runs.
+// slot definitions (`kvSlots`, `defContractKvByManifest`) and the count of
+// resets in progress (`kvHeightSessionHolds`), which survive
+// `chelonia/reset`. New instances rather than `.clear()`: every user reads
+// them from the context when it runs, except `whenSettled`, which keeps the
+// `kvSettleWaiters` map it registered in, so that its cleanup can't touch
+// the next session's map (reset rejects it anyway).
 const initKvSession = (ctx: CheloniaContext): void => {
   ctx.kvSlotsByContractID = new Map()
   ctx.kvActiveFilters = new Map()
@@ -29,6 +32,7 @@ const initKvSession = (ctx: CheloniaContext): void => {
   ctx.kvHeightSession = new AbortController()
   ctx.kvSuspendedHeightWaits = []
   ctx.kvSettleWaiters = new Map()
+  ctx.kvReconciledContracts = new Set()
 }
 
 // Creates every KV field of the context. Not `kvReconnectListener` /
@@ -47,12 +51,13 @@ export const initKvRuntime = (ctx: CheloniaContext): void => {
 }
 
 // The per-session part of `chelonia/reset`: everything but the slot
-// definitions (`kvSlots`, `defContractKvByManifest`). Called once the old
-// session's KV writes and loads were drained (`chelonia/kv/_waitInFlight`,
-// which also drains `kvRecoveries`), so dropping `kvLocalEchoCIDs` /
-// `kvPendingWrites` can't strand a continuation mid-write. The caller
-// re-seeds the `_kv` mirror, and then releases its reset's hold on the
-// height session (`chelonia/kv/_finishHeightSession`).
+// definitions (`kvSlots`, `defContractKvByManifest`) and
+// `kvHeightSessionHolds`. Called once the old session's KV writes and
+// loads were drained (`chelonia/kv/_waitInFlight`, which also drains
+// `kvRecoveries`), so dropping `kvLocalEchoCIDs` / `kvPendingWrites`
+// can't strand a continuation mid-write. The caller re-seeds the `_kv`
+// mirror, and then releases its reset's hold on the height session
+// (`chelonia/kv/_finishHeightSession`).
 export const clearKvRuntime = (ctx: CheloniaContext): void => {
   if (ctx.kvFilterRetryTimer != null) clearTimeout(ctx.kvFilterRetryTimer)
   // Height waits can't have been registered since the height session

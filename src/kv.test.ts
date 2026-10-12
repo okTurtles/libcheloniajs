@@ -93,6 +93,11 @@ const collectEvents = (): { log: EventLogEntry[]; offs: Array<() => void> } => {
   return { log, offs }
 }
 
+// The `reason` of each `CHELONIA_KV_UPDATED` event in `log`, in order.
+const updatedReasons = (log: EventLogEntry[]): string[] => log
+  .filter((e) => e.type === CHELONIA_KV_UPDATED)
+  .map((e) => (e.payload as { reason: string }).reason)
+
 const setupContract = async (contractID: string, contractType = CTYPE): Promise<void> => {
   const s = rootState()
   if (!s.contracts) {
@@ -2315,15 +2320,12 @@ describe('KV slot API', () => {
     }
 
     const { log, offs } = collectEvents()
-    const updatedReasons = () => log
-      .filter((e) => e.type === CHELONIA_KV_UPDATED)
-      .map((e) => (e.payload as { reason: string }).reason)
     assert.deepStrictEqual(await sbp('chelonia/kv/update', {
       contractID: c, key: 'abortUpdate', signal: ac.signal, updater: () => ({ x: 1 })
     }), { x: 1 })
 
     // (a) The mirror holds the committed write.
-    assert.deepStrictEqual(updatedReasons(), ['local'])
+    assert.deepStrictEqual(updatedReasons(log), ['local'])
     assert.deepStrictEqual(rootState()._kv![c]!.abortUpdate.value, { x: 1 })
     assert.strictEqual(rootState()._kv![c]!.abortUpdate.etag, echoCID)
     assert.strictEqual(rootState()._kv![c]!.abortUpdate.status, 'loaded')
@@ -2337,7 +2339,7 @@ describe('KV slot API', () => {
     // (c) The committed write's pubsub echo arrives: it is suppressed,
     // not re-validated as 'remote'.
     await sbp('chelonia/kv/_handleRemote', c, 'abortUpdate', fakeParsed({ x: 1 }), echoCID)
-    assert.deepStrictEqual(updatedReasons(), ['local'])
+    assert.deepStrictEqual(updatedReasons(log), ['local'])
     assert.deepStrictEqual(rootState()._kv![c]!.abortUpdate.value, { x: 1 })
     offs.forEach((off) => off())
   })
@@ -2656,16 +2658,13 @@ describe('KV slot API', () => {
     }
 
     const { log, offs } = collectEvents()
-    const updatedReasons = () => log
-      .filter((e) => e.type === CHELONIA_KV_UPDATED)
-      .map((e) => (e.payload as { reason: string }).reason)
     assert.strictEqual(
       await sbp('chelonia/kv/clear', c, 'abortClear', { signal: ac.signal }),
       undefined
     )
 
     // (a) The mirror holds the committed clear.
-    assert.deepStrictEqual(updatedReasons(), ['local'])
+    assert.deepStrictEqual(updatedReasons(log), ['local'])
     assert.strictEqual(rootState()._kv![c]!.abortClear.value, undefined)
     assert.strictEqual(rootState()._kv![c]!.abortClear.etag, echoCID)
     assert.strictEqual(rootState()._kv![c]!.abortClear.status, 'non-init')
@@ -2679,7 +2678,7 @@ describe('KV slot API', () => {
     // (c) The committed clear's pubsub echo arrives: it is suppressed,
     //     not re-validated as 'remote'.
     await sbp('chelonia/kv/_handleRemote', c, 'abortClear', fakeParsed(null), echoCID)
-    assert.deepStrictEqual(updatedReasons(), ['local'])
+    assert.deepStrictEqual(updatedReasons(log), ['local'])
     assert.strictEqual(rootState()._kv![c]!.abortClear.value, undefined)
     offs.forEach((off) => off())
   })

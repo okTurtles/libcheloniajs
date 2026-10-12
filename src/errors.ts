@@ -124,7 +124,8 @@ export function kvHeightAheadCause (e: unknown): KvHeightAheadCause | undefined 
 // slot's `lastError`).
 // `.cause`, when present, is `{ currentStatus, currentData, etag }` from the
 // last server response (`update` and `clear` normalize `currentData` for
-// the slot); `currentData` is omitted when the value is unknown.
+// the slot); `currentData` is omitted when the value is unknown, and
+// `currentStatus` too when the last response couldn't be read or decoded.
 export function isKvConflict (
   e: unknown
 ): e is Error & { name: 'ChelErrorKvConflict' | 'ChelErrorKvMaxAttempts' } {

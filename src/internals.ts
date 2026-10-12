@@ -654,10 +654,12 @@ export default sbp('sbp/selectors/register', {
     // Drop per-contract KV runtime state on every removal, including the
     // early returns below; the `CONTRACTS_MODIFIED` listener also performs
     // this cleanup via `_onContractsModified`, so the direct call is an
-    // idempotent fast path.
+    // idempotent fast path (and on the early returns, which announce no
+    // removal, the only cleanup). A resync keeps the contract's
+    // `whenSettled` calls waiting for its slots to come back.
     const cleanupKvRuntime = () => {
       try {
-        sbp('chelonia/kv/_cleanupContractRuntime', contractID)
+        sbp('chelonia/kv/_cleanupContractRuntime', contractID, { resync: !!params?.resync })
       } catch (e) {
         console.error('[chelonia] KV cleanup on contract removal failed', e)
       }
@@ -3545,8 +3547,8 @@ const handleEvent = {
       sbp('okTurtles.events/emit', EVENT_HANDLED, contractID, message)
     }
     // The local height has been committed above (even when processing
-    // errored), so KV values stamped at this height are now verifiable.
-    // Wake up KV operations waiting for it (see `src/kv-height.ts`).
+    // errored), so KV operations waiting for this height can proceed:
+    // wake them up (see `src/kv-height.ts`).
     notifyContractHeight(this, contractID, height)
   }
 }

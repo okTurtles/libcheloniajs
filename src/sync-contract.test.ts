@@ -35,6 +35,8 @@ let first: SPMessage
 let contractID: string
 // Status of `/eventsAfter` responses: 200 serves the contract's events.
 let eventsAfterStatus: number
+// Awaited before each `/latestHEADinfo` response, when set.
+let onLatestHEADinfo: (() => Promise<void>) | undefined
 let warnings: unknown[][]
 let errors: unknown[][]
 let restoreConsole: () => void
@@ -56,12 +58,14 @@ beforeEach(() => {
   first = makeSelfSignedContract({ type: CONTRACT_TYPE }).message
   contractID = first.contractID()
   eventsAfterStatus = 200
+  onLatestHEADinfo = undefined
   sbp('chelonia/configure', {
     connectionURL: 'https://example.test',
     skipActionProcessing: true,
     fetch: async (url: string) => {
       const { pathname } = new URL(url)
       if (pathname.startsWith('/latestHEADinfo/')) {
+        await onLatestHEADinfo?.()
         return new Response(JSON.stringify({ HEAD: first.hash(), height: 0 }), { status: 200 })
       }
       if (pathname.startsWith('/eventsAfter/')) {
@@ -176,7 +180,9 @@ describe('a re-sync that fails', () => {
     assert.ok(!logged(errors, 'Missing contract name'))
     await sbp('chelonia/contract/release', contractID)
     assert.ok(!(contractID in rootState().contracts))
+    assert.ok(!(contractID in rootState()))
   })
+
   it('leaves no state once the contract is released', async () => {
     await sbp('chelonia/contract/retain', contractID)
     eventsAfterStatus = 500
@@ -184,14 +190,15 @@ describe('a re-sync that fails', () => {
       sbp('chelonia/contract/sync', contractID, { resync: true }),
       { name: 'ChelErrorUnexpectedHttpResponseCode' }
     )
-    // The re-sync cleared the contract (keeping its reference count) and
-    // unsubscribed it.
+    // The re-sync cleared the contract (keeping its reference count),
+    // unsubscribed it, and announced its removal.
     assert.strictEqual(rootState().contracts[contractID]?.type, undefined)
+    assert.deepStrictEqual(removed, [contractID])
     assert.deepStrictEqual(await deliverFromOutside(), { ignored: true, subscribed: false })
     await sbp('chelonia/contract/release', contractID)
     assert.ok(!(contractID in rootState().contracts))
     assert.ok(!(contractID in rootState()))
-    // Its removal is announced once, by the failed re-sync or the release.
+    // The release doesn't announce it a second time.
     assert.deepStrictEqual(removed, [contractID])
   })
 })
@@ -240,7 +247,7 @@ describe('a KV height recovery racing a release', () => {
   })
 
   afterEach(() => {
-    sbp('chelonia/kv/_clearHeightWaits')
+    sbp('chelonia/kv/_testClearHeightWaits')
     sbp('chelonia/kv/_testSetHeightTimings')
   })
 
@@ -309,5 +316,120 @@ describe('a KV height recovery racing a release', () => {
       () => logged(warnings, 'failed during height recovery'), 'the fallback never ran its recovery'
     )
     assertRemoved()
+  })
+})
+
+// A resync (`chelonia/contract/sync` with `resync`, or a dirty contract)
+// clears the contract and unsubscribes it until its first event is applied
+// again, though the contract is still retained. A height recovery that
+// starts meanwhile must wait for it rather than give up on a released
+// contract.
+describe('a KV height recovery racing a resync', () => {
+  beforeEach(() => {
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 50 })
+  })
+
+  afterEach(() => {
+    sbp('chelonia/kv/_testSetHeightTimings')
+  })
+
+  it('syncs after the resync, and retries', async () => {
+    await sbp('chelonia/contract/retain', contractID)
+    // Holds the resync once it has unsubscribed the contract.
+    let releaseResync!: () => void
+    const resyncHeld = new Promise<void>((resolve) => { releaseResync = resolve })
+    let resyncStarted = false
+    onLatestHEADinfo = async () => {
+      onLatestHEADinfo = undefined
+      resyncStarted = true
+      await resyncHeld
+    }
+    const resyncing = sbp('chelonia/contract/sync', contractID, { resync: true })
+    try {
+      await until(() => resyncStarted, 'the resync started')
+      assert.ok(!sbp('chelonia/private/state').contracts[contractID]?.type)
+      let attempts = 0
+      const recovering = sbp('chelonia/kv/withHeightRecovery', contractID, async () => {
+        if (++attempts > 1) return 'written'
+        throw new ChelErrorKvHeightAhead('[test] ahead', {
+          cause: { requiredHeight: 0, exact: false, localHeight: 0, etag: null, httpStatus: 409 }
+        })
+      })
+      releaseResync()
+      assert.strictEqual(await within(recovering, 'the recovery'), 'written')
+      assert.strictEqual(attempts, 2)
+      await within(resyncing, 'the resync')
+      assert.strictEqual(rootState().contracts[contractID]?.HEAD, first.hash())
+    } finally {
+      releaseResync()
+      await resyncing.catch(() => {})
+    }
+  })
+})
+
+// `chelonia/kv/whenSettled` called before the contract has synced, or
+// while its slot hasn't settled, across what happens to the contract.
+describe("whenSettled across a contract's lifecycle", () => {
+  let offReconcile: () => void
+
+  // What `chelonia/connect` mounts: slots are reconciled as contracts are
+  // added, and cleaned up as they are removed.
+  beforeEach(() => {
+    offReconcile = sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (_: string[], change: unknown) => {
+      sbp('chelonia/kv/_onContractsModified', change)
+    })
+  })
+
+  afterEach(() => {
+    offReconcile()
+  })
+
+  const defineSlot = (contractType: string, def: Record<string, unknown> = {}) =>
+    sbp('chelonia/kv/defineSlot', { contractType, key: 'k', defaultValue: {}, ...def })
+
+  const settling = () => {
+    const outcome = (sbp('chelonia/kv/whenSettled', contractID, 'k') as Promise<string>)
+      .then((status) => ({ status }), (e: Error) => ({ error: e }))
+    return outcome
+  }
+
+  it("rejects once the contract's type turns out to have no such slot", async () => {
+    defineSlot('test/other-type')
+    const outcome = settling()
+    await sbp('chelonia/contract/retain', contractID)
+    const { error } = await within(outcome, 'whenSettled') as { error?: Error }
+    assert.strictEqual(error?.name, 'ChelErrorKvSlotUnknown')
+    assert.match(error.message, /isn't defined for this contract's type/)
+    await sbp('chelonia/contract/release', contractID)
+  })
+
+  it('rejects when the contract is released before its first sync succeeded', async () => {
+    defineSlot(CONTRACT_TYPE)
+    const outcome = settling()
+    await failedRetain()
+    await sbp('chelonia/contract/release', contractID)
+    const { error } = await within(outcome, 'whenSettled') as { error?: Error }
+    assert.strictEqual(error?.name, 'ChelErrorKvSlotUnknown')
+    assert.match(error.message, /was removed with its contract/)
+  })
+
+  it('keeps waiting across a resync, and settles once the slot loads again', async () => {
+    // Loaded explicitly below, once the resync is done.
+    defineSlot(CONTRACT_TYPE, { autoLoad: 'never' })
+    await sbp('chelonia/contract/retain', contractID)
+    assert.strictEqual(sbp('chelonia/kv/status', contractID, 'k'), 'non-init')
+    let settled = false
+    const outcome = settling().finally(() => { settled = true })
+    await sbp('chelonia/contract/sync', contractID, { resync: true })
+    assert.ok(removed.includes(contractID))
+    await sleep(20)
+    assert.strictEqual(settled, false)
+    // The slot is active again. (Its load fails here, for want of the
+    // contract's `#sak` key: that settles it too.)
+    await sbp('chelonia/kv/sync', contractID, 'k').catch(() => {})
+    const { status } = await within(outcome, 'whenSettled') as { status?: string }
+    assert.strictEqual(status, sbp('chelonia/kv/settledStatus', contractID, 'k'))
+    assert.strictEqual(status, 'error')
+    await sbp('chelonia/contract/release', contractID)
   })
 })
