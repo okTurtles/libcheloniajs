@@ -1,15 +1,20 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ChelErrorKvMaxAttempts = void 0;
+exports.isKvMaxAttempts = isKvMaxAttempts;
 // Internal error classes — NOT part of the public API. These are
 // intentionally kept out of `src/errors.ts` (and therefore out of the
 // package-root `export *`) so that adding new internal error types
 // does not widen the public taxonomy.
+const error_names_js_1 = require("./error-names.cjs");
 const errors_js_1 = require("./errors.cjs");
 // Thrown by the low-level `chelonia/kv/set` primitive when the
-// conflict-retry loop exhausts `maxAttempts`. The high-level slot
-// API (`chelonia/kv/update` / `chelonia/kv/clear`) catches this and
-// remaps it to the public `ChelErrorKvConflict`.
+// conflict-retry loop exhausts `maxAttempts`, or on a `412` when there is
+// no `onconflict` to resolve it. `chelonia/kv/update`,
+// `chelonia/kv/clear` and `chelonia/kv/queuedSet` catch this and remap it
+// to the public `ChelErrorKvConflict`, so only raw `chelonia/kv/set`
+// rejects with it; its callers should match it with `isKvConflict(e)`
+// (`src/errors.ts`).
 //
 // Internal — not part of the published API. The package's
 // `exports` map intentionally does not expose `./internal-errors`,
@@ -17,5 +22,13 @@ const errors_js_1 = require("./errors.cjs");
 // legitimate external consumer is the `@chelonia/lib` test suite,
 // which needs to simulate the low-level throw without going through
 // the public `ChelErrorKvConflict` mapping. Application code should
-// catch `ChelErrorKvConflict` instead.
+// use `isKvConflict(e)` instead.
 exports.ChelErrorKvMaxAttempts = (0, errors_js_1.ChelErrorGenerator)('ChelErrorKvMaxAttempts');
+// Realm-safe detection of `ChelErrorKvMaxAttempts`, for the selectors that
+// remap it. `ChelErrorGenerator` assigns `.name` from a string literal, so
+// it survives a dual ESM/CJS or cross-realm load of `@chelonia/lib` where
+// `instanceof` would fail. Matches any object with that name (as
+// `isKvConflict` in `src/errors.ts` does).
+function isKvMaxAttempts(e) {
+    return (0, error_names_js_1.hasErrorName)(e, 'ChelErrorKvMaxAttempts');
+}

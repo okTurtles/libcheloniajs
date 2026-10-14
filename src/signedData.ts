@@ -156,25 +156,37 @@ const verifySignatureData = function <T, U extends object = object> (
     height < designatedKey._notBeforeHeight ||
     !designatedKey.purpose.includes('sig')
   ) {
-    // These errors (ChelErrorSignatureKeyUnauthorized) are serious and
-    // indicate a bug. Make them fatal when running integration tests
-    // (otherwise, they get swallowed and shown as a notification)
-    if (process.env.CI) {
-      console.error(`Key ${sKeyId} is unauthorized or expired for the current contract`, {
-        designatedKey,
-        height,
-        state: JSON.parse(JSON.stringify(sbp('state/vuex/state')))
-      })
+    // An unauthorized or expired key (`ChelErrorSignatureKeyUnauthorized`)
+    // is serious and indicates a bug. In the host app's integration tests,
+    // make it fatal: otherwise it is swallowed and only shown as a
+    // notification. This only happens when `CI` is set and the host app
+    // registers `state/vuex/state`, as Group Income's integration tests do.
+    // CI services (e.g. GitHub Actions) also set `CI` when running this
+    // library's own unit tests, or another app's; there the lookup would
+    // throw in place of `ChelErrorSignatureKeyUnauthorized`, and the
+    // unhandled rejection would fail unrelated tests. The diagnostics must
+    // never replace the real error, so a state that can't be serialized is
+    // only reported. The lookup is only an existence check: the state is
+    // read through `sbp`, so that the selector's filters and `this` apply.
+    // It only finds a selector registered under its own name: one that a
+    // star selector (e.g. `state/*`) provides isn't detected, so the switch
+    // stays off for it.
+    const message = `Key ${sKeyId} is unauthorized or expired for the current contract`
+    const hasVuexState = !!process.env.CI && !!sbp('sbp/selectors/fn', 'state/vuex/state')
+    if (hasVuexState) {
+      try {
+        console.error(message, {
+          designatedKey,
+          height,
+          state: JSON.parse(JSON.stringify(sbp('state/vuex/state')))
+        })
+      } catch (e) {
+        console.error('[chelonia] could not serialize the app state for diagnostics', e)
+      }
       // An unhandled promise rejection will cause Cypress to fail
-      Promise.reject(
-        new ChelErrorSignatureKeyUnauthorized(
-          `Key ${sKeyId} is unauthorized or expired for the current contract`
-        )
-      )
+      Promise.reject(new ChelErrorSignatureKeyUnauthorized(message))
     }
-    throw new ChelErrorSignatureKeyUnauthorized(
-      `Key ${sKeyId} is unauthorized or expired for the current contract`
-    )
+    throw new ChelErrorSignatureKeyUnauthorized(message)
   }
 
   // TODO

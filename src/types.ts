@@ -270,6 +270,112 @@ export type KvMirrorEntry = {
   etag: string | null;
   status: KvLoadStatus;
   lastError?: { name: string; message: string };
+  // `true` once the slot has reached a terminal outcome since it was last
+  // activated: a load (value or 404), an applied remote frame, a committed
+  // local write or clear, or a terminal error. Tells a settled `'non-init'`
+  // (the last verifiable read found no value, and no load or frame since
+  // has found one) apart from a pending one. It stays `true` while the slot
+  // reloads, including while a `'non-init'` slot waits for the contract to
+  // reach the height of a server value it can't verify yet. A reload
+  // reports `'loading'` meanwhile, except that a `'loaded'` slot keeps its
+  // status during the reloads that preserve it (deferred reloads,
+  // `update`'s reloads, the reload after a pubsub conflict, the later
+  // rounds of a single-key `sync`); `sync`'s own loads and reconnect or
+  // resync reloads take it through `'loading'` too.
+  // Always present on entries of active slots; entries persisted by older
+  // versions may lack it until their slot is activated, so treat a missing
+  // value as `false`. Only meaningful for an active slot: an entry
+  // persisted by an earlier session keeps its old value until its slot is
+  // activated again. See KV-REVAMPED.md §4.3 and `chelonia/kv/whenSettled`.
+  settled?: boolean;
+  // Set while the server is known to hold a value written at a contract
+  // height the local contract hasn't reached (`requiredHeight`). `value`,
+  // if any, is then the last verified one, not the server's, whatever the
+  // status says (a `'loaded'` slot keeps presenting it). Cleared when a load
+  // verifies the key (or finds none), when a local write commits (unless a
+  // newer wait was registered meanwhile), and once the deferred reload
+  // started by reaching the height succeeds. A deferred reload that fails
+  // (or can't start) leaves it, even though the height was reached: nothing
+  // verified the key, so `update` keeps reloading before running its
+  // reducer, and rejects with the reload's error if that fails too, until a
+  // load verifies the key. Changes are announced with
+  // `CHELONIA_KV_STATUS_CHANGED`, possibly with an unchanged status.
+  // See KV-REVAMPED.md §4.9.
+  heightAhead?: { requiredHeight: number };
+};
+
+// What `chelonia/kv/set` knows about the server value it received with a
+// conflict (or fetch-first GET) response. See KV-REVAMPED.md §3.4.
+//   - 'absent':  the server holds no value for the key.
+//   - 'present': the local contract has reached the value's height, so it
+//                can be verified. Decryption and signature verification
+//                happen lazily, on `currentData` / `currentValue.data`,
+//                which may still throw.
+//   - 'ahead':   the server value was written at a contract height the
+//                local contract has not reached, so it cannot be verified.
+//                Only reported with `allowUnverifiedConflict` (otherwise
+//                `chelonia/kv/set` rejects with `ChelErrorKvHeightAhead`).
+//   - 'malformed': the stored value's height stamp is malformed, so it can
+//                never be verified. Only reported with
+//                `allowUnverifiedConflict`.
+export type KvServerValueStatus = 'absent' | 'present' | 'ahead' | 'malformed';
+
+// `.cause` of `ChelErrorKvHeightAhead`.
+export type KvHeightAheadCause = {
+  // The local contract must reach this height before the operation can
+  // succeed. Read from the unverified server value (or inferred from a 409).
+  // It is the target of the passive wait, of up to `maxHeightRecoveries`
+  // forced contract syncs, and of the slot's `heightAhead` marker (all
+  // bounded).
+  requiredHeight: number;
+  // `true`: `requiredHeight` is the height stamp of a value the server
+  // returned. `false`: a lower bound inferred from a 409.
+  exact: boolean;
+  // The local contract height when the error was raised.
+  localHeight: number | undefined;
+  // The server's ETag for the key, when the response carried one.
+  etag: string | null;
+  // HTTP status of the response that revealed the height gap.
+  httpStatus: number;
+};
+
+// What `chelonia/kv/update`, `chelonia/kv/clear`, `chelonia/kv/queuedSet`
+// and single-key `chelonia/kv/sync` do when the server value is ahead of
+// the local contract: sync the contract outside the queue lane and try
+// again (`'sync'`, the default), or reject with `ChelErrorKvHeightAhead` at
+// once, without waiting passively for the height or syncing (`'reject'`).
+export type KvHeightAheadMode = 'sync' | 'reject';
+
+// A callback waiting for a contract to reach `minHeight`. See
+// `src/kv-height.ts`.
+export type KvHeightListener = { minHeight: number; fire: () => void };
+
+// A slot load deferred until the local contract reaches `requiredHeight`.
+// See `kvHeightWaits` below and `src/kv.ts`.
+export type KvHeightWait = {
+  contractID: string;
+  key: string;
+  requiredHeight: number;
+  // The `reason` of the first registration for the key. Later registrations
+  // merged into this wait raise `requiredHeight` but keep this `reason`, so
+  // the reload reports the first trigger (e.g. `'load'` even when a later
+  // pubsub frame raised the height). The reloaded value is the latest.
+  reason: Exclude<KvUpdateCtx['reason'], 'local'>;
+  // Removes the height listener backing this wait.
+  off: () => void;
+  // Fallback timer; `undefined` once it has fired, and while parked.
+  timer: ReturnType<typeof setTimeout> | undefined;
+  // `true` once the fallback gave up (the contract could not be brought to
+  // `requiredHeight`), or while single-key `chelonia/kv/sync` drives the
+  // recovery itself. A parked wait has no timer but keeps its height
+  // listener: the slot still reloads if the contract reaches the height,
+  // and its mirror is not used as an `update` basis until then. The next
+  // registration for the key un-parks it, with a new fallback timer.
+  parked?: boolean;
+  // The reload this wait fired, set when it fires (the wait is dropped at
+  // the same time). Lets single-key `chelonia/kv/sync`, which parked the
+  // wait, await that reload instead of loading the key a second time.
+  reload?: Promise<void>;
 };
 
 // Context passed to `onUpdate` and embedded in the `CHELONIA_KV_UPDATED`
@@ -319,6 +425,15 @@ export type KvSlotDefinition = {
   autoSubscribe?: boolean;
   autoLoad?: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
   refreshOnReconnect?: boolean;
+  // Called after every successful load, applied remote frame or committed
+  // local write, including reconnect reloads (also when the value didn't
+  // change), and when a load's 404 replaces a value the slot held. NOT
+  // called when a slot's first load finds no value (404): use
+  // `chelonia/kv/whenSettled` (or `KvMirrorEntry.settled`, or
+  // `CHELONIA_KV_STATUS_CHANGED`) to learn that a slot settled as empty.
+  // Must not throw, and must not synchronously call `update`, `clear`,
+  // `sync`, or a `whenSettled` that would wait, for the same contract
+  // (`ChelErrorKvReentrant`).
   onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
 };
 
@@ -352,6 +467,7 @@ export type SlotDefinition = {
   autoSubscribe: boolean;
   autoLoad: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
   refreshOnReconnect: boolean;
+  // See `KvSlotDefinition.onUpdate`: not called on a first-load 404.
   onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
   source?: SlotDefinitionSource;
 };
@@ -472,7 +588,7 @@ export type CheloniaContext = {
   kvReconnectListener?: (client: import('./pubsub/index.js').PubSubClient) => void;
   kvContractsModifiedListener?: (
     contracts: string[],
-    { added, removed }: { added: string[]; removed: string[] },
+    { added, removed }: { added: string[]; removed: string[]; resync?: boolean },
   ) => void;
   defContractSelectors: string[];
   defContractManifest: string;
@@ -534,13 +650,64 @@ export type CheloniaContext = {
   kvPendingLoads: Map<string, number>;
   // Per-contract count of `onUpdate` callbacks currently executing
   // inside the contract's `chelonia/queueInvocation` lane. A KV write
-  // selector (`update`/`clear`/`sync`) invoked while this is non-zero
-  // for the same contract would enqueue behind the lane that is blocked
+  // selector (`update`/`clear`/`sync`), or a `whenSettled` that would wait,
+  // invoked while this is non-zero for the same contract would enqueue
+  // behind (or wait for a load queued behind) the lane that is blocked
   // awaiting the callback → permanent deadlock, so those selectors
   // reject with `ChelErrorKvReentrant` instead. Keyed by `contractID`
   // to match the lane granularity exactly (cross-contract writes from
   // `onUpdate` are safe and not rejected).
   kvOnUpdateActive: Map<string, number>;
+  // Callbacks waiting for a contract to reach a height, keyed by
+  // contractID. Fired from `handleEvent.applyProcessResult` once the local
+  // height is committed. Used both by the passive waits in
+  // `chelonia/kv/set` and by `kvHeightWaits`. Runtime-only; see
+  // `src/kv-height.ts`.
+  kvHeightListeners: Map<string, Set<KvHeightListener>>;
+  // Slots whose load (or pubsub frame) returned a value written at a
+  // height the local contract has not reached, keyed by
+  // `${contractID}::${key}`. The slot reloads once the height is reached;
+  // a fallback timer forces a contract sync if it isn't. Runtime-only.
+  kvHeightWaits: Map<string, KvHeightWait>;
+  // Height waits that fired and whose reload is queued but hasn't settled
+  // yet, keyed like `kvHeightWaits`; the value identifies the reload, so
+  // that only its own completion removes the key. Until then `update`
+  // doesn't use the mirror as a basis (it reloads first): the value it
+  // holds is known to be stale. Runtime-only.
+  kvHeightReloadsQueued: Map<string, object>;
+  // In-flight forced contract syncs started to recover from
+  // `ChelErrorKvHeightAhead`, keyed by contractID and shared by every
+  // operation recovering on that contract. Awaited by
+  // `chelonia/kv/_waitInFlight`. Runtime-only.
+  kvRecoveries: Map<string, Promise<void>>;
+  // Aborted by `chelonia/reset` as soon as it aborts the old session, and
+  // replaced once the reset has torn that session down. While it is
+  // aborted, no height wait can be registered and no height-recovery sync
+  // can start: either would run into the next session. Runtime-only.
+  kvHeightSession: AbortController;
+  // The `chelonia/reset` calls in progress (between ending the height
+  // session and tearing the old session down, or failing). Resets can
+  // overlap: the height session only resumes when the last one fails, and
+  // a reset that succeeds while another still drains starts the new height
+  // session already ended. Survives `chelonia/reset`. Runtime-only.
+  kvHeightSessionHolds: number;
+  // The height waits `chelonia/reset` dropped when it ended the height
+  // session. If the reset fails before tearing the session down, they are
+  // registered again, parked ones as parked
+  // (`chelonia/kv/_resumeHeightSession`). Runtime-only.
+  kvSuspendedHeightWaits: Array<Pick<KvHeightWait, 'contractID' | 'key' | 'requiredHeight' | 'reason' | 'parked'>>;
+  // The pending `chelonia/kv/whenSettled` calls, keyed by
+  // `${contractID}::${key}`: the function that rejects each one, called
+  // when the slot it waits for can't settle any more (deactivated, not
+  // active once reconciled, not defined for the contract's type, or its
+  // contract removed other than for a resync). Runtime-only.
+  kvSettleWaiters: Map<string, Set<(e: Error) => void>>;
+  // Subscribed contracts whose slots have been reconciled since they were
+  // subscribed (`chelonia/kv/_onContractsModified`, `refreshFilters`);
+  // dropped when the contract is removed. For such a contract, a slot that
+  // isn't active won't activate unless its `match` changes, so
+  // `whenSettled` rejects at once. Runtime-only.
+  kvReconciledContracts: Set<string>;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
@@ -716,10 +883,11 @@ export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<
 };
 
 /**
- * Callback supplied to `chelonia/kv/set` to resolve a `409` / `412`
- * conflict (or to populate the body when `data` was omitted and the
- * primitive performs a fetch-first GET — see the `data === undefined`
- * branch in `src/chelonia.ts`).
+ * Callback supplied to `chelonia/kv/set` to resolve a `412` conflict (or to
+ * populate the body when `data` was omitted and the primitive performs a
+ * fetch-first GET; see the `data === undefined` branch in
+ * `src/chelonia.ts`). A `409` (stale height stamp) is handled inside
+ * `kv/set`, which signs the same data again, and never reaches it.
  *
  * Return either:
  *   - `[newData, ifMatch]` to retry the write with `newData` against
@@ -747,18 +915,49 @@ export type ChelKvOnConflictCallback = (args: {
   status: number;
   etag: string | null | undefined;
   /**
-   * The decrypted/verified server data for the conflicting key.
+   * The server data for the conflicting key. `undefined` means the server
+   * holds no value (`currentStatus` is `'absent'`).
    *
    * **Throws on access.** The runtime value is a lazy getter (see
    * `resolveData` in `src/chelonia.ts`) that forces decryption and
    * signature verification the first time it is read, and may reject
-   * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`.
+   * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`, also
+   * when `currentStatus` is `'present'`. When `currentStatus` is
+   * `'ahead'` it throws `ChelErrorKvHeightAhead`, and when it is
+   * `'malformed'` it throws `ChelErrorKvHeightMalformed`.
    * Access it inside a `try`/`catch` (falling back to `undefined` or
-   * re-throwing as appropriate), or read `currentValue.data` directly
-   * with the same precaution. The bundled slot API (`chelonia/kv/update`,
-   * `chelonia/kv/clear`) already guards access; this note applies to
-   * direct `chelonia/kv/set` callers supplying a custom `onconflict`.
+   * re-throwing as appropriate), or check `currentStatus` first and read
+   * `currentValue.data` with the same precaution: `currentValue` is
+   * `undefined` unless `currentStatus` is `'present'`. The bundled slot
+   * API (`chelonia/kv/update`, `chelonia/kv/clear`) already guards access;
+   * this note applies to direct `chelonia/kv/set` callers supplying a
+   * custom `onconflict`.
    */
   currentData: JSONType | undefined;
-  currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string | undefined] | false>;
+} & KvConflictServerValue) => Promise<[JSONType, string | undefined] | false>;
+
+/**
+ * What `chelonia/kv/set` tells `onconflict` about the server value (see
+ * `KvServerValueStatus` and KV-REVAMPED.md §3.4). `'ahead'` and
+ * `'malformed'` are only ever passed when the caller set
+ * `allowUnverifiedConflict: true`; without it, `chelonia/kv/set` rejects
+ * with `ChelErrorKvHeightAhead` (or `ChelErrorKvHeightMalformed`)
+ * instead of calling `onconflict`. With `'ahead'`, `requiredHeight` is the
+ * contract height the local contract must reach before the server value
+ * can be verified. `currentValue` is the parsed server value (whose `data`
+ * decrypts and verifies lazily, and may throw) when `currentStatus` is
+ * `'present'`, and `undefined` otherwise: narrow on `currentStatus` before
+ * reading it.
+ */
+export type KvConflictServerValue =
+  | {
+      currentStatus: 'present';
+      currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType>;
+      requiredHeight?: undefined;
+    }
+  | {
+      currentStatus: Exclude<KvServerValueStatus, 'present' | 'ahead'>;
+      currentValue: undefined;
+      requiredHeight?: undefined;
+    }
+  | { currentStatus: 'ahead'; currentValue: undefined; requiredHeight: number };
