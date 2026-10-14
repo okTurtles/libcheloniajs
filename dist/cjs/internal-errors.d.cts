@@ -6,3 +6,6 @@ export declare const ChelErrorKvMaxAttempts: {
         cause?: unknown;
     };
 };
+export declare function isKvMaxAttempts(e: unknown): e is Error & {
+    name: 'ChelErrorKvMaxAttempts';
+};

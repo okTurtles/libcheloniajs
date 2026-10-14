@@ -1,3 +1,4 @@
+import type { KvHeightAheadCause } from './types.mjs';
 type ErrorConstructorType = {
     new (...args: ConstructorParameters<typeof Error>): Error;
 };
@@ -208,5 +209,24 @@ export declare const ChelErrorKvHeightAhead: {
         stack?: string;
         cause?: unknown;
     };
+};
+export declare const ChelErrorKvHeightMalformed: {
+    new (message?: string | undefined, options?: ErrorOptions | undefined): {
+        name: string;
+        message: string;
+        stack?: string;
+        cause?: unknown;
+    };
+};
+export declare function isKvHeightAhead(e: unknown): e is Error & {
+    name: 'ChelErrorKvHeightAhead';
+    cause?: KvHeightAheadCause;
+};
+export declare function isKvHeightMalformed(e: unknown): e is Error & {
+    name: 'ChelErrorKvHeightMalformed';
+};
+export declare function kvHeightAheadCause(e: unknown): KvHeightAheadCause | undefined;
+export declare function isKvConflict(e: unknown): e is Error & {
+    name: 'ChelErrorKvConflict' | 'ChelErrorKvMaxAttempts';
 };
 export {};

@@ -424,6 +424,20 @@ export default sbp('sbp/selectors/register', {
         // against a contract we've already given up on.
         clearReingestTrackerForContract(contractID);
         clearReprocessDebounceForContract(contractID);
+        // Drop per-contract KV runtime state on every removal, including the
+        // early returns below; the `CONTRACTS_MODIFIED` listener also performs
+        // this cleanup via `_onContractsModified`, so the direct call is an
+        // idempotent fast path (and on the early returns, which announce no
+        // removal, the only cleanup). A resync keeps the contract's
+        // `whenSettled` calls waiting for its slots to come back.
+        const cleanupKvRuntime = () => {
+            try {
+                sbp('chelonia/kv/_cleanupContractRuntime', contractID, { resync: !!params?.resync });
+            }
+            catch (e) {
+                console.error('[chelonia] KV cleanup on contract removal failed', e);
+            }
+        };
         const contractName = state.contracts[contractID]?.type;
         if (!contractName) {
             // An entry without a type is a contract whose first sync never
@@ -432,18 +446,26 @@ export default sbp('sbp/selectors/register', {
             // subscribed (applying the first message both sets the type and
             // subscribes) and has no destructor to call. Unless re-syncing, drop
             // what is left of it, which would otherwise linger in (persisted)
-            // state. It was never announced as added, so its removal isn't
-            // announced either.
-            if (state.contracts[contractID] &&
-                !params?.resync &&
-                !this.subscriptionSet.has(contractID)) {
-                console.debug(`[chelonia/private/removeImmediately] Removing ${contractID}, which never finished syncing`);
-                removeContractState.call(this, state, contractID, params?.permanent);
+            // state. A contract whose first sync failed was never announced as
+            // added, so its removal isn't announced either. One whose re-sync
+            // failed was, but the failed re-sync already announced its removal
+            // (`CONTRACTS_MODIFIED` with `removed` and `resync: true`), so
+            // dropping it here for good adds no second announcement. Re-syncing
+            // such an entry is expected too: there is nothing to clear, and the
+            // re-sync starts over from the first message. Either way, the
+            // contract's KV runtime state goes, as on every removal below.
+            if (state.contracts[contractID] && !this.subscriptionSet.has(contractID)) {
+                if (!params?.resync) {
+                    console.debug(`[chelonia/private/removeImmediately] Removing ${contractID}, which never finished syncing`);
+                    removeContractState.call(this, state, contractID, params?.permanent);
+                }
+                cleanupKvRuntime();
                 return;
             }
             console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
                 contractID
             });
+            cleanupKvRuntime();
             return;
         }
         const manifestHash = this.config.contracts.manifests[contractName];
@@ -478,15 +500,7 @@ export default sbp('sbp/selectors/register', {
         else {
             removeContractState.call(this, state, contractID, params?.permanent);
         }
-        // Drop per-contract KV runtime state on every removal; the
-        // `CONTRACTS_MODIFIED` listener also performs this cleanup via
-        // `_onContractsModified`, so the direct call is an idempotent fast path.
-        try {
-            sbp('chelonia/kv/_cleanupContractRuntime', contractID);
-        }
-        catch (e) {
-            console.error('[chelonia] KV cleanup on contract removal failed', e);
-        }
+        cleanupKvRuntime();
         this.subscriptionSet.delete(contractID);
         // (Tracker + debounce cancellation moved to the top of this selector
         // so the early-return path on a missing contract row also clears.
@@ -2690,8 +2704,8 @@ const handleEvent = {
             sbp('okTurtles.events/emit', EVENT_HANDLED, contractID, message);
         }
         // The local height has been committed above (even when processing
-        // errored), so KV values stamped at this height are now verifiable.
-        // Wake up KV operations waiting for it (see `src/kv-height.ts`).
+        // errored), so KV operations waiting for this height can proceed:
+        // wake them up (see `src/kv-height.ts`).
         notifyContractHeight(this, contractID, height);
     }
 };

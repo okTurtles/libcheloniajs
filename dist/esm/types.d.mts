@@ -162,14 +162,17 @@ export type KvMirrorEntry = {
         message: string;
     };
     settled?: boolean;
+    heightAhead?: {
+        requiredHeight: number;
+    };
 };
-export type KvServerValueStatus = 'absent' | 'present' | 'ahead';
+export type KvServerValueStatus = 'absent' | 'present' | 'ahead' | 'malformed';
 export type KvHeightAheadCause = {
     requiredHeight: number;
     exact: boolean;
     localHeight: number | undefined;
     etag: string | null;
-    status: number;
+    httpStatus: number;
 };
 export type KvHeightAheadMode = 'sync' | 'reject';
 export type KvHeightListener = {
@@ -183,6 +186,8 @@ export type KvHeightWait = {
     reason: Exclude<KvUpdateCtx['reason'], 'local'>;
     off: () => void;
     timer: ReturnType<typeof setTimeout> | undefined;
+    parked?: boolean;
+    reload?: Promise<void>;
 };
 export type KvUpdateCtx = {
     contractID: string;
@@ -352,6 +357,7 @@ export type CheloniaContext = {
     kvContractsModifiedListener?: (contracts: string[], { added, removed }: {
         added: string[];
         removed: string[];
+        resync?: boolean;
     }) => void;
     defContractSelectors: string[];
     defContractManifest: string;
@@ -374,8 +380,13 @@ export type CheloniaContext = {
     kvOnUpdateActive: Map<string, number>;
     kvHeightListeners: Map<string, Set<KvHeightListener>>;
     kvHeightWaits: Map<string, KvHeightWait>;
+    kvHeightReloadsQueued: Map<string, object>;
     kvRecoveries: Map<string, Promise<void>>;
     kvHeightSession: AbortController;
+    kvHeightSessionHolds: number;
+    kvSuspendedHeightWaits: Array<Pick<KvHeightWait, 'contractID' | 'key' | 'requiredHeight' | 'reason' | 'parked'>>;
+    kvSettleWaiters: Map<string, Set<(e: Error) => void>>;
+    kvReconciledContracts: Set<string>;
     defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
 };
 export type ChelContractManifestBody = {
@@ -532,10 +543,11 @@ export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<
     etag: string | null;
 };
 /**
- * Callback supplied to `chelonia/kv/set` to resolve a `409` / `412`
- * conflict (or to populate the body when `data` was omitted and the
- * primitive performs a fetch-first GET — see the `data === undefined`
- * branch in `src/chelonia.ts`).
+ * Callback supplied to `chelonia/kv/set` to resolve a `412` conflict (or to
+ * populate the body when `data` was omitted and the primitive performs a
+ * fetch-first GET; see the `data === undefined` branch in
+ * `src/chelonia.ts`). A `409` (stale height stamp) is handled inside
+ * `kv/set`, which signs the same data again, and never reaches it.
  *
  * Return either:
  *   - `[newData, ifMatch]` to retry the write with `newData` against
@@ -563,35 +575,49 @@ export type ChelKvOnConflictCallback = (args: {
     status: number;
     etag: string | null | undefined;
     /**
-     * What is known about the server value. `'absent'` means the server
-     * holds no value, `'present'` that `currentData` is the verified server
-     * value. `'ahead'` is only ever passed when the caller set
-     * `allowUnverifiedConflict: true`; without it, `chelonia/kv/set` rejects
-     * with `ChelErrorKvHeightAhead` instead of calling `onconflict`.
-     * See KV-REVAMPED.md §3.4.
-     */
-    currentStatus: KvServerValueStatus;
-    /**
-     * Set when `currentStatus` is `'ahead'`: the contract height the local
-     * contract must reach before the server value can be verified.
-     */
-    requiredHeight?: number;
-    /**
-     * The decrypted/verified server data for the conflicting key.
-     * `undefined` means the server holds no value (`currentStatus` is
-     * `'absent'`).
+     * The server data for the conflicting key. `undefined` means the server
+     * holds no value (`currentStatus` is `'absent'`).
      *
      * **Throws on access.** The runtime value is a lazy getter (see
      * `resolveData` in `src/chelonia.ts`) that forces decryption and
      * signature verification the first time it is read, and may reject
-     * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`. When
-     * `currentStatus` is `'ahead'` it throws `ChelErrorKvHeightAhead`.
+     * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`, also
+     * when `currentStatus` is `'present'`. When `currentStatus` is
+     * `'ahead'` it throws `ChelErrorKvHeightAhead`, and when it is
+     * `'malformed'` it throws `ChelErrorKvHeightMalformed`.
      * Access it inside a `try`/`catch` (falling back to `undefined` or
-     * re-throwing as appropriate), or read `currentValue.data` directly
-     * with the same precaution. The bundled slot API (`chelonia/kv/update`,
-     * `chelonia/kv/clear`) already guards access; this note applies to
-     * direct `chelonia/kv/set` callers supplying a custom `onconflict`.
+     * re-throwing as appropriate), or check `currentStatus` first and read
+     * `currentValue.data` with the same precaution: `currentValue` is
+     * `undefined` unless `currentStatus` is `'present'`. The bundled slot
+     * API (`chelonia/kv/update`, `chelonia/kv/clear`) already guards access;
+     * this note applies to direct `chelonia/kv/set` callers supplying a
+     * custom `onconflict`.
      */
     currentData: JSONType | undefined;
-    currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string | undefined] | false>;
+} & KvConflictServerValue) => Promise<[JSONType, string | undefined] | false>;
+/**
+ * What `chelonia/kv/set` tells `onconflict` about the server value (see
+ * `KvServerValueStatus` and KV-REVAMPED.md §3.4). `'ahead'` and
+ * `'malformed'` are only ever passed when the caller set
+ * `allowUnverifiedConflict: true`; without it, `chelonia/kv/set` rejects
+ * with `ChelErrorKvHeightAhead` (or `ChelErrorKvHeightMalformed`)
+ * instead of calling `onconflict`. With `'ahead'`, `requiredHeight` is the
+ * contract height the local contract must reach before the server value
+ * can be verified. `currentValue` is the parsed server value (whose `data`
+ * decrypts and verifies lazily, and may throw) when `currentStatus` is
+ * `'present'`, and `undefined` otherwise: narrow on `currentStatus` before
+ * reading it.
+ */
+export type KvConflictServerValue = {
+    currentStatus: 'present';
+    currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType>;
+    requiredHeight?: undefined;
+} | {
+    currentStatus: Exclude<KvServerValueStatus, 'present' | 'ahead'>;
+    currentValue: undefined;
+    requiredHeight?: undefined;
+} | {
+    currentStatus: 'ahead';
+    currentValue: undefined;
+    requiredHeight: number;
+};

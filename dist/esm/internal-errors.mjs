@@ -2,11 +2,15 @@
 // intentionally kept out of `src/errors.ts` (and therefore out of the
 // package-root `export *`) so that adding new internal error types
 // does not widen the public taxonomy.
+import { hasErrorName } from './error-names.mjs';
 import { ChelErrorGenerator } from './errors.mjs';
 // Thrown by the low-level `chelonia/kv/set` primitive when the
-// conflict-retry loop exhausts `maxAttempts`. The high-level slot
-// API (`chelonia/kv/update` / `chelonia/kv/clear`) catches this and
-// remaps it to the public `ChelErrorKvConflict`.
+// conflict-retry loop exhausts `maxAttempts`, or on a `412` when there is
+// no `onconflict` to resolve it. `chelonia/kv/update`,
+// `chelonia/kv/clear` and `chelonia/kv/queuedSet` catch this and remap it
+// to the public `ChelErrorKvConflict`, so only raw `chelonia/kv/set`
+// rejects with it; its callers should match it with `isKvConflict(e)`
+// (`src/errors.ts`).
 //
 // Internal — not part of the published API. The package's
 // `exports` map intentionally does not expose `./internal-errors`,
@@ -14,5 +18,13 @@ import { ChelErrorGenerator } from './errors.mjs';
 // legitimate external consumer is the `@chelonia/lib` test suite,
 // which needs to simulate the low-level throw without going through
 // the public `ChelErrorKvConflict` mapping. Application code should
-// catch `ChelErrorKvConflict` instead.
+// use `isKvConflict(e)` instead.
 export const ChelErrorKvMaxAttempts = ChelErrorGenerator('ChelErrorKvMaxAttempts');
+// Realm-safe detection of `ChelErrorKvMaxAttempts`, for the selectors that
+// remap it. `ChelErrorGenerator` assigns `.name` from a string literal, so
+// it survives a dual ESM/CJS or cross-realm load of `@chelonia/lib` where
+// `instanceof` would fail. Matches any object with that name (as
+// `isKvConflict` in `src/errors.ts` does).
+export function isKvMaxAttempts(e) {
+    return hasErrorName(e, 'ChelErrorKvMaxAttempts');
+}
