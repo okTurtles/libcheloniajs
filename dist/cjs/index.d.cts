@@ -10,6 +10,7 @@ export * from './files.cjs';
 export * from './journal.cjs';
 export * from './kv-constants.cjs';
 export * from './kv.cjs';
+export * from './names.cjs';
 export * from './persistent-actions.cjs';
 export * from './presets.cjs';
 export * from './pubsub/index.cjs';

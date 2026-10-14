@@ -1,6 +1,6 @@
 {
   "name": "@chelonia/lib",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "description": "Library for building Chelonia applications",
   "main": "dist/cjs/index.cjs",
   "types": "dist/cjs/index.d.cts",
@@ -145,6 +145,16 @@
       "require": {
         "types": "./dist/cjs/local-selectors/index.d.cts",
         "default": "./dist/cjs/local-selectors/index.cjs"
+      }
+    },
+    "./names": {
+      "import": {
+        "types": "./dist/esm/names.d.mts",
+        "default": "./dist/esm/names.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/names.d.cts",
+        "default": "./dist/cjs/names.cjs"
       }
     },
     "./persistent-actions": {

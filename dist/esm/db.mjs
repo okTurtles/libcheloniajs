@@ -57,7 +57,8 @@ sbp('sbp/selectors/unsafe', ['chelonia.db/get', 'chelonia.db/set', 'chelonia.db/
 // Chelonia relies on being able to find the current contract head. To overcome
 // this, if a head is requested, 'chelonia.db/get' returns information from
 // the Chelonia contract state.
-const dbPrimitiveSelectors = process.env.LIGHTWEIGHT_CLIENT === 'true'
+// Lightweight is the default; LIGHTWEIGHT_CLIENT='false' asks for the full mode.
+const dbPrimitiveSelectors = process.env.LIGHTWEIGHT_CLIENT !== 'false'
     ? {
         'chelonia.db/get': function (key) {
             const id = getContractIdFromLogHead(key);
