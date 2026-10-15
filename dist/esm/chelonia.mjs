@@ -9,7 +9,7 @@ import { clearReingestTrackerAll } from './reingestTracker.mjs';
 import { EDWARDS25519SHA512BATCH, deserializeKey, keyId, keygen, serializeKey } from '@chelonia/crypto';
 import { ChelErrorInvalidMessageHeight, ChelErrorKvHeightMalformed, ChelErrorResourceGone, ChelErrorUnexpected, ChelErrorUnexpectedHttpResponseCode, ChelErrorUnrecoverable, isKvHeightMalformed } from './errors.mjs';
 import { ChelErrorKvMaxAttempts } from './internal-errors.mjs';
-import { KV_MAX_STALE_STAMP_RETRIES, delayUnlessAborted, isHeightReached, kvHeightAheadError, pubsubSocketNotOpen, readHeightStamp, throwIfAborted, waitForContractHeight } from './kv-height.mjs';
+import { KV_MAX_STALE_STAMP_RETRIES, delayUnlessAborted, isHeightReached, isValidMaxAttempts, kvHeightAheadError, kvHeightTimings, pubsubSocketNotOpen, readHeightStamp, throwIfAborted, waitForContractHeight, waitForSyncEnd } from './kv-height.mjs';
 import { clearKvRuntime, initKvRuntime } from './kv-runtime.mjs';
 import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './events.mjs';
 import { SPMessage } from './SPMessage.mjs';
@@ -520,20 +520,28 @@ export default sbp('sbp/selectors/register', {
         }
         // The following are all synchronous operations
         const rootState = sbp(this.config.stateSelector);
-        // Cancel all outgoing messages by replacing this._instance
-        this._instance = Object.create(null);
-        // Remove all contracts, including all contracts from pending
-        reactiveClearObject(rootState, this.config.reactiveDel);
-        this.config.reactiveSet(rootState, 'contracts', Object.create(null));
-        this.config.reactiveSet(rootState, 'secretKeys', Object.create(null));
-        // Re-seed the KV mirror — `reactiveClearObject` above stripped it
-        // along with everything else. Slot definitions (`kvSlots`) and the
-        // per-manifest cache (`defContractKvByManifest`) survive reset
-        // because they are code-level state; the per-subscription maps are
-        // cleared alongside `subscriptionSet` below (`clearKvRuntime`).
-        this.config.reactiveSet(rootState, '_kv', Object.create(null));
-        clearKvRuntime(this);
-        sbp('chelonia/kv/_finishHeightSession');
+        // The teardown starts here, so the old session can't be resumed even if
+        // a step throws (e.g. an app's `reactiveDel`): this reset still releases
+        // its height-session hold, or every later reset would leave height
+        // recovery aborted. The error still propagates.
+        try {
+            // Cancel all outgoing messages by replacing this._instance
+            this._instance = Object.create(null);
+            // Remove all contracts, including all contracts from pending
+            reactiveClearObject(rootState, this.config.reactiveDel);
+            this.config.reactiveSet(rootState, 'contracts', Object.create(null));
+            this.config.reactiveSet(rootState, 'secretKeys', Object.create(null));
+            // Re-seed the KV mirror — `reactiveClearObject` above stripped it
+            // along with everything else. Slot definitions (`kvSlots`) and the
+            // per-manifest cache (`defContractKvByManifest`) survive reset
+            // because they are code-level state; the per-subscription maps are
+            // cleared next (`clearKvRuntime`), before `subscriptionSet`.
+            this.config.reactiveSet(rootState, '_kv', Object.create(null));
+            clearKvRuntime(this);
+        }
+        finally {
+            sbp('chelonia/kv/_finishHeightSession');
+        }
         clearObject(this.ephemeralReferenceCount);
         this.pending.splice(0);
         clearObject(this.currentSyncs);
@@ -906,9 +914,16 @@ export default sbp('sbp/selectors/register', {
                         if (frame.kind === 'malformed') {
                             const slot = this.kvSlotsByContractID.get(msg.channelID)?.get(msg.key);
                             if (slot) {
-                                sbp('chelonia/kv/_loadSlot', {
-                                    contractID: msg.channelID, slot, reason: 'remote'
-                                }).catch(() => { });
+                                // A vetoed load throws synchronously: log it, and still
+                                // report the frame's own error below.
+                                try {
+                                    sbp('chelonia/kv/_loadSlot', {
+                                        contractID: msg.channelID, slot, reason: 'remote'
+                                    }).catch(() => { });
+                                }
+                                catch (e) {
+                                    console.error(`[chelonia] reloading ${msg.channelID}::${msg.key} couldn't start`, e);
+                                }
                             }
                             throw frame.error;
                         }
@@ -2230,6 +2245,9 @@ export default sbp('sbp/selectors/register', {
             !(typeof heightWaitMs === 'number' && Number.isFinite(heightWaitMs) && heightWaitMs >= 0)) {
             throw new TypeError('[chelonia/kv] set: `heightWaitMs` must be a finite number >= 0');
         }
+        if (!isValidMaxAttempts(maxAttempts)) {
+            throw new TypeError('[chelonia/kv] set: `maxAttempts` must be an integer >= 1');
+        }
         maxAttempts = maxAttempts ?? 3;
         const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`;
         const hasOnconflict = typeof onconflict === 'function';
@@ -2246,7 +2264,6 @@ export default sbp('sbp/selectors/register', {
             })()
             : this.abortController.signal;
         let response;
-        let conflictEtag = null;
         let successEtag = null;
         let recoveryGetAttempted = false;
         // Height stamp of the most recent POST.
@@ -2268,6 +2285,21 @@ export default sbp('sbp/selectors/register', {
             timeoutMs: pubsubSocketNotOpen(this) ? 0 : heightWaitMs ?? undefined,
             signals: [fetchSignal]
         });
+        // The same wait after a `409`. While a sync of the contract is running
+        // (e.g. one catching up after a reconnect), the stamp would be stale at
+        // every height it replays: wait for that sync to end first, then for
+        // the height, both within one `heightWaitMs`.
+        const waitForStampHeight = async (required) => {
+            if (!this.currentSyncs[contractID])
+                return waitForHeight(required);
+            const timeoutMs = pubsubSocketNotOpen(this) ? 0 : heightWaitMs ?? kvHeightTimings().waitMs;
+            const startedAt = Date.now();
+            await waitForSyncEnd(this, contractID, { timeoutMs, signals: [fetchSignal] });
+            return waitForContractHeight(this, contractID, required, {
+                timeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
+                signals: [fetchSignal]
+            });
+        };
         // Classifies a server value (see `KvServerValue`). A value that is ahead is
         // first given a bounded, passive wait for the local contract to catch up
         // (only when `wait` is set, and never for a blind writer, which doesn't
@@ -2294,12 +2326,12 @@ export default sbp('sbp/selectors/register', {
         // Reads what the current `response` (a 412, or the fetch-first GET) says
         // about the server value, doing at most one recovery GET per `kv/set`
         // call. With `wait`, a value that is ahead is first given a bounded,
-        // passive wait for the local contract to catch up.
+        // passive wait for the local contract to catch up. `status` is that of
+        // the response `etag` came from (the recovery GET's, once it ran).
         const readServerValue = async (wait) => {
             let body = { kind: 'absent' };
             let etag = responseEtag(response);
-            if (etag)
-                conflictEtag = etag;
+            let status = response.status;
             // Rationale:
             //  * response.ok could be the result of `GET` (no initial data)
             //  * 412 indicates a conflict (precondition failed) because the data
@@ -2341,29 +2373,28 @@ export default sbp('sbp/selectors/register', {
                     signal: fetchSignal
                 });
                 if (getResp.ok) {
-                    body = await classifyBody(await getResp.text(), wait);
                     etag = responseEtag(getResp);
+                    status = getResp.status;
+                    body = await classifyBody(await getResp.text(), wait);
                 }
                 else {
                     console.warn(`[kv/set] recovery GET for ${contractID}/${key} returned ` +
                         `${getResp.status}; proceeding without recovered etag/value`);
                 }
-                if (etag)
-                    conflictEtag = etag;
             }
-            return { body, etag };
+            return { body, etag, status };
         };
         // The `resolveData` function is tasked with computing merged data, as in
         // merging the existing stored values (after a conflict or initial fetch)
         // and new data. The return value indicates whether there should be a new
         // attempt at storing updated data (if `true`) or not (if `false`).
         const resolveData = async ({ backoff = false } = {}) => {
-            const { body, etag } = await readServerValue(true);
+            const { body, etag, status } = await readServerValue(true);
             // Never hand `onconflict` a value that could not be verified as if it
             // were absent (KV-REVAMPED.md §3.4): a merge against the default would
             // either drop the write or overwrite the server value.
             const aheadError = body.kind === 'ahead'
-                ? heightAheadError(body.requiredHeight, true, etag, response.status)
+                ? heightAheadError(body.requiredHeight, true, etag, status)
                 : undefined;
             if (aheadError && !allowUnverifiedConflict)
                 throw aheadError;
@@ -2457,18 +2488,17 @@ export default sbp('sbp/selectors/register', {
                         // 409 means the precondition still holds and `data` is still
                         // the right value: only the height stamp is stale (the server
                         // has processed contract events this client hasn't). Wait for
-                        // the local contract to move past the stamp, then sign the same
-                        // data again. The stored value's own stamp, when the body
-                        // carries one, is a better lower bound for the server height.
+                        // the local contract to move past the stamp (for a running sync
+                        // to end first), then sign the same data again. The stored
+                        // value's own stamp, when the body carries one, is a better
+                        // lower bound for the server height.
                         const etag = responseEtag(response);
-                        if (etag)
-                            conflictEtag = etag;
                         const required = Math.max(postedHeight + 1, await readConflictBodyHeight(response) ?? 0);
                         if (++staleStampRetries > KV_MAX_STALE_STAMP_RETRIES) {
                             throw heightAheadError(required, false, etag, response.status);
                         }
                         throwIfAborted(fetchSignal);
-                        const reached = await waitForHeight(required);
+                        const reached = await waitForStampHeight(required);
                         if (!reached)
                             throw heightAheadError(required, false, etag, response.status);
                         continue;
@@ -2499,7 +2529,7 @@ export default sbp('sbp/selectors/register', {
                                 return undefined;
                             });
                             if (hasOnconflict && !allowUnverifiedConflict && last?.body.kind === 'ahead') {
-                                throw heightAheadError(last.body.requiredHeight, true, last.etag, response.status);
+                                throw heightAheadError(last.body.requiredHeight, true, last.etag, last.status);
                             }
                             let currentStatus = last?.body.kind;
                             let currentData;
@@ -2523,7 +2553,7 @@ export default sbp('sbp/selectors/register', {
                                         currentData
                                     }),
                                     ...(currentStatus !== undefined && { currentStatus }),
-                                    etag: (last ? last.etag : conflictEtag) ?? null
+                                    etag: (last ? last.etag : responseEtag(response)) ?? null
                                 }
                             });
                         }
@@ -2683,9 +2713,11 @@ function classifyKvValue(ctx, contractID, key, serializedData) {
         height = readHeightStamp(serializedData, ChelErrorKvHeightMalformed);
     }
     catch (e) {
+        // The stamp error's own `[chelonia] ` prefix gives way to this one.
+        const stampMessage = e.message.replace(/^\[chelonia\] /, '');
         return {
             kind: 'malformed',
-            error: new ChelErrorKvHeightMalformed(`[chelonia/kv] ${contractID}::${key}: ${e.message}`, { cause: e })
+            error: new ChelErrorKvHeightMalformed(`[chelonia/kv] ${contractID}::${key}: ${stampMessage}`, { cause: e })
         };
     }
     if (!isHeightReached(ctx, contractID, height)) {

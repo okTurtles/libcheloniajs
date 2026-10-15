@@ -1,4 +1,4 @@
-import type { KvHeightAheadCause } from './types.cjs';
+import type { KvConflictCause, KvHeightAheadCause } from './types.cjs';
 type ErrorConstructorType = {
     new (...args: ConstructorParameters<typeof Error>): Error;
 };
@@ -228,5 +228,6 @@ export declare function isKvHeightMalformed(e: unknown): e is Error & {
 export declare function kvHeightAheadCause(e: unknown): KvHeightAheadCause | undefined;
 export declare function isKvConflict(e: unknown): e is Error & {
     name: 'ChelErrorKvConflict' | 'ChelErrorKvMaxAttempts';
+    cause?: KvConflictCause;
 };
 export {};

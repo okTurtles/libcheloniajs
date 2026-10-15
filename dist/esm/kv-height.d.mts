@@ -1,4 +1,4 @@
-import type { CheloniaContext, KvHeightAheadCause, KvHeightAheadMode, KvHeightWait } from './types.mjs';
+import type { CheloniaContext, KvHeightAheadCause, KvHeightAheadMode, KvHeightRecoveryAttempt, KvHeightRecoveryOptions, KvHeightWait } from './types.mjs';
 export declare const KV_HEIGHT_WAIT_MS = 1500;
 export declare const KV_HEIGHT_PENDING_FALLBACK_MS = 10000;
 export declare const KV_HEIGHT_RECOVERY_TIMEOUT_MS = 30000;
@@ -23,6 +23,10 @@ export declare function kvHeightAheadError(ctx: CheloniaContext, contractID: str
 export declare function abortReason(signal: AbortSignal): unknown;
 export declare function throwIfAborted(signal?: AbortSignal): void;
 export declare function raceAbort<T>(promise: Promise<T>, signals: Array<AbortSignal | undefined>): Promise<T>;
+export declare function queueAbortable<T>(contractID: string, signals: Array<AbortSignal | undefined>, body: () => Promise<T>): {
+    result: Promise<T>;
+    queued: Promise<void>;
+};
 export declare function addHeightListener(ctx: CheloniaContext, contractID: string, minHeight: number, fire: () => void): () => void;
 export declare function notifyContractHeight(ctx: CheloniaContext, contractID: string, height: number): void;
 export declare function clearWaitTimer(wait: KvHeightWait): void;
@@ -33,22 +37,19 @@ export declare function waitForContractHeight(ctx: CheloniaContext, contractID: 
     timeoutMs?: number;
     signals?: Array<AbortSignal | undefined>;
 }): Promise<boolean>;
+export declare function waitForSyncEnd(ctx: CheloniaContext, contractID: string, { timeoutMs, signals }?: {
+    timeoutMs?: number;
+    signals?: Array<AbortSignal | undefined>;
+}): Promise<boolean>;
 export declare function recoverContractHeight(ctx: CheloniaContext, contractID: string, error: unknown, { callerSignal, sessionSignal, requiredHeight }?: {
     callerSignal?: AbortSignal;
     sessionSignal?: AbortSignal;
     requiredHeight?: number;
 }): Promise<void>;
-export type KvHeightRecoveryOptions = {
-    onHeightAhead?: KvHeightAheadMode;
-    maxHeightRecoveries?: number;
-    signal?: AbortSignal;
-};
 export declare function resolveHeightRecoveryOptions(label: string, { onHeightAhead, maxHeightRecoveries }: KvHeightRecoveryOptions): {
     mode: KvHeightAheadMode;
     maxRecoveries: number;
 };
-export type KvHeightRecoveryAttempt = {
-    recoveries: number;
-    heightWaitMs: 0 | undefined;
-};
+export declare function isValidMaxAttempts(maxAttempts: unknown): boolean;
+export declare function assertValidMaxAttempts(label: string, maxAttempts: unknown): void;
 export declare function withHeightRecovery<T>(ctx: CheloniaContext, contractID: string, attempt: (info: KvHeightRecoveryAttempt) => Promise<T>, { onHeightAhead, maxHeightRecoveries, signal }?: KvHeightRecoveryOptions, label?: string): Promise<T>;

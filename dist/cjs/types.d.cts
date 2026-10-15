@@ -175,6 +175,20 @@ export type KvHeightAheadCause = {
     httpStatus: number;
 };
 export type KvHeightAheadMode = 'sync' | 'reject';
+export type KvHeightRecoveryOptions = {
+    onHeightAhead?: KvHeightAheadMode;
+    maxHeightRecoveries?: number;
+    signal?: AbortSignal;
+};
+export type KvHeightRecoveryAttempt = {
+    recoveries: number;
+    heightWaitMs: 0 | undefined;
+};
+export type KvConflictCause = {
+    currentData?: JSONType;
+    currentStatus?: KvServerValueStatus;
+    etag?: string | null;
+};
 export type KvHeightListener = {
     minHeight: number;
     fire: () => void;

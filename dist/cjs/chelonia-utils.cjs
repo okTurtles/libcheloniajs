@@ -6,10 +6,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const sbp_1 = __importDefault(require("@sbp/sbp"));
 const errors_js_1 = require("./errors.cjs");
 const internal_errors_js_1 = require("./internal-errors.cjs");
+const kv_height_js_1 = require("./kv-height.cjs");
 // This file contains non-core parts of Chelonia, i.e., functionality that is
 // useful but optional. The threshold for something being 'optional' generally
 // is something that can be implemented externally using only public Chelonia
-// selectors.
+// selectors (here plus the library's error predicates and internal helpers:
+// `queueAbortable`, and the `maxAttempts` check).
 // Optional functionality can make certain assumptions about contracts or
 // actions to make things simpler or easier to implement.
 // Currently, a single selector is defined: 'chelonia/kv/queuedSet'.
@@ -28,20 +30,25 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // docs/kv.md).
     //
     // When the server value is ahead of the local contract
-    // (`ChelErrorKvHeightAhead`), the contract is synced outside the queue and
-    // the write is retried (`onHeightAhead: 'sync'`, the default), up to
+    // (`ChelErrorKvHeightAhead`), the write waits (holding no lane) for a sync
+    // of the contract, which runs on the contract's internal lane, and is
+    // retried (`onHeightAhead: 'sync'`, the default), up to
     // `maxHeightRecoveries` times, without `kv/set`'s passive wait for the
     // height, except on the last attempt, where that wait is the write's only
     // chance. Pass `onHeightAhead: 'reject'` to get the error at once, without
     // waiting or syncing: nothing retries the write then (a deferred reload
     // only refreshes a slot's mirror, and only for a value that is ahead, not
-    // after a stale-stamp `409`), so only when the caller re-issues it itself.
+    // after a stale-stamp `409`), so use it only when the caller re-issues the
+    // write itself.
     // Pass `maxHeightRecoveries: 0` to wait passively without syncing. See
     // KV-REVAMPED.md §4.2 step 5a. A write that recovers is enqueued again,
     // so a later write to the same key can commit before it (as with an
-    // app-level retry). Awaited from one of the contract's `sideEffect`s, or
-    // from an `onUpdate` of one of its slots, it never settles: both run on
-    // the contract's lanes (see docs/kv.md, "Contract heights").
+    // app-level retry). `signal` ends the write at once while it is queued
+    // (it then sends nothing). Awaited from the contract's own lanes (one of
+    // its `sideEffect`s, a raw pubsub handler or a `queueInvocation` body for
+    // it, an `onUpdate` of one of its slots), it never settles; a synchronous
+    // call from such an `onUpdate` rejects with `ChelErrorKvReentrant` (see
+    // docs/kv.md, "How height recovery runs").
     // `allowUnverifiedConflict` is passed on to `chelonia/kv/set`.
     //
     // Running out of `maxAttempts` resolving `412` conflicts, or a `412`
@@ -59,8 +66,13 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
     // (`allowUnverifiedConflict`) doesn't depend on the value, so that is a
     // conflict too.
     'chelonia/kv/queuedSet': ({ contractID, key, data, onconflict, allowUnverifiedConflict, ifMatch, maxAttempts, signal, onHeightAhead, maxHeightRecoveries, encryptionKeyName = 'cek', signingKeyName = 'csk' }) => {
+        const label = `queuedSet: ${contractID}::${key}`;
+        if (!(0, kv_height_js_1.isValidMaxAttempts)(maxAttempts)) {
+            return Promise.reject(new errors_js_1.ChelErrorKvUpdateInvalid(`[chelonia/kv] ${label}: \`maxAttempts\` must be an integer >= 1`));
+        }
         return (0, sbp_1.default)('chelonia/kv/withHeightRecovery', contractID, ({ heightWaitMs }) => {
-            return (0, sbp_1.default)('chelonia/queueInvocation', contractID, () => {
+            // `signal` also ends the wait while the write is still queued.
+            return (0, kv_height_js_1.queueAbortable)(contractID, [signal], () => {
                 return (0, sbp_1.default)('chelonia/kv/set', contractID, key, data, {
                     ifMatch,
                     encryptionKeyId: (0, sbp_1.default)('chelonia/contract/currentKeyIdByName', contractID, encryptionKeyName),
@@ -71,9 +83,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                     heightWaitMs,
                     signal
                 });
-            });
+            }).result;
         }, {
-            onHeightAhead, maxHeightRecoveries, signal, label: `queuedSet: ${contractID}::${key}`
+            onHeightAhead, maxHeightRecoveries, signal, label
         })
             .catch((e) => {
             // `kv/set`'s internal error for running out of attempts, or for a

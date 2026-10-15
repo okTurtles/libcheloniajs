@@ -447,19 +447,29 @@ export default sbp('sbp/selectors/register', {
             // subscribes) and has no destructor to call. Unless re-syncing, drop
             // what is left of it, which would otherwise linger in (persisted)
             // state. A contract whose first sync failed was never announced as
-            // added, so its removal isn't announced either. One whose re-sync
-            // failed was, but the failed re-sync already announced its removal
-            // (`CONTRACTS_MODIFIED` with `removed` and `resync: true`), so
-            // dropping it here for good adds no second announcement. Re-syncing
-            // such an entry is expected too: there is nothing to clear, and the
-            // re-sync starts over from the first message. Either way, the
-            // contract's KV runtime state goes, as on every removal below.
+            // added, and one whose re-sync failed already announced its removal
+            // (`CONTRACTS_MODIFIED` with `removed` and `resync: true`), so an
+            // ordinary removal is announced no further. A permanent one is,
+            // either way: Chelonia now records `null` for the contract, and a
+            // store copy of `state.contracts` (`chelonia/externalStateSetup`)
+            // must record it too. The listeners tolerate the removal of a
+            // contract they never saw added. Re-syncing such an entry is expected
+            // too: there is nothing to clear, and the re-sync starts over from
+            // the first message. Either way, the contract's KV runtime state
+            // goes, as on every removal below.
             if (state.contracts[contractID] && !this.subscriptionSet.has(contractID)) {
                 if (!params?.resync) {
                     console.debug(`[chelonia/private/removeImmediately] Removing ${contractID}, which never finished syncing`);
                     removeContractState.call(this, state, contractID, params?.permanent);
                 }
                 cleanupKvRuntime();
+                if (!params?.resync && params?.permanent) {
+                    sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {
+                        added: [],
+                        removed: [contractID],
+                        permanent: true
+                    });
+                }
                 return;
             }
             console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
