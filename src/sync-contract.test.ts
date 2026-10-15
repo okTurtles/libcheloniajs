@@ -42,6 +42,8 @@ let errors: unknown[][]
 let restoreConsole: () => void
 let added: string[]
 let removed: string[]
+// The removals announced as permanent.
+let removedPermanently: string[]
 let offModified: () => void
 
 // Every `chelonia/kv/_cleanupContractRuntime` call, by contract ID (SBP
@@ -83,11 +85,13 @@ beforeEach(() => {
   kvCleanups.length = 0
   added = []
   removed = []
+  removedPermanently = []
   offModified = sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (
-    _: string[], change: { added: string[]; removed: string[] }
+    _: string[], change: { added: string[]; removed: string[]; permanent?: boolean }
   ) => {
     added.push(...change.added)
     removed.push(...change.removed)
+    if (change.permanent) removedPermanently.push(...change.removed)
   })
   ;({ warnings, errors, restore: restoreConsole } = captureConsole())
 })
@@ -148,10 +152,12 @@ describe('a first sync that fails', () => {
     assert.deepStrictEqual(kvCleanups, [contractID])
   })
 
-  it('leaves a null entry once the contract is removed permanently', async () => {
+  it('leaves a null entry once the contract is removed permanently, and announces it', async () => {
     await failedRetain()
     await sbp('chelonia/contract/remove', contractID, { permanent: true })
     assert.strictEqual(rootState().contracts[contractID], null)
+    // A store copy of `state.contracts` records the `null` too.
+    assert.deepStrictEqual(removedPermanently, [contractID])
     await assert.rejects(
       sbp('chelonia/contract/retain', contractID), { name: 'ChelErrorResourceGone' }
     )
@@ -200,6 +206,20 @@ describe('a re-sync that fails', () => {
     assert.ok(!(contractID in rootState()))
     // The release doesn't announce it a second time.
     assert.deepStrictEqual(removed, [contractID])
+  })
+
+  it('announces a permanent removal once the contract is removed for good', async () => {
+    await sbp('chelonia/contract/retain', contractID)
+    eventsAfterStatus = 500
+    await assert.rejects(
+      sbp('chelonia/contract/sync', contractID, { resync: true }),
+      { name: 'ChelErrorUnexpectedHttpResponseCode' }
+    )
+    eventsAfterStatus = 200
+    assert.deepStrictEqual(removedPermanently, [])
+    await sbp('chelonia/contract/remove', contractID, { permanent: true })
+    assert.strictEqual(rootState().contracts[contractID], null)
+    assert.deepStrictEqual(removedPermanently, [contractID])
   })
 })
 

@@ -27,12 +27,15 @@ import {
   isKvHeightAhead,
   kvHeightAheadCause
 } from './errors.js'
+import { CONTRACT_IS_SYNCING } from './events.js'
 import type { PubSubClient } from './pubsub/index.js'
 import type {
   CheloniaContext,
   KvHeightAheadCause,
   KvHeightAheadMode,
   KvHeightListener,
+  KvHeightRecoveryAttempt,
+  KvHeightRecoveryOptions,
   KvHeightWait
 } from './types.js'
 
@@ -46,7 +49,10 @@ export const KV_HEIGHT_WAIT_MS = 1500
 export const KV_HEIGHT_PENDING_FALLBACK_MS = 10000
 // Upper bound on how long an operation waits for the contract sync it
 // started to recover from `ChelErrorKvHeightAhead`. The sync itself keeps
-// running; only the waiting operation gives up.
+// running; only the waiting operation gives up. It doesn't bound the
+// retry that follows: when the height was reached anyway, the retry is
+// queued behind that sync and waits for it (only the caller's `signal`
+// ends that wait; see `queueAbortable`).
 export const KV_HEIGHT_RECOVERY_TIMEOUT_MS = 30000
 // Default number of sync-and-retry rounds for `onHeightAhead: 'sync'`.
 export const KV_DEFAULT_MAX_HEIGHT_RECOVERIES = 2
@@ -215,6 +221,48 @@ export function raceAbort<T> (
   return withDeadline<T>({ signals }, ({ resolve, reject }) => {
     promise.then(resolve, reject)
   })
+}
+
+// Queues `body` on the public lane of `contractID`
+// (`chelonia/queueInvocation`). Until `body` starts, any of `signals`
+// rejects `result` at once with its reason, and `body` then never runs: it
+// checks the signals first. Once `body` has started, aborts are its own
+// business (e.g. `chelonia/kv/set` aborts its fetch, and a write that
+// committed still resolves). `queued` settles (never rejects) when the
+// lane work does, which can be after `result`: in-flight accounting waits
+// for it. A `queueInvocation` that throws (a filter vetoed it) throws.
+export function queueAbortable<T> (
+  contractID: string,
+  signals: Array<AbortSignal | undefined>,
+  body: () => Promise<T>
+): { result: Promise<T>; queued: Promise<void> } {
+  const active = signals.filter((s): s is AbortSignal => !!s)
+  const alreadyAborted = active.find((s) => s.aborted)
+  if (alreadyAborted) {
+    return { result: Promise.reject(abortReason(alreadyAborted)), queued: Promise.resolve() }
+  }
+  let started = false
+  const lane = Promise.resolve(sbp('chelonia/queueInvocation', contractID, () => {
+    started = true
+    // Rejects rather than throws, as an `async` body would.
+    const aborted = active.find((s) => s.aborted)
+    return aborted ? Promise.reject(abortReason(aborted)) : body()
+  })) as Promise<T>
+  const queued = lane.then(() => undefined, () => undefined)
+  if (!active.length) return { result: lane, queued }
+  const result = new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      if (started) return
+      release()
+      reject(abortReason(active.find((s) => s.aborted)!))
+    }
+    const release = () => {
+      for (const s of active) s.removeEventListener('abort', onAbort)
+    }
+    for (const s of active) s.addEventListener('abort', onAbort)
+    lane.then((value) => { release(); resolve(value) }, (e: unknown) => { release(); reject(e) })
+  })
+  return { result, queued }
 }
 
 // Registers `fire` to run (once) when the local height of `contractID`
@@ -386,6 +434,39 @@ export function waitForContractHeight (
   }, ({ resolve }) => addHeightListener(ctx, contractID, minHeight, () => resolve(true)))
 }
 
+// Waits, without touching any queue, until the sync of `contractID` that is
+// running ends (`CONTRACT_IS_SYNCING` with `false`), however it ends.
+// Resolves `true` when it does (at once when none is running) and `false`
+// when `timeoutMs` elapses first (at once when it isn't positive). Rejects
+// with the abort reason if any of `signals` aborts (at once when one
+// already has and a sync is running). Like `waitForContractHeight`, it
+// creates no lane dependency: a caller holding the lane the sync needs
+// times out.
+export function waitForSyncEnd (
+  ctx: CheloniaContext,
+  contractID: string,
+  { timeoutMs = heightWaitMs, signals = [] }: {
+    timeoutMs?: number;
+    signals?: Array<AbortSignal | undefined>;
+  } = {}
+): Promise<boolean> {
+  const syncing = () => !!ctx.currentSyncs[contractID]
+  if (!syncing()) return Promise.resolve(true)
+  if (!(timeoutMs > 0)) {
+    return withDeadline<boolean>({ signals }, ({ resolve }) => resolve(false))
+  }
+  return withDeadline<boolean>({
+    signals,
+    timeoutMs,
+    onTimeout: ({ resolve }) => resolve(!syncing())
+  }, ({ resolve }) => {
+    const listener = (id: string, isSyncing: boolean) => {
+      if (id === contractID && !isSyncing) resolve(true)
+    }
+    return sbp('okTurtles.events/on', CONTRACT_IS_SYNCING, listener) as () => void
+  })
+}
+
 // Starts (or joins) a sync of `contractID`. Concurrent recoveries on the
 // same contract share one sync. The sync runs on the contract's internal
 // queue; callers MUST NOT hold the contract's public (`queueInvocation`)
@@ -436,10 +517,12 @@ function startRecoverySync (ctx: CheloniaContext, contractID: string): Promise<v
 // (`waitForContractHeight`'s default, none while the pubsub socket is
 // closed). The required height is `requiredHeight`, or else `error`'s.
 // Note that after a timeout the retried operation's lane work still waits
-// behind the sync, which runs on the contract's lane. Rejects with the
-// abort reason if the caller's signal, the session's
+// behind the sync, which runs on the contract's lane (the KV writes queue
+// it with `queueAbortable`, so the caller's signal still ends that wait).
+// Rejects with the abort reason if the caller's signal, the session's
 // (`ctx.abortController`'s, captured when the operation started) or the
-// height session (`kvHeightSession`, ended by `chelonia/reset`) aborts; an
+// height session (`kvHeightSession`, ended by `chelonia/reset`) aborts:
+// that ends this caller's wait, not the shared sync. An
 // already aborted one rejects before any sync starts, since after a reset
 // the sync would run into the next session. Once settled, it logs nothing
 // more: a sync that fails after the timeout or an abort is the outcome of
@@ -528,12 +611,6 @@ export function recoverContractHeight (
   })
 }
 
-export type KvHeightRecoveryOptions = {
-  onHeightAhead?: KvHeightAheadMode;
-  maxHeightRecoveries?: number;
-  signal?: AbortSignal;
-}
-
 // Validates the height-recovery options shared by `update`, `clear`,
 // `queuedSet` (through `withHeightRecovery`) and single-key `sync`, and
 // fills in the defaults. Invalid input throws `ChelErrorKvUpdateInvalid`,
@@ -560,17 +637,22 @@ export function resolveHeightRecoveryOptions (
   }
 }
 
-// What `withHeightRecovery` hands each attempt: `recoveries`, the number of
-// recoveries performed so far (counted from 0), and `heightWaitMs`, to pass
-// on to `chelonia/kv/set`. That is `0` when a recovery (sync the contract
-// and retry) follows: `kv/set` then rejects with `ChelErrorKvHeightAhead`
-// at once instead of first waiting passively for the height, with the
-// contract's lane held. `0` with `onHeightAhead: 'reject'` too: such a
-// caller wants the error at once, as single-key `sync` does. `undefined`
-// (the default wait) for the last attempt of `'sync'`, where that wait is
-// the write's only chance; so `maxHeightRecoveries: 0` means "wait
-// passively, never sync".
-export type KvHeightRecoveryAttempt = { recoveries: number; heightWaitMs: 0 | undefined }
+// Whether `maxAttempts` is a valid `maxAttempts` option of a KV write:
+// omitted (`undefined` or `null`), or a safe integer >= 1.
+export function isValidMaxAttempts (maxAttempts: unknown): boolean {
+  return maxAttempts == null || (Number.isSafeInteger(maxAttempts) && (maxAttempts as number) >= 1)
+}
+
+// The `maxAttempts` check of `update`, `clear` and `queuedSet`: throws
+// `ChelErrorKvUpdateInvalid`, labelled as `resolveHeightRecoveryOptions`
+// labels its errors. (`chelonia/kv/set` throws a `TypeError`.)
+export function assertValidMaxAttempts (label: string, maxAttempts: unknown): void {
+  if (!isValidMaxAttempts(maxAttempts)) {
+    throw new ChelErrorKvUpdateInvalid(
+      `[chelonia/kv] ${label}: \`maxAttempts\` must be an integer >= 1`
+    )
+  }
+}
 
 // Runs `attempt` and, while it rejects with `ChelErrorKvHeightAhead`, syncs
 // the contract and runs it again (up to `maxHeightRecoveries` times).

@@ -286,7 +286,9 @@ export type KvMirrorEntry = {
   // versions may lack it until their slot is activated, so treat a missing
   // value as `false`. Only meaningful for an active slot: an entry
   // persisted by an earlier session keeps its old value until its slot is
-  // activated again. See KV-REVAMPED.md §4.3 and `chelonia/kv/whenSettled`.
+  // activated again, except that `chelonia/reset(newState)`, the way to
+  // restore a persisted mirror, marks every restored entry
+  // `settled: false`. See KV-REVAMPED.md §4.3 and `chelonia/kv/whenSettled`.
   settled?: boolean;
   // Set while the server is known to hold a value written at a contract
   // height the local contract hasn't reached (`requiredHeight`). `value`,
@@ -294,8 +296,9 @@ export type KvMirrorEntry = {
   // status says (a `'loaded'` slot keeps presenting it). Cleared when a load
   // verifies the key (or finds none), when a local write commits (unless a
   // newer wait was registered meanwhile), and once the deferred reload
-  // started by reaching the height succeeds. A deferred reload that fails
-  // (or can't start) leaves it, even though the height was reached: nothing
+  // started by reaching the height verifies the key. A deferred reload
+  // that fails, can't start or is vetoed leaves it, even though the height
+  // was reached: nothing
   // verified the key, so `update` keeps reloading before running its
   // reducer, and rejects with the reload's error if that fails too, until a
   // load verifies the key. Changes are announced with
@@ -324,9 +327,10 @@ export type KvServerValueStatus = 'absent' | 'present' | 'ahead' | 'malformed';
 export type KvHeightAheadCause = {
   // The local contract must reach this height before the operation can
   // succeed. Read from the unverified server value (or inferred from a 409).
-  // It is the target of the passive wait, of up to `maxHeightRecoveries`
-  // forced contract syncs, and of the slot's `heightAhead` marker (all
-  // bounded).
+  // It is the target of the passive wait (bounded), of up to
+  // `maxHeightRecoveries` forced contract syncs (bounded), and of the slot's
+  // `heightAhead` marker, which stays until a load verifies the key
+  // (unbounded; KV-REVAMPED.md §12.10).
   requiredHeight: number;
   // `true`: `requiredHeight` is the height stamp of a value the server
   // returned. `false`: a lower bound inferred from a 409.
@@ -344,7 +348,44 @@ export type KvHeightAheadCause = {
 // the local contract: sync the contract outside the queue lane and try
 // again (`'sync'`, the default), or reject with `ChelErrorKvHeightAhead` at
 // once, without waiting passively for the height or syncing (`'reject'`).
+// The recovery sync runs on the contract's internal lane and is shared:
+// never await these from that contract's lanes (see "How height recovery
+// runs" in docs/kv.md).
 export type KvHeightAheadMode = 'sync' | 'reject';
+
+// The height-recovery options of `chelonia/kv/withHeightRecovery` (and of
+// `update`, `clear`, `queuedSet` and single-key `sync`). `signal` ends the
+// caller's wait (also while its work is queued), not the shared recovery
+// sync.
+export type KvHeightRecoveryOptions = {
+  onHeightAhead?: KvHeightAheadMode;
+  maxHeightRecoveries?: number;
+  signal?: AbortSignal;
+}
+
+// What `withHeightRecovery` hands each attempt: `recoveries`, the number of
+// recoveries performed so far (counted from 0), and `heightWaitMs`, to pass
+// on to `chelonia/kv/set`. That is `0` when a recovery (sync the contract
+// and retry) follows: `kv/set` then rejects with `ChelErrorKvHeightAhead`
+// at once instead of first waiting passively for the height, with the
+// contract's lane held. `0` with `onHeightAhead: 'reject'` too: such a
+// caller wants the error at once, as single-key `sync` does. `undefined`
+// (the default wait) for the last attempt of `'sync'`, where that wait is
+// the write's only chance; so `maxHeightRecoveries: 0` means "wait
+// passively, never sync".
+export type KvHeightRecoveryAttempt = { recoveries: number; heightWaitMs: 0 | undefined }
+
+// `.cause` of a KV write's conflict-exhaustion error (`isKvConflict`): what
+// the last server response said about the stored value. `currentData` is
+// only there when the value is known (present and decoded, or absent);
+// `update` and `clear` normalize it for the slot. `currentStatus` is
+// missing when that response couldn't be read or decoded. `etag` is that
+// response's (`null` when it carried none).
+export type KvConflictCause = {
+  currentData?: JSONType;
+  currentStatus?: KvServerValueStatus;
+  etag?: string | null;
+}
 
 // A callback waiting for a contract to reach `minHeight`. See
 // `src/kv-height.ts`.

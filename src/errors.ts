@@ -2,7 +2,7 @@
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
 
 import { hasErrorName } from './error-names.js'
-import type { KvHeightAheadCause } from './types.js'
+import type { KvConflictCause, KvHeightAheadCause } from './types.js'
 
 type ErrorConstructorType = { new (...args: ConstructorParameters<typeof Error>): Error };
 
@@ -121,13 +121,16 @@ export function kvHeightAheadCause (e: unknown): KvHeightAheadCause | undefined 
 // `chelonia/kv/clear` and `chelonia/kv/queuedSet`), or the internal error
 // raw `chelonia/kv/set` rejects with. Name-based, like `isKvHeightAhead`
 // (and, like it, also true for a plain `{ name, message }` object such as a
-// slot's `lastError`).
-// `.cause`, when present, is `{ currentStatus, currentData, etag }` from the
-// last server response (`update` and `clear` normalize `currentData` for
-// the slot); `currentData` is omitted when the value is unknown, and
-// `currentStatus` too when the last response couldn't be read or decoded.
+// slot's `lastError`, whose `.cause` is missing).
+// `.cause`, when present, is a `KvConflictCause`: `{ currentStatus,
+// currentData, etag }` from the last server response (`update` and `clear`
+// normalize `currentData` for the slot); `currentData` is omitted when the
+// value is unknown, and `currentStatus` too when the last response couldn't
+// be read or decoded.
 export function isKvConflict (
   e: unknown
-): e is Error & { name: 'ChelErrorKvConflict' | 'ChelErrorKvMaxAttempts' } {
+): e is Error & {
+  name: 'ChelErrorKvConflict' | 'ChelErrorKvMaxAttempts'; cause?: KvConflictCause
+} {
   return hasErrorName(e, 'ChelErrorKvConflict', 'ChelErrorKvMaxAttempts')
 }

@@ -130,9 +130,9 @@ describe('height waits woken by processed events', () => {
       if (n === 1) setTimeout(() => { handled = handle(event) }, 20)
     }
     const startedAt = Date.now()
-    await sbp('chelonia/kv/set', contractID, KEY, { name: 'alice' }, {
+    await within(sbp('chelonia/kv/set', contractID, KEY, { name: 'alice' }, {
       ifMatch: '""', signingKeyId: keyId(csk)
-    })
+    }), 'kv/set')
     const elapsed = Date.now() - startedAt
     await within(handled ?? Promise.resolve(), 'the event was never handled')
     assert.strictEqual(rootState().contracts[contractID].height, 1)
@@ -150,7 +150,7 @@ describe('height waits woken by processed events', () => {
     await writeAsOtherDevice({ name: 'bob' }, 1)
     sbp('chelonia/kv/defineSlot', { contractType: CTYPE, key: KEY, defaultValue: {} })
     sbp('chelonia/kv/_onContractsModified', { added: [contractID], removed: [] })
-    await sbp('chelonia/queueInvocation', contractID, () => {})
+    await within(sbp('chelonia/queueInvocation', contractID, () => {}), 'the contract lane')
     await until(() => server.gets().length === 1, 'the first load never issued its GET')
     // The value was written at height 1: the load is deferred. A load that
     // is merely in flight is 'loading' too, so check that it ran once and

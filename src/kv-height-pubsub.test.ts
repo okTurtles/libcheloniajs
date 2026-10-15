@@ -192,30 +192,13 @@ describe('pubsub frames while the local contract is behind', () => {
 
 // `connect` uses the harness's manual connection options, so the client's
 // socket never opens: no contract event can arrive, and `kv/set` doesn't
-// wait for one.
+// wait for one. (A stale stamp written with recoveries left skips the wait
+// by itself; `kv-height.test.ts` checks that without a pubsub client.)
 describe('writes and loads while the pubsub socket is closed', () => {
   // Time of the first contract sync requested at or after `started`.
   const firstSyncAfter = (started: number): number | undefined => server.requests.find((r) =>
     r.at >= started && r.path.startsWith('/latestHEADinfo/')
   )?.at
-
-  it('a stale stamp (409) goes straight to the recovery sync', async () => {
-    await loadV0At40()
-    connect()
-    // The server moved on without changing the key (e.g. a contract event
-    // this device missed while its socket was down).
-    server.height = 41
-    server.catchUpOnSync = true
-    server.log.length = 0
-    const started = Date.now()
-    await sbp('chelonia/kv/update', {
-      contractID: CONTRACT_ID, key: UNREAD, updater: addChatRoomUnreadMessage('roomA', 'a2', 5)
-    })
-    const firstSync = firstSyncAfter(started)
-    assert.ok(firstSync !== undefined, 'no recovery sync')
-    assert.ok(firstSync - started < 500, `first sync after ${firstSync - started} ms`)
-    assert.deepStrictEqual(server.posts().map((p) => p.status), [409, 204])
-  })
 
   // With no recovery left, `update`'s only attempt is its last, which
   // takes `kv/set`'s default wait: only the closed socket skips it.

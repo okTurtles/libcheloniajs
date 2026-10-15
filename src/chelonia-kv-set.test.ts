@@ -14,7 +14,6 @@ import {
   isKvHeightMalformed,
   kvHeightAheadCause
 } from './errors.js'
-import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import { KV_MAX_STALE_STAMP_RETRIES } from './kv-height.js'
 import { captureConsole, setContractHeightLater, sleep, useKvSetHooks, withLocalHeight, within } from './test-utils.js'
 import type {
@@ -172,7 +171,7 @@ describe('chelonia/kv/set', () => {
             typeof args.etag === 'string' ? args.etag : undefined
           ]
         }),
-        (e: unknown) => e instanceof ChelErrorKvMaxAttempts
+        (e: unknown) => isKvConflict(e)
       )
     } finally {
       restore()
@@ -293,6 +292,33 @@ describe('chelonia/kv/set', () => {
     assert.strictEqual(removed, 1)
   })
 
+  // Not a bound at all otherwise: `NaN` would retry a contended key forever.
+  it('rejects an invalid maxAttempts with a TypeError, without any request', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    let requests = 0
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async () => {
+        requests++
+        return new Response('', { status: 412 })
+      }
+    } as Partial<CheloniaConfig>)
+    for (const maxAttempts of [NaN, 0, -1, 1.5, Infinity, '3']) {
+      await assert.rejects(
+        () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+          signingKeyId,
+          maxAttempts,
+          onconflict: async ({ etag }: ConflictArgs): Promise<[JSONType, string | undefined]> =>
+            [{ x: 1 }, etag ?? undefined]
+        }),
+        (e: unknown) => e instanceof TypeError &&
+          e.message === '[chelonia/kv] set: `maxAttempts` must be an integer >= 1',
+        String(maxAttempts)
+      )
+    }
+    assert.strictEqual(requests, 0)
+  })
+
   it('returns null etag when a retry succeeds without etag headers', async () => {
     const { contractID, signingKeyId } = setupContract()
     let calls = 0
@@ -331,7 +357,7 @@ describe('chelonia/kv/set', () => {
         onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, 'etag-1']
       }),
       (e: unknown) => {
-        assert.ok(e instanceof ChelErrorKvMaxAttempts)
+        assert.ok(isKvConflict(e))
         assert.deepStrictEqual((e as { cause?: unknown }).cause, { etag: 'etag-1' })
         return true
       }
@@ -358,7 +384,7 @@ describe('chelonia/kv/set', () => {
         onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, undefined]
       }),
       (e: unknown) => {
-        assert.ok(e instanceof ChelErrorKvMaxAttempts)
+        assert.ok(isKvConflict(e))
         assert.deepStrictEqual((e as { cause?: unknown }).cause, { etag: '"cid-1"' })
         return true
       }
@@ -392,7 +418,7 @@ describe('chelonia/kv/set', () => {
       }),
       // The one recovery GET (after the first 412) is used up: the last,
       // body-less 412 says the key is absent, and carries no etag.
-      (e: unknown) => e instanceof ChelErrorKvMaxAttempts &&
+      (e: unknown) => isKvConflict(e) &&
         assert.deepStrictEqual(
           (e as { cause?: unknown }).cause,
           { currentData: undefined, currentStatus: 'absent', etag: null }
@@ -416,13 +442,13 @@ describe('chelonia/kv/set', () => {
     } as Partial<CheloniaConfig>)
 
     await assert.rejects(
-      () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+      () => within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
         signingKeyId,
         onconflict: async (): Promise<[JSONType, string | undefined]> => {
           conflicts++
           return [{ x: 2 }, undefined]
         }
-      }),
+      }), 'kv/set'),
       (e: unknown) => {
         assert.ok(isKvHeightAhead(e))
         assert.ok(e instanceof ChelErrorInvalidMessageHeight)
@@ -454,13 +480,13 @@ describe('chelonia/kv/set', () => {
       }
     } as Partial<CheloniaConfig>)
 
-    const result = await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+    const result = await within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
       signingKeyId,
       onconflict: async (args: ConflictArgs): Promise<[JSONType, string | undefined]> => {
         seen.push([args.currentStatus, args.currentData, args.etag])
         return [{ x: 8 }, args.etag ?? undefined]
       }
-    }) as { etag: string | null }
+    }), 'kv/set') as { etag: string | null }
 
     assert.deepStrictEqual(result, { etag: 'etag-3' })
     assert.deepStrictEqual(seen, [['present', { x: 7 }, 'etag-2']])
@@ -486,7 +512,7 @@ describe('chelonia/kv/set', () => {
       signingKeyId,
       allowUnverifiedConflict: true,
       onconflict: async (args: ConflictArgs): Promise<[JSONType, string | undefined]> => {
-        assert.throws(() => args.currentData, ChelErrorKvHeightAhead)
+        assert.throws(() => args.currentData, (e: unknown) => isKvHeightAhead(e))
         seen.push([args.currentStatus, args.requiredHeight, args.currentValue, args.etag])
         return [{ x: 2 }, args.etag ?? undefined]
       }
@@ -737,43 +763,86 @@ describe('chelonia/kv/set', () => {
     assert.ok(Date.now() - started < 5000)
   })
 
-  it('recovery GET with a value that is ahead rejects with its etag', async () => {
-    const { contractID, signingKeyId } = setupContract()
-    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 30 })
-    let capturedBody = ''
-    let posts = 0
-    let gets = 0
-    let conflicts = 0
-    sbp('chelonia/configure', {
-      connectionURL: 'https://example.test',
-      fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
-        if (opts?.method === 'POST') {
-          posts++
-          capturedBody ||= opts.body ?? ''
-          return new Response('', { status: 412 })
+  // The cause describes the response that revealed the height gap: the
+  // recovery GET, with its own etag and status (not the 412's), on a
+  // conflict with attempts left as on the last one.
+  for (const maxAttempts of [undefined, 1]) {
+    it(`recovery GET with a value that is ahead rejects with the GET's etag and status (maxAttempts: ${maxAttempts})`, async () => {
+      const { contractID, signingKeyId } = setupContract()
+      sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 30 })
+      let capturedBody = ''
+      let posts = 0
+      let gets = 0
+      let conflicts = 0
+      sbp('chelonia/configure', {
+        connectionURL: 'https://example.test',
+        fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
+          if (opts?.method === 'POST') {
+            posts++
+            capturedBody ||= opts.body ?? ''
+            return new Response('', { status: 412 })
+          }
+          gets++
+          const ahead = { ...JSON.parse(capturedBody), height: '5' }
+          return new Response(JSON.stringify(ahead), {
+            status: 200,
+            headers: { etag: 'etag-recovered' }
+          })
         }
-        gets++
-        const ahead = { ...JSON.parse(capturedBody), height: '5' }
-        return new Response(JSON.stringify(ahead), {
-          status: 200,
-          headers: { etag: 'etag-recovered' }
-        })
-      }
-    } as Partial<CheloniaConfig>)
+      } as Partial<CheloniaConfig>)
 
-    await assert.rejects(
-      () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
-        signingKeyId,
-        onconflict: async (): Promise<[JSONType, string | undefined]> => {
-          conflicts++
-          return [{ x: 2 }, undefined]
+      await assert.rejects(
+        () => within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+          signingKeyId,
+          maxAttempts,
+          onconflict: async (): Promise<[JSONType, string | undefined]> => {
+            conflicts++
+            return [{ x: 2 }, undefined]
+          }
+        }), 'kv/set'),
+        (e: unknown) => {
+          assert.deepStrictEqual(kvHeightAheadCause(e), {
+            requiredHeight: 5, exact: true, localHeight: 1, etag: 'etag-recovered', httpStatus: 200
+          })
+          return true
         }
-      }),
-      (e: unknown) => kvHeightAheadCause(e)?.etag === 'etag-recovered'
-    )
-    assert.strictEqual(posts, 1)
-    assert.strictEqual(gets, 1)
-    assert.strictEqual(conflicts, 0)
+      )
+      assert.strictEqual(posts, 1)
+      assert.strictEqual(gets, 1)
+      assert.strictEqual(conflicts, 0)
+    })
+  }
+
+  it("the conflict cause reports the last 412's etag, or null when it carried none", async () => {
+    const { contractID, signingKeyId } = setupContract()
+    const stored = await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 1)
+    for (const lastEtag of [undefined, '"cid-last"']) {
+      let posts = 0
+      sbp('chelonia/configure', {
+        connectionURL: 'https://example.test',
+        // The first 412 carries a value and an etag; the second (the last
+        // attempt's) a body that can't be read, with or without an etag.
+        fetch: async () => ++posts === 1
+          ? new Response(stored, { status: 412, headers: { etag: '"cid-1"' } })
+          : new Response('not json', { status: 412, headers: lastEtag ? { etag: lastEtag } : {} })
+      } as Partial<CheloniaConfig>)
+
+      await assert.rejects(
+        () => within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+          signingKeyId,
+          maxAttempts: 2,
+          onconflict: async ({ etag }: ConflictArgs): Promise<[JSONType, string | undefined]> =>
+            [{ x: 2 }, etag ?? undefined]
+        }), 'kv/set'),
+        (e: unknown) => {
+          assert.ok(isKvConflict(e))
+          assert.deepStrictEqual((e as { cause?: unknown }).cause, { etag: lastEtag ?? null })
+          return true
+        },
+        String(lastEtag)
+      )
+      assert.strictEqual(posts, 2)
+    }
   })
 
   it('stops before onconflict when chelonia/reset aborts during the backoff', async () => {
@@ -868,10 +937,10 @@ describe('chelonia/kv/set on 409', () => {
     } as unknown as Partial<CheloniaConfig>)
 
     // No `onconflict` at all: a 409 doesn't need one.
-    const result = await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+    const result = await within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
       signingKeyId,
       ifMatch: '"cid-0"'
-    })
+    }), 'kv/set')
     assert.deepStrictEqual(result, { etag: '"cid-1"' })
     assert.deepStrictEqual(posts.map((p) => p.height), ['1', '2'])
     assert.strictEqual(posts[0].message, posts[1].message)
@@ -899,12 +968,12 @@ describe('chelonia/kv/set on 409', () => {
       }
     } as Partial<CheloniaConfig>)
 
-    await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+    await within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
       signingKeyId,
       onconflict: async () => {
         throw new Error('onconflict must not be called for a 409')
       }
-    })
+    }), 'kv/set')
     assert.strictEqual(posts, 2)
   })
 
@@ -921,7 +990,7 @@ describe('chelonia/kv/set on 409', () => {
     } as Partial<CheloniaConfig>)
 
     await assert.rejects(
-      () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, { signingKeyId }),
+      () => within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, { signingKeyId }), 'kv/set'),
       (e: unknown) => {
         assert.ok(isKvHeightAhead(e))
         assert.deepStrictEqual(kvHeightAheadCause(e), {
@@ -957,10 +1026,10 @@ describe('chelonia/kv/set on 409', () => {
     } as Partial<CheloniaConfig>)
 
     await assert.rejects(
-      () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+      () => within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
         signingKeyId,
         ifMatch: '"cid-4"'
-      }),
+      }), 'kv/set'),
       (e: unknown) => kvHeightAheadCause(e)?.requiredHeight === 4
     )
   })
@@ -983,11 +1052,11 @@ describe('chelonia/kv/set on 409', () => {
     } as Partial<CheloniaConfig>)
 
     await assert.rejects(
-      () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+      () => within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
         signingKeyId,
         // A 409 isn't a conflict: it doesn't use up conflict attempts.
         maxAttempts: 1
-      }),
+      }), 'kv/set'),
       (e: unknown) => {
         const cause = kvHeightAheadCause(e)
         assert.strictEqual(cause?.exact, false)
@@ -1040,9 +1109,9 @@ describe('chelonia/kv/set on 409', () => {
       { status: 409 }, { status: 409 }, { status: 412, body: stored }, { status: 204 }
     ])
     const seen: unknown[] = []
-    const result = await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+    const result = await within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
       signingKeyId, ifMatch: '"cid-0"', maxAttempts: 2, onconflict: mergeX(seen)
-    })
+    }), 'kv/set')
     assert.deepStrictEqual(result, { etag: '"cid-final"' })
     assert.deepStrictEqual(seen, [['present', { x: 7 }, '"cid-3"']])
     assert.deepStrictEqual(heights, ['1', '2', '3', '3'])
@@ -1055,9 +1124,9 @@ describe('chelonia/kv/set on 409', () => {
       { status: 412, body: stored }, { status: 412, body: stored }, { status: 409 }, { status: 204 }
     ])
     const seen: unknown[] = []
-    const result = await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+    const result = await within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
       signingKeyId, onconflict: mergeX(seen)
-    })
+    }), 'kv/set')
     assert.deepStrictEqual(result, { etag: '"cid-final"' })
     assert.strictEqual(seen.length, 2)
     assert.deepStrictEqual(heights, ['1', '1', '1', '2'])
@@ -1072,10 +1141,10 @@ describe('chelonia/kv/set on 409', () => {
     ])
     const seen: unknown[] = []
     await assert.rejects(
-      () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+      () => within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
         signingKeyId, maxAttempts: 2, onconflict: mergeX(seen)
-      }),
-      (e: unknown) => e instanceof ChelErrorKvMaxAttempts &&
+      }), 'kv/set'),
+      (e: unknown) => isKvConflict(e) &&
         assert.deepStrictEqual(
           (e as { cause?: unknown }).cause,
           { currentData: { x: 9 }, currentStatus: 'present', etag: '"cid-3"' }
@@ -1083,6 +1152,166 @@ describe('chelonia/kv/set on 409', () => {
     )
     assert.deepStrictEqual(seen, [['present', { x: 7 }, '"cid-1"']])
     assert.deepStrictEqual(heights, ['1', '1', '2'])
+  })
+})
+
+// With no `data`, `kv/set` reads the current value first (a GET) and lets
+// `onconflict` compute the value to write.
+describe('chelonia/kv/set fetch-first (no data)', () => {
+  useKvSetHooks()
+
+  type Request = { method: string; ifMatch: string | null; body?: string }
+  type FetchOptions = { method?: string; body?: string; headers?: Headers }
+  // Answers each request with `respond(request, n)` (`n` counts from 1).
+  const recordRequests = (respond: (req: Request, n: number) => Response) => {
+    const requests: Request[] = []
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      fetch: async (_url: string, opts: FetchOptions = {}) => {
+        const req = {
+          method: opts.method ?? 'GET',
+          ifMatch: opts.headers?.get('if-match') ?? null,
+          body: opts.body
+        }
+        requests.push(req)
+        return respond(req, requests.length)
+      }
+    } as unknown as Partial<CheloniaConfig>)
+    return requests
+  }
+  const postedData = (req: Request): unknown => JSON.parse(JSON.parse(req.body!)._signedData[0])
+  const postedHeight = (req: Request): string => JSON.parse(req.body!).height
+  const written = () => new Response(null, { status: 204, headers: { etag: '"cid-new"' } })
+
+  it("calls onconflict with 'absent' for a missing value, then writes with an empty if-match", async () => {
+    const { contractID, signingKeyId } = setupContract()
+    const seen: unknown[] = []
+    const requests = recordRequests((req) =>
+      req.method === 'GET' ? new Response(null, { status: 404 }) : written()
+    )
+    const result = await within(sbp('chelonia/kv/set', contractID, 'settings', undefined, {
+      signingKeyId,
+      onconflict: async (args: ConflictArgs): Promise<[JSONType, string | undefined]> => {
+        seen.push([args.status, args.currentStatus, args.currentData, args.etag])
+        return [{ x: 1 }, args.etag ?? undefined]
+      }
+    }), 'kv/set')
+    assert.deepStrictEqual(seen, [[404, 'absent', undefined, null]])
+    assert.deepStrictEqual(requests.map((r) => [r.method, r.ifMatch]), [['GET', null], ['POST', '""']])
+    assert.deepStrictEqual(postedData(requests[1]), { x: 1 })
+    assert.deepStrictEqual(result, { etag: '"cid-new"' })
+  })
+
+  it('passes the current value and its etag to onconflict, and writes with that etag', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    const stored = await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 1)
+    const seen: unknown[] = []
+    const requests = recordRequests((req) => req.method === 'GET'
+      ? new Response(stored, { status: 200, headers: { etag: '"cid-7"' } })
+      : written()
+    )
+    const result = await within(sbp('chelonia/kv/set', contractID, 'settings', undefined, {
+      signingKeyId,
+      onconflict: async (args: ConflictArgs): Promise<[JSONType, string | undefined]> => {
+        seen.push([args.currentStatus, args.currentData, args.etag])
+        return [{ x: (args.currentData as { x: number }).x + 1 }, args.etag ?? undefined]
+      }
+    }), 'kv/set')
+    assert.deepStrictEqual(seen, [['present', { x: 7 }, '"cid-7"']])
+    assert.deepStrictEqual(requests.map((r) => [r.method, r.ifMatch]), [['GET', null], ['POST', '"cid-7"']])
+    assert.deepStrictEqual(postedData(requests[1]), { x: 8 })
+    assert.deepStrictEqual(result, { etag: '"cid-new"' })
+  })
+
+  it('waits for a value that is ahead, then passes it to onconflict decoded', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    // Long enough that a wait ended by its timeout fails the timing check.
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 3000 })
+    const stored = await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 3)
+    const seen: unknown[] = []
+    const requests = recordRequests((req) => {
+      if (req.method !== 'GET') return written()
+      // The local contract reaches the value's height shortly after the GET.
+      setContractHeightLater(contractID, 3, 50)
+      return new Response(stored, { status: 200, headers: { etag: '"cid-7"' } })
+    })
+    const started = Date.now()
+    await within(sbp('chelonia/kv/set', contractID, 'settings', undefined, {
+      signingKeyId,
+      onconflict: async (args: ConflictArgs): Promise<[JSONType, string | undefined]> => {
+        seen.push([args.currentStatus, args.currentData, args.etag])
+        return [{ x: 8 }, args.etag ?? undefined]
+      }
+    }), 'kv/set')
+    const elapsed = Date.now() - started
+    assert.ok(elapsed >= 40 && elapsed < 1500, `took ${elapsed} ms`)
+    assert.deepStrictEqual(seen, [['present', { x: 7 }, '"cid-7"']])
+    assert.deepStrictEqual(requests.map((r) => r.method), ['GET', 'POST'])
+    assert.strictEqual(postedHeight(requests[1]), '3')
+  })
+
+  it('rejects a value that is ahead at once with heightWaitMs: 0, without writing', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 10000 })
+    const stored = await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 3)
+    let conflicts = 0
+    const requests = recordRequests((req) => req.method === 'GET'
+      ? new Response(stored, { status: 200, headers: { etag: '"cid-7"' } })
+      : written()
+    )
+    await assert.rejects(
+      within(sbp('chelonia/kv/set', contractID, 'settings', undefined, {
+        signingKeyId,
+        heightWaitMs: 0,
+        onconflict: async (): Promise<[JSONType, string | undefined]> => {
+          conflicts++
+          return [{ x: 8 }, undefined]
+        }
+      }), 'kv/set'),
+      (e: unknown) => {
+        assert.ok(isKvHeightAhead(e))
+        assert.deepStrictEqual(kvHeightAheadCause(e), {
+          requiredHeight: 3, exact: true, localHeight: 1, etag: '"cid-7"', httpStatus: 200
+        })
+        return true
+      }
+    )
+    assert.strictEqual(conflicts, 0)
+    assert.deepStrictEqual(requests.map((r) => r.method), ['GET'])
+  })
+
+  it("allowUnverifiedConflict passes a value that is ahead as 'ahead', with a throwing currentData", async () => {
+    const { contractID, signingKeyId } = setupContract()
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 10000 })
+    const stored = await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 3)
+    const seen: unknown[] = []
+    const requests = recordRequests((req) => req.method === 'GET'
+      ? new Response(stored, { status: 200, headers: { etag: '"cid-7"' } })
+      : written()
+    )
+    const result = await within(sbp('chelonia/kv/set', contractID, 'settings', undefined, {
+      signingKeyId,
+      allowUnverifiedConflict: true,
+      onconflict: async (args: ConflictArgs): Promise<[JSONType, string | undefined]> => {
+        assert.throws(() => args.currentData, (e: unknown) => isKvHeightAhead(e))
+        seen.push([args.currentStatus, args.requiredHeight, args.currentValue, args.etag])
+        return [{ x: 2 }, args.etag ?? undefined]
+      }
+    }), 'kv/set')
+    assert.deepStrictEqual(seen, [['ahead', 3, undefined, '"cid-7"']])
+    assert.deepStrictEqual(requests.map((r) => [r.method, r.ifMatch]), [['GET', null], ['POST', '"cid-7"']])
+    assert.deepStrictEqual(postedData(requests[1]), { x: 2 })
+    assert.deepStrictEqual(result, { etag: '"cid-new"' })
+  })
+
+  it('requires onconflict, and sends no request without one', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    const requests = recordRequests(() => written())
+    await assert.rejects(
+      within(sbp('chelonia/kv/set', contractID, 'settings', undefined, { signingKeyId }), 'kv/set'),
+      (e: unknown) => e instanceof TypeError && e.message === 'onconflict required with empty data'
+    )
+    assert.strictEqual(requests.length, 0)
   })
 })
 

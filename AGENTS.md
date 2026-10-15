@@ -242,7 +242,13 @@ Full documentation:
   name any more; lower-level parsing
   (`chelonia/parseEncryptedOrUnencryptedDetachedMessage`) still throws it,
   both for a value that is ahead and for a malformed stamp. Likewise
-  `isKvConflict(e)` for a conflict that ran out of attempts.
+  `isKvConflict(e)` for a write that ran out of attempts, or got a `412`
+  without `onconflict`.
+- Never await a KV write, single-key `chelonia/kv/sync`, `whenSettled` or
+  `withHeightRecovery` for a contract from that contract's own lanes (a
+  `sideEffect`, a raw pubsub handler, a `queueInvocation` body, an
+  `onUpdate`): it never settles. See
+  [docs/kv.md](docs/kv.md#how-height-recovery-runs).
 
 ### Contract State Structure
 
