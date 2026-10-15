@@ -21,24 +21,27 @@ export const waitMicrotasks = async (): Promise<void> => {
 export const sleep = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => setTimeout(resolve, ms))
 
+// The failure of `until` and `within`, whichever way `label` is worded.
+const timedOut = (label: string, ms: number): string => `Timed out after ${ms} ms: ${label}`
+
 // Polls `cond` every 5 ms until it holds. Fails with `label` after `ms`
 // instead of looping forever when a regression means it never holds.
 export const until = async (cond: () => boolean, label: string, ms = 3000): Promise<void> => {
   const deadline = Date.now() + ms
   while (!cond()) {
-    if (Date.now() > deadline) assert.fail(`${label} (within ${ms} ms)`)
+    if (Date.now() > deadline) assert.fail(timedOut(label, ms))
     await sleep(5)
   }
 }
 
+const PENDING = Symbol('pending')
+
 // Settles like `promise`, or rejects with `label` after `ms`, so that a
 // regression that leaves it pending fails the test instead of hanging it.
-export const within = <T>(promise: Promise<T>, label: string, ms = 3000): Promise<T> => {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} (within ${ms} ms)`)), ms)
-  })
-  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
+export const within = async <T>(promise: Promise<T>, label: string, ms = 3000): Promise<T> => {
+  const result = await settledOr(promise, ms, PENDING)
+  if (result === PENDING) throw new Error(timedOut(label, ms))
+  return result
 }
 
 // Settles like `promise` if it settles within `ms`, and otherwise resolves
@@ -312,7 +315,9 @@ export const makeKvServer = (initialHeight = 0, contractID?: string) => {
     // `store` models another device's write that won the race.
     onPost: null as ((n: number) => void) | null,
     // While set, GETs wait for it before answering, with the value stored
-    // when the request arrived. An abort meanwhile rejects the GET.
+    // when the request arrived. An abort meanwhile rejects the GET. A GET is
+    // logged once answered: a held one isn't in `gets()` yet, and an aborted
+    // one never is.
     holdGet: null as Promise<void> | null,
     posts: () => log.filter((e) => e.method === 'POST'),
     gets: () => log.filter((e) => e.method === 'GET'),

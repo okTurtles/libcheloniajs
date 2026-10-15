@@ -7,9 +7,11 @@
 // through `chelonia/handleEvent`) could subscribe a contract nobody
 // retains. A contract whose first sync failed must not leave an empty
 // entry in `state.contracts` once it is released. A successful sync
-// subscribes the contract until it is released. And a KV height recovery
+// subscribes the contract until it is released. A KV height recovery
 // racing a release must not sync (and so subscribe again) the contract
-// that the release removed.
+// that the release removed, and one racing a re-sync must wait for it.
+// `chelonia/kv/whenSettled` keeps waiting across a re-sync, and rejects
+// once the contract turns out to have no such slot, or is removed.
 //
 // Runs the real selectors against a stubbed server that serves one
 // contract: a self-signed OP_CONTRACT (`skipActionProcessing` keeps
@@ -25,7 +27,16 @@ import { ChelErrorKvHeightAhead, isKvHeightAhead } from './errors.js'
 import { CONTRACTS_MODIFIED } from './events.js'
 import { strToB64 } from './functions.js'
 import type { SPMessage } from './SPMessage.js'
-import { captureConsole, logged, makeSelfSignedContract, sleep, until, within } from './test-utils.js'
+import {
+  captureConsole,
+  logged,
+  makeSelfSignedContract,
+  settledOr,
+  sleep,
+  until,
+  whenContractSlotSettledWithin,
+  within
+} from './test-utils.js'
 import type { ChelRootState, CheloniaConfig } from './types.js'
 
 const rootState = (): ChelRootState => sbp('chelonia/private/state')
@@ -305,7 +316,7 @@ describe('a KV height recovery racing a release', () => {
     })
     await sleep(20)
     lane.open()
-    await releasing
+    await within(releasing, 'the release')
     await assert.rejects(within(recovering, 'the recovery'), (e: unknown) => isKvHeightAhead(e))
     assert.strictEqual(attempts, 1)
     // The recovery ran, and its sync refused the removed contract.
@@ -327,15 +338,19 @@ describe('a KV height recovery racing a release', () => {
     })
     const lane = holdLane()
     const releasing = sbp('chelonia/contract/release', contractID)
-    // The 100 ms fallback starts its sync while the removal waits.
-    await sleep(200)
-    lane.open()
-    await releasing
-    // Its sync refused the removed contract.
+    // Once the fallback has fired, its recovery sync is queued behind the
+    // removal.
     await until(
-      () => logged(warnings, 'failed during height recovery'), 'the fallback never ran its recovery'
+      () => sbp('chelonia/kv/_testHeightWait', contractID, 'k')?.fallbackArmed === false,
+      'the fallback fired'
     )
+    lane.open()
+    await within(releasing, 'the release')
+    // Runs after the recovery's sync task, queued earlier on the same lane.
+    await within(sbp('chelonia/private/queueEvent', contractID, () => {}), 'the lane')
     assertRemoved()
+    // Its sync refused the removed contract.
+    await until(() => logged(warnings, 'failed during height recovery'), 'the refusal warning')
   })
 })
 
@@ -367,7 +382,7 @@ describe('a KV height recovery racing a resync', () => {
     const resyncing = sbp('chelonia/contract/sync', contractID, { resync: true })
     try {
       await until(() => resyncStarted, 'the resync started')
-      assert.ok(!sbp('chelonia/private/state').contracts[contractID]?.type)
+      assert.ok(!rootState().contracts[contractID]?.type)
       let attempts = 0
       const recovering = sbp('chelonia/kv/withHeightRecovery', contractID, async () => {
         if (++attempts > 1) return 'written'
@@ -382,7 +397,7 @@ describe('a KV height recovery racing a resync', () => {
       assert.strictEqual(rootState().contracts[contractID]?.HEAD, first.hash())
     } finally {
       releaseResync()
-      await resyncing.catch(() => {})
+      await within(resyncing, 'the resync').catch(() => {})
     }
   })
 })
@@ -407,17 +422,17 @@ describe("whenSettled across a contract's lifecycle", () => {
   const defineSlot = (contractType: string, def: Record<string, unknown> = {}) =>
     sbp('chelonia/kv/defineSlot', { contractType, key: 'k', defaultValue: {}, ...def })
 
-  const settling = () => {
-    const outcome = (sbp('chelonia/kv/whenSettled', contractID, 'k') as Promise<string>)
-      .then((status) => ({ status }), (e: Error) => ({ error: e }))
-    return outcome
-  }
+  // How `whenSettled` ends, within 3 s (a missed deadline is a
+  // `TimeoutError`).
+  const settling = (): Promise<{ status?: string; error?: Error }> =>
+    whenContractSlotSettledWithin(contractID, 'k')
+      .then((status) => ({ status }), (error: Error) => ({ error }))
 
   it("rejects once the contract's type turns out to have no such slot", async () => {
     defineSlot('test/other-type')
     const outcome = settling()
     await sbp('chelonia/contract/retain', contractID)
-    const { error } = await within(outcome, 'whenSettled') as { error?: Error }
+    const { error } = await outcome
     assert.strictEqual(error?.name, 'ChelErrorKvSlotUnknown')
     assert.match(error.message, /isn't defined for this contract's type/)
     await sbp('chelonia/contract/release', contractID)
@@ -428,7 +443,7 @@ describe("whenSettled across a contract's lifecycle", () => {
     const outcome = settling()
     await failedRetain()
     await sbp('chelonia/contract/release', contractID)
-    const { error } = await within(outcome, 'whenSettled') as { error?: Error }
+    const { error } = await outcome
     assert.strictEqual(error?.name, 'ChelErrorKvSlotUnknown')
     assert.match(error.message, /was removed with its contract/)
   })
@@ -438,16 +453,14 @@ describe("whenSettled across a contract's lifecycle", () => {
     defineSlot(CONTRACT_TYPE, { autoLoad: 'never' })
     await sbp('chelonia/contract/retain', contractID)
     assert.strictEqual(sbp('chelonia/kv/status', contractID, 'k'), 'non-init')
-    let settled = false
-    const outcome = settling().finally(() => { settled = true })
+    const outcome = settling()
     await sbp('chelonia/contract/sync', contractID, { resync: true })
     assert.ok(removed.includes(contractID))
-    await sleep(20)
-    assert.strictEqual(settled, false)
+    assert.strictEqual(await settledOr(outcome, 20, 'pending'), 'pending')
     // The slot is active again. (Its load fails here, for want of the
     // contract's `#sak` key: that settles it too.)
     await sbp('chelonia/kv/sync', contractID, 'k').catch(() => {})
-    const { status } = await within(outcome, 'whenSettled') as { status?: string }
+    const { status } = await outcome
     assert.strictEqual(status, sbp('chelonia/kv/settledStatus', contractID, 'k'))
     assert.strictEqual(status, 'error')
     await sbp('chelonia/contract/release', contractID)
