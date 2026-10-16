@@ -97,6 +97,16 @@ console.log('HEAD:', cheloniaState.HEAD, '@ height', cheloniaState.height)
 console.log('authorized keys:', cheloniaState._vm?.authorizedKeys)
 ```
 
+`cheloniaState` leaves the journal out. Ask for it explicitly when
+inspecting journal contents:
+
+```js
+const { cheloniaState } = sbp('chelonia/contract/fullState', contractID, undefined, {
+  includeJournal: true
+})
+console.log('journal entries:', cheloniaState._journal?.entries.length)
+```
+
 For sync status:
 
 ```js

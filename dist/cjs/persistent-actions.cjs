@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.PersistentAction = void 0;
 require("@sbp/okturtles.events");
 const sbp_1 = __importDefault(require("@sbp/sbp"));
+const functions_js_1 = require("./functions.cjs");
 const events_js_1 = require("./events.cjs");
 // Using `Symbol` to prevent enumeration; this avoids JSON serialization.
 const timer = Symbol('timer');
@@ -27,7 +28,7 @@ class PersistentAction {
     status;
     [timer];
     constructor(invocation, options = {}) {
-        this.id = crypto.randomUUID();
+        this.id = (0, functions_js_1.randomUUID)();
         this.invocation = invocation;
         this.options = { ...defaultOptions, ...options };
         this.status = {

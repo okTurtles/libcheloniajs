@@ -1,5 +1,6 @@
 import { CID } from '@chelonia/multiformats/cid';
 import { Buffer } from 'buffer';
+import type { UUIDV4 } from './types.mjs';
 export declare const multicodes: Record<string, number>;
 export declare const parseCID: (cid: string) => CID;
 export declare const maybeParseCID: (cid: string) => CID | null;
@@ -12,4 +13,5 @@ export declare const bufToB64: (buf: Buffer) => string;
 export declare const strToBuf: (str: string) => Buffer;
 export declare const strToB64: (str: string) => string;
 export declare const bytesToB64: (ary: Uint8Array) => string;
+export declare const randomUUID: () => UUIDV4;
 export declare const getSubscriptionId: (subscriptionInfo: ReturnType<PushSubscription["toJSON"]>) => Promise<string>;

@@ -1,8 +1,9 @@
 import '@sbp/okturtles.events';
 import sbp from '@sbp/sbp';
+import type { UUIDV4 } from './types.mjs';
 declare const timer: unique symbol;
 type SbpInvocation = Parameters<typeof sbp>;
-export type UUIDV4 = `${string}-${string}-${string}-${string}-${string}`;
+export type { UUIDV4 };
 type PersistentActionOptions = {
     errorInvocation?: SbpInvocation;
     maxAttempts: number;

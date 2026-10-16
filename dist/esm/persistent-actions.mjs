@@ -1,5 +1,6 @@
 import '@sbp/okturtles.events';
 import sbp from '@sbp/sbp';
+import { randomUUID } from './functions.mjs';
 import { PERSISTENT_ACTION_FAILURE, PERSISTENT_ACTION_SUCCESS, PERSISTENT_ACTION_TOTAL_FAILURE } from './events.mjs';
 // Using `Symbol` to prevent enumeration; this avoids JSON serialization.
 const timer = Symbol('timer');
@@ -21,7 +22,7 @@ export class PersistentAction {
     status;
     [timer];
     constructor(invocation, options = {}) {
-        this.id = crypto.randomUUID();
+        this.id = randomUUID();
         this.invocation = invocation;
         this.options = { ...defaultOptions, ...options };
         this.status = {

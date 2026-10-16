@@ -18,6 +18,7 @@ export type ResTypeSub = 'sub';
 export type ResTypeUnsub = 'unsub';
 export type ResTypePub = 'pub';
 export type ResTypeEntry = 'entry';
+export type UUIDV4 = `${string}-${string}-${string}-${string}-${string}`;
 export type CheloniaConfig = {
     [_ in `preOp_${SPOpType}`]?: (message: SPMessage, state: ChelContractState) => boolean;
 } & {
@@ -86,10 +87,17 @@ export type JournalPatch = {
     op: 'add' | 'replace';
     path: string;
     value: unknown;
+    redacted?: true;
 } | {
     op: 'remove';
     path: string;
+    redacted?: undefined;
 };
+export type RedactionSite = {
+    original: unknown;
+    replacement: unknown;
+};
+export type RedactionSiteMap = Map<string, RedactionSite>;
 export type JournalEntry = {
     kind: 'snapshot';
     hash: string;
@@ -101,6 +109,15 @@ export type JournalEntry = {
         name: string;
         message: string;
     };
+    redactionError?: {
+        name: string;
+        message: string;
+    };
+    diffError?: {
+        name: string;
+        message: string;
+    };
+    replayed?: true;
 } | {
     kind: 'patch';
     hash: string;
@@ -109,6 +126,14 @@ export type JournalEntry = {
     description?: string;
     patch: JournalPatch[];
     error?: {
+        name: string;
+        message: string;
+    };
+    diffError?: {
+        name: string;
+        message: string;
+    };
+    redactionError?: {
         name: string;
         message: string;
     };
@@ -122,6 +147,7 @@ export type JournalConfig = {
     snapshotInterval?: number;
     contractIDs?: string[];
     redactions?: JournalRedaction[];
+    markRedactedChanges?: boolean;
     diff?: (before: unknown, after: unknown) => JournalPatch[];
     applyPatch?: (state: unknown, patches: JournalPatch[]) => unknown;
 };

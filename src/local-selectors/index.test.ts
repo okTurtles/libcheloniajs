@@ -16,6 +16,7 @@ import {
   CONTRACTS_MODIFIED,
   EVENT_HANDLED
 } from '../events.js'
+import { waitMicrotasks } from '../test-utils.js'
 import localSelectors from './index.js'
 // Reference the export so the module is not tree-shaken away by the
 // ts-node ESM loader (the side-effectful `sbp/selectors/register` call
@@ -54,14 +55,6 @@ sbp('sbp/selectors/register', {
     }
   }
 })
-
-const waitMicrotasks = async () => {
-  // The setup queues work onto okTurtles.eventQueue/queueEvent; await
-  // a couple of macrotask boundaries so that async handlers settle.
-  for (let i = 0; i < 5; i++) {
-    await new Promise<void>((resolve) => setTimeout(resolve as () => void, 0))
-  }
-}
 
 describe('chelonia/externalStateSetup teardown', () => {
   beforeEach(() => {

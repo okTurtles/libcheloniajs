@@ -1,6 +1,6 @@
 {
   "name": "@chelonia/lib",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "description": "Library for building Chelonia applications",
   "main": "dist/cjs/index.cjs",
   "types": "dist/cjs/index.d.cts",
@@ -147,6 +147,16 @@
         "default": "./dist/cjs/local-selectors/index.cjs"
       }
     },
+    "./names": {
+      "import": {
+        "types": "./dist/esm/names.d.mts",
+        "default": "./dist/esm/names.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/names.d.cts",
+        "default": "./dist/cjs/names.cjs"
+      }
+    },
     "./persistent-actions": {
       "import": {
         "types": "./dist/esm/persistent-actions.d.mts",
@@ -259,9 +269,9 @@
     }
   },
   "scripts": {
-    "test": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' src/kv.test.ts && node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' src/index.test.ts",
-    "build:esm": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' buildHelper.ts esm",
-    "build:cjs": "node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\")); process.on(\"uncaughtException\", (e) => { console.error(\"ERROR\", e); throw e });' buildHelper.ts cjs",
+    "test": "node --import ./scripts/ts-node-register.mjs --test \"src/**/*.test.ts\"",
+    "build:esm": "node --import ./scripts/ts-node-register.mjs buildHelper.ts esm",
+    "build:cjs": "node --import ./scripts/ts-node-register.mjs buildHelper.ts cjs",
     "build": "npm run build:esm && npm run build:cjs",
     "lint": "eslint .",
     "clean": "rm -f dist/*"
@@ -285,7 +295,7 @@
     "@sbp/okturtles.eventqueue": "1.2.1",
     "@sbp/okturtles.events": "1.0.1",
     "scrypt-async": "2.0.1",
-    "turtledash": "1.0.3",
+    "turtledash": "2.0.0",
     "tweetnacl": "1.0.3"
   },
   "devDependencies": {

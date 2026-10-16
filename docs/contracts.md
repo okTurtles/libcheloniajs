@@ -280,6 +280,17 @@ name rules: malformed names are rejected with HTTP 400 and duplicates are
 rejected with HTTP 409. For other contract types the header is silently
 ignored, so the name simply never registers.
 
+To check a username before sending anything, for example while a user picks
+one, use `isValidUsername`. It's the same rule the reference relay checks
+names against:
+
+```js
+import { isValidUsername } from '@chelonia/lib/names'
+
+isValidUsername('alice') // → true
+isValidUsername('Alice') // → false: only lowercase letters, digits, `_` and `-`
+```
+
 To resolve a registered name back to a contract ID, use
 `chelonia/out/nameToContractID`:
 
@@ -701,14 +712,16 @@ Chelonia maintains your contract's state under
 ```js
 const { cheloniaState, contractState } =
   sbp('chelonia/contract/fullState', contractID)
-// cheloniaState  → rootState.contracts[contractID]  (includes _journal!)
+// cheloniaState  → a shallow copy of rootState.contracts[contractID]
 // contractState  → rootState[contractID]            (your action-produced state)
 ```
 
-If journaling is enabled, `cheloniaState._journal` rides along with
-`cheloniaState`. See
-[`journal.md`](./journal.md#consumer-visible-leakage) for how to
-project it out.
+`cheloniaState` is Chelonia's bookkeeping for the contract (`HEAD`,
+`height`, `previousKeyOp`, …). The journal is left out of it; pass
+`{ includeJournal: true }` as the third argument to include it. See
+[`journal.md`](./journal.md#consumer-visible-leakage). The copy is
+shallow, so treat it as read-only: nested values are shared with
+Chelonia's live state.
 
 ---
 
