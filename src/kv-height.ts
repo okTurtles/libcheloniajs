@@ -63,7 +63,7 @@ export const KV_DEFAULT_MAX_HEIGHT_RECOVERIES = 2
 // separately from `maxAttempts`, which bounds `412` conflict resolution.
 export const KV_MAX_STALE_STAMP_RETRIES = 5
 
-let heightWaitMs = KV_HEIGHT_WAIT_MS
+let heightWaitDefaultMs = KV_HEIGHT_WAIT_MS
 let pendingFallbackMs = KV_HEIGHT_PENDING_FALLBACK_MS
 let recoveryTimeoutMs = KV_HEIGHT_RECOVERY_TIMEOUT_MS
 
@@ -74,7 +74,7 @@ export type KvHeightTimings = {
 }
 
 export const kvHeightTimings = (): KvHeightTimings => ({
-  waitMs: heightWaitMs,
+  waitMs: heightWaitDefaultMs,
   pendingFallbackMs,
   recoveryTimeoutMs
 })
@@ -90,7 +90,7 @@ export const setKvHeightTimings = (
 ): KvHeightTimings => {
   const { waitMs, pendingFallbackMs: fallbackMs, recoveryTimeoutMs: recoveryMs } =
     overrides ?? { waitMs: null, pendingFallbackMs: null, recoveryTimeoutMs: null }
-  if (waitMs !== undefined) heightWaitMs = waitMs ?? KV_HEIGHT_WAIT_MS
+  if (waitMs !== undefined) heightWaitDefaultMs = waitMs ?? KV_HEIGHT_WAIT_MS
   if (fallbackMs !== undefined) pendingFallbackMs = fallbackMs ?? KV_HEIGHT_PENDING_FALLBACK_MS
   if (recoveryMs !== undefined) recoveryTimeoutMs = recoveryMs ?? KV_HEIGHT_RECOVERY_TIMEOUT_MS
   return kvHeightTimings()
@@ -207,6 +207,12 @@ export function throwIfAborted (signal?: AbortSignal): void {
   if (signal?.aborted) throw abortReason(signal)
 }
 
+// `throwIfAborted` for each of `signals`, in order: the first that has
+// aborted gives the reason.
+export function throwIfAnyAborted (...signals: Array<AbortSignal | undefined>): void {
+  for (const signal of signals) throwIfAborted(signal)
+}
+
 // Settles as `promise` does, unless one of `signals` aborts first (or
 // already has): it then rejects with the abort reason. `promise` keeps
 // running (e.g. a slot load, which records its outcome on the slot); its
@@ -228,9 +234,13 @@ export function raceAbort<T> (
 // rejects `result` at once with its reason, and `body` then never runs: it
 // checks the signals first. Once `body` has started, aborts are its own
 // business (e.g. `chelonia/kv/set` aborts its fetch, and a write that
-// committed still resolves). `queued` settles (never rejects) when the
-// lane work does, which can be after `result`: in-flight accounting waits
-// for it. A `queueInvocation` that throws (a filter vetoed it) throws.
+// committed still resolves). A `body` that never runs rejects `result`
+// rather than resolving it with `undefined`: with `ChelErrorUnexpected`
+// when a filter vetoed `chelonia/queueInvocation` (it returned nothing),
+// and with an `AbortError` when the lane dropped it (`chelonia/reset`'s
+// teardown does). `queued` settles (never rejects) when the lane work
+// does, which can be after `result`: in-flight accounting waits for it. A
+// `queueInvocation` that throws (a filter threw) throws.
 export function queueAbortable<T> (
   contractID: string,
   signals: Array<AbortSignal | undefined>,
@@ -242,12 +252,20 @@ export function queueAbortable<T> (
     return { result: Promise.reject(abortReason(alreadyAborted)), queued: Promise.resolve() }
   }
   let started = false
-  const lane = Promise.resolve(sbp('chelonia/queueInvocation', contractID, () => {
+  const invocation = sbp('chelonia/queueInvocation', contractID, () => {
     started = true
     // Rejects rather than throws, as an `async` body would.
     const aborted = active.find((s) => s.aborted)
     return aborted ? Promise.reject(abortReason(aborted)) : body()
-  })) as Promise<T>
+  })
+  const lane = Promise.resolve(invocation).then((value: unknown) => {
+    if (!started) {
+      throw invocation === undefined
+        ? new ChelErrorUnexpected(`[chelonia/kv] queueing work for ${contractID} was vetoed`)
+        : new DOMException('Aborted by chelonia/reset', 'AbortError')
+    }
+    return value
+  }) as Promise<T>
   const queued = lane.then(() => undefined, () => undefined)
   if (!active.length) return { result: lane, queued }
   const result = new Promise<T>((resolve, reject) => {
@@ -335,7 +353,7 @@ export function dropHeightWait (ctx: CheloniaContext, waitKey: string, wait: KvH
 
 // Drops every height-deferred load and height listener of `ctx`. Used by
 // `chelonia/kv/_endHeightSession`, the test-only
-// `chelonia/kv/_testClearHeightWaits`, and `clearKvRuntime` (`kv-runtime.ts`),
+// `chelonia/kv/_testClearHeightWaits`, and `resetKvSession` (`kv-runtime.ts`),
 // which must clear the context it is given rather than the one the
 // selectors are registered with.
 export function clearHeightWaits (ctx: CheloniaContext): void {
@@ -347,6 +365,10 @@ export function clearHeightWaits (ctx: CheloniaContext): void {
 }
 
 type Settle<T> = { resolve: (value: T) => void; reject: (reason: unknown) => void }
+
+// The longest delay `setTimeout` takes (about 24.8 days): a longer one
+// fires at once, with a `TimeoutOverflowWarning`.
+const MAX_TIMER_MS = 2 ** 31 - 1
 
 // The deadline of `withDeadline`: abort `signals` (`undefined` entries are
 // ignored), and an optional timeout, which `onTimeout` handles.
@@ -361,7 +383,8 @@ type Deadline<T> = { signals: Array<AbortSignal | undefined> } & (
 // abort reason). When one has already aborted, it rejects at once, without
 // calling `start`. Whichever settles it first wins; the timer, the abort
 // listeners and the cleanup function `start` returns are released at that
-// point. A `start` that throws rejects it.
+// point. A `start` that throws rejects it. A `timeoutMs` above
+// `MAX_TIMER_MS` is capped at it.
 function withDeadline<T> (
   { signals, timeoutMs, onTimeout }: Deadline<T>,
   start: (settle: Settle<T>) => (() => void) | void
@@ -388,7 +411,9 @@ function withDeadline<T> (
     }
     // Only called by an `abort` event, so one of the signals is aborted.
     const onAbort = () => settle.reject(abortReason(active.find((s) => s.aborted)!))
-    if (timeoutMs !== undefined) timer = setTimeout(() => onTimeout(settle), timeoutMs)
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => onTimeout(settle), Math.min(timeoutMs, MAX_TIMER_MS))
+    }
     for (const s of active) s.addEventListener('abort', onAbort, { once: true })
     try {
       stop = start(settle)
@@ -409,62 +434,66 @@ export function delayUnlessAborted (ms: number, signals: AbortSignal[]): Promise
   )
 }
 
-// Waits, without touching any queue, until the local contract reaches
-// `minHeight`. Resolves `true` when it does (at once when it already has)
-// and `false` when `timeoutMs` elapses first (at once when it isn't
-// positive). Rejects with the abort reason if any of `signals` aborts
-// (at once when one already has and the height isn't reached).
+// Waits, without touching any queue, until `ready()` holds; `subscribe`
+// calls the `wake` it is given when it may hold, and returns its cleanup.
+// Resolves `true` when it holds (at once when it already does) and
+// `false` when `timeoutMs` elapses first (at once when it isn't positive).
+// Rejects with the abort reason if any of `signals` aborts (at once when
+// one already has and `ready()` doesn't hold).
+function waitUntil (
+  ready: () => boolean,
+  subscribe: (wake: () => void) => () => void,
+  { timeoutMs, signals }: { timeoutMs: number; signals: Array<AbortSignal | undefined> }
+): Promise<boolean> {
+  if (ready()) return Promise.resolve(true)
+  if (!(timeoutMs > 0)) {
+    return withDeadline<boolean>({ signals }, ({ resolve }) => resolve(false))
+  }
+  return withDeadline<boolean>({
+    signals,
+    timeoutMs,
+    onTimeout: ({ resolve }) => resolve(ready())
+  }, ({ resolve }) => subscribe(() => resolve(true)))
+}
+
+// Waits, as `waitUntil` does, until the local contract reaches
+// `minHeight`.
 export function waitForContractHeight (
   ctx: CheloniaContext,
   contractID: string,
   minHeight: number,
-  { timeoutMs = heightWaitMs, signals = [] }: {
+  { timeoutMs = heightWaitDefaultMs, signals = [] }: {
     timeoutMs?: number;
     signals?: Array<AbortSignal | undefined>;
   } = {}
 ): Promise<boolean> {
-  if (isHeightReached(ctx, contractID, minHeight)) return Promise.resolve(true)
-  if (!(timeoutMs > 0)) {
-    return withDeadline<boolean>({ signals }, ({ resolve }) => resolve(false))
-  }
-  return withDeadline<boolean>({
-    signals,
-    timeoutMs,
-    onTimeout: ({ resolve }) => resolve(isHeightReached(ctx, contractID, minHeight))
-  }, ({ resolve }) => addHeightListener(ctx, contractID, minHeight, () => resolve(true)))
+  return waitUntil(
+    () => isHeightReached(ctx, contractID, minHeight),
+    (wake) => addHeightListener(ctx, contractID, minHeight, wake),
+    { timeoutMs, signals }
+  )
 }
 
-// Waits, without touching any queue, until the sync of `contractID` that is
-// running ends (`CONTRACT_IS_SYNCING` with `false`), however it ends.
-// Resolves `true` when it does (at once when none is running) and `false`
-// when `timeoutMs` elapses first (at once when it isn't positive). Rejects
-// with the abort reason if any of `signals` aborts (at once when one
-// already has and a sync is running). Like `waitForContractHeight`, it
-// creates no lane dependency: a caller holding the lane the sync needs
-// times out.
+// Waits, as `waitUntil` does, until the sync of `contractID` that is
+// running ends (`CONTRACT_IS_SYNCING` with `false`), however it ends
+// (resolving `true` at once when none is running). Like
+// `waitForContractHeight`, it creates no lane dependency: a caller holding
+// the lane the sync needs times out.
 export function waitForSyncEnd (
   ctx: CheloniaContext,
   contractID: string,
-  { timeoutMs = heightWaitMs, signals = [] }: {
+  { timeoutMs = heightWaitDefaultMs, signals = [] }: {
     timeoutMs?: number;
     signals?: Array<AbortSignal | undefined>;
   } = {}
 ): Promise<boolean> {
-  const syncing = () => !!ctx.currentSyncs[contractID]
-  if (!syncing()) return Promise.resolve(true)
-  if (!(timeoutMs > 0)) {
-    return withDeadline<boolean>({ signals }, ({ resolve }) => resolve(false))
-  }
-  return withDeadline<boolean>({
-    signals,
-    timeoutMs,
-    onTimeout: ({ resolve }) => resolve(!syncing())
-  }, ({ resolve }) => {
-    const listener = (id: string, isSyncing: boolean) => {
-      if (id === contractID && !isSyncing) resolve(true)
-    }
-    return sbp('okTurtles.events/on', CONTRACT_IS_SYNCING, listener) as () => void
-  })
+  return waitUntil(
+    () => !ctx.currentSyncs[contractID],
+    (wake) => sbp('okTurtles.events/on', CONTRACT_IS_SYNCING, (id: string, isSyncing: boolean) => {
+      if (id === contractID && !isSyncing) wake()
+    }) as () => void,
+    { timeoutMs, signals }
+  )
 }
 
 // Starts (or joins) a sync of `contractID`. Concurrent recoveries on the
@@ -613,7 +642,8 @@ export function recoverContractHeight (
 
 // Validates the height-recovery options shared by `update`, `clear`,
 // `queuedSet` (through `withHeightRecovery`) and single-key `sync`, and
-// fills in the defaults. Invalid input throws `ChelErrorKvUpdateInvalid`,
+// fills in the defaults (an option that is `undefined` or `null` takes
+// its default). Invalid input throws `ChelErrorKvUpdateInvalid`,
 // whose message starts with `[chelonia/kv] ${label}: ` (e.g. `label` is
 // `'update: cID::key'`).
 export function resolveHeightRecoveryOptions (
@@ -622,11 +652,11 @@ export function resolveHeightRecoveryOptions (
 ): { mode: KvHeightAheadMode; maxRecoveries: number } {
   const invalid = (message: string) =>
     new ChelErrorKvUpdateInvalid(`[chelonia/kv] ${label}: ${message}`)
-  if (onHeightAhead !== undefined && onHeightAhead !== 'sync' && onHeightAhead !== 'reject') {
+  if (onHeightAhead != null && onHeightAhead !== 'sync' && onHeightAhead !== 'reject') {
     throw invalid("`onHeightAhead` must be 'sync' or 'reject'")
   }
   if (
-    maxHeightRecoveries !== undefined &&
+    maxHeightRecoveries != null &&
     (!Number.isSafeInteger(maxHeightRecoveries) || maxHeightRecoveries < 0)
   ) {
     throw invalid('`maxHeightRecoveries` must be a non-negative integer')
@@ -660,12 +690,12 @@ export function assertValidMaxAttempts (label: string, maxAttempts: unknown): vo
 // with `ChelErrorKvUpdateInvalid` before `attempt` runs; `label` (e.g.
 // `'update: cID::key'`) prefixes that error's message.
 //
-// `attempt` is expected to enqueue its work on the contract's lane and
-// return the lane promise, so the recovery below always runs with the lane
-// released. It is called synchronously right after the abort checks, so an
-// operation started before `chelonia/reset` can never be re-enqueued after
-// the reset aborted it (and one whose signal had already aborted never
-// starts).
+// `attempt` is expected to enqueue its work on the contract's lane (through
+// the `queue` it is handed) and return the lane promise, so the recovery
+// below always runs with the lane released. It is called synchronously
+// right after the abort checks, so an operation started before
+// `chelonia/reset` can never be re-enqueued after the reset aborted it (and
+// one whose signal had already aborted never starts).
 export async function withHeightRecovery<T> (
   ctx: CheloniaContext,
   contractID: string,
@@ -679,15 +709,17 @@ export async function withHeightRecovery<T> (
   // Captured once: `chelonia/reset` aborts this controller and replaces it.
   const sessionSignal = ctx.abortController.signal
   for (let recoveries = 0; ; recoveries++) {
-    throwIfAborted(signal)
-    throwIfAborted(sessionSignal)
+    throwIfAnyAborted(signal, sessionSignal)
     const heightWaitMs = mode === 'reject' || recoveries < maxRecoveries ? 0 : undefined
     try {
-      return await attempt({ recoveries, heightWaitMs })
+      // The attempt's lane work, queued as `update` and `clear` queue theirs:
+      // the caller's signal and the session's end it while it waits.
+      const queue = <U>(body: () => Promise<U>): Promise<U> =>
+        queueAbortable(contractID, [signal, sessionSignal], body).result
+      return await attempt({ recoveries, heightWaitMs, queue })
     } catch (e) {
       if (!isKvHeightAhead(e) || mode === 'reject' || recoveries >= maxRecoveries) throw e
-      throwIfAborted(signal)
-      throwIfAborted(sessionSignal)
+      throwIfAnyAborted(signal, sessionSignal)
       await recoverContractHeight(ctx, contractID, e, { callerSignal: signal, sessionSignal })
     }
   }

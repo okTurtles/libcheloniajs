@@ -156,24 +156,16 @@ const verifySignatureData = function <T, U extends object = object> (
     height < designatedKey._notBeforeHeight ||
     !designatedKey.purpose.includes('sig')
   ) {
-    // An unauthorized or expired key (`ChelErrorSignatureKeyUnauthorized`)
-    // is serious and indicates a bug. In the host app's integration tests,
-    // make it fatal: otherwise it is swallowed and only shown as a
-    // notification. This only happens when `CI` is set and the host app
-    // registers `state/vuex/state`, as Group Income's integration tests do.
-    // CI services (e.g. GitHub Actions) also set `CI` when running this
-    // library's own unit tests, or another app's; there the lookup would
-    // throw in place of `ChelErrorSignatureKeyUnauthorized`, and the
-    // unhandled rejection would fail unrelated tests. The diagnostics must
-    // never replace the real error, so a state that can't be serialized is
-    // only reported. The lookup is only an existence check: the state is
-    // read through `sbp`, so that the selector's filters and `this` apply.
-    // It only finds a selector registered under its own name: one that a
-    // star selector (e.g. `state/*`) provides isn't detected, so the switch
-    // stays off for it.
+    // An unauthorized or expired key is serious and indicates a bug: make it
+    // fatal in the host app's CI (`CI` is set, and the app registers
+    // `state/vuex/state`, as Group Income's integration tests do), where it
+    // would otherwise only show as a notification. Off in other CI runs
+    // (e.g. this library's own tests), where the state lookup would throw
+    // in place of the real error. The diagnostics never replace it either:
+    // a state that can't be serialized is only reported.
     const message = `Key ${sKeyId} is unauthorized or expired for the current contract`
-    const hasVuexState = !!process.env.CI && !!sbp('sbp/selectors/fn', 'state/vuex/state')
-    if (hasVuexState) {
+    const failInHostAppCI = !!process.env.CI && !!sbp('sbp/selectors/fn', 'state/vuex/state')
+    if (failInHostAppCI) {
       try {
         console.error(message, {
           designatedKey,

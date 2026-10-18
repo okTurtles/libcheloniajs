@@ -166,16 +166,29 @@ const contractMeta = (contractID: string): ContractMeta | undefined =>
 // sign a value as another device at another height would, or to decode one
 // regardless of the local height.
 //
-// The height is only restored if it is still `height`: when the contract
-// moved on meanwhile (e.g. it processed events while `fn` was awaiting),
-// restoring would move it back.
+// The height is only restored if nothing set it while `fn` ran: when the
+// contract moved meanwhile (e.g. it processed events while `fn` was
+// awaiting), restoring would move it back, even when it moved to `height`
+// itself.
 export const withLocalHeight = <T>(contractID: string, height: number, fn: () => T): T => {
   const meta = contractMeta(contractID)
   if (!meta) throw new Error(`withLocalHeight: no contract ${contractID}`)
   const saved = meta.height
-  meta.height = height
+  let current: number | undefined = height
+  let moved = false
+  Object.defineProperty(meta, 'height', {
+    configurable: true,
+    enumerable: true,
+    get: () => current,
+    set: (value: number | undefined) => {
+      current = value
+      moved = true
+    }
+  })
   const restore = () => {
-    if (meta.height === height) meta.height = saved
+    Object.defineProperty(meta, 'height', {
+      configurable: true, enumerable: true, writable: true, value: moved ? current : saved
+    })
   }
   let result: T
   try {

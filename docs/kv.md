@@ -140,12 +140,13 @@ first round of a single-key `sync`), and reconnect and resync reloads. A
 reloads, `update`'s reloads, the reload after a pubsub conflict and the
 later rounds of a single-key `sync`.
 
-Like `sync` and `update`, don't await `whenSettled` from code that holds
-the contract's lanes (a contract `sideEffect`, a `queueInvocation` body,
-`onconflict`, an `onUpdate` after its first `await`): the load it waits
-for queues behind that code, so it never resolves. Only a call from the
-synchronous part of a same-contract `onUpdate` is detected
-(`ChelErrorKvReentrant`).
+Like `sync` and `update`, don't await a `whenSettled` that has to wait
+from code that the contract's lanes await (a `sideEffect`, a
+`queueInvocation` body, an `onconflict`, an `onUpdate`): the load it
+waits for queues behind that code, so it never resolves (see
+[How height recovery runs](#how-height-recovery-runs)). Only a call from
+the synchronous part of a same-contract `onUpdate` is detected
+(`ChelErrorKvReentrant`). On a settled slot it resolves at once.
 
 A reducer passed to `chelonia/kv/update` never runs against a value
 that couldn't be verified, or against the default in its place (see
@@ -322,10 +323,10 @@ value exists. (A pre-flight `chelonia/contract/sync` before a write isn't
 needed: see
 [Replacing an app-level height guard](#replacing-an-app-level-height-guard).)
 
-KV writes made from code that holds a contract's lanes (a `sideEffect`,
-a raw pubsub handler, a `queueInvocation` body, an `onUpdate`) shouldn't
-be awaited there: for the same contract they never settle, and for
-another contract they hold its lane while they wait. See
+Don't await KV writes from code that a contract's lanes await (a
+`sideEffect`, a `queueInvocation` body, an `onconflict`, an `onUpdate`):
+for the same contract they never settle, and for another contract they
+hold its lane while they wait. See
 [How height recovery runs](#how-height-recovery-runs).
 
 `ChelErrorKvHeightAhead` extends `ChelErrorInvalidMessageHeight`, but has
@@ -379,38 +380,41 @@ link here.
   rejects it at once, and the queued work then writes nothing. Once the
   work runs, the usual abort rules apply: the request is aborted, and a
   write that committed still resolves. `withHeightRecovery` runs your
-  own attempt: to make its queue wait abortable, race your
-  `queueInvocation` against the signal yourself (or use `queuedSet`).
+  own attempt: queue its lane work with the attempt's `queue`, which
+  gives it the same guarantees. Work that never runs rejects rather
+  than resolving `undefined`: with an `AbortError` when `chelonia/reset`
+  dropped it, and with `ChelErrorUnexpected` when a filter vetoed
+  `chelonia/queueInvocation`.
 
 **Never await** `update`, `clear`, `queuedSet`, single-key `sync`,
-`whenSettled` or `withHeightRecovery` for contract X from:
+`whenSettled` or `withHeightRecovery` for contract X from code that X's
+lanes await:
 
-- one of X's `sideEffect`s: they hold X's internal lane, which every one
-  of these selectors queues on first (`chelonia/queueInvocation` waits for
-  the internal lane), and on which the recovery sync runs;
-- a raw pubsub handler (e.g. the `NOTIFICATION_TYPE.KV` handler passed
-  to `chelonia/connect`) or a `chelonia/queueInvocation` body for X: they
-  hold X's public lane, which every attempt queues on;
-- an `onUpdate` of one of X's slots, which runs on X's lane too. These
-  selectors reject a synchronous call from there with
-  `ChelErrorKvReentrant`; a call after the callback's first `await`
+- one of X's `sideEffect`s (X's internal lane, which every one of these
+  selectors queues on first, and on which the recovery sync runs);
+- a `chelonia/queueInvocation` body for X, or an `onconflict` of a write
+  to X (X's public lane, which every attempt queues on);
+- an `onUpdate` of one of X's slots. A synchronous call from there rejects
+  with `ChelErrorKvReentrant`; a call after the callback's first `await`
   isn't detected.
 
-None of these calls would ever settle. Schedule the call without
-awaiting it instead (from an `onUpdate`, with `queueMicrotask(…)`).
+None of these calls would ever settle. Schedule the call without awaiting
+it instead (from an `onUpdate`, with `queueMicrotask(…)`). Raw pubsub
+handlers (`KV`, `PUB`) and `okTurtles.events` listeners are not awaited
+by the library: only their synchronous part runs on the lane, so a write
+they await queues behind the frame's work and settles.
 
-**From another contract's lane** (e.g. a `sideEffect` of contract Y, or a
-listener of an event emitted while one of Y's events is processed, such
-as Group Income's `MESSAGE_RECEIVE_RAW` handlers), don't await the write
-either: waiting for heights, or for a recovery sync, holds Y's lane all
-along. With the defaults, an awaited write can take two recovery syncs
-(up to 30 s each), then a last attempt with up to 5 stale-stamp waits
-and one wait per `412` whose value is ahead (up to 1.5 s each). If you
-must await it, pass a `signal` (e.g. `AbortSignal.timeout(…)`): it is
-then the only bound. A recovery sync that timed out with the height
-reached keeps the retry queued behind it, and a lane cycle through your
-own code (X's work awaiting Y's, and Y's awaiting X's) deadlocks with or
-without a height error.
+**From another contract's lane** (a `sideEffect` of contract Y, or a
+`queueInvocation` body for Y), don't await the write either: Y's lane is
+held for as long as the write waits for heights or a recovery sync. With
+the defaults, an awaited write can take two recovery syncs (up to 30 s
+each), then a last attempt with up to 5 stale-stamp waits and one wait
+per `412` whose value is ahead (up to 1.5 s each; none while the pubsub
+socket is closed). If you must await it, pass a `signal` (e.g.
+`AbortSignal.timeout(…)`): it is then the only bound. A recovery sync
+that timed out with the height reached keeps the retry queued behind it,
+and a lane cycle through your own code (X's work awaiting Y's, and Y's
+awaiting X's) deadlocks with or without a height error.
 
 ### Replacing an app-level height guard
 
@@ -454,7 +458,10 @@ retry on a height error" helpers should delete them:
   `ChelErrorKvHeightAhead` instead, which it recovers from as above. A
   blind write (`clear`, or `allowUnverifiedConflict`) doesn't depend on
   the value, so it reports the conflict, without waiting for the value's
-  height or syncing.
+  height or syncing. A slot still records the value as ahead, as a load
+  that found it would: it gets the `heightAhead` marker (a settled
+  `'non-init'` slot goes `'loading'`), and reloads once the contract
+  reaches the value's height.
 - Raw `chelonia/kv/get` rejects at once with `ChelErrorKvHeightAhead` for
   a value that is ahead; raw `chelonia/kv/set` first waits passively (see
   [Contract heights](#contract-heights); `heightWaitMs: 0` skips it), and
@@ -463,9 +470,15 @@ retry on a height error" helpers should delete them:
   `queuedSet` use:
 
   ```js
-  await sbp('chelonia/kv/withHeightRecovery', contractID, ({ heightWaitMs }) =>
-    sbp('chelonia/queueInvocation', contractID, () =>
-      sbp('chelonia/kv/set', contractID, key, data, { ...options, heightWaitMs })),
+  await sbp('chelonia/kv/withHeightRecovery', contractID, ({ heightWaitMs, queue }) =>
+    queue(() => sbp('chelonia/kv/set', contractID, key, data, {
+      ...options,
+      // Per attempt: the recovery sync may have rotated keys.
+      signingKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, 'csk'),
+      encryptionKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, 'cek'),
+      heightWaitMs,
+      signal
+    })),
   { onHeightAhead, maxHeightRecoveries, signal })
   ```
 
@@ -478,24 +491,38 @@ retry on a height error" helpers should delete them:
   also when the sync fails but the contract reaches the height anyway
   (e.g. through pubsub, within a short passive wait after the failure;
   none while the pubsub socket is closed). It runs no sync when the
-  contract has already reached the height by the time the attempt
+  contract had already reached the height by the time the attempt
   failed. Otherwise the caller gets the attempt's own error. The attempt
-  must reject with the library's error as is (a wrapped error isn't
-  recovered), enqueue its own lane work, as above (the recovery must not
-  run with the lane held), only read or write keys of `contractID` (the
-  recovery syncs that contract, whichever contract the error came from;
-  this isn't checked), and pass `heightWaitMs` on to `kv/set`: `0` while
-  a recovery follows, the default passive wait on the last attempt
-  (`onHeightAhead: 'reject'` runs one attempt, with `0`). Invalid options
-  reject with `ChelErrorKvUpdateInvalid` before the attempt runs, and so
-  does a synchronous call from an `onUpdate` of one of the contract's
-  slots (`ChelErrorKvReentrant`). Never await it from the contract's own
-  lanes (see [How height recovery runs](#how-height-recovery-runs)).
+  must:
+
+  - reject with the library's error as is (a wrapped error isn't
+    recovered);
+  - queue its lane work with `queue` (the recovery must not run with the
+    lane held). `queue` is what makes `signal` and `chelonia/reset` end
+    an attempt that is still queued: until the body starts, they reject
+    it at once, and the body then never runs;
+  - resolve key IDs inside the attempt: `kv/set` replaces a revoked key
+    with the current key of the same name, but rejects with
+    `ChelErrorSignatureKeyNotFound` when no key of that name is left;
+  - pass `signal` on to `kv/set`, so that it aborts the request in
+    flight;
+  - only read or write keys of `contractID` (the recovery syncs that
+    contract, whichever contract the error came from; this isn't
+    checked);
+  - pass `heightWaitMs` on to `kv/set`: `0` while a recovery follows,
+    the default passive wait on the last attempt (`onHeightAhead:
+    'reject'` runs one attempt, with `0`).
+
+  Invalid options reject with `ChelErrorKvUpdateInvalid` before the
+  attempt runs (a non-function attempt with a `TypeError`), and so does
+  a synchronous call from an `onUpdate` of one of the contract's slots
+  (`ChelErrorKvReentrant`). Never await it from code that the contract's
+  lanes await (see [How height recovery runs](#how-height-recovery-runs)).
   Prefer `queuedSet` or a slot where they fit.
 - `onUpdate` is called when a value lands (`'load'`, `'remote'`,
   `'local'`, `'reconnect'`), and when a load's 404 replaces a value the
-  slot held. A first load that finds no value (a 404 on a slot that never
-  held one) doesn't call it, so a gate that waits for "the slot has
+  slot held. A load that finds no value (a 404) on a slot that never
+  held one doesn't call it, so a gate that waits for "the slot has
   loaded" must not wait for `onUpdate`: use `whenSettled`,
   `settledStatus`, or the entry's `settled && status !== 'loading'` (in
   a store, or in `CHELONIA_KV_STATUS_CHANGED`'s payload).
@@ -506,10 +533,10 @@ In terms of a typical app-level guard (Group Income's `kv-guard.js`):
 |---|---|
 | `isHeightAheadError(e)` | `isKvHeightAhead(e)` (walk `.cause` above your own wrappers); for a malformed stamp, `isKvHeightMalformed(e)` (`clear` the key; syncing doesn't help) |
 | `isKvConflictError(e)` plus an extra retry | `isKvConflict(e)`; pass an `onconflict` (or use a slot's `update`) to resolve conflicts, and a larger `maxAttempts`. A `412` without `onconflict` rejects on the first attempt whatever `maxAttempts` is |
-| `withKvGuard` / `withKvHeightRetry` around `update`, `clear` or `queuedSet` | Nothing: the selectors recover on their own (`onHeightAhead`, `maxHeightRecoveries`). Unlike the guard, they never retry blindly at a stale height: after a failed sync they wait passively (up to 1.5 s) for the height, and retry only once it has arrived |
+| `withKvGuard` / `withKvHeightRetry` around `update`, `clear` or `queuedSet` | Nothing: the selectors recover on their own (`onHeightAhead`, `maxHeightRecoveries`). Unlike the guard, they never retry blindly at a stale height: after a failed sync they wait passively (up to 1.5 s; not while the pubsub socket is closed) for the height, and retry only once it has arrived |
 | `withKvHeightRetry` around raw `kv/get` / `kv/set` | `chelonia/kv/withHeightRecovery` (see above) |
-| The guard's side-effect rule (no pre-flight on a hot lane; still sync and retry on a height error) | Keep the default `onHeightAhead: 'sync'`: it never pre-flights, and it only syncs after the server rejected the write. But don't await the write on the lane: with the defaults, an awaited write can take two recovery syncs (up to 30 s each), then a last attempt with up to 5 stale-stamp waits and one per `412` that is ahead (up to 1.5 s each). If it must be awaited, pass a `signal` (e.g. `AbortSignal.timeout(…)`), which also ends the wait while the write is queued (see [How height recovery runs](#how-height-recovery-runs)). `'reject'` gives up on the write, a stale-stamp `409` included: use it only when the caller re-issues the write itself |
-| `ensureContractHeightCurrent` before a write | Not needed: the selectors recover without waiting |
+| The guard's side-effect rule (no pre-flight on a hot lane; still sync and retry on a height error) | Keep the default `onHeightAhead: 'sync'`: it never pre-flights, and it only syncs after the server rejected the write. But don't await the write on the lane: it can hold the lane for a long time (see [How height recovery runs](#how-height-recovery-runs) for the worst case with the defaults). If it must be awaited, pass a `signal` (e.g. `AbortSignal.timeout(…)`), which also ends the wait while the write is queued. `'reject'` gives up on the write, a stale-stamp `409` included: use it only when the caller re-issues the write itself |
+| `ensureContractHeightCurrent` before a write | Not needed: the selectors recover by syncing, without first waiting for a pubsub event, except on the last attempt |
 | Telling "empty" from "not loaded yet" (e.g. on a first-load 404) | `whenSettled`, `settledStatus`, or `settled && status !== 'loading'` (see [Pending vs. settled](#pending-vs-settled)) |
 | Tracking "the server holds a newer value" | The mirror entry's `heightAhead` (see [Contract heights](#contract-heights)) |
 
@@ -549,7 +576,7 @@ In terms of a typical app-level guard (Group Income's `kv-guard.js`):
 | `autoLoad` | `'on-sync'` | `'on-sync'` loads on contract sync; `'on-demand'` waits for `chelonia/kv/sync` (or a successful `update`); `'never'` skips. |
 | `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect. |
 | `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the plain-`value` form of `chelonia/kv/update`. |
-| `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every successful load, applied remote frame or committed local write (also when the value didn't change), and when a load's 404 replaces a value the slot held. Must not throw; must not synchronously call a same-contract `update`, `clear` or `sync`, or a `whenSettled` that would wait (rejected with `ChelErrorKvReentrant`; see the rejection taxonomy below). |
+| `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every successful load, applied remote frame or committed local write (also when the value didn't change), and when a load's 404 replaces a value the slot held (not on a 404 for a slot that never held a value). Must not throw. For the same contract, must not call `update`, `clear`, `queuedSet`, `sync`, `withHeightRecovery`, or a `whenSettled` that would wait, synchronously (rejected with `ChelErrorKvReentrant`; see the rejection taxonomy below), nor await one after its first `await` (an undetected deadlock; see [How height recovery runs](#how-height-recovery-runs)). |
 
 `KvUpdater<T>` receives `T | undefined`: `undefined` is passed when a slot
 has neither a mirror value nor a `defaultValue`.
@@ -650,10 +677,11 @@ ahead of the local contract and the write isn't blind (it has an
 `onconflict` and no `allowUnverifiedConflict`): that rejects with
 `ChelErrorKvHeightAhead`, with the last response's etag.
 Its `.cause` now describes one response, the final `412`:
-`{ currentStatus, currentData, etag }`, with `currentData` omitted when
-the value is unknown (`'ahead'`, `'malformed'`, or undecodable), and
-`currentStatus` omitted too (rather than set to `undefined`) when that
-response couldn't be read or decoded. It used
+`{ currentStatus, currentData, requiredHeight, etag }`, with
+`currentData` omitted when the value is unknown (`'ahead'`, `'malformed'`,
+or undecodable), `requiredHeight` (the value's height stamp) only for a
+value that is `'ahead'`, and `currentStatus` omitted too (rather than set
+to `undefined`) when that response couldn't be read or decoded. It used
 to pair the last value that could be decoded, possibly from an earlier
 `412`, with the latest etag. `update`, `clear` and `queuedSet` report the
 same response the same way (`update` and `clear` normalize
@@ -711,8 +739,9 @@ height recovery. `update` then rejects with that reload's error (e.g.
 nothing to write. After a failed reload of an `'error'` slot that still
 holds a value (see below), a `KV_NOOP` resolves `undefined`.
 
-`chelonia/kv/update`, `chelonia/kv/clear`, and `chelonia/kv/sync` (and
-a `chelonia/kv/whenSettled` that would wait) also reject with
+`chelonia/kv/update`, `chelonia/kv/clear`, `chelonia/kv/queuedSet`,
+`chelonia/kv/sync` and `chelonia/kv/withHeightRecovery` (and a
+`chelonia/kv/whenSettled` that would wait) also reject with
 `ChelErrorKvReentrant` when called for the **same
 contract** from within the *synchronous* portion of that contract's own
 `onUpdate` callback. `onUpdate` holds the per-contract
@@ -720,7 +749,9 @@ contract** from within the *synchronous* portion of that contract's own
 the callback would enqueue behind the lane that is blocked awaiting the
 callback — a deadlock. The guard is narrow (synchronous portion only)
 so it never rejects an *independent* concurrent write that interleaves
-with a slow async `onUpdate` (those queue safely and succeed).
+with a slow async `onUpdate` (those queue safely and succeed); a call
+that the callback itself awaits after its first `await` deadlocks
+undetected (see [How height recovery runs](#how-height-recovery-runs)).
 `chelonia/kv/read` / `chelonia/kv/status` (synchronous, unqueued) and
 writes to *other* contracts are always unaffected. To re-enter a
 same-contract write, schedule it off the synchronous stack and do not

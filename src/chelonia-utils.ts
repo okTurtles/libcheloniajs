@@ -1,7 +1,7 @@
 import sbp from '@sbp/sbp'
-import { ChelErrorKvConflict, ChelErrorKvUpdateInvalid } from './errors.js'
+import { ChelErrorKvConflict } from './errors.js'
 import { isKvMaxAttempts } from './internal-errors.js'
-import { isValidMaxAttempts, queueAbortable } from './kv-height.js'
+import { assertValidMaxAttempts } from './kv-height.js'
 import type {
   ChelKvOnConflictCallback, JSONType, KvHeightAheadMode, KvHeightRecoveryAttempt
 } from './types.js'
@@ -9,8 +9,8 @@ import type {
 // This file contains non-core parts of Chelonia, i.e., functionality that is
 // useful but optional. The threshold for something being 'optional' generally
 // is something that can be implemented externally using only public Chelonia
-// selectors (here plus the library's error predicates and internal helpers:
-// `queueAbortable`, and the `maxAttempts` check).
+// selectors (here plus the library's error predicates and the `maxAttempts`
+// check).
 // Optional functionality can make certain assumptions about contracts or
 // actions to make things simpler or easier to implement.
 // Currently, a single selector is defined: 'chelonia/kv/queuedSet'.
@@ -36,17 +36,17 @@ export default sbp('sbp/selectors/register', {
   // `maxHeightRecoveries` times, without `kv/set`'s passive wait for the
   // height, except on the last attempt, where that wait is the write's only
   // chance. Pass `onHeightAhead: 'reject'` to get the error at once, without
-  // waiting or syncing: nothing retries the write then (a deferred reload
-  // only refreshes a slot's mirror, and only for a value that is ahead, not
-  // after a stale-stamp `409`), so use it only when the caller re-issues the
-  // write itself.
+  // waiting or syncing: nothing retries the write then, so use it only
+  // when the caller re-issues the write itself.
   // Pass `maxHeightRecoveries: 0` to wait passively without syncing. See
   // KV-REVAMPED.md §4.2 step 5a. A write that recovers is enqueued again,
   // so a later write to the same key can commit before it (as with an
-  // app-level retry). `signal` ends the write at once while it is queued
-  // (it then sends nothing). Awaited from the contract's own lanes (one of
-  // its `sideEffect`s, a raw pubsub handler or a `queueInvocation` body for
-  // it, an `onUpdate` of one of its slots), it never settles; a synchronous
+  // app-level retry). `signal` and `chelonia/reset` end the write at once
+  // while it is queued (it then sends nothing), and a write whose queued
+  // work never runs rejects (see `KvHeightRecoveryAttempt`'s `queue`).
+  // Awaited from code that the contract's lanes await (one of its
+  // `sideEffect`s, a `queueInvocation` body for it, an `onconflict`, an
+  // `onUpdate` of one of its slots), it never settles; a synchronous
   // call from such an `onUpdate` rejects with `ChelErrorKvReentrant` (see
   // docs/kv.md, "How height recovery runs").
   // `allowUnverifiedConflict` is passed on to `chelonia/kv/set`.
@@ -55,9 +55,10 @@ export default sbp('sbp/selectors/register', {
   // without `onconflict`, rejects with `ChelErrorKvConflict`, like
   // `chelonia/kv/update` and `chelonia/kv/clear`; match it with
   // `isKvConflict(e)`. Its `.cause` is `kv/set`'s: `{ currentStatus,
-  // currentData, etag }` from the last server response, with `currentData`
-  // only when that value is known (`'present'` and decodable, or
-  // `'absent'`), and `currentStatus` only when the last response could be
+  // currentData, requiredHeight, etag }` from the last server response, with
+  // `currentData` only when that value is known (`'present'` and decodable,
+  // or `'absent'`), `requiredHeight` (the value's height stamp) only when it
+  // is `'ahead'`, and `currentStatus` only when the last response could be
   // read and decoded. The exception is a conflict whose last value is ahead of
   // the local contract (with an `onconflict`, and without
   // `allowUnverifiedConflict`): `kv/set` rejects with
@@ -65,7 +66,7 @@ export default sbp('sbp/selectors/register', {
   // rejection once the recoveries run out). A blind write
   // (`allowUnverifiedConflict`) doesn't depend on the value, so that is a
   // conflict too.
-  'chelonia/kv/queuedSet': ({
+  'chelonia/kv/queuedSet': async ({
     contractID,
     key,
     data,
@@ -85,24 +86,22 @@ export default sbp('sbp/selectors/register', {
     onconflict?: ChelKvOnConflictCallback;
     allowUnverifiedConflict?: boolean;
     ifMatch?: string;
-    maxAttempts?: number;
+    maxAttempts?: number | null;
     signal?: AbortSignal;
-    onHeightAhead?: KvHeightAheadMode;
-    maxHeightRecoveries?: number;
+    onHeightAhead?: KvHeightAheadMode | null;
+    maxHeightRecoveries?: number | null;
     encryptionKeyName: string;
     signingKeyName: string;
   }): Promise<{ etag: string | null }> => {
     const label = `queuedSet: ${contractID}::${key}`
-    if (!isValidMaxAttempts(maxAttempts)) {
-      return Promise.reject(new ChelErrorKvUpdateInvalid(
-        `[chelonia/kv] ${label}: \`maxAttempts\` must be an integer >= 1`
-      ))
-    }
+    // Throws, so it rejects: this is an `async` function.
+    assertValidMaxAttempts(label, maxAttempts)
     return sbp('chelonia/kv/withHeightRecovery', contractID, (
-      { heightWaitMs }: KvHeightRecoveryAttempt
+      { heightWaitMs, queue }: KvHeightRecoveryAttempt
     ) => {
-      // `signal` also ends the wait while the write is still queued.
-      return queueAbortable(contractID, [signal], () => {
+      // `signal` (and `chelonia/reset`) also end the wait while the write is
+      // still queued.
+      return queue(() => {
         return sbp('chelonia/kv/set', contractID, key, data, {
           ifMatch,
           encryptionKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, encryptionKeyName),
@@ -113,7 +112,7 @@ export default sbp('sbp/selectors/register', {
           heightWaitMs,
           signal
         })
-      }).result
+      })
     }, {
       onHeightAhead, maxHeightRecoveries, signal, label
     })
@@ -124,7 +123,7 @@ export default sbp('sbp/selectors/register', {
         // keeps `kv/set`'s shape: there is no slot to normalize it against.
         if (isKvMaxAttempts(e)) {
           throw new ChelErrorKvConflict(
-            `[chelonia/kv] queuedSet: ${contractID}::${key} ` + (
+            `[chelonia/kv] ${label} ` + (
               typeof onconflict === 'function'
                 ? 'ran out of attempts resolving conflicts'
                 : 'conflicts with the server value, and no onconflict handler was provided'

@@ -137,6 +137,17 @@ const failedRetain = async () => {
   eventsAfterStatus = 200
 }
 
+// A re-sync of a retained contract that fails fetching the contract's
+// events.
+const failedResync = async () => {
+  eventsAfterStatus = 500
+  await assert.rejects(
+    sbp('chelonia/contract/sync', contractID, { resync: true }),
+    { name: 'ChelErrorUnexpectedHttpResponseCode' }
+  )
+  eventsAfterStatus = 200
+}
+
 describe('a first sync that fails', () => {
   it('leaves nothing pending', async () => {
     await failedRetain()
@@ -185,12 +196,7 @@ describe('a first sync that fails', () => {
 describe('a re-sync that fails', () => {
   it('keeps the reference count of a contract whose first sync failed', async () => {
     await failedRetain()
-    eventsAfterStatus = 500
-    await assert.rejects(
-      sbp('chelonia/contract/sync', contractID, { resync: true }),
-      { name: 'ChelErrorUnexpectedHttpResponseCode' }
-    )
-    eventsAfterStatus = 200
+    await failedResync()
     // Still retained: releasing it removes it.
     assert.deepStrictEqual({ ...rootState().contracts[contractID] }, { references: 1 })
     // An entry without a type is expected here: nothing is reported.
@@ -202,11 +208,7 @@ describe('a re-sync that fails', () => {
 
   it('leaves no state once the contract is released', async () => {
     await sbp('chelonia/contract/retain', contractID)
-    eventsAfterStatus = 500
-    await assert.rejects(
-      sbp('chelonia/contract/sync', contractID, { resync: true }),
-      { name: 'ChelErrorUnexpectedHttpResponseCode' }
-    )
+    await failedResync()
     // The re-sync cleared the contract (keeping its reference count),
     // unsubscribed it, and announced its removal.
     assert.strictEqual(rootState().contracts[contractID]?.type, undefined)
@@ -221,12 +223,7 @@ describe('a re-sync that fails', () => {
 
   it('announces a permanent removal once the contract is removed for good', async () => {
     await sbp('chelonia/contract/retain', contractID)
-    eventsAfterStatus = 500
-    await assert.rejects(
-      sbp('chelonia/contract/sync', contractID, { resync: true }),
-      { name: 'ChelErrorUnexpectedHttpResponseCode' }
-    )
-    eventsAfterStatus = 200
+    await failedResync()
     assert.deepStrictEqual(removedPermanently, [])
     await sbp('chelonia/contract/remove', contractID, { permanent: true })
     assert.strictEqual(rootState().contracts[contractID], null)
@@ -308,16 +305,21 @@ describe('a KV height recovery racing a release', () => {
     const lane = holdLane()
     const releasing = sbp('chelonia/contract/release', contractID)
     let attempts = 0
+    let thrown: unknown
     const recovering = sbp('chelonia/kv/withHeightRecovery', contractID, async () => {
       attempts++
-      throw new ChelErrorKvHeightAhead('[test] ahead', {
+      throw (thrown = new ChelErrorKvHeightAhead('[test] ahead', {
         cause: { requiredHeight: 5, exact: true, localHeight: 0, etag: null, httpStatus: 412 }
-      })
+      }))
     })
     await sleep(20)
     lane.open()
     await within(releasing, 'the release')
-    await assert.rejects(within(recovering, 'the recovery'), (e: unknown) => isKvHeightAhead(e))
+    await assert.rejects(within(recovering, 'the recovery'), (e: unknown) => {
+      assert.ok(isKvHeightAhead(e))
+      assert.strictEqual(e, thrown)
+      return true
+    })
     assert.strictEqual(attempts, 1)
     // The recovery ran, and its sync refused the removed contract.
     assert.ok(logged(warnings, 'failed during height recovery'))
@@ -454,12 +456,12 @@ describe("whenSettled across a contract's lifecycle", () => {
     await sbp('chelonia/contract/retain', contractID)
     assert.strictEqual(sbp('chelonia/kv/status', contractID, 'k'), 'non-init')
     const outcome = settling()
-    await sbp('chelonia/contract/sync', contractID, { resync: true })
+    await within(sbp('chelonia/contract/sync', contractID, { resync: true }), 'the resync')
     assert.ok(removed.includes(contractID))
     assert.strictEqual(await settledOr(outcome, 20, 'pending'), 'pending')
     // The slot is active again. (Its load fails here, for want of the
     // contract's `#sak` key: that settles it too.)
-    await sbp('chelonia/kv/sync', contractID, 'k').catch(() => {})
+    await within(sbp('chelonia/kv/sync', contractID, 'k').catch(() => {}), 'the key sync')
     const { status } = await outcome
     assert.strictEqual(status, sbp('chelonia/kv/settledStatus', contractID, 'k'))
     assert.strictEqual(status, 'error')

@@ -56,9 +56,10 @@ export const initKvRuntime = (ctx: CheloniaContext): void => {
 // loads were drained (`chelonia/kv/_waitInFlight`, which also drains
 // `kvRecoveries`), so dropping `kvLocalEchoCIDs` / `kvPendingWrites`
 // can't strand a continuation mid-write. The caller re-seeds the `_kv`
-// mirror, and then releases its reset's hold on the height session
+// mirror first (unless a step of its teardown threw: this runs anyway),
+// and then releases its reset's hold on the height session
 // (`chelonia/kv/_finishHeightSession`).
-export const clearKvRuntime = (ctx: CheloniaContext): void => {
+export const resetKvSession = (ctx: CheloniaContext): void => {
   if (ctx.kvFilterRetryTimer != null) clearTimeout(ctx.kvFilterRetryTimer)
   // Height waits can't have been registered since the height session
   // ended (`chelonia/kv/_endHeightSession`), but listeners of passive

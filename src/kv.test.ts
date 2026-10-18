@@ -24,7 +24,7 @@ import {
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
 import { KV_ECHO_CID_MAX, KV_ECHO_TTL_MS, KV_KEY_SEPARATOR } from './kv-constants.js'
-import { clearKvRuntime, initKvRuntime } from './kv-runtime.js'
+import { initKvRuntime, resetKvSession } from './kv-runtime.js'
 import { KV_NOOP } from './kv.js'
 import { captureConsole, logged } from './test-utils.js'
 import type {
@@ -215,7 +215,7 @@ sbp('sbp/selectors/register', {
     reactiveSet(s, 'secretKeys', Object.create(null))
     reactiveDel(s, '_kv')
     reactiveSet(s, '_kv', Object.create(null))
-    clearKvRuntime(this)
+    resetKvSession(this)
     sbp('chelonia/kv/_finishHeightSession')
     this.subscriptionSet.clear()
   },
@@ -1041,19 +1041,13 @@ describe('KV slot API', () => {
     await sbp('chelonia/kv/_handleRemote', c, 'echo', fakeParsed({ x: 2 }), 'e')
     assert.deepStrictEqual(rootState()._kv![c]!.echo.value, { x: 2 })
     assert.strictEqual(
-      log.filter((e) =>
-        e.type === CHELONIA_KV_UPDATED &&
-        (e.payload as { reason: string }).reason === 'remote'
-      ).length, 1
+      updatedReasons(log).filter((r) => r === 'remote').length, 1
     )
 
     log.length = 0
     await sbp('chelonia/kv/_handleRemote', c, 'echo', fakeParsed({ x: 3 }), 'other')
     assert.strictEqual(
-      log.filter((e) =>
-        e.type === CHELONIA_KV_UPDATED &&
-        (e.payload as { reason: string }).reason === 'remote'
-      ).length, 1
+      updatedReasons(log).filter((r) => r === 'remote').length, 1
     )
 
     let clock = 1000
@@ -1067,10 +1061,7 @@ describe('KV slot API', () => {
     await sbp('chelonia/kv/_handleRemote', c, 'echo', fakeParsed({ x: 5 }), 'late')
     assert.deepStrictEqual(rootState()._kv![c]!.echo.value, { x: 5 })
     assert.strictEqual(
-      log.filter((e) =>
-        e.type === CHELONIA_KV_UPDATED &&
-        (e.payload as { reason: string }).reason === 'remote'
-      ).length, 1
+      updatedReasons(log).filter((r) => r === 'remote').length, 1
     )
     assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::echo`), false)
     sbp('chelonia/kv/_testSetNowMs')
@@ -2291,10 +2282,10 @@ describe('KV slot API', () => {
     // was replaced mid-write — otherwise it would be re-validated through
     // the replacement slot and could spuriously flip it to 'error'.
     await sbp('chelonia/kv/_handleRemote', c, 'staleUpdate', fakeParsed({ x: 1 }), echoCID)
-    assert.ok(!log.some((e) =>
-      e.type === CHELONIA_KV_UPDATED &&
-      (e.payload as { reason: string }).reason === 'remote'
-    ), 'echo of committed write should be suppressed, not processed as remote')
+    assert.ok(
+      !updatedReasons(log).includes('remote'),
+      'echo of committed write should be suppressed, not processed as remote'
+    )
     offs.forEach((off) => off())
   })
 
@@ -2372,10 +2363,10 @@ describe('KV slot API', () => {
     await clearP
 
     await sbp('chelonia/kv/_handleRemote', c, 'staleClear', fakeParsed(null), echoCID)
-    assert.ok(!log.some((e) =>
-      e.type === CHELONIA_KV_UPDATED &&
-      (e.payload as { reason: string }).reason === 'remote'
-    ), 'echo of committed clear should be suppressed, not processed as remote')
+    assert.ok(
+      !updatedReasons(log).includes('remote'),
+      'echo of committed clear should be suppressed, not processed as remote'
+    )
     offs.forEach((off) => off())
   })
 
@@ -3157,10 +3148,7 @@ describe('KV slot API', () => {
     await sbp('chelonia/kv/_handleRemote', c, 'ambiguous', fakeParsed(committed!))
     assert.deepStrictEqual(rootState()._kv![c]!.ambiguous.value, { x: 2 })
     assert.strictEqual(
-      log.filter((e) =>
-        e.type === CHELONIA_KV_UPDATED &&
-        (e.payload as { reason: string }).reason === 'remote'
-      ).length,
+      updatedReasons(log).filter((r) => r === 'remote').length,
       1
     )
     offs.forEach((off) => off())
@@ -3338,10 +3326,7 @@ describe('KV slot API', () => {
     assert.strictEqual(getCalls, 1)
     assert.deepStrictEqual(rootState()._kv![c]!.forceSync.value, { x: 2 })
     assert.strictEqual(
-      log.filter((e) =>
-        e.type === CHELONIA_KV_UPDATED &&
-        (e.payload as { reason: string }).reason === 'remote'
-      ).length,
+      updatedReasons(log).filter((r) => r === 'remote').length,
       1
     )
     offs.forEach((off) => off())
@@ -4965,10 +4950,7 @@ describe('KV slot API', () => {
       'status should be loaded after successful re-validation'
     )
     assert.ok(
-      log.some((e) =>
-        e.type === CHELONIA_KV_UPDATED &&
-        (e.payload as { reason: string }).reason === 'load'
-      ),
+      updatedReasons(log).includes('load'),
       'CHELONIA_KV_UPDATED should fire for the coerced value'
     )
     offs.forEach((off) => off())
@@ -5717,9 +5699,13 @@ describe('KV slot API', () => {
     stubQueueInvocation = (() => undefined) as unknown as typeof stubQueueInvocation
 
     try {
-      // The write resolves (Promise.resolve(undefined) → fulfilled),
-      // not rejects. The assertion is really about the counter.
-      await sbp('chelonia/kv/update', { contractID: c, key: 'k', updater: () => ({ x: 1 }) })
+      // The write rejects as vetoed, since its body never ran; the counter
+      // must not leak either.
+      await assert.rejects(
+        sbp('chelonia/kv/update', { contractID: c, key: 'k', updater: () => ({ x: 1 }) }),
+        (e: unknown) => (e as Error).name === 'ChelErrorUnexpected' &&
+          /was vetoed/.test((e as Error).message)
+      )
       assert.strictEqual(sbp('chelonia/test/pendingCount', c), 0,
         'pending counter must not leak when queueInvocation returns undefined')
     } finally {
@@ -5767,7 +5753,7 @@ describe('KV runtime fields across chelonia/reset', () => {
       else continue
       marked.push(name)
     }
-    clearKvRuntime(ctx)
+    resetKvSession(ctx)
     const kept = marked.filter((name) => {
       const value = fields[name]
       return value instanceof Map || value instanceof Set
@@ -5800,7 +5786,7 @@ describe('KV runtime fields across chelonia/reset', () => {
     ownWait.off = () => { ownListenerRemoved = true }
     ctx.kvHeightWaits.set('own', ownWait)
     try {
-      clearKvRuntime(ctx)
+      resetKvSession(ctx)
       assert.strictEqual(ownListenerRemoved, true)
       assert.strictEqual(globalWaits.get('global'), globalWait)
       await new Promise((resolve) => setTimeout(resolve, 60))

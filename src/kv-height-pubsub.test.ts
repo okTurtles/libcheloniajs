@@ -11,7 +11,7 @@ import { describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
-import { isKvHeightAhead, isKvHeightMalformed } from './errors.js'
+import { ChelErrorKvHeightAhead, isKvHeightAhead, isKvHeightMalformed } from './errors.js'
 import { CHELONIA_KV_UPDATED } from './events.js'
 import { createCID, multicodes } from './functions.js'
 import {
@@ -75,17 +75,17 @@ const connect = ({ rawHandler = false } = {}) => {
 // Delivers the value stored for `key` as a pubsub KV frame.
 const deliverKvFrame = (key = UNREAD) => {
   const stored = server.store.get(key)!
-  deliverBody(key, stored.body, stored.cid)
+  deliverBody(key, stored.body)
   return stored
 }
 
-const deliverBody = (key: string, body: string, cid = createCID(body, multicodes.RAW)) => {
+const deliverBody = (key: string, body: string) => {
   client.messageHandlers[NOTIFICATION_TYPE.KV].call(client, {
     type: NOTIFICATION_TYPE.KV,
     channelID: CONTRACT_ID,
     key,
     data: body,
-    cid: `"${cid}"`
+    cid: `"${createCID(body, multicodes.RAW)}"`
   })
 }
 
@@ -135,7 +135,7 @@ describe('pubsub frames while the local contract is behind', () => {
     assert.ok(!('heightAhead' in mirror(UNREAD)))
     assert.strictEqual(mirror(UNREAD).etag, `"${stored.cid}"`)
     assert.deepStrictEqual(updates.map((u) => u.reason), ['remote'])
-    assert.ok(debugs.some((d) => String(d[0]).includes('reloading the slot')))
+    assert.ok(logged(debugs, 'reloading the slot'))
     // With the etag current, the next write needs no conflict round trip.
     server.log.length = 0
     await sbp('chelonia/kv/update', {
@@ -172,7 +172,7 @@ describe('pubsub frames while the local contract is behind', () => {
     deliverKvFrame()
     await drainLanes()
     server.catchUpOnSync = true
-    await sbp('chelonia/kv/clear', CONTRACT_ID, UNREAD)
+    await within(sbp('chelonia/kv/clear', CONTRACT_ID, UNREAD), 'the clear')
     // Attempt 1 conflicts (412), then its height stamp is stale (409);
     // after the recovery sync, attempt 2 commits without a conflict.
     assert.deepStrictEqual(server.posts().map((p) => [p.status, p.height]), [
@@ -211,12 +211,12 @@ describe('writes and loads while the pubsub socket is closed', () => {
     const syncsBefore = server.syncs
     const started = Date.now()
     await assert.rejects(
-      sbp('chelonia/kv/update', {
+      within(sbp('chelonia/kv/update', {
         contractID: CONTRACT_ID,
         key: UNREAD,
         updater: addChatRoomUnreadMessage('roomA', 'a2', 5),
         maxHeightRecoveries: 0
-      }),
+      }), 'the update'),
       (e: unknown) => isKvHeightAhead(e)
     )
     assert.ok(Date.now() - started < 500, `rejected after ${Date.now() - started} ms`)
@@ -233,9 +233,9 @@ describe('writes and loads while the pubsub socket is closed', () => {
     server.log.length = 0
     const started = Date.now()
     await assert.rejects(
-      sbp('chelonia/kv/set', CONTRACT_ID, UNREAD, VB, {
+      within(sbp('chelonia/kv/set', CONTRACT_ID, UNREAD, VB, {
         ifMatch: '*', signingKeyId: cskId, encryptionKeyId: cekId
-      }),
+      }), 'the write'),
       (e: any) => isKvHeightAhead(e)
     )
     assert.ok(Date.now() - started < 500, `rejected after ${Date.now() - started} ms`)
@@ -248,12 +248,12 @@ describe('writes and loads while the pubsub socket is closed', () => {
     connect()
     const started = Date.now()
     await assert.rejects(
-      sbp('chelonia/kv/set', CONTRACT_ID, UNREAD, { x: 1 }, {
+      within(sbp('chelonia/kv/set', CONTRACT_ID, UNREAD, { x: 1 }, {
         ifMatch: e0,
         signingKeyId: cskId,
         encryptionKeyId: cekId,
         onconflict: async ({ etag }: any) => [{ x: 1 }, etag]
-      }),
+      }), 'the write'),
       (e: any) => isKvHeightAhead(e)
     )
     assert.ok(Date.now() - started < 500)
@@ -265,7 +265,12 @@ describe('writes and loads while the pubsub socket is closed', () => {
     await setupStaleDeviceA()
     connect()
     const started = Date.now()
-    await assert.rejects(sbp('chelonia/kv/sync', CONTRACT_ID, UNREAD), (e: unknown) => isKvHeightAhead(e))
+    const syncsBefore = server.syncs
+    await assert.rejects(
+      within(sbp('chelonia/kv/sync', CONTRACT_ID, UNREAD), 'the key sync'),
+      (e: unknown) => isKvHeightAhead(e)
+    )
+    assert.strictEqual(server.syncs - syncsBefore, 2)
     const firstSync = firstSyncAfter(started)
     assert.ok(firstSync !== undefined, 'no recovery sync')
     assert.ok(firstSync - started < 500, `first sync after ${firstSync - started} ms`)
@@ -279,7 +284,7 @@ describe('writes and loads while the pubsub socket is closed', () => {
     connect()
     server.catchUpOnSync = true
     const started = Date.now()
-    await sbp('chelonia/kv/sync', CONTRACT_ID, UNREAD)
+    await within(sbp('chelonia/kv/sync', CONTRACT_ID, UNREAD), 'the key sync')
     assert.ok(Date.now() - started < 500, `loaded after ${Date.now() - started} ms`)
     assert.strictEqual(slotStatus(UNREAD), 'loaded')
     assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), VB)
@@ -333,18 +338,18 @@ describe('the raw KV callback', () => {
 
 // `chelonia/connect` starts clock sync, which `chelonia/reset` stops while
 // it drains.
-describe('chelonia/reset failing in its persistence hook', () => {
-  // Whether clock sync is running: starting it again throws then.
-  const clockSyncRunning = (): boolean => {
-    try {
-      sbp('chelonia/private/startClockSync')
-    } catch {
-      return true
-    }
-    sbp('chelonia/private/stopClockSync')
-    return false
+// Whether clock sync is running: starting it again throws then.
+const clockSyncRunning = (): boolean => {
+  try {
+    sbp('chelonia/private/startClockSync')
+  } catch {
+    return true
   }
+  sbp('chelonia/private/stopClockSync')
+  return false
+}
 
+describe('chelonia/reset failing in its persistence hook', () => {
   it("rejects with the hook's error even when resuming fails, and restarts clock sync", async () => {
     // A settled 'non-init' slot. While the reset drains, a wait is
     // registered for it, which is only remembered (the height session is
@@ -364,13 +369,13 @@ describe('chelonia/reset failing in its persistence hook', () => {
         return value
       }
     })
-    await assert.rejects(sbp('chelonia/reset', () => {
+    await assert.rejects(within(sbp('chelonia/reset', () => {
       sbp('chelonia/kv/_registerHeightWait', {
         contractID: CONTRACT_ID, key: 'absent', requiredHeight: 42, reason: 'remote'
       })
       failSets = true
       throw new Error('persistence hook failed')
-    }), /persistence hook failed/)
+    }), 'the reset'), /persistence hook failed/)
     failSets = false
     assert.ok(logged(errors, 'failed to resume the KV height session'))
     assert.strictEqual(clockSyncRunning(), true)
@@ -379,10 +384,16 @@ describe('chelonia/reset failing in its persistence hook', () => {
   it('restarts clock sync when resuming succeeds', async () => {
     await loadV0At40()
     connect()
+    // `chelonia/reset` stops clock sync while it drains, and restarts it.
+    let runningInHook: boolean | undefined
     await assert.rejects(
-      sbp('chelonia/reset', () => { throw new Error('persistence hook failed') }),
+      within(sbp('chelonia/reset', () => {
+        runningInHook = clockSyncRunning()
+        throw new Error('persistence hook failed')
+      }), 'the reset'),
       /persistence hook failed/
     )
+    assert.strictEqual(runningInHook, false)
     assert.strictEqual(clockSyncRunning(), true)
     assert.strictEqual(slotStatus(UNREAD), 'loaded')
   })
@@ -424,4 +435,56 @@ describe('chelonia/reset failing in its persistence hook', () => {
       assert.ok(!logged(errors, 'failed to restart clock sync'))
     })
   }
+})
+
+// A teardown step that throws (e.g. an app's `reactiveDel`) leaves the
+// state partly torn down, so the old session can't go on. The reset still
+// starts a new KV session and restarts clock sync; the app should reset
+// again.
+describe('chelonia/reset failing in its teardown', () => {
+  const failDeletes = () => {
+    let failing = true
+    addTeardown(() => { failing = false })
+    sbp('chelonia/configure', {
+      reactiveDel: (obj: any, key: string) => {
+        if (failing) throw new Error('reactiveDel failed')
+        delete obj[key]
+      }
+    })
+    return () => { failing = false }
+  }
+
+  it('starts a new KV session, and restarts clock sync', async () => {
+    await setupStaleDeviceA()
+    connect()
+    const stopFailing = failDeletes()
+    await assert.rejects(within(sbp('chelonia/reset'), 'the reset'), /reactiveDel failed/)
+    stopFailing()
+    assert.strictEqual(clockSyncRunning(), true)
+    // Height recovery runs, rather than ending at once as aborted: the
+    // contract is still subscribed (the teardown stopped before the
+    // subscriptions), and both recoveries sync it.
+    const syncsBefore = server.syncs
+    const thrown = new ChelErrorKvHeightAhead('[test] ahead', {
+      cause: { requiredHeight: 42, exact: true, localHeight: 40, etag: null, httpStatus: 412 }
+    })
+    await assert.rejects(
+      within(sbp('chelonia/kv/withHeightRecovery', CONTRACT_ID, () => Promise.reject(thrown)), 'the recovery'),
+      (e: unknown) => e === thrown
+    )
+    assert.strictEqual(server.syncs - syncsBefore, 2)
+    // As the app should: the state left behind is partly torn down.
+    await within(sbp('chelonia/reset'), 'the second reset')
+  })
+
+  it('lets the next reset succeed', async () => {
+    await setupStaleDeviceA()
+    connect()
+    const stopFailing = failDeletes()
+    await assert.rejects(within(sbp('chelonia/reset'), 'the reset'), /reactiveDel failed/)
+    stopFailing()
+    await within(sbp('chelonia/reset'), 'the second reset')
+    assert.strictEqual(clockSyncRunning(), true)
+    assert.ok(!logged(errors, 'failed to restart clock sync'))
+  })
 })

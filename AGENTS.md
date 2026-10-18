@@ -78,7 +78,8 @@ src/
 ├── functions.ts          # CID creation, blake32Hash, base64 utilities
 ├── utils.ts              # Key lookup, permissions, event stream utilities
 ├── errors.ts             # Custom error classes via ChelErrorGenerator factory
-├── error-names.ts        # Name-based error check behind the realm-safe predicates (internal)
+├── error-names.ts        # Name-based error check and `.cause` reader behind the realm-safe predicates (internal)
+├── internal-errors.ts    # Internal KV errors (`ChelErrorKvMaxAttempts`, `isKvMaxAttempts`)
 ├── events.ts             # Event name constants
 ├── constants.ts          # INVITE_STATUS enum
 ├── persistent-actions.ts # PersistentAction queue with retry
@@ -245,9 +246,12 @@ Full documentation:
   `isKvConflict(e)` for a write that ran out of attempts, or got a `412`
   without `onconflict`.
 - Never await a KV write, single-key `chelonia/kv/sync`, `whenSettled` or
-  `withHeightRecovery` for a contract from that contract's own lanes (a
-  `sideEffect`, a raw pubsub handler, a `queueInvocation` body, an
-  `onUpdate`): it never settles. See
+  `withHeightRecovery` for a contract from code that contract's lanes
+  await (a `sideEffect`, a `queueInvocation` body, an `onconflict`, an
+  `onUpdate`): it never settles. From another contract's `sideEffect` or
+  `queueInvocation` body, it holds that contract's lane for the whole
+  recovery. Raw pubsub handlers and event listeners aren't awaited, so
+  they may await writes. See
   [docs/kv.md](docs/kv.md#how-height-recovery-runs).
 
 ### Contract State Structure

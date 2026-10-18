@@ -654,8 +654,9 @@ export default sbp('sbp/selectors/register', {
     // Drop per-contract KV runtime state on every removal, including the
     // early returns below; the `CONTRACTS_MODIFIED` listener also performs
     // this cleanup via `_onContractsModified`, so the direct call is an
-    // idempotent fast path (and on the early returns, which announce no
-    // removal, the only cleanup). A resync keeps the contract's
+    // idempotent fast path. On the early returns, which only announce a
+    // permanent removal, it is otherwise the only cleanup. A resync keeps
+    // the contract's
     // `whenSettled` calls waiting for its slots to come back.
     const cleanupKvRuntime = () => {
       try {
@@ -3491,75 +3492,79 @@ const handleEvent = {
     }
     this.config.reactiveSet(state.contracts[contractID], 'HEAD', hash)
     this.config.reactiveSet(state.contracts[contractID], 'height', height)
-    // If there were decryption errors due to missing encryption keys, we store
-    // those key IDs. If those key IDs are later shared with us, we can re-sync
-    // the contract. Without this information, we can only guess whether a
-    // re-sync is needed or not.
-    // We do it here because the property is stored under `.contracts` instead
-    // of in the contract state itself, and this is where `.contracts` gets
-    // updated after handling a message.
-    const missingDecryptionKeyIdsForMessage = missingDecryptionKeyIdsMap.get(message)
-    if (missingDecryptionKeyIdsForMessage) {
-      let missingDecryptionKeyIds = state.contracts[contractID].missingDecryptionKeyIds
-      if (!missingDecryptionKeyIds) {
-        missingDecryptionKeyIds = []
-        this.config.reactiveSet(
-          state.contracts[contractID],
-          'missingDecryptionKeyIds',
-          missingDecryptionKeyIds
-        )
-      }
-      missingDecryptionKeyIdsForMessage.forEach((keyId) => {
-        if (missingDecryptionKeyIds!.includes(keyId)) return
-        missingDecryptionKeyIds!.push(keyId)
-      })
-    }
-
-    if (!this.subscriptionSet.has(contractID)) {
-      const entry = this.pending.find((entry) => entry?.contractID === contractID)
-      // we've successfully received it back, so remove it from expectation pending
-      if (entry) {
-        const index = this.pending.indexOf(entry)
-        if (index !== -1) {
-          this.pending.splice(index, 1)
+    try {
+      // If there were decryption errors due to missing encryption keys, we store
+      // those key IDs. If those key IDs are later shared with us, we can re-sync
+      // the contract. Without this information, we can only guess whether a
+      // re-sync is needed or not.
+      // We do it here because the property is stored under `.contracts` instead
+      // of in the contract state itself, and this is where `.contracts` gets
+      // updated after handling a message.
+      const missingDecryptionKeyIdsForMessage = missingDecryptionKeyIdsMap.get(message)
+      if (missingDecryptionKeyIdsForMessage) {
+        let missingDecryptionKeyIds = state.contracts[contractID].missingDecryptionKeyIds
+        if (!missingDecryptionKeyIds) {
+          missingDecryptionKeyIds = []
+          this.config.reactiveSet(
+            state.contracts[contractID],
+            'missingDecryptionKeyIds',
+            missingDecryptionKeyIds
+          )
         }
+        missingDecryptionKeyIdsForMessage.forEach((keyId) => {
+          if (missingDecryptionKeyIds!.includes(keyId)) return
+          missingDecryptionKeyIds!.push(keyId)
+        })
       }
-      this.subscriptionSet.add(contractID)
-      sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {
-        added: [contractID],
-        removed: []
-      })
-    }
 
-    // Journal recording. Runs after `state.contracts[contractID]` has been
-    // populated (HEAD/height/etc.) so the journal selector can attach
-    // `_journal` to a real bookkeeping object, but BEFORE we emit
-    // EVENT_HANDLED, so that listeners snapshotting contract state on that
-    // event (either reading `state.contracts[contractID]` directly, or calling
-    // `chelonia/contract/fullState` with `{ includeJournal: true }`) observe
-    // the fully-committed `_journal` rather than the previous event's value.
-    // The selector enforces a "MUST NOT throw" contract internally, so we
-    // deliberately do not wrap this call: a journal failure must never
-    // break event processing, and we don't want a duplicate log line on
-    // the way out.
-    sbp(
-      'chelonia/private/journal/recordEvent',
-      contractID,
-      message,
-      beforeContractState,
-      processingErrored ? beforeContractState : contractState,
-      processingErrored,
-      processingError ?? null
-    )
+      if (!this.subscriptionSet.has(contractID)) {
+        const entry = this.pending.find((entry) => entry?.contractID === contractID)
+        // we've successfully received it back, so remove it from expectation pending
+        if (entry) {
+          const index = this.pending.indexOf(entry)
+          if (index !== -1) {
+            this.pending.splice(index, 1)
+          }
+        }
+        this.subscriptionSet.add(contractID)
+        sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {
+          added: [contractID],
+          removed: []
+        })
+      }
 
-    if (!processingErrored) {
-      sbp('okTurtles.events/emit', hash, contractID, message)
-      sbp('okTurtles.events/emit', EVENT_HANDLED, contractID, message)
+      // Journal recording. Runs after `state.contracts[contractID]` has been
+      // populated (HEAD/height/etc.) so the journal selector can attach
+      // `_journal` to a real bookkeeping object, but BEFORE we emit
+      // EVENT_HANDLED, so that listeners snapshotting contract state on that
+      // event (either reading `state.contracts[contractID]` directly, or calling
+      // `chelonia/contract/fullState` with `{ includeJournal: true }`) observe
+      // the fully-committed `_journal` rather than the previous event's value.
+      // The selector enforces a "MUST NOT throw" contract internally, so we
+      // deliberately do not wrap this call: a journal failure must never
+      // break event processing, and we don't want a duplicate log line on
+      // the way out.
+      sbp(
+        'chelonia/private/journal/recordEvent',
+        contractID,
+        message,
+        beforeContractState,
+        processingErrored ? beforeContractState : contractState,
+        processingErrored,
+        processingError ?? null
+      )
+
+      if (!processingErrored) {
+        sbp('okTurtles.events/emit', hash, contractID, message)
+        sbp('okTurtles.events/emit', EVENT_HANDLED, contractID, message)
+      }
+    } finally {
+      // The local height has been committed above (even when processing
+      // errored, or when a step since then throws), so KV operations
+      // waiting for this height can proceed: wake them up (see
+      // `src/kv-height.ts`).
+      notifyContractHeight(this, contractID, height)
     }
-    // The local height has been committed above (even when processing
-    // errored), so KV operations waiting for this height can proceed:
-    // wake them up (see `src/kv-height.ts`).
-    notifyContractHeight(this, contractID, height)
   }
 }
 

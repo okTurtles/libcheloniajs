@@ -12,3 +12,11 @@ export function hasErrorName<N extends string> (
 ): e is Error & { name: N } {
   return !!e && typeof e === 'object' && names.includes((e as { name?: unknown }).name as N)
 }
+
+// The `.cause` of `e` as a `T`, when it is an object (`undefined`
+// otherwise, also for a plain `{ name, message }` such as `lastError`).
+// Callers check what `e` is first: `T` isn't checked.
+export function objectCause<T extends object> (e: unknown): T | undefined {
+  const cause = (e as { cause?: unknown } | null | undefined)?.cause
+  return cause && typeof cause === 'object' ? cause as T : undefined
+}

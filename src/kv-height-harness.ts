@@ -286,13 +286,20 @@ export const addTeardown = (fn: () => void): void => {
   offs.push(fn)
 }
 
-// Holds the contract's public lane (`chelonia/queueInvocation`) until
-// `open` is called; `released` settles once the holding task has run, so
-// only after `open`. Opened after the test if the test doesn't.
-export const gateLane = () => {
+// Holds a lane of `contractID` until `open` is called: its public lane
+// (`chelonia/queueInvocation`), or with `lane: 'internal'` the internal one
+// (`chelonia/private/queueEvent`), on which contract events are processed.
+// `released` settles once the holding task has run, so only after `open`.
+// Opened after the test if the test doesn't.
+export const gateLane = (
+  { contractID = CONTRACT_ID, lane = 'public' }: {
+    contractID?: string; lane?: 'public' | 'internal'
+  } = {}
+) => {
   let open!: () => void
   const gate = new Promise<void>((resolve) => { open = resolve })
-  const released = sbp('chelonia/queueInvocation', CONTRACT_ID, () => gate) as Promise<void>
+  const selector = lane === 'internal' ? 'chelonia/private/queueEvent' : 'chelonia/queueInvocation'
+  const released = sbp(selector, contractID, () => gate) as Promise<void>
   offs.push(open)
   return { open, released }
 }

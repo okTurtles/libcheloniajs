@@ -17,6 +17,7 @@ import * as assert from 'node:assert'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
+import { EVENT_HANDLED } from './events.js'
 import './internals.js'
 import { SPMessage } from './SPMessage.js'
 import type { SPOpValue } from './SPMessage.js'
@@ -40,6 +41,11 @@ const MANIFEST = 'test-manifest'
 const KEY = 'profile'
 
 const rootState = (): ChelRootState & Record<string, any> => sbp('chelonia/private/state')
+
+// What `okTurtles.events` logs a listener's error with by default.
+const defaultEventsErrorHandler = (event: string, e: unknown) => {
+  console.error(`[okTurtles.events] Error at handler for ${event}`, e)
+}
 
 let server: ReturnType<typeof makeKvServer>
 let csk: ReturnType<typeof keygen>
@@ -140,6 +146,40 @@ describe('height waits woken by processed events', () => {
       [409, '0'], [204, '1']
     ])
     assert.ok(elapsed < 1500, `the write waited ${elapsed} ms: it wasn't woken by the event`)
+  })
+
+  // E.g. an `EVENT_HANDLED` listener throws, and the app's events error
+  // handler rethrows: the height is committed by then, so its waiters must
+  // still wake.
+  it('a kv/set waiting on a stale height stamp is woken even when a step after the height commit throws', async () => {
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 3000 })
+    const first = await createContract()
+    sbp('okTurtles.events/setErrorHandler', (_event: string, e: unknown) => { throw e })
+    const off = sbp('okTurtles.events/on', EVENT_HANDLED, () => {
+      throw new Error('app listener failed')
+    }) as () => void
+    try {
+      server.height = 1
+      const event = nextEvent(first)
+      let handled: Promise<void> | undefined
+      server.onPost = (n) => {
+        if (n === 1) setTimeout(() => { handled = handle(event) }, 20)
+      }
+      const startedAt = Date.now()
+      await within(sbp('chelonia/kv/set', contractID, KEY, { name: 'alice' }, {
+        ifMatch: '""', signingKeyId: keyId(csk)
+      }), 'kv/set')
+      const elapsed = Date.now() - startedAt
+      await within((handled ?? Promise.resolve()).catch(() => {}), 'the event was never handled')
+      assert.strictEqual(rootState().contracts[contractID].height, 1)
+      assert.deepStrictEqual(server.posts().map((p) => [p.status, p.height]), [
+        [409, '0'], [204, '1']
+      ])
+      assert.ok(elapsed < 1500, `the write waited ${elapsed} ms: it wasn't woken by the event`)
+    } finally {
+      off()
+      sbp('okTurtles.events/setErrorHandler', defaultEventsErrorHandler)
+    }
   })
 
   it('a deferred slot load reloads once the event reaching its height is processed', async () => {

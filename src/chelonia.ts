@@ -58,7 +58,7 @@ import {
   waitForContractHeight,
   waitForSyncEnd
 } from './kv-height.js'
-import { clearKvRuntime, initKvRuntime } from './kv-runtime.js'
+import { initKvRuntime, resetKvSession } from './kv-runtime.js'
 import { CHELONIA_RESET, CONTRACTS_MODIFIED, CONTRACT_REGISTERED } from './events.js'
 import { SPMessage } from './SPMessage.js'
 import type { Secret } from './Secret.js'
@@ -122,12 +122,11 @@ import type { Options as PubSubOptions, PubSubClient } from './pubsub/index.js'
 // read; `kv/set` only reports it to blind writers (`allowUnverifiedConflict`)
 // and throws its `error` otherwise. `kind` is the value's
 // `KvServerValueStatus`.
-type KvServerValue<T> = { kind: KvServerValueStatus } & (
+type KvServerValue<T> =
   | { kind: 'absent' }
   | { kind: 'present'; parsed: ParsedEncryptedOrUnencryptedMessage<T> }
   | { kind: 'ahead'; requiredHeight: number }
   | { kind: 'malformed'; error: Error }
-)
 
 // TODO: define ChelContractType for /defineContract
 
@@ -812,9 +811,11 @@ export default sbp('sbp/selectors/register', {
     // The following are all synchronous operations
     const rootState = sbp(this.config.stateSelector)
     // The teardown starts here, so the old session can't be resumed even if
-    // a step throws (e.g. an app's `reactiveDel`): this reset still releases
-    // its height-session hold, or every later reset would leave height
-    // recovery aborted. The error still propagates.
+    // a step throws (e.g. an app's `reactiveDel`): this reset still starts
+    // a new KV session and releases its height-session hold (or every later
+    // reset would leave height recovery aborted), and restarts clock sync.
+    // The error still propagates; the state is then partly torn down, so
+    // the app should reset again.
     try {
       // Cancel all outgoing messages by replacing this._instance
       this._instance = Object.create(null)
@@ -825,12 +826,23 @@ export default sbp('sbp/selectors/register', {
       // Re-seed the KV mirror — `reactiveClearObject` above stripped it
       // along with everything else. Slot definitions (`kvSlots`) and the
       // per-manifest cache (`defContractKvByManifest`) survive reset
-      // because they are code-level state; the per-subscription maps are
-      // cleared next (`clearKvRuntime`), before `subscriptionSet`.
+      // because they are code-level state; the per-session maps are
+      // replaced next (`resetKvSession`, also when a step here throws),
+      // before `subscriptionSet`.
       this.config.reactiveSet(rootState, '_kv', Object.create(null))
-      clearKvRuntime(this)
+    } catch (e) {
+      try {
+        restartClockSync()
+      } catch (clockError) {
+        console.error('[chelonia] reset: failed to restart clock sync', clockError)
+      }
+      throw e
     } finally {
-      sbp('chelonia/kv/_finishHeightSession')
+      try {
+        resetKvSession(this)
+      } finally {
+        sbp('chelonia/kv/_finishHeightSession')
+      }
     }
     clearObject(this.ephemeralReferenceCount)
     this.pending.splice(0)
@@ -3035,6 +3047,9 @@ export default sbp('sbp/selectors/register', {
     maxAttempts = maxAttempts ?? 3
     const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`
     const hasOnconflict = typeof onconflict === 'function'
+    if (data === undefined && !hasOnconflict) {
+      throw new TypeError('[chelonia/kv] set: `onconflict` is required when `data` is undefined')
+    }
     // Compose the caller-provided signal with Chelonia's global abort
     // controller (KV-REVAMPED.md §4.2). When `callerSignal` is omitted,
     // we fall back to the global signal unchanged for full backwards
@@ -3066,23 +3081,27 @@ export default sbp('sbp/selectors/register', {
     ) => kvHeightAheadError(this, contractID, key, {
       requiredHeight: required, exact, etag, httpStatus
     })
-    // The passive wait for the local contract to reach `required`, of up to
-    // `heightWaitMs`. Skipped (it resolves `false` at once unless the
-    // height is already reached) while the pubsub socket isn't open: no
-    // contract event arrives then, so waiting can't help. Without a pubsub
-    // client (e.g. server-side use), the wait stays.
+    // The budget of one passive wait for the local contract to reach a
+    // height the server requires: `heightWaitMs`, and none while the pubsub
+    // socket isn't open (no contract event arrives then, so waiting can't
+    // help). Without a pubsub client (e.g. server-side use), the wait stays.
+    const waitBudgetMs = (): number =>
+      pubsubSocketNotOpen(this) ? 0 : heightWaitMs ?? kvHeightTimings().waitMs
+    // The passive wait for the local contract to reach `required`. It
+    // resolves `false` at once (unless the height is already reached) when
+    // the budget is 0.
     const waitForHeight = (required: number) =>
       waitForContractHeight(this, contractID, required, {
-        timeoutMs: pubsubSocketNotOpen(this) ? 0 : heightWaitMs ?? undefined,
+        timeoutMs: waitBudgetMs(),
         signals: [fetchSignal]
       })
     // The same wait after a `409`. While a sync of the contract is running
     // (e.g. one catching up after a reconnect), the stamp would be stale at
     // every height it replays: wait for that sync to end first, then for
-    // the height, both within one `heightWaitMs`.
+    // the height, both within one budget.
     const waitForStampHeight = async (required: number): Promise<boolean> => {
       if (!this.currentSyncs[contractID]) return waitForHeight(required)
-      const timeoutMs = pubsubSocketNotOpen(this) ? 0 : heightWaitMs ?? kvHeightTimings().waitMs
+      const timeoutMs = waitBudgetMs()
       const startedAt = Date.now()
       await waitForSyncEnd(this, contractID, { timeoutMs, signals: [fetchSignal] })
       return waitForContractHeight(this, contractID, required, {
@@ -3195,10 +3214,11 @@ export default sbp('sbp/selectors/register', {
         ? heightAheadError(body.requiredHeight, true, etag, status)
         : undefined
       if (aheadError && !allowUnverifiedConflict) throw aheadError
-      if (backoff && !aheadError) {
-        // Spread out retries from clients contending for the same key. An
-        // abort (the caller's, or `chelonia/reset`'s) ends the backoff at
-        // once, before `onconflict` runs.
+      if (backoff) {
+        // Spread out retries from clients contending for the same key (also
+        // blind writers on a value that is ahead). An abort (the caller's,
+        // or `chelonia/reset`'s) ends the backoff at once, before
+        // `onconflict` runs.
         await delayUnlessAborted(randomIntFromRange(0, 1500), [fetchSignal])
         throwIfAborted(fetchSignal)
       }
@@ -3256,9 +3276,6 @@ export default sbp('sbp/selectors/register', {
             signal: fetchSignal
           })
         } else {
-          if (!hasOnconflict) {
-            throw TypeError('onconflict required with empty data')
-          }
           // If no initial data provided, perform a GET `fetch` to get the current
           // data and CID. Then, `onconflict` will be used to merge the current
           // and new data.
@@ -3352,6 +3369,8 @@ export default sbp('sbp/selectors/register', {
                       currentData
                     }),
                     ...(currentStatus !== undefined && { currentStatus }),
+                    // The value's height stamp, for a value that is ahead.
+                    ...(last?.body.kind === 'ahead' && { requiredHeight: last.body.requiredHeight }),
                     etag: (last ? last.etag : responseEtag(response)) ?? null
                   }
                 }

@@ -298,11 +298,10 @@ export type KvMirrorEntry = {
   // newer wait was registered meanwhile), and once the deferred reload
   // started by reaching the height verifies the key. A deferred reload
   // that fails, can't start or is vetoed leaves it, even though the height
-  // was reached: nothing
-  // verified the key, so `update` keeps reloading before running its
-  // reducer, and rejects with the reload's error if that fails too, until a
-  // load verifies the key. Changes are announced with
-  // `CHELONIA_KV_STATUS_CHANGED`, possibly with an unchanged status.
+  // was reached: nothing verified the key, so `update` keeps reloading
+  // before running its reducer, and rejects with the reload's error if
+  // that fails too, until a load verifies the key. Changes are announced
+  // with `CHELONIA_KV_STATUS_CHANGED`, possibly with an unchanged status.
   // See KV-REVAMPED.md §4.9.
   heightAhead?: { requiredHeight: number };
 };
@@ -316,8 +315,10 @@ export type KvMirrorEntry = {
 //                which may still throw.
 //   - 'ahead':   the server value was written at a contract height the
 //                local contract has not reached, so it cannot be verified.
-//                Only reported with `allowUnverifiedConflict` (otherwise
-//                `chelonia/kv/set` rejects with `ChelErrorKvHeightAhead`).
+//                `onconflict` only gets it with `allowUnverifiedConflict`
+//                (otherwise `chelonia/kv/set` rejects with
+//                `ChelErrorKvHeightAhead`). A conflict's `.cause` also
+//                reports it for a `412` without `onconflict`.
 //   - 'malformed': the stored value's height stamp is malformed, so it can
 //                never be verified. Only reported with
 //                `allowUnverifiedConflict`.
@@ -355,11 +356,11 @@ export type KvHeightAheadMode = 'sync' | 'reject';
 
 // The height-recovery options of `chelonia/kv/withHeightRecovery` (and of
 // `update`, `clear`, `queuedSet` and single-key `sync`). `signal` ends the
-// caller's wait (also while its work is queued), not the shared recovery
-// sync.
+// caller's wait, also while work queued through the attempt's `queue`
+// waits, not the shared recovery sync. A `null` option is the default.
 export type KvHeightRecoveryOptions = {
-  onHeightAhead?: KvHeightAheadMode;
-  maxHeightRecoveries?: number;
+  onHeightAhead?: KvHeightAheadMode | null;
+  maxHeightRecoveries?: number | null;
   signal?: AbortSignal;
 }
 
@@ -373,17 +374,29 @@ export type KvHeightRecoveryOptions = {
 // (the default wait) for the last attempt of `'sync'`, where that wait is
 // the write's only chance; so `maxHeightRecoveries: 0` means "wait
 // passively, never sync".
-export type KvHeightRecoveryAttempt = { recoveries: number; heightWaitMs: 0 | undefined }
+export type KvHeightRecoveryAttempt = {
+  recoveries: number;
+  heightWaitMs: 0 | undefined;
+  // Queues `body` on the contract's public lane. Until `body` starts, the
+  // caller's `signal` and `chelonia/reset` reject the result at once, and
+  // `body` then never runs. A body that never runs rejects rather than
+  // resolving `undefined`: with `AbortError` when `chelonia/reset` dropped
+  // it, and `ChelErrorUnexpected` when a filter vetoed
+  // `chelonia/queueInvocation`.
+  queue: <T>(body: () => Promise<T>) => Promise<T>;
+}
 
 // `.cause` of a KV write's conflict-exhaustion error (`isKvConflict`): what
 // the last server response said about the stored value. `currentData` is
 // only there when the value is known (present and decoded, or absent);
 // `update` and `clear` normalize it for the slot. `currentStatus` is
-// missing when that response couldn't be read or decoded. `etag` is that
-// response's (`null` when it carried none).
+// missing when that response couldn't be read or decoded. With
+// `currentStatus: 'ahead'`, `requiredHeight` is the height stamp of that
+// value. `etag` is that response's (`null` when it carried none).
 export type KvConflictCause = {
   currentData?: JSONType;
   currentStatus?: KvServerValueStatus;
+  requiredHeight?: number;
   etag?: string | null;
 }
 
@@ -469,12 +482,14 @@ export type KvSlotDefinition = {
   // Called after every successful load, applied remote frame or committed
   // local write, including reconnect reloads (also when the value didn't
   // change), and when a load's 404 replaces a value the slot held. NOT
-  // called when a slot's first load finds no value (404): use
-  // `chelonia/kv/whenSettled` (or `KvMirrorEntry.settled`, or
+  // called when a load finds no value (404) on a slot that never held
+  // one: use `chelonia/kv/whenSettled` (or `KvMirrorEntry.settled`, or
   // `CHELONIA_KV_STATUS_CHANGED`) to learn that a slot settled as empty.
-  // Must not throw, and must not synchronously call `update`, `clear`,
-  // `sync`, or a `whenSettled` that would wait, for the same contract
-  // (`ChelErrorKvReentrant`).
+  // Must not throw. For the same contract, it must not call `update`,
+  // `clear`, `queuedSet`, `sync`, `withHeightRecovery`, or a `whenSettled`
+  // that would wait, synchronously (rejected with `ChelErrorKvReentrant`),
+  // nor await one after its first `await` (an undetected deadlock). See
+  // docs/kv.md, "How height recovery runs".
   onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
 };
 
@@ -508,7 +523,8 @@ export type SlotDefinition = {
   autoSubscribe: boolean;
   autoLoad: typeof KV_AUTO_LOAD[keyof typeof KV_AUTO_LOAD];
   refreshOnReconnect: boolean;
-  // See `KvSlotDefinition.onUpdate`: not called on a first-load 404.
+  // See `KvSlotDefinition.onUpdate`: not called on a 404 for a slot that
+  // never held a value.
   onUpdate?: (value: JSONType | undefined, ctx: KvUpdateCtx) => void | Promise<void>;
   source?: SlotDefinitionSource;
 };

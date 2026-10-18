@@ -1,7 +1,7 @@
 // ugly boilerplate because JavaScript is stupid
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
 
-import { hasErrorName } from './error-names.js'
+import { hasErrorName, objectCause } from './error-names.js'
 import type { KvConflictCause, KvHeightAheadCause } from './types.js'
 
 type ErrorConstructorType = { new (...args: ConstructorParameters<typeof Error>): Error };
@@ -111,22 +111,22 @@ export function isKvHeightMalformed (
 // The `.cause` of a `ChelErrorKvHeightAhead` (`undefined` for any other
 // error): the height to wait for, and what the server returned.
 export function kvHeightAheadCause (e: unknown): KvHeightAheadCause | undefined {
-  if (!isKvHeightAhead(e)) return undefined
-  const cause = (e as { cause?: unknown }).cause
-  return cause && typeof cause === 'object' ? cause as KvHeightAheadCause : undefined
+  return isKvHeightAhead(e) ? objectCause<KvHeightAheadCause>(e) : undefined
 }
 
 // Whether `e` is a KV write that ran out of attempts resolving `412`
-// conflicts: `ChelErrorKvConflict` (from `chelonia/kv/update`,
-// `chelonia/kv/clear` and `chelonia/kv/queuedSet`), or the internal error
-// raw `chelonia/kv/set` rejects with. Name-based, like `isKvHeightAhead`
+// conflicts, or got a `412` without `onconflict`: `ChelErrorKvConflict`
+// (from `chelonia/kv/update`, `chelonia/kv/clear` and
+// `chelonia/kv/queuedSet`), or the internal error raw `chelonia/kv/set`
+// rejects with. Name-based, like `isKvHeightAhead`
 // (and, like it, also true for a plain `{ name, message }` object such as a
 // slot's `lastError`, whose `.cause` is missing).
 // `.cause`, when present, is a `KvConflictCause`: `{ currentStatus,
-// currentData, etag }` from the last server response (`update` and `clear`
-// normalize `currentData` for the slot); `currentData` is omitted when the
-// value is unknown, and `currentStatus` too when the last response couldn't
-// be read or decoded.
+// currentData, requiredHeight, etag }` from the last server response
+// (`update` and `clear` normalize `currentData` for the slot);
+// `currentData` is omitted when the value is unknown, `requiredHeight` is
+// only there for a value that is `'ahead'`, and `currentStatus` is omitted
+// too when the last response couldn't be read or decoded.
 export function isKvConflict (
   e: unknown
 ): e is Error & {
