@@ -86,7 +86,7 @@ src/
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
 ├── kv-height.ts          # KV contract-height awareness (waits, recovery; internal)
-├── kv-runtime.ts         # KV runtime maps: created by _init, cleared by reset (internal)
+├── kv-runtime.ts         # KV runtime maps: created by _init, replaced by reset (internal)
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time synchronization via monotonic offsets
 ├── chelonia-utils.ts     # Optional utility selectors (e.g., chelonia/kv/queuedSet)
@@ -245,13 +245,15 @@ Full documentation:
   both for a value that is ahead and for a malformed stamp. Likewise
   `isKvConflict(e)` for a write that ran out of attempts, or got a `412`
   without `onconflict`.
-- Never await a KV write, single-key `chelonia/kv/sync`, `whenSettled` or
-  `withHeightRecovery` for a contract from code that contract's lanes
-  await (a `sideEffect`, a `queueInvocation` body, an `onconflict`, an
-  `onUpdate`): it never settles. From another contract's `sideEffect` or
-  `queueInvocation` body, it holds that contract's lane for the whole
-  recovery. Raw pubsub handlers and event listeners aren't awaited, so
-  they may await writes. See
+- Never await `chelonia/kv/update`, `clear`, `queuedSet`, single-key
+  `chelonia/kv/sync`, `whenSettled` or `withHeightRecovery` for a
+  contract from code that contract's lanes await (a `sideEffect`, a
+  `queueInvocation` body, an `onconflict`, an `onUpdate`): it never
+  settles. (Raw `chelonia/kv/set` and `kv/get` queue on no lane, so they
+  settle, their passive waits timing out.) From another contract's
+  `sideEffect` or `queueInvocation` body, it holds that contract's lane
+  for the whole recovery. Raw pubsub handlers and event listeners aren't
+  awaited, so they may await writes. See
   [docs/kv.md](docs/kv.md#how-height-recovery-runs).
 
 ### Contract State Structure

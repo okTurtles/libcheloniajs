@@ -188,13 +188,14 @@ export const restampedBody = (key: string, stamp: string): string =>
 export const restamp = (key: string, stamp: string): string =>
   server.put(key, restampedBody(key, stamp)).body
 
-// Wait for the internal lane and then the public lane to drain.
-export const drainLanes = async () => {
+// Wait for the internal lane and then the public lane to drain. Fails with
+// `label` after `ms` rather than hang when a lane stays held.
+export const drainLanes = (label = 'the contract lanes drained', ms = 2000) => within((async () => {
   for (let i = 0; i < 3; i++) {
     await sbp('chelonia/queueInvocation', CONTRACT_ID, () => {})
     await sleep(5)
   }
-}
+})(), label, ms)
 
 // Makes the next `n` KV GETs answer `status` (default 500), only counting
 // those made while `when()` holds. Returns a function that restores the
@@ -356,14 +357,15 @@ export const probePublicLaneOnSync = (): string[] => {
 // by `chelonia/connect` (and then outlives `chelonia/_init`), which only
 // `kv-height-pubsub.test.ts` calls, so reconcile explicitly (a repeated
 // reconcile is a no-op).
-export const subscribeContract = async () => {
-  await sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true })
+// Both fail with `label` after `ms` rather than hang.
+export const subscribeContract = async (label = 'the contract subscribed', ms = 2000) => {
+  await within(sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true }), label, ms)
   sbp('chelonia/kv/_onContractsModified', { added: [CONTRACT_ID], removed: [] })
 }
 
-export const activateContract = async () => {
-  await subscribeContract()
-  await drainLanes()
+export const activateContract = async (label = 'the contract activated', ms = 2000) => {
+  await subscribeContract(label, ms)
+  await drainLanes(label, ms)
 }
 
 export const defineSlot = (def: Record<string, unknown>) =>
@@ -374,6 +376,24 @@ export const whenSettledWithin = (key: string, ms = 3000) =>
   whenContractSlotSettledWithin(CONTRACT_ID, key, ms)
 export const mirror = (key: string): KvMirrorEntry & Record<string, any> =>
   rootState()._kv?.[CONTRACT_ID]?.[key] as KvMirrorEntry
+
+// The slot of `key` waits for a value written at `requiredHeight`, which is
+// ahead: settled `'loading'` with the `heightAhead` marker and no value, so
+// no settled status yet, and `whenSettled` is still pending after `ms`.
+export const assertAwaitsValueAhead = async (key: string, requiredHeight: number, ms = 200) => {
+  const entry = mirror(key)
+  assert.deepStrictEqual(
+    {
+      status: entry.status,
+      settled: entry.settled,
+      heightAhead: entry.heightAhead,
+      hasValue: entry.value !== undefined
+    },
+    { status: 'loading', settled: true, heightAhead: { requiredHeight }, hasValue: false }
+  )
+  assert.strictEqual(sbp('chelonia/kv/settledStatus', CONTRACT_ID, key), undefined)
+  await assert.rejects(whenSettledWithin(key, ms), (e: any) => e?.name === 'TimeoutError')
+}
 
 // `okTurtles.events/on` whose listener is also removed after the test, even
 // when the test fails before calling the returned `off`.
@@ -503,7 +523,7 @@ export const installKvHeightHooks = () => {
     await step(() => sbp('chelonia/kv/_assertIndexConsistent'))
     for (const off of offs.splice(0)) await step(off)
     await step(() => sbp('chelonia/kv/_testClearHeightWaits'))
-    await step(() => within(drainLanes(), 'lanes drained after the test', 2000))
+    await step(() => drainLanes('lanes drained after the test'))
     await step(() => sbp('chelonia/kv/_testClearHeightWaits'))
     restoreKvTestStubs()
     restoreConsole()

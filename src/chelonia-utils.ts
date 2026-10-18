@@ -1,5 +1,5 @@
 import sbp from '@sbp/sbp'
-import { ChelErrorKvConflict } from './errors.js'
+import { ChelErrorKvConflict, ChelErrorKvUpdateInvalid, ChelErrorUnexpected } from './errors.js'
 import { isKvMaxAttempts } from './internal-errors.js'
 import { assertValidMaxAttempts } from './kv-height.js'
 import type {
@@ -25,6 +25,9 @@ export default sbp('sbp/selectors/register', {
   // `chelonia/kv/set`. However, the `chelonia/kv/set` primitive is needed if
   // the queueing logic needs to be more advanced, the key to use requires
   // custom logic or _if the `onconflict` callback also needs to be queued_.
+  // As for slot writes, a missing named encryption key rejects with
+  // `ChelErrorKvUpdateInvalid` instead of writing plaintext; pass
+  // `encryptionKeyName: null` to store plaintext.
   // Raw `chelonia/kv/set` never syncs the contract, though: wrap such a call
   // in `chelonia/kv/withHeightRecovery`, as this selector does (see
   // docs/kv.md).
@@ -90,21 +93,32 @@ export default sbp('sbp/selectors/register', {
     signal?: AbortSignal;
     onHeightAhead?: KvHeightAheadMode | null;
     maxHeightRecoveries?: number | null;
-    encryptionKeyName: string;
+    encryptionKeyName?: string | null;
     signingKeyName: string;
   }): Promise<{ etag: string | null }> => {
     const label = `queuedSet: ${contractID}::${key}`
     // Throws, so it rejects: this is an `async` function.
     assertValidMaxAttempts(label, maxAttempts)
-    return sbp('chelonia/kv/withHeightRecovery', contractID, (
+    const recovering = sbp('chelonia/kv/withHeightRecovery', contractID, (
       { heightWaitMs, queue }: KvHeightRecoveryAttempt
     ) => {
       // `signal` (and `chelonia/reset`) also end the wait while the write is
       // still queued.
       return queue(() => {
+        // Resolved here, on the lane, as slot writes do. A missing named
+        // key refuses the write rather than storing plaintext; only
+        // `encryptionKeyName: null` stores plaintext.
+        const encryptionKeyId = encryptionKeyName === null
+          ? undefined
+          : sbp('chelonia/contract/currentKeyIdByName', contractID, encryptionKeyName)
+        if (encryptionKeyName !== null && !encryptionKeyId) {
+          throw new ChelErrorKvUpdateInvalid(
+            `[chelonia/kv] ${label}: '${encryptionKeyName}' not found on contract; refusing to write plaintext`
+          )
+        }
         return sbp('chelonia/kv/set', contractID, key, data, {
           ifMatch,
-          encryptionKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, encryptionKeyName),
+          encryptionKeyId,
           signingKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, signingKeyName),
           onconflict,
           allowUnverifiedConflict,
@@ -114,24 +128,27 @@ export default sbp('sbp/selectors/register', {
         })
       })
     }, {
-      onHeightAhead, maxHeightRecoveries, signal, label
+      onHeightAhead, maxHeightRecoveries, signal, label, operation: 'queuedSet'
+    }) as Promise<{ etag: string | null }> | undefined
+    if (recovering === undefined) {
+      throw new ChelErrorUnexpected(`[chelonia/kv] ${label}: withHeightRecovery was vetoed`)
+    }
+    return recovering.catch((e: unknown) => {
+      // `kv/set`'s internal error for running out of attempts, or for a
+      // `412` without `onconflict` (only `ChelErrorKvHeightAhead` is
+      // retried above, so this is outside the recovery loop). The cause
+      // keeps `kv/set`'s shape: there is no slot to normalize it against.
+      if (isKvMaxAttempts(e)) {
+        throw new ChelErrorKvConflict(
+          `[chelonia/kv] ${label} ` + (
+            typeof onconflict === 'function'
+              ? 'ran out of attempts resolving conflicts'
+              : 'conflicts with the server value, and no onconflict handler was provided'
+          ),
+          { cause: e.cause }
+        )
+      }
+      throw e
     })
-      .catch((e: unknown) => {
-        // `kv/set`'s internal error for running out of attempts, or for a
-        // `412` without `onconflict` (only `ChelErrorKvHeightAhead` is
-        // retried above, so this is outside the recovery loop). The cause
-        // keeps `kv/set`'s shape: there is no slot to normalize it against.
-        if (isKvMaxAttempts(e)) {
-          throw new ChelErrorKvConflict(
-            `[chelonia/kv] ${label} ` + (
-              typeof onconflict === 'function'
-                ? 'ran out of attempts resolving conflicts'
-                : 'conflicts with the server value, and no onconflict handler was provided'
-            ),
-            { cause: e.cause }
-          )
-        }
-        throw e
-      })
   }
 }) as string[]

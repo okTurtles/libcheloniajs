@@ -656,8 +656,8 @@ export default sbp('sbp/selectors/register', {
     // this cleanup via `_onContractsModified`, so the direct call is an
     // idempotent fast path. On the early returns, which only announce a
     // permanent removal, it is otherwise the only cleanup. A resync keeps
-    // the contract's
-    // `whenSettled` calls waiting for its slots to come back.
+    // the contract's slot mirror, and its `whenSettled` calls waiting for
+    // its slots to come back.
     const cleanupKvRuntime = () => {
       try {
         sbp('chelonia/kv/_cleanupContractRuntime', contractID, { resync: !!params?.resync })
@@ -2087,13 +2087,10 @@ export default sbp('sbp/selectors/register', {
       const { HEAD: recentHEAD, height: recentHeight } = state.contracts[contractID] || {}
       const isSubscribed = this.subscriptionSet.has(contractID)
       if (!isSubscribed) {
-        const entry = this.pending.find((entry) => entry?.contractID === contractID)
         // we're syncing a contract for the first time, make sure to add to pending
         // so that handleEvents knows to expect events from this contract
-        if (!entry) {
-          pendingEntry = { contractID }
-          this.pending.push(pendingEntry)
-        }
+        pendingEntry = { contractID }
+        this.pending.push(pendingEntry)
       }
       this.postSyncOperations[contractID] =
         this.postSyncOperations[contractID] ?? Object.create(null)

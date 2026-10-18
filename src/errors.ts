@@ -126,11 +126,10 @@ export function kvHeightAheadCause (e: unknown): KvHeightAheadCause | undefined 
 // (`update` and `clear` normalize `currentData` for the slot);
 // `currentData` is omitted when the value is unknown, `requiredHeight` is
 // only there for a value that is `'ahead'`, and `currentStatus` is omitted
-// too when the last response couldn't be read or decoded.
+// too when the last response couldn't be read or decoded. The type names no
+// error: raw `kv/set`'s is internal, so match with this guard only.
 export function isKvConflict (
   e: unknown
-): e is Error & {
-  name: 'ChelErrorKvConflict' | 'ChelErrorKvMaxAttempts'; cause?: KvConflictCause
-} {
+): e is Error & { cause?: KvConflictCause } {
   return hasErrorName(e, 'ChelErrorKvConflict', 'ChelErrorKvMaxAttempts')
 }

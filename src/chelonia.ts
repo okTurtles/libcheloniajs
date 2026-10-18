@@ -108,6 +108,7 @@ import {
   CheloniaConfig,
   CheloniaContext,
   CheloniaContractCtx,
+  ContractsModifiedChange,
   JSONType,
   JournalConfig,
   KvConflictServerValue,
@@ -780,11 +781,17 @@ export default sbp('sbp/selectors/register', {
     sbp('chelonia/kv/_endHeightSession')
     // `startClockSync` throws while clock sync runs (an overlapping reset
     // may have restarted it already); `stopClockSync` is a no-op when it
-    // doesn't.
+    // doesn't. A failure is logged rather than thrown: it must neither
+    // replace the error a failed reset rethrows nor fail a reset that
+    // succeeded.
     const restartClockSync = () => {
       if (!this.pubsub) return
-      sbp('chelonia/private/stopClockSync')
-      sbp('chelonia/private/startClockSync')
+      try {
+        sbp('chelonia/private/stopClockSync')
+        sbp('chelonia/private/startClockSync')
+      } catch (clockError) {
+        console.error('[chelonia] reset: failed to restart clock sync', clockError)
+      }
     }
     let result: void
     try {
@@ -801,11 +808,7 @@ export default sbp('sbp/selectors/register', {
       } catch (resumeError) {
         console.error('[chelonia] reset: failed to resume the KV height session', resumeError)
       }
-      try {
-        restartClockSync()
-      } catch (clockError) {
-        console.error('[chelonia] reset: failed to restart clock sync', clockError)
-      }
+      restartClockSync()
       throw e
     }
     // The following are all synchronous operations
@@ -831,11 +834,7 @@ export default sbp('sbp/selectors/register', {
       // before `subscriptionSet`.
       this.config.reactiveSet(rootState, '_kv', Object.create(null))
     } catch (e) {
-      try {
-        restartClockSync()
-      } catch (clockError) {
-        console.error('[chelonia] reset: failed to restart clock sync', clockError)
-      }
+      restartClockSync()
       throw e
     } finally {
       try {
@@ -1304,17 +1303,9 @@ export default sbp('sbp/selectors/register', {
             if (frame.kind === 'malformed') {
               const slot = this.kvSlotsByContractID.get(msg.channelID)?.get(msg.key)
               if (slot) {
-                // A vetoed load throws synchronously: log it, and still
-                // report the frame's own error below.
-                try {
-                  sbp('chelonia/kv/_loadSlot', {
-                    contractID: msg.channelID, slot, reason: 'remote'
-                  }).catch(() => {})
-                } catch (e) {
-                  console.error(
-                    `[chelonia] reloading ${msg.channelID}::${msg.key} couldn't start`, e
-                  )
-                }
+                sbp('chelonia/kv/_loadSlotInBackground', {
+                  contractID: msg.channelID, slot, reason: 'remote'
+                }, `[chelonia] reloading ${msg.channelID}::${msg.key} after a malformed frame failed`)
               }
               throw frame.error
             }
@@ -1424,7 +1415,7 @@ export default sbp('sbp/selectors/register', {
       // so multi-instance deployments dispatch against the correct context.
       this.kvContractsModifiedListener = (
         _contracts: string[],
-        payload: { added: string[]; removed: string[]; resync?: boolean }
+        payload: ContractsModifiedChange
       ) => {
         try {
           sbp('chelonia/kv/_onContractsModified', payload)
@@ -1755,7 +1746,12 @@ export default sbp('sbp/selectors/register', {
     const listOfIds = typeof contractIDs === 'string' ? [contractIDs] : contractIDs
     return Promise.all(
       listOfIds.map((contractID) => {
-        if (!rootState?.contracts?.[contractID]) {
+        const entry = rootState?.contracts?.[contractID]
+        // `null`: removed for good already. `undefined` while subscribed:
+        // nothing to remove. `undefined` and not subscribed is still
+        // removed, e.g. after an ephemeral retain whose first sync failed:
+        // its KV runtime (and `whenSettled` callers) must still go.
+        if (entry === null || (entry === undefined && this.subscriptionSet.has(contractID))) {
           return undefined
         }
 
@@ -1934,8 +1930,34 @@ export default sbp('sbp/selectors/register', {
       : undefined
   },
   // Higher level function to automatically retain / release a contract
-  'chelonia/contract/withRetained': async function (contractIDs: string | string[], callback: () => unknown | Promise<unknown>) {
-    await sbp('chelonia/contract/retain', contractIDs, { ephemeral: true })
+  'chelonia/contract/withRetained': async function (
+    this: CheloniaContext,
+    contractIDs: string | string[],
+    callback: () => unknown | Promise<unknown>
+  ) {
+    const listOfIds = typeof contractIDs === 'string' ? [contractIDs] : contractIDs
+    const countsBefore = listOfIds.map((id) => this.ephemeralReferenceCount[id] ?? 0)
+    // `retain` takes its references synchronously, before its first await
+    // (it stops at a permanently deleted contract), so the references it
+    // took are known here, also when it then rejects.
+    const retaining = sbp('chelonia/contract/retain', contractIDs, { ephemeral: true })
+    const retained = listOfIds.filter(
+      (id, i) => (this.ephemeralReferenceCount[id] ?? 0) > countsBefore[i]
+    )
+    try {
+      await retaining
+    } catch (e) {
+      // A failed first sync: give the references back, or the contract is
+      // never removed (and its KV `whenSettled` calls never settle).
+      if (retained.length) {
+        await sbp('chelonia/contract/release', retained, { ephemeral: true }).catch(
+          (releaseError: unknown) => {
+            console.error('[withRetained] Error releasing contract:', releaseError)
+          }
+        )
+      }
+      throw e
+    }
     try {
       return await callback()
     } finally {
@@ -2969,8 +2991,9 @@ export default sbp('sbp/selectors/register', {
   // a general rule, you shouldn't be calling this selector directly unless
   // you're building a utility library or if you have very specific needs. In
   // this case, see if `chelonia/kv/queuedSet` covers your needs.
-  // `data` is allowed to be falsy, in which case a fetch will occur first and
-  // the `onconflict` handler will be called.
+  // `data` is allowed to be `undefined` (only `undefined`: any other value,
+  // falsy ones included, is written as is), in which case a fetch will occur
+  // first and the `onconflict` handler will be called.
   //
   // Contract heights (KV-REVAMPED.md §3.4): every write is stamped with the
   // local contract height, and the server only accepts the stamp that equals
@@ -3098,12 +3121,16 @@ export default sbp('sbp/selectors/register', {
     // The same wait after a `409`. While a sync of the contract is running
     // (e.g. one catching up after a reconnect), the stamp would be stale at
     // every height it replays: wait for that sync to end first, then for
-    // the height, both within one budget.
+    // the height, both within one budget. A sync that doesn't end within
+    // the budget gives up (`false`): signing again mid-replay would only
+    // get another `409`. The caller's recovery (`withHeightRecovery`) is
+    // queued behind the sync, and signs once.
     const waitForStampHeight = async (required: number): Promise<boolean> => {
       if (!this.currentSyncs[contractID]) return waitForHeight(required)
       const timeoutMs = waitBudgetMs()
       const startedAt = Date.now()
-      await waitForSyncEnd(this, contractID, { timeoutMs, signals: [fetchSignal] })
+      const synced = await waitForSyncEnd(this, contractID, { timeoutMs, signals: [fetchSignal] })
+      if (!synced) return false
       return waitForContractHeight(this, contractID, required, {
         timeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
         signals: [fetchSignal]
@@ -3171,8 +3198,11 @@ export default sbp('sbp/selectors/register', {
       // per set call to recover the current etag and value so
       // onconflict can produce a valid retry. chel's 412 carries the
       // stored value as its body (empty when there is none), so a
-      // body-less 412 does mean absent: this GET only recovers the etag,
-      // and if it fails, `'absent'` stands rather than failing the write.
+      // body-less 412 does mean absent. This GET recovers the etag, and
+      // its body replaces the `'absent'` one: a value written since is
+      // classified as usual (a malformed stamp throws
+      // `ChelErrorKvHeightMalformed`). If it fails, `'absent'` stands
+      // rather than failing the write.
       if (
         !recoveryGetAttempted &&
         !etag &&

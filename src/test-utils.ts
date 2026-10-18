@@ -161,33 +161,60 @@ const contractMeta = (contractID: string): ContractMeta | undefined =>
   (sbp('chelonia/private/state') as { contracts?: Record<string, ContractMeta> })
     .contracts?.[contractID]
 
+// The active `withLocalHeight` calls of one contract's metadata object, in
+// the order they started, and its real height: the value it had before the
+// first of them, or the last one set since (the contract moved, e.g. it
+// processed events). `seq` orders the starts and the moves.
+type HeightOverride = { height: number; startedAt: number }
+type HeightRecord = {
+  real: number | undefined;
+  overrides: HeightOverride[];
+  movedAt: number;
+  seq: number;
+}
+const heightRecords = new WeakMap<ContractMeta, HeightRecord>()
+
 // Runs `fn` with the local height of `contractID` temporarily set to
-// `height` (restored once `fn`, or the promise it returns, settles). Used to
-// sign a value as another device at another height would, or to decode one
+// `height` (until `fn`, or the promise it returns, settles). Used to sign a
+// value as another device at another height would, or to decode one
 // regardless of the local height.
 //
-// The height is only restored if nothing set it while `fn` ran: when the
-// contract moved meanwhile (e.g. it processed events while `fn` was
-// awaiting), restoring would move it back, even when it moved to `height`
-// itself.
+// The contract reads the height of the call that started last, unless the
+// contract moved since: then it reads the height it moved to. Once the last
+// call ends, the height is the real one, as a plain value: the one it had
+// before the first call, or the last one it moved to, even when it moved to
+// `height` itself. So overlapping calls, which may end in any order, never
+// roll a real move back.
 export const withLocalHeight = <T>(contractID: string, height: number, fn: () => T): T => {
   const meta = contractMeta(contractID)
   if (!meta) throw new Error(`withLocalHeight: no contract ${contractID}`)
-  const saved = meta.height
-  let current: number | undefined = height
-  let moved = false
-  Object.defineProperty(meta, 'height', {
-    configurable: true,
-    enumerable: true,
-    get: () => current,
-    set: (value: number | undefined) => {
-      current = value
-      moved = true
-    }
-  })
-  const restore = () => {
+  let record = heightRecords.get(meta)
+  if (!record) {
+    const created: HeightRecord = { real: meta.height, overrides: [], movedAt: -1, seq: 0 }
+    record = created
+    heightRecords.set(meta, created)
     Object.defineProperty(meta, 'height', {
-      configurable: true, enumerable: true, writable: true, value: moved ? current : saved
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        const top = created.overrides[created.overrides.length - 1]
+        return top && top.startedAt > created.movedAt ? top.height : created.real
+      },
+      set: (value: number | undefined) => {
+        created.real = value
+        created.movedAt = created.seq++
+      }
+    })
+  }
+  const active = record
+  const override: HeightOverride = { height, startedAt: active.seq++ }
+  active.overrides.push(override)
+  const restore = () => {
+    active.overrides.splice(active.overrides.indexOf(override), 1)
+    if (active.overrides.length) return
+    heightRecords.delete(meta)
+    Object.defineProperty(meta, 'height', {
+      configurable: true, enumerable: true, writable: true, value: active.real
     })
   }
   let result: T

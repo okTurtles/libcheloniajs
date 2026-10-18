@@ -67,5 +67,16 @@ export const resetKvSession = (ctx: CheloniaContext): void => {
   // fallback timers) before the next session starts: those of `ctx`, which
   // isn't necessarily the context the selectors are registered with.
   clearHeightWaits(ctx)
+  const settleWaiters = ctx.kvSettleWaiters
   initKvSession(ctx)
+  // The old session's `whenSettled` calls can't settle any more: reject
+  // them here rather than on `CHELONIA_RESET`, which a reset whose
+  // teardown throws never emits. Each waiter removes itself from the old
+  // map, so iterate over copies.
+  for (const [waitKey, waiters] of Array.from(settleWaiters)) {
+    const error = new DOMException(
+      `chelonia/reset while waiting for ${waitKey} to settle`, 'AbortError'
+    )
+    for (const reject of Array.from(waiters)) reject(error)
+  }
 }

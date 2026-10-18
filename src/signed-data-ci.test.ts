@@ -155,8 +155,13 @@ describe('signature verification with an unauthorized key', () => {
       assert.ok(thrown instanceof ChelErrorSignatureKeyUnauthorized)
       assert.strictEqual(rejections.length, 1)
       assert.ok(rejections[0] instanceof ChelErrorSignatureKeyUnauthorized)
-      assert.strictEqual(errors.length, 1)
+      assert.strictEqual(errors.length, 2)
       assert.match(String(errors[0][0]), /could not serialize the app state/)
+      // The diagnostic itself is still logged, without the state.
+      assert.match(String(errors[1][0]), /is unauthorized or expired/)
+      const details = errors[1][1] as { designatedKey?: unknown; height?: unknown; state: unknown }
+      assert.strictEqual(details.state, '[unserializable]')
+      assert.ok('designatedKey' in details && 'height' in details)
     })
   }
 })

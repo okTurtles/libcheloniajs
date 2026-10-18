@@ -2372,9 +2372,9 @@ describe('KV slot API', () => {
 
   it('44a1: replaced-slot committed write resolves with the value, not undefined', async () => {
     // #3: a write that commits to the server but whose slot was replaced
-    // mid-flight must resolve with the committed value — `undefined` is
-    // reserved for KV_NOOP/abort, so callers can distinguish a persisted
-    // write from a genuine no-op.
+    // mid-flight must resolve with the committed value: `undefined` is
+    // reserved for KV_NOOP (an abort rejects), so callers can tell a
+    // persisted write from a genuine no-op.
     sbp('chelonia/kv/defineSlot', {
       key: 'committed', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
     })
@@ -4580,13 +4580,13 @@ describe('KV slot API', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 77b: issue #3 — the data-loss-guard reload inside `update` must NOT
-  // fire CHELONIA_KV_UPDATED / onUpdate with reason 'load'. A single
-  // `update` call should produce only one event (reason 'local') after the
-  // write commits, not a 'load' + 'local' pair that double-triggers
-  // non-idempotent onUpdate handlers.
+  // 77b: the data-loss-guard reload inside `update` reports what it loads,
+  // as any load does: a 'load' event and `onUpdate` before the write's
+  // 'local' one, and the status leaves 'error' as soon as the reload has
+  // verified the server value (REVIEW 2026-10-18 #5: a silent reload left
+  // the slot in 'error' when the reducer then returned KV_NOOP).
   // -----------------------------------------------------------------------
-  it('77b: update on error slot fires only local event (silent reload)', async () => {
+  it('77b: update on error slot reports its guard reload, then the local write', async () => {
     const onUpdateCalls: Array<{ reason?: string; value?: unknown }> = []
     sbp('chelonia/kv/defineSlot', {
       key: 'silentReload',
@@ -4617,37 +4617,31 @@ describe('KV slot API', () => {
 
     const updatedEvents = log.filter((e) => e.type === CHELONIA_KV_UPDATED) as
       Array<{ payload: { reason?: string } }>
-    const loadEvents = updatedEvents.filter((e) => e.payload.reason === 'load')
-    const localEvents = updatedEvents.filter((e) => e.payload.reason === 'local')
 
-    assert.strictEqual(loadEvents.length, 0, 'no load event from the silent data-loss-guard reload')
-    assert.strictEqual(localEvents.length, 1, 'exactly one local event from the write')
-    assert.strictEqual(onUpdateCalls.length, 1, 'onUpdate called once (local only)')
-    assert.strictEqual(onUpdateCalls[0].reason, 'local')
+    assert.deepStrictEqual(
+      updatedEvents.map((e) => e.payload.reason), ['load', 'local'],
+      'the guard reload reports its load, then the write commits')
+    assert.deepStrictEqual(onUpdateCalls.map((c) => c.reason), ['load', 'local'])
     assert.deepStrictEqual(rootState()._kv![c]!.silentReload.value, { x: 6 })
     assert.strictEqual(sbp('chelonia/kv/status', c, 'silentReload'), 'loaded')
-    // Issue #2: the silent reload must not surface its internal status
-    // churn. A single `update` from an 'error' baseline previously leaked
-    // `error → loading → loaded` STATUS_CHANGED events; now the only
-    // status event is the terminal `loaded` the write itself emits.
+    // From an 'error' baseline the reload goes through 'loading' (only a
+    // 'loaded' slot keeps its status while it reloads), and the slot is
+    // 'loaded' before the write commits.
     const statusEvents = log.filter((e) => e.type === CHELONIA_KV_STATUS_CHANGED) as
       Array<{ payload: { status: string } }>
-    assert.strictEqual(
-      statusEvents.filter((e) => e.payload.status === 'loading').length, 0,
-      'no transient loading status event from the silent reload')
     assert.deepStrictEqual(
-      statusEvents.map((e) => e.payload.status), ['loaded'],
-      'the only status event from a silent-reload update is the terminal loaded')
+      statusEvents.map((e) => e.payload.status).slice(0, 2), ['loading', 'loaded'])
+    assert.strictEqual(statusEvents.at(-1)?.payload.status, 'loaded')
     offs.forEach((off) => off())
   })
 
   // -----------------------------------------------------------------------
-  // 77c: issue #3 edge case — the data-loss-guard reload returns 404 (server
-  // value was cleared while the slot was in 'error'). The silent flag must
-  // suppress the 404 path's UPDATED + onUpdate too, not just the success
-  // path's. The write then seeds from the default.
+  // 77c: the data-loss-guard reload returns 404 (the server value was
+  // cleared while the slot was in 'error'). The reload reports the removal
+  // ('load' event with no value, `onUpdate` with the default), and the
+  // write then seeds from the default.
   // -----------------------------------------------------------------------
-  it('77c: silent 404 reload suppresses UPDATED; write seeds from default', async () => {
+  it('77c: a 404 guard reload reports the removal; the write seeds from default', async () => {
     const onUpdateCalls: Array<{ reason?: string; value?: unknown }> = []
     sbp('chelonia/kv/defineSlot', {
       key: 'silent404',
@@ -4676,14 +4670,52 @@ describe('KV slot API', () => {
     })
 
     const updatedEvents = log.filter((e) => e.type === CHELONIA_KV_UPDATED) as
-      Array<{ payload: { reason?: string } }>
-    const loadEvents = updatedEvents.filter((e) => e.payload.reason === 'load')
+      Array<{ payload: { reason?: string; value?: unknown; previousValue?: unknown } }>
 
-    assert.strictEqual(loadEvents.length, 0, 'no load event from the silent 404 reload')
-    assert.strictEqual(onUpdateCalls.length, 1, 'onUpdate called once (local only)')
-    assert.strictEqual(onUpdateCalls[0].reason, 'local')
+    assert.deepStrictEqual(
+      updatedEvents.map((e) => [e.payload.reason, e.payload.value, e.payload.previousValue]),
+      [['load', undefined, { x: 5 }], ['local', { x: 1 }, undefined]])
+    assert.deepStrictEqual(onUpdateCalls, [
+      { reason: 'load', value: { x: 0 } }, { reason: 'local', value: { x: 1 } }
+    ])
     // Reducer seeded from the default ({x:0}), so result is {x:1}.
     assert.deepStrictEqual(rootState()._kv![c]!.silent404.value, { x: 1 })
+    offs.forEach((off) => off())
+  })
+
+  // -----------------------------------------------------------------------
+  // 77d: the guard reload verifies another device's value, and the reducer
+  // then returns KV_NOOP: the slot holds a verified value, so it leaves
+  // 'error', `read` returns that value, and the next update needs no
+  // request (REVIEW 2026-10-18 #5).
+  // -----------------------------------------------------------------------
+  it("77d: a KV_NOOP after the guard reload leaves the slot 'loaded'", async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'guardNoop', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-77d'
+    await setupContract(c)
+    await sbp('chelonia/kv/_handleRemote', c, 'guardNoop', fakeParsed({ x: 5 }), 'e-seed')
+    // An earlier refresh failed (a 500).
+    const entry = rootState()._kv![c]!.guardNoop as { status: string; lastError?: unknown }
+    entry.status = 'error'
+    entry.lastError = { name: 'ChelErrorUnexpectedHttpResponseCode', message: '[kv/get] 500: ' }
+    let requests = 0
+    stubGet = async () => { requests++; return fakeParsed({ x: 7 }) }
+    stubSet = async () => { requests++; return { etag: 'e-set' } }
+
+    const { log, offs } = collectEvents()
+    const noop = () => sbp('chelonia/kv/update', {
+      contractID: c, key: 'guardNoop', updater: () => KV_NOOP
+    })
+    assert.strictEqual(await noop(), undefined)
+    assert.strictEqual(sbp('chelonia/kv/status', c, 'guardNoop'), 'loaded')
+    assert.strictEqual(rootState()._kv![c]!.guardNoop.lastError, undefined)
+    assert.deepStrictEqual(sbp('chelonia/kv/read', c, 'guardNoop'), { x: 7 })
+    assert.deepStrictEqual(updatedReasons(log), ['load'])
+    assert.strictEqual(requests, 1)
+    assert.strictEqual(await noop(), undefined)
+    assert.strictEqual(requests, 1)
     offs.forEach((off) => off())
   })
 
@@ -5687,8 +5719,9 @@ describe('KV slot API', () => {
   it('87c: pending counter does not leak when queueInvocation returns undefined (filter veto)', async () => {
     // A more insidious failure mode than 87/87b: an SBP filter vetoes
     // `chelonia/queueInvocation` itself, so `sbp(...)` returns undefined
-    // (no throw). `queued.finally` would then throw a TypeError and the
-    // increment would leak. `Promise.resolve(queued)` neutralises this.
+    // (no throw). The write rejects as vetoed, since its body never ran,
+    // and the in-flight accounting, which waits for the lane work, must
+    // still give back its increment.
     sbp('chelonia/kv/defineSlot', {
       key: 'k', contractType: CTYPE, defaultValue: { x: 0 }
     })
@@ -5699,8 +5732,6 @@ describe('KV slot API', () => {
     stubQueueInvocation = (() => undefined) as unknown as typeof stubQueueInvocation
 
     try {
-      // The write rejects as vetoed, since its body never ran; the counter
-      // must not leak either.
       await assert.rejects(
         sbp('chelonia/kv/update', { contractID: c, key: 'k', updater: () => ({ x: 1 }) }),
         (e: unknown) => (e as Error).name === 'ChelErrorUnexpected' &&
@@ -5741,6 +5772,9 @@ describe('KV runtime fields across chelonia/reset', () => {
     const ctx = {} as CheloniaContext
     initKvRuntime(ctx)
     const fields = ctx as unknown as Record<string, unknown>
+    // Put in place of every field that isn't a collection (the height
+    // session, the flush flag, the retry timer...): reset must replace it.
+    const SENTINEL = { sentinel: true }
     const marked: string[] = []
     for (const [name, value] of Object.entries(fields)) {
       // A height wait is dropped (its timer and listener stopped), so it
@@ -5750,18 +5784,24 @@ describe('KV runtime fields across chelonia/reset', () => {
       } else if (value instanceof Map) value.set('__marker__', 1)
       else if (value instanceof Set) value.add('__marker__')
       else if (Array.isArray(value)) value.push('__marker__')
-      else continue
+      else fields[name] = SENTINEL
       marked.push(name)
     }
     resetKvSession(ctx)
     const kept = marked.filter((name) => {
       const value = fields[name]
+      if (value === SENTINEL) return true
       return value instanceof Map || value instanceof Set
         ? value.has('__marker__')
         : Array.isArray(value) && value.includes('__marker__')
     })
-    assert.deepStrictEqual(kept.sort(), ['defContractKvByManifest', 'kvSlots'])
-    assert.ok(marked.length > 10, `only ${marked.length} collections were created`)
+    assert.deepStrictEqual(kept.sort(), ['defContractKvByManifest', 'kvHeightSessionHolds', 'kvSlots'])
+    assert.ok(marked.length > 10, `only ${marked.length} fields were created`)
+    assert.ok(marked.includes('kvHeightSession') && marked.includes('kvFlushInFlight'))
+    assert.ok(ctx.kvHeightSession instanceof AbortController)
+    assert.strictEqual(ctx.kvHeightSession.signal.aborted, false)
+    assert.strictEqual(ctx.kvFlushInFlight, false)
+    assert.strictEqual(ctx.kvFilterRetryTimer, undefined)
   })
 
   it('clears the height waits of the context it is given, and only those', async () => {

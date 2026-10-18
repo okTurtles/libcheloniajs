@@ -42,17 +42,20 @@ import type {
 // How long `chelonia/kv/set` (and single-key `chelonia/kv/sync`) wait for
 // the local contract to reach a required height before giving up. Matches
 // the upper bound of the random back-off `kv/set` already applied between
-// conflict retries.
+// conflict retries. Also the default of `update`'s passive wait on its last
+// attempt (after a reload that found the value ahead), and of the short
+// passive wait `recoverContractHeight` gives a sync that failed.
 export const KV_HEIGHT_WAIT_MS = 1500
 // How long a slot load deferred on height stays pending before the library
-// forces a contract sync and, failing that, settles the slot to `'error'`.
+// forces a contract sync and, failing that, settles the slot (to `'error'`
+// only when it holds no value).
 export const KV_HEIGHT_PENDING_FALLBACK_MS = 10000
 // Upper bound on how long an operation waits for the contract sync it
 // started to recover from `ChelErrorKvHeightAhead`. The sync itself keeps
 // running; only the waiting operation gives up. It doesn't bound the
 // retry that follows: when the height was reached anyway, the retry is
-// queued behind that sync and waits for it (only the caller's `signal`
-// ends that wait; see `queueAbortable`).
+// queued behind that sync and waits for it (the caller's `signal` and
+// `chelonia/reset` end that wait; see `queueAbortable`).
 export const KV_HEIGHT_RECOVERY_TIMEOUT_MS = 30000
 // Default number of sync-and-retry rounds for `onHeightAhead: 'sync'`.
 export const KV_DEFAULT_MAX_HEIGHT_RECOVERIES = 2
@@ -237,8 +240,10 @@ export function raceAbort<T> (
 // committed still resolves). A `body` that never runs rejects `result`
 // rather than resolving it with `undefined`: with `ChelErrorUnexpected`
 // when a filter vetoed `chelonia/queueInvocation` (it returned nothing),
-// and with an `AbortError` when the lane dropped it (`chelonia/reset`'s
-// teardown does). `queued` settles (never rejects) when the lane work
+// and with an `AbortError` when the lane dropped it: `chelonia/reset`'s
+// teardown does, and so does a filter that vetoes one of the selectors
+// `queueInvocation` calls, which can't be told apart here (hence the
+// neutral message). `queued` settles (never rejects) when the lane work
 // does, which can be after `result`: in-flight accounting waits for it. A
 // `queueInvocation` that throws (a filter threw) throws.
 export function queueAbortable<T> (
@@ -262,7 +267,11 @@ export function queueAbortable<T> (
     if (!started) {
       throw invocation === undefined
         ? new ChelErrorUnexpected(`[chelonia/kv] queueing work for ${contractID} was vetoed`)
-        : new DOMException('Aborted by chelonia/reset', 'AbortError')
+        : new DOMException(
+          `[chelonia/kv] the queued work for ${contractID} never ran ` +
+          '(chelonia/reset dropped it, or a filter vetoed a lane selector)',
+          'AbortError'
+        )
     }
     return value
   }) as Promise<T>
@@ -547,7 +556,8 @@ function startRecoverySync (ctx: CheloniaContext, contractID: string): Promise<v
 // closed). The required height is `requiredHeight`, or else `error`'s.
 // Note that after a timeout the retried operation's lane work still waits
 // behind the sync, which runs on the contract's lane (the KV writes queue
-// it with `queueAbortable`, so the caller's signal still ends that wait).
+// it with `queueAbortable`, so the caller's signal and `chelonia/reset`
+// still end that wait).
 // Rejects with the abort reason if the caller's signal, the session's
 // (`ctx.abortController`'s, captured when the operation started) or the
 // height session (`kvHeightSession`, ended by `chelonia/reset`) aborts:
@@ -620,8 +630,10 @@ export function recoverContractHeight (
       // Before deciding, give the height a short passive wait outside every
       // lane (none while the pubsub socket is closed, when no event can
       // arrive): pubsub may still deliver the missing events. A timeout
-      // needs none, having waited for `recoveryTimeoutMs` already.
-      const reached = required === undefined
+      // needs none, having waited for `recoveryTimeoutMs` already. Nor does
+      // a contract that is no longer subscribed (e.g. released while the
+      // sync was queued): no event can arrive for it.
+      const reached = required === undefined || !ctx.subscriptionSet.has(contractID)
         ? Promise.resolve(false)
         : waitForContractHeight(ctx, contractID, required, {
           timeoutMs: pubsubSocketNotOpen(ctx) ? 0 : undefined,

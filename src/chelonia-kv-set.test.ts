@@ -15,7 +15,7 @@ import {
   kvHeightAheadCause
 } from './errors.js'
 import { KV_MAX_STALE_STAMP_RETRIES } from './kv-height.js'
-import { captureConsole, setContractHeightLater, sleep, useKvSetHooks, withLocalHeight, within } from './test-utils.js'
+import { captureConsole, setContractHeightLater, useKvSetHooks, withLocalHeight, within } from './test-utils.js'
 import type {
   ChelKvOnConflictCallback,
   ChelRootState,
@@ -87,8 +87,10 @@ const tamperedBodyAt1 = async (contractID: string, signingKeyId: string): Promis
 }
 
 // A `fetch` that answers every request with the body of the test's first
-// request, which must be a POST, re-stamped at `height` (e.g. a value the
-// local contract can't verify yet, or a malformed stamp).
+// request, which must be a POST, re-stamped at `height` (e.g. a value that
+// is ahead of the local contract, or a malformed stamp). Such a body never
+// verifies, even once the contract reaches `height`: the signature covers
+// the height.
 const replyRestamped = (
   height: string,
   init: ConstructorParameters<typeof Response>[1],
@@ -158,8 +160,8 @@ const abortDuringWait = async (
 }
 
 describe('chelonia/kv/set', () => {
-  // Scoped to this describe rather than registered at module scope, so the
-  // re-init only wraps this suite's tests.
+  // A fresh Chelonia before each test; each of this file's describes
+  // registers these hooks.
   useKvSetHooks()
 
   it('bounds body-less conflict recovery GETs to one per set call', async () => {
@@ -406,6 +408,10 @@ describe('chelonia/kv/set', () => {
     const { contractID, signingKeyId } = setupContract()
     let capturedBody = ''
     let calls = 0
+    // This mock disagrees with itself on purpose: its GETs still return a
+    // value while its 412s carry no body, which is how the server reports
+    // that the key is absent. The point is that `kv/set` describes the last
+    // response it got, not a value an earlier GET returned.
     sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
       fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
@@ -441,14 +447,14 @@ describe('chelonia/kv/set', () => {
   it('rejects a 412 whose value is ahead, without calling onconflict', async () => {
     const { contractID, signingKeyId } = setupContract()
     sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 30 })
-    let posts = 0
+    let requests = 0
     let conflicts = 0
     sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
       // A stored value written at a contract height (5) ahead of the locally
       // synced height (1)
       fetch: replyRestamped('5', { status: 412, headers: { etag: 'etag-ahead' } }, () => {
-        posts++
+        requests++
       })
     } as Partial<CheloniaConfig>)
 
@@ -469,7 +475,7 @@ describe('chelonia/kv/set', () => {
         return true
       }
     )
-    assert.strictEqual(posts, 1)
+    assert.strictEqual(requests, 1)
     assert.strictEqual(conflicts, 0)
   })
 
@@ -695,14 +701,14 @@ describe('chelonia/kv/set', () => {
 
   it("the height error of attempts that ran out carries the last 412's etag, not an earlier one's", async () => {
     const { contractID, signingKeyId } = setupContract()
-    let posts = 0
+    let requests = 0
     const verifiable = replyRestamped('1', { status: 412, headers: { etag: 'e1' } })
     const ahead = replyRestamped('5', { status: 412 })
     sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
       fetch: async (url: string, opts?: { method?: string; body?: string }) => {
-        posts++
-        return (posts === 1 ? verifiable : ahead)(url, opts)
+        requests++
+        return (requests === 1 ? verifiable : ahead)(url, opts)
       }
     } as Partial<CheloniaConfig>)
 
@@ -715,16 +721,16 @@ describe('chelonia/kv/set', () => {
       }),
       (e: unknown) => isKvHeightAhead(e) && kvHeightAheadCause(e)?.etag === null
     )
-    assert.strictEqual(posts, 2)
+    assert.strictEqual(requests, 2)
   })
 
   it('a blind writer reports running out of attempts on a value that is ahead as a conflict', async () => {
     const { contractID, signingKeyId } = setupContract()
     sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 10000 })
-    let posts = 0
+    let requests = 0
     sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
-      fetch: replyRestamped('5', { status: 412, headers: { etag: 'e5' } }, () => { posts++ })
+      fetch: replyRestamped('5', { status: 412, headers: { etag: 'e5' } }, () => { requests++ })
     } as Partial<CheloniaConfig>)
 
     const started = Date.now()
@@ -748,7 +754,7 @@ describe('chelonia/kv/set', () => {
     // Without a passive wait for the value's height: the merge doesn't
     // depend on it.
     assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`)
-    assert.strictEqual(posts, 2)
+    assert.strictEqual(requests, 2)
   })
 
   // The wait for the height of a 412 that is ahead (here up to 10 s: no
@@ -852,63 +858,29 @@ describe('chelonia/kv/set', () => {
     }
   })
 
-  it('stops before onconflict when chelonia/reset aborts during the backoff', async () => {
-    const { contractID, signingKeyId } = setupContract()
-    const stored = await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 1)
-    Math.random = () => 0.2 // a ~300 ms backoff before onconflict
-    let resetting: Promise<unknown> | undefined
-    let resetTimer: ReturnType<typeof setTimeout> | undefined
-    let conflicts = 0
-    sbp('chelonia/configure', {
-      connectionURL: 'https://example.test',
-      fetch: async (_url: string, opts: { signal?: AbortSignal }) => {
-        opts.signal?.throwIfAborted()
-        // `reset` waits for the contracts' lanes (none here), aborts the
-        // global signal, which ends the backoff at once, then waits in its
-        // persistence hook: the write must not reach `onconflict` meanwhile.
-        resetTimer ??= setTimeout(() => {
-          resetting = sbp('chelonia/reset', () => sleep(500))
-          // Awaited below; an early rejection mustn't be unhandled meanwhile.
-          resetting!.catch(() => {})
-        }, 50)
-        return new Response(stored, { status: 412, headers: { etag: '"cid-1"' } })
-      }
-    } as unknown as Partial<CheloniaConfig>)
-
-    // Cancels a reset that hasn't started, and awaits one that has, even
-    // when an assertion fails, so that it doesn't run into the next test.
-    try {
-      await assert.rejects(
-        () => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
-          signingKeyId,
-          onconflict: async (): Promise<[JSONType, string | undefined]> => {
-            conflicts++
-            return [{ x: 2 }, undefined]
-          }
-        }),
-        { name: 'AbortError' }
-      )
-      assert.strictEqual(conflicts, 0)
-    } finally {
-      clearTimeout(resetTimer)
-      await within(resetting ?? Promise.resolve(), 'chelonia/reset')
-    }
-  })
-
+  // The abort ends the backoff at once, and the write must not reach
+  // `onconflict` afterwards (e.g. while reset's persistence hook runs).
   for (const by of ['reset', 'signal'] as const) {
     const what = by === 'reset' ? 'chelonia/reset' : "the caller's signal"
-    it(`rejects as soon as ${what} aborts the backoff, not when the backoff ends`, async () => {
+    it(`rejects as soon as ${what} aborts the backoff, before onconflict`, async () => {
       const contract = setupContract()
       const stored = await signedBodyAt(
         contract.contractID, contract.signingKeyId, 'settings', { x: 7 }, 1
       )
       Math.random = () => 0.9999 // a ~1500 ms backoff before onconflict
+      let conflicts = 0
       await abortDuringWait(
         by,
         contract,
         () => new Response(stored, { status: 412, headers: { etag: '"cid-1"' } }),
-        { onconflict: async (): Promise<[JSONType, string | undefined]> => [{ x: 2 }, undefined] }
+        {
+          onconflict: async (): Promise<[JSONType, string | undefined]> => {
+            conflicts++
+            return [{ x: 2 }, undefined]
+          }
+        }
       )
+      assert.strictEqual(conflicts, 0)
     })
   }
 })
@@ -1233,8 +1205,9 @@ describe('chelonia/kv/set fetch-first (no data)', () => {
 
   it('waits for a value that is ahead, then passes it to onconflict decoded', async () => {
     const { contractID, signingKeyId } = setupContract()
-    // Long enough that a wait ended by its timeout fails the timing check.
-    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 3000 })
+    // Long enough that a wait ended by its timeout fails the timing check,
+    // and below `within`'s 3 s, so that the timing check is what fails.
+    sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 2000 })
     const stored = await signedBodyAt(contractID, signingKeyId, 'settings', { x: 7 }, 3)
     const seen: unknown[] = []
     const requests = recordRequests((req) => {
@@ -1329,20 +1302,9 @@ describe('chelonia/kv/get', () => {
 
   it('rejects with a descriptive height error for height-ahead values', async () => {
     const { contractID, signingKeyId } = setupContract()
-    let capturedBody = ''
     sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
-      fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
-        if (opts?.method === 'POST') {
-          capturedBody = opts.body ?? ''
-          return new Response('', { status: 200, headers: { 'x-cid': 'cid-ok' } })
-        }
-        const ahead = { ...JSON.parse(capturedBody), height: '5' }
-        return new Response(JSON.stringify(ahead), {
-          status: 200,
-          headers: { etag: 'etag-ahead' }
-        })
-      }
+      fetch: replyRestamped('5', { status: 200, headers: { etag: 'etag-ahead' } })
     } as Partial<CheloniaConfig>)
 
     await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, { signingKeyId })
@@ -1385,17 +1347,9 @@ describe('chelonia/kv/get', () => {
 
   it('reports a malformed height stamp as an invalid height, not as ahead', async () => {
     const { contractID, signingKeyId } = setupContract()
-    let capturedBody = ''
     sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
-      fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
-        if (opts?.method === 'POST') {
-          capturedBody = opts.body ?? ''
-          return new Response(null, { status: 204 })
-        }
-        const bad = { ...JSON.parse(capturedBody), height: '-3' }
-        return new Response(JSON.stringify(bad), { status: 200 })
-      }
+      fetch: replyRestamped('-3', { status: 200 })
     } as Partial<CheloniaConfig>)
 
     await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, { signingKeyId })

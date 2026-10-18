@@ -23,6 +23,7 @@ import {
   addChatRoomUnreadMessage,
   addTeardown,
   advanceLocalHeightOnInternalLane,
+  assertAwaitsValueAhead,
   cekId,
   cskId,
   debugs,
@@ -54,6 +55,13 @@ import { logged } from './test-utils.js'
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 installKvHeightHooks()
+
+// Vetoes `chelonia/kv/_loadSlot` while set. Filters can't be removed, so
+// this one is registered once, and a test's teardown clears the flag.
+let vetoLoads = false
+sbp('sbp/filters/selector/add', 'chelonia/kv/_loadSlot', () => {
+  if (vetoLoads) return false
+})
 
 let client: any
 // Messages passed to the raw KV callback, when `connect` installs one.
@@ -102,6 +110,10 @@ describe('pubsub frames with a malformed height stamp', () => {
     assert.strictEqual(slotStatus(UNREAD), 'error')
     assert.strictEqual(isKvHeightMalformed(mirror(UNREAD).lastError), true)
     assert.strictEqual(mirror(UNREAD).settled, true)
+    // The frame's own error is logged too.
+    const logs = errors.filter((args) => String(args[0]).includes('Error processing kv event'))
+    assert.strictEqual(logs.length, 1)
+    assert.ok(isKvHeightMalformed(logs[0][2]))
   })
 
   it('reload the slot, which loads the stored value when the frame was a stale one', async () => {
@@ -115,6 +127,29 @@ describe('pubsub frames with a malformed height stamp', () => {
     assert.strictEqual(server.gets().length, 1)
     assert.strictEqual(slotStatus(UNREAD), 'loaded')
     assert.deepStrictEqual(mirror(UNREAD).value, VB)
+    // The stale frame's error is still logged.
+    const logs = errors.filter((args) => String(args[0]).includes('Error processing kv event'))
+    assert.strictEqual(logs.length, 1)
+    assert.ok(isKvHeightMalformed(logs[0][2]))
+  })
+
+  it('settle the slot when a filter vetoes the reload, and log it', async () => {
+    connect()
+    await writeAsDeviceB(UNREAD, V0, 40)
+    defineSlot({ key: UNREAD, autoLoad: 'never' })
+    await activateContract()
+    assert.strictEqual(mirror(UNREAD).settled, false)
+    vetoLoads = true
+    addTeardown(() => { vetoLoads = false })
+    deliverBody(UNREAD, restampedBody(UNREAD, 'not-a-height'))
+    await drainLanes()
+    vetoLoads = false
+    assert.strictEqual(await whenSettledWithin(UNREAD, 300), 'error')
+    assert.strictEqual(mirror(UNREAD).lastError?.name, 'ChelErrorUnexpected')
+    const vetoed = errors.find((args) => String(args[0]).includes('after a malformed frame failed'))
+    assert.match(String((vetoed?.[1] as Error | undefined)?.message), /was vetoed/)
+    assert.ok(!errors.some((args) => args.some((arg) => arg instanceof TypeError)))
+    assert.strictEqual(server.gets().length, 0)
   })
 })
 
@@ -129,7 +164,7 @@ describe('pubsub frames while the local contract is behind', () => {
     assert.deepStrictEqual(mirror(UNREAD).heightAhead, { requiredHeight: 42 })
     const updates: any[] = []
     onEvent(CHELONIA_KV_UPDATED, (p: any) => updates.push(p))
-    await advanceLocalHeightOnInternalLane(42)
+    await within(advanceLocalHeightOnInternalLane(42), 'the height move')
     await drainLanes()
     assert.deepStrictEqual(mirror(UNREAD).value, VB)
     assert.ok(!('heightAhead' in mirror(UNREAD)))
@@ -138,9 +173,9 @@ describe('pubsub frames while the local contract is behind', () => {
     assert.ok(logged(debugs, 'reloading the slot'))
     // With the etag current, the next write needs no conflict round trip.
     server.log.length = 0
-    await sbp('chelonia/kv/update', {
+    await within(sbp('chelonia/kv/update', {
       contractID: CONTRACT_ID, key: UNREAD, updater: addChatRoomUnreadMessage('roomA', 'a2', 5)
-    })
+    }), 'the update')
     assert.deepStrictEqual(server.posts().map((p) => p.status), [204])
   })
 
@@ -159,10 +194,33 @@ describe('pubsub frames while the local contract is behind', () => {
     assert.deepStrictEqual(mirror(UNREAD).heightAhead, { requiredHeight: 42 })
     await assert.rejects(whenSettledWithin(UNREAD, 100), (e: any) => e.name === 'TimeoutError')
     const settling = whenSettledWithin(UNREAD)
-    await advanceLocalHeightOnInternalLane(42)
+    await within(advanceLocalHeightOnInternalLane(42), 'the height move')
     assert.strictEqual(await settling, 'loaded')
     assert.deepStrictEqual(mirror(UNREAD).value, VB)
     assert.ok(!('heightAhead' in mirror(UNREAD)))
+  })
+
+  // Device B cleared the key at 40, then wrote VB at 42. The clear's frame
+  // arrives after a load found VB ahead: it doesn't settle the slot "no
+  // value", since the server is known to hold VB.
+  it("a stale clear frame doesn't settle 'non-init' while the slot waits for a value ahead", async () => {
+    sbp('chelonia/kv/_testSetHeightTimings', { pendingFallbackMs: 10000 })
+    connect()
+    defineSlot({ key: UNREAD })
+    await activateContract()
+    const clearFrame = { ...await writeAsDeviceB(UNREAD, null, 40) }
+    await writeAsDeviceB(UNREAD, VB, 42)
+    await within(sbp('chelonia/kv/sync', CONTRACT_ID), 'the sync')
+    await drainLanes()
+    assert.strictEqual(slotStatus(UNREAD), 'loading')
+    deliverBody(UNREAD, clearFrame.body)
+    await drainLanes()
+    await assertAwaitsValueAhead(UNREAD, 42)
+    assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), {})
+    const settling = whenSettledWithin(UNREAD)
+    await within(advanceLocalHeightOnInternalLane(42), 'the height move')
+    assert.strictEqual(await settling, 'loaded')
+    assert.deepStrictEqual(mirror(UNREAD).value, VB)
   })
 
   it("a clear retried after a recovery doesn't carry the first attempt's conflict", async () => {
@@ -181,7 +239,7 @@ describe('pubsub frames while the local contract is behind', () => {
     // So another device's next write is applied as is, without the
     // authoritative GET a conflict-resolved write's echo marker forces.
     const V2 = { ...VB, roomC: room('c1', 3) }
-    await writeAsDeviceB(UNREAD, V2, 42)
+    await within(writeAsDeviceB(UNREAD, V2, 42), "device B's write")
     const getsBefore = server.gets().length
     deliverKvFrame()
     await drainLanes()
@@ -312,7 +370,9 @@ describe('the raw KV callback', () => {
     deliverKvFrame('other')
     await drainLanes()
     assert.strictEqual(rawFrames.length, 0)
-    assert.ok(logged(warnings, 'dropping kv pubsub frame'))
+    const dropped = warnings.filter((w) => String(w[0]).includes('dropping kv pubsub frame'))
+    assert.strictEqual(dropped.length, 1)
+    assert.ok(String(dropped[0][0]).includes('define a slot for the key to have it reloaded'))
     // Nothing reloads it once the contract catches up.
     setLocalHeight(42)
     await drainLanes()

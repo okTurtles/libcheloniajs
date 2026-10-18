@@ -162,19 +162,19 @@ const verifySignatureData = function <T, U extends object = object> (
     // would otherwise only show as a notification. Off in other CI runs
     // (e.g. this library's own tests), where the state lookup would throw
     // in place of the real error. The diagnostics never replace it either:
-    // a state that can't be serialized is only reported.
+    // a state that can't be serialized is reported, and the key's diagnostic
+    // is still logged, with `'[unserializable]'` as its state.
     const message = `Key ${sKeyId} is unauthorized or expired for the current contract`
     const failInHostAppCI = !!process.env.CI && !!sbp('sbp/selectors/fn', 'state/vuex/state')
     if (failInHostAppCI) {
+      let appState: unknown
       try {
-        console.error(message, {
-          designatedKey,
-          height,
-          state: JSON.parse(JSON.stringify(sbp('state/vuex/state')))
-        })
+        appState = JSON.parse(JSON.stringify(sbp('state/vuex/state')))
       } catch (e) {
+        appState = '[unserializable]'
         console.error('[chelonia] could not serialize the app state for diagnostics', e)
       }
+      console.error(message, { designatedKey, height, state: appState })
       // An unhandled promise rejection will cause Cypress to fail
       Promise.reject(new ChelErrorSignatureKeyUnauthorized(message))
     }

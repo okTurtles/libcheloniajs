@@ -129,9 +129,10 @@ describe('KV error predicates', () => {
     assert.strictEqual(maxAttemptsThenMessage(new ChelErrorKvMaxAttempts('x')), 'max attempts')
   })
 
-  // The library never wraps its own KV errors (the KV tests check its
-  // rejections with these predicates), so they don't walk `.cause`: only
-  // an app that wraps errors itself needs to.
+  // No library path wraps its own height or conflict errors (the KV tests
+  // check its rejections with these predicates; what it does wrap, such as
+  // a decode failure in `ChelErrorKvValidation`, isn't one of them), so
+  // they don't walk `.cause`: only an app that wraps errors itself needs to.
   it('match only the error itself, not one wrapped in a cause', () => {
     const wrap = (cause: Error) => new ChelErrorKvValidation('wrapper', { cause })
     const ahead = wrap(new ChelErrorKvHeightAhead('x', { cause: { requiredHeight: 42 } }))
