@@ -41,15 +41,19 @@ export const parseCID = (cid: string): CID => {
 // lint rule skips those but not regex literals.
 const BASE58 = '[1-9A-HJ-NP-Za-km-z]'
 
+// The start of every ID with the SHELTER_CONTRACT_DATA codec
+const CONTRACT_ID_PREFIX = 'zLDXeQ2AgfCu'
+
 // What `parseCID` accepts: CIDv1, base58btc, blake2b-256 and a codec from
 // `multicodes`. Each codec gives a fixed prefix and length, so the prefixes
-// have to change when `multicodes` does. A test checks every codec.
+// have to change when `multicodes` does. A test checks every codec. Unlike
+// `parseCID`, this also needs the digest to be 32 bytes, blake2b-256's size.
 export const CHELONIA_CID_REGEX = new RegExp(
-  `^z(?:9brRu3V|yop8PQyp|L(?:7mM9d4Xb4T|AeVmpcc88g|DXeQ2AgfCu|GQo2DimCH8|KHweRGqjMM))${BASE58}{44}$`
+  `^z(?:9brRu3V|yop8PQyp|L(?:7mM9d4Xb4T|AeVmpcc88g|${CONTRACT_ID_PREFIX.slice(2)}|GQo2DimCH8|KHweRGqjMM))${BASE58}{44}$`
 )
 
 // A Chelonia contract ID, with the SHELTER_CONTRACT_DATA codec
-export const CONTRACT_ID_REGEX = new RegExp(`^zLDXeQ2AgfCu${BASE58}{44}$`)
+export const CONTRACT_ID_REGEX = new RegExp(`^${CONTRACT_ID_PREFIX}${BASE58}{44}$`)
 
 // Any CID that `CID.parse` decodes on its own: CIDv0 (`Qm…`), or CIDv1 in
 // base32 (`b…`) or base58btc (`z…`). The version byte fixes the characters
