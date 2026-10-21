@@ -11,7 +11,7 @@ import {
   EVENT_HANDLED,
   EVENT_HANDLED_READY
 } from '../events.js'
-import type { KvMirrorEntry } from '../types.js'
+import type { ContractsModifiedChange, KvMirrorEntry } from '../types.js'
 
 type Context = {
   stateSelector: string;
@@ -135,14 +135,7 @@ export default sbp('sbp/selectors/register', {
     handles.push(sbp(
       'okTurtles.events/on',
       CONTRACTS_MODIFIED,
-      (
-        subscriptionSet: string[],
-        {
-          added,
-          removed,
-          permanent
-        }: { added: Array<string>; removed: Array<string>; permanent: boolean }
-      ) => {
+      (subscriptionSet: string[], { added, removed, permanent }: ContractsModifiedChange) => {
         sbp('okTurtles.eventQueue/queueEvent', EVENT_HANDLED, async () => {
           const states = added.length ? await sbp('chelonia/contract/fullState', added) : {}
           const externalState = sbp(stateSelector)

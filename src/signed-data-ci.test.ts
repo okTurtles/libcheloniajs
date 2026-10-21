@@ -7,8 +7,9 @@
 // throw `ChelErrorSignatureKeyUnauthorized`. A state that can't be
 // serialized must not replace the real error either.
 //
-// Runs in its own process: the tests after the first two register
-// `state/vuex/state`.
+// Runs in its own process. The tests that need `state/vuex/state` register
+// it, and it is unregistered after each test, so that the tests pass in any
+// order (e.g. with `--test-randomize`).
 
 import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
@@ -82,24 +83,36 @@ const originalCI = process.env.CI
 const originalError = console.error
 let errors: unknown[][]
 
-// What the host app's `state/vuex/state` returns. SBP keeps the first
-// registration of a selector, so it is registered once, by the first test
-// that needs it, and reads this variable. Like an app's store, it reads the
-// state through its SBP domain's `this`, and a filter counts its calls: the
-// diagnostics must call it through `sbp`.
+// What the host app's `state/vuex/state` returns. Like an app's store, it
+// reads the state through its SBP domain's `this`, and a filter counts its
+// calls: the diagnostics must call it through `sbp`. The selectors are
+// unsafe, so that `afterEach` can unregister them. The filter is added once:
+// filters can't be removed, and it outlives the registrations.
+const APP_STATE_SELECTORS = ['state/_init', 'state/vuex/state']
+sbp('sbp/selectors/unsafe', APP_STATE_SELECTORS)
 let appState: unknown
-let appStateRegistered = false
 let appStateCalls = 0
+sbp('sbp/filters/selector/add', 'state/vuex/state', () => { appStateCalls++ })
 const useAppState = (state: unknown) => {
   appState = state
-  if (appStateRegistered) return
-  sbp('sbp/selectors/register', {
-    'state/_init': function (this: { read?: () => unknown }) { this.read = () => appState },
-    'state/vuex/state': function (this: { read: () => unknown }) { return this.read() }
-  })
-  sbp('sbp/filters/selector/add', 'state/vuex/state', () => { appStateCalls++ })
-  appStateRegistered = true
+  // SBP warns when an unsafe selector is registered: expected here.
+  const { warn } = console
+  console.warn = () => {}
+  try {
+    sbp('sbp/selectors/register', {
+      'state/_init': function (this: { read?: () => unknown }) { this.read = () => appState },
+      'state/vuex/state': function (this: { read: () => unknown }) { return this.read() }
+    })
+  } finally {
+    console.warn = warn
+  }
 }
+
+// The library's own messages: Node may also log warnings through
+// `console.error` (e.g. a deprecation warning), at any time.
+const libraryErrors = () => errors.filter((args) =>
+  /^\[chelonia\] |is unauthorized or expired/.test(String(args[0]))
+)
 
 describe('signature verification with an unauthorized key', () => {
   beforeEach(() => {
@@ -110,6 +123,7 @@ describe('signature verification with an unauthorized key', () => {
 
   afterEach(() => {
     console.error = originalError
+    sbp('sbp/selectors/unregister', APP_STATE_SELECTORS)
     if (originalCI === undefined) delete process.env.CI
     else process.env.CI = originalCI
   })
@@ -126,7 +140,7 @@ describe('signature verification with an unauthorized key', () => {
     const { thrown, rejections } = await capture(readRevokedKeyValue())
     assert.ok(thrown instanceof ChelErrorSignatureKeyUnauthorized)
     assert.deepStrictEqual(rejections, [])
-    assert.deepStrictEqual(errors, [])
+    assert.deepStrictEqual(libraryErrors(), [])
   })
 
   it('logs the app state and leaves a rejection under CI when the host app has one', async () => {
@@ -137,8 +151,9 @@ describe('signature verification with an unauthorized key', () => {
     assert.ok(thrown instanceof ChelErrorSignatureKeyUnauthorized)
     assert.strictEqual(rejections.length, 1)
     assert.ok(rejections[0] instanceof ChelErrorSignatureKeyUnauthorized)
-    assert.strictEqual(errors.length, 1)
-    assert.deepStrictEqual((errors[0][1] as { state: unknown }).state, { app: 'state' })
+    const logged = libraryErrors()
+    assert.strictEqual(logged.length, 1)
+    assert.deepStrictEqual((logged[0][1] as { state: unknown }).state, { app: 'state' })
     assert.strictEqual(appStateCalls, callsBefore + 1)
   })
 
@@ -155,11 +170,12 @@ describe('signature verification with an unauthorized key', () => {
       assert.ok(thrown instanceof ChelErrorSignatureKeyUnauthorized)
       assert.strictEqual(rejections.length, 1)
       assert.ok(rejections[0] instanceof ChelErrorSignatureKeyUnauthorized)
-      assert.strictEqual(errors.length, 2)
-      assert.match(String(errors[0][0]), /could not serialize the app state/)
+      const logged = libraryErrors()
+      assert.strictEqual(logged.length, 2)
+      assert.match(String(logged[0][0]), /could not serialize the app state/)
       // The diagnostic itself is still logged, without the state.
-      assert.match(String(errors[1][0]), /is unauthorized or expired/)
-      const details = errors[1][1] as { designatedKey?: unknown; height?: unknown; state: unknown }
+      assert.match(String(logged[1][0]), /is unauthorized or expired/)
+      const details = logged[1][1] as { designatedKey?: unknown; height?: unknown; state: unknown }
       assert.strictEqual(details.state, '[unserializable]')
       assert.ok('designatedKey' in details && 'height' in details)
     })

@@ -665,31 +665,67 @@ export default sbp('sbp/selectors/register', {
         console.error('[chelonia] KV cleanup on contract removal failed', e)
       }
     }
-    const contractName = state.contracts[contractID]?.type
+    // Calls the `_cleanup` destructor of the contract's type, if it defines
+    // one, with the contract's state as it is now.
+    const callDestructor = (contractName: string, resync: boolean) => {
+      const manifestHash = this.config.contracts.manifests[contractName]
+      if (!manifestHash) return
+      const destructor = `${manifestHash}/${contractName}/_cleanup`
+      // Check if a destructor is defined
+      if (!sbp('sbp/selectors/fn', destructor)) return
+      // And call it
+      try {
+        sbp(destructor, { contractID, resync, state: state[contractID] })
+      } catch (e) {
+        console.error(
+          `[chelonia/private/removeImmediately] Error at destructor for ${contractID}`,
+          e
+        )
+      }
+    }
+    const entry = state.contracts[contractID]
+    const contractName = entry?.type
     if (!contractName) {
-      // An entry without a type is a contract whose first sync never
-      // completed: `retain` created the entry, then the sync failed (or a
-      // re-sync failed after clearing the contract's state). It isn't
-      // subscribed (applying the first message both sets the type and
-      // subscribes) and has no destructor to call. Unless re-syncing, drop
-      // what is left of it, which would otherwise linger in (persisted)
-      // state. A contract whose first sync failed was never announced as
-      // added, and one whose re-sync failed already announced its removal
-      // (`CONTRACTS_MODIFIED` with `removed` and `resync: true`), so an
-      // ordinary removal is announced no further. A permanent one is,
-      // either way: Chelonia now records `null` for the contract, and a
-      // store copy of `state.contracts` (`chelonia/externalStateSetup`)
-      // must record it too. The listeners tolerate the removal of a
-      // contract they never saw added. Re-syncing such an entry is expected
-      // too: there is nothing to clear, and the re-sync starts over from
-      // the first message. Either way, the contract's KV runtime state
-      // goes, as on every removal below.
-      if (state.contracts[contractID] && !this.subscriptionSet.has(contractID)) {
+      // No type: the contract isn't subscribed (applying the first message
+      // both sets the type and subscribes). Expected cases:
+      //  - no entry: an ephemeral retain creates none, and neither does a
+      //    contract that was never retained here (e.g. a `try` release of a
+      //    foreign key's contract);
+      //  - an entry whose first sync never completed (`retain` created it,
+      //    then the sync failed): there is no destructor to call;
+      //  - an entry whose re-sync failed after clearing the contract's
+      //    state: its destructor was called with `resync: true`, and its
+      //    final removal calls it again, with `resync: false` and the state
+      //    the re-sync left, as after a re-sync that succeeded. The type is
+      //    only remembered in memory (`contractTypesBeforeResync`): after a
+      //    restart, such an entry is removed without that call.
+      // Unless re-syncing, drop what is left, which would otherwise linger
+      // in (persisted) state. A contract whose first sync failed was never
+      // announced as added, and one whose re-sync failed already announced
+      // its removal (`CONTRACTS_MODIFIED` with `removed` and `resync:
+      // true`), so an ordinary removal is quiet, and announced no further.
+      // A permanent one is announced either way: Chelonia now records `null`
+      // for the contract, and a store copy of `state.contracts`
+      // (`chelonia/externalStateSetup`) must record it too. The listeners
+      // tolerate the removal of a contract they never saw added. Re-syncing
+      // such an entry is expected too: there is nothing to clear, and the
+      // re-sync starts over from the first message. Either way, the
+      // contract's KV runtime state goes, as on every removal below.
+      if (entry !== null && !this.subscriptionSet.has(contractID)) {
         if (!params?.resync) {
-          console.debug(
-            `[chelonia/private/removeImmediately] Removing ${contractID}, which never finished syncing`
-          )
-          removeContractState.call(this, state, contractID, params?.permanent)
+          const typeBeforeResync = this.contractTypesBeforeResync[contractID]
+          if (typeBeforeResync !== undefined) {
+            delete this.contractTypesBeforeResync[contractID]
+            callDestructor(typeBeforeResync, false)
+          }
+          if (entry) {
+            console.debug(
+              `[chelonia/private/removeImmediately] Removing ${contractID}, which never finished syncing`
+            )
+          }
+          if (entry || params?.permanent) {
+            removeContractState.call(this, state, contractID, params?.permanent)
+          }
         }
         cleanupKvRuntime()
         if (!params?.resync && params?.permanent) {
@@ -708,24 +744,12 @@ export default sbp('sbp/selectors/register', {
       return
     }
 
-    const manifestHash = this.config.contracts.manifests[contractName]
-    if (manifestHash) {
-      const destructor = `${manifestHash}/${contractName}/_cleanup`
-      // Check if a destructor is defined
-      if (sbp('sbp/selectors/fn', destructor)) {
-        // And call it
-        try {
-          sbp(destructor, { contractID, resync: !!params?.resync, state: state[contractID] })
-        } catch (e) {
-          console.error(
-            `[chelonia/private/removeImmediately] Error at destructor for ${contractID}`,
-            e
-          )
-        }
-      }
-    }
+    callDestructor(contractName, !!params?.resync)
 
     if (params?.resync) {
+      // Until the re-sync applies the first message again: if it fails, the
+      // final removal (above) still owes the destructor call.
+      this.contractTypesBeforeResync[contractID] = contractName
       // If re-syncing, keep the reference count
       Object.keys(state.contracts[contractID])
         .filter((k) => k !== 'references')
@@ -740,6 +764,7 @@ export default sbp('sbp/selectors/register', {
           .forEach((k) => this.config.reactiveDel(state[contractID]._volatile, k))
       }
     } else {
+      delete this.contractTypesBeforeResync[contractID]
       removeContractState.call(this, state, contractID, params?.permanent)
     }
 
@@ -3482,6 +3507,8 @@ const handleEvent = {
         this.config.reactiveSet(state.contracts, contractID, Object.create(null))
       }
       this.config.reactiveSet(state.contracts[contractID], 'type', type)
+      // A re-sync got this far: the ordinary removal calls the destructor.
+      delete this.contractTypesBeforeResync[contractID]
       console.debug(`contract ${type} registered for ${contractID}`)
     }
     if (message.isKeyOp()) {

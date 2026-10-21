@@ -86,11 +86,12 @@ const tamperedBodyAt1 = async (contractID: string, signingKeyId: string): Promis
   return JSON.stringify(stored)
 }
 
-// A `fetch` that answers every request with the body of the test's first
-// request, which must be a POST, re-stamped at `height` (e.g. a value that
-// is ahead of the local contract, or a malformed stamp). Such a body never
-// verifies, even once the contract reaches `height`: the signature covers
-// the height.
+// A `fetch` that answers every request with the body of the first request
+// it receives, which must be a POST, re-stamped at `height` (e.g. a value
+// that is ahead of the local contract, or a malformed stamp). At another
+// height, such a body never verifies, even once the contract reaches
+// `height`: the signature covers the height. At the POST's own height, the
+// body is byte-identical, and verifies.
 const replyRestamped = (
   height: string,
   init: ConstructorParameters<typeof Response>[1],
@@ -541,30 +542,9 @@ describe('chelonia/kv/set', () => {
     assert.deepStrictEqual(JSON.parse(posted[1] as string), { x: 2 })
   })
 
-  it("reports currentStatus 'absent' for an empty conflict body", async () => {
-    const { contractID, signingKeyId } = setupContract()
-    const seen: unknown[] = []
-    sbp('chelonia/configure', {
-      connectionURL: 'https://example.test',
-      fetch: async () => seen.length === 0
-        ? new Response('', { status: 412, headers: { etag: '""' } })
-        : new Response(null, { status: 204, headers: { etag: 'e1' } })
-    } as Partial<CheloniaConfig>)
-
-    await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
-      signingKeyId,
-      ifMatch: '"stale"',
-      onconflict: async (args: ConflictArgs): Promise<[JSONType, string | undefined]> => {
-        seen.push([args.currentStatus, args.currentData, args.etag])
-        return [{ x: 2 }, args.etag ?? undefined]
-      }
-    })
-    assert.deepStrictEqual(seen, [['absent', undefined, '""']])
-  })
-
   // Type-checked: the test file fails to compile if `currentValue` stops
   // being tied to `currentStatus`.
-  it('types currentValue by currentStatus for onconflict', async () => {
+  it("reports currentStatus 'absent' for an empty conflict body, typing currentValue by it", async () => {
     const { contractID, signingKeyId } = setupContract()
     const seen: unknown[] = []
     sbp('chelonia/configure', {
@@ -587,14 +567,14 @@ describe('chelonia/kv/set', () => {
         seen.push([args.currentStatus, requiredHeight, none])
       } else {
         const none: undefined = args.currentValue
-        seen.push([args.currentStatus, none])
+        seen.push([args.currentStatus, none, args.currentData, args.etag])
       }
       return [{ x: 2 }, args.etag ?? undefined]
     }
     await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
       signingKeyId, ifMatch: '"stale"', onconflict
     })
-    assert.deepStrictEqual(seen, [['absent', undefined]])
+    assert.deepStrictEqual(seen, [['absent', undefined, undefined, '""']])
   })
 
   it("reports 'present' for a value verified lazily: currentData can still throw", async () => {
@@ -783,24 +763,22 @@ describe('chelonia/kv/set', () => {
     it(`recovery GET with a value that is ahead rejects with the GET's etag and status (maxAttempts: ${maxAttempts})`, async () => {
       const { contractID, signingKeyId } = setupContract()
       sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 30 })
-      let capturedBody = ''
+      // Every GET gets the first POST's body, stamped ahead; a POST gets a
+      // 412 without a body.
+      const restamped = replyRestamped('5', { status: 200, headers: { etag: 'etag-recovered' } })
       let posts = 0
       let gets = 0
       let conflicts = 0
       sbp('chelonia/configure', {
         connectionURL: 'https://example.test',
-        fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
-          if (opts?.method === 'POST') {
-            posts++
-            capturedBody ||= opts.body ?? ''
-            return new Response('', { status: 412 })
+        fetch: async (url: string, opts?: { method?: string; body?: string }) => {
+          const response = await restamped(url, opts)
+          if (opts?.method !== 'POST') {
+            gets++
+            return response
           }
-          gets++
-          const ahead = { ...JSON.parse(capturedBody), height: '5' }
-          return new Response(JSON.stringify(ahead), {
-            status: 200,
-            headers: { etag: 'etag-recovered' }
-          })
+          posts++
+          return new Response('', { status: 412 })
         }
       } as Partial<CheloniaConfig>)
 

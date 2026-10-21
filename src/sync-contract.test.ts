@@ -140,6 +140,11 @@ const failedRetain = async () => {
   eventsAfterStatus = 200
 }
 
+// Whether a warning was logged with `text` in any of its arguments (e.g. in
+// the error that follows the message).
+const warnedWith = (text: string): boolean =>
+  warnings.some((args) => args.some((arg) => String(arg).includes(text)))
+
 // The awaits below fail rather than hang the file.
 const retain = (options?: object) =>
   within(sbp('chelonia/contract/retain', contractID, options), 'the retain')
@@ -191,6 +196,20 @@ describe('a first sync that fails', () => {
     // A store copy of `state.contracts` records the `null` too.
     assert.deepStrictEqual(removedPermanently, [contractID])
     await assert.rejects(retain(), { name: 'ChelErrorResourceGone' })
+  })
+
+  // An ephemeral retain creates no entry: the permanent removal still
+  // records `null`, and announces it, as for a persistent retain.
+  it('leaves a null entry once an ephemerally retained contract is removed permanently', async () => {
+    eventsAfterStatus = 500
+    await assert.rejects(retain({ ephemeral: true }), { name: 'ChelErrorUnexpectedHttpResponseCode' })
+    eventsAfterStatus = 200
+    assert.ok(!(contractID in rootState().contracts))
+    await within(sbp('chelonia/contract/remove', contractID, { permanent: true }), 'the removal')
+    assert.strictEqual(rootState().contracts[contractID], null)
+    assert.deepStrictEqual(removedPermanently, [contractID])
+    assert.ok(!logged(errors, 'Missing contract name'))
+    await assert.rejects(retain({ ephemeral: true }), { name: 'ChelErrorResourceGone' })
   })
 
   it('can be retried', async () => {
@@ -272,6 +291,118 @@ describe('a sync that succeeds', () => {
   })
 })
 
+// A contract with no `state.contracts` entry (one that was never retained
+// here, or only ephemerally) is removed quietly.
+describe('a removal of a contract that has no entry', () => {
+  const OTHER_ID = 'zSyncContractTestNeverRetained'
+  const lane = () =>
+    within(sbp('chelonia/private/queueEvent', OTHER_ID, () => {}), 'the lane')
+
+  it('logs nothing for a `try` release of a contract that was never retained', async () => {
+    await within(sbp('chelonia/contract/release', [OTHER_ID], { try: true }), 'the release')
+    await lane()
+    assert.deepStrictEqual(errors, [])
+  })
+
+  it('logs nothing for the removal of a contract that was never retained', async () => {
+    await within(sbp('chelonia/contract/remove', OTHER_ID), 'the removal')
+    await lane()
+    assert.deepStrictEqual(errors, [])
+    assert.ok(!(OTHER_ID in rootState().contracts))
+  })
+})
+
+// The `_cleanup` destructor of the contract's type, as `removeImmediately`
+// looks it up (`${manifestHash}/${contractName}/_cleanup`), with a made-up
+// manifest hash, configured once the first sync is done (that sync then
+// needs no manifest). A re-sync calls it with `resync: true`; the final
+// removal with `resync: false`, also after a re-sync that failed.
+const MANIFEST = 'zSyncContractTestManifest'
+// `chelonia/configure` preloads the manifests it is given: there is none to
+// load here.
+let skipManifestLoads = false
+sbp('sbp/filters/selector/add', 'chelonia/private/loadManifest', () => {
+  if (skipManifestLoads) return false
+})
+const destructorCalls: Array<{ resync: boolean; state: unknown }> = []
+sbp('sbp/selectors/register', {
+  [`${MANIFEST}/${CONTRACT_TYPE}/_cleanup`]: (
+    { resync, state }: { resync: boolean; state: unknown }
+  ) => {
+    destructorCalls.push({ resync, state: JSON.parse(JSON.stringify(state ?? null)) })
+  }
+})
+
+describe("a contract's destructor", () => {
+  const retainWithDestructor = async () => {
+    await retain()
+    skipManifestLoads = true
+    try {
+      await sbp('chelonia/configure', { contracts: { manifests: { [CONTRACT_TYPE]: MANIFEST } } })
+    } finally {
+      skipManifestLoads = false
+    }
+    destructorCalls.length = 0
+  }
+  const resyncs = (statuses: number[]) => statuses.reduce(async (previous, status) => {
+    await previous
+    if (status === 200) {
+      await within(sbp('chelonia/contract/sync', contractID, { resync: true }), 'the resync')
+    } else {
+      await failedResync()
+    }
+  }, Promise.resolve())
+  const resyncCalls = () => destructorCalls.map(({ resync }) => ({ resync }))
+
+  it('is called with resync: false when the contract is released', async () => {
+    await retainWithDestructor()
+    await release()
+    assert.deepStrictEqual(resyncCalls(), [{ resync: false }])
+  })
+
+  // After a re-sync that failed, the state the re-sync left (only
+  // `_volatile.watch` would remain), not the one before it: a destructor
+  // that releases the contracts it finds in its state would otherwise
+  // release them twice.
+  it('is called again, with resync: false, on the final removal after a failed re-sync', async () => {
+    await retainWithDestructor()
+    await resyncs([500])
+    assert.deepStrictEqual(resyncCalls(), [{ resync: true }])
+    assert.deepStrictEqual({ ...rootState().contracts[contractID] }, { references: 1 })
+    await release()
+    assert.deepStrictEqual(resyncCalls(), [{ resync: true }, { resync: false }])
+    // Here `_volatile` holds no `watch`.
+    assert.deepStrictEqual(destructorCalls[1].state, { _volatile: {} })
+    assert.ok(!(contractID in rootState().contracts))
+    // Nothing is remembered: a later contract of the same ID whose first
+    // sync fails has no destructor to call.
+    destructorCalls.length = 0
+    await failedRetain()
+    await release()
+    assert.deepStrictEqual(resyncCalls(), [])
+  })
+
+  for (const statuses of [[200], [500, 200]]) {
+    it(`is called with resync: true, then false, after re-syncs answered ${statuses.join(', then ')} (control)`, async () => {
+      await retainWithDestructor()
+      await resyncs(statuses)
+      await release()
+      // A re-sync of a contract whose re-sync failed has nothing to clean up.
+      assert.deepStrictEqual(resyncCalls(), [{ resync: true }, { resync: false }])
+    })
+  }
+
+  it("isn't called by chelonia/reset, also after a failed re-sync", async () => {
+    await retainWithDestructor()
+    await resyncs([500])
+    await within(sbp('chelonia/reset'), 'chelonia/reset')
+    assert.deepStrictEqual(resyncCalls(), [{ resync: true }])
+    await failedRetain()
+    await release()
+    assert.deepStrictEqual(resyncCalls(), [{ resync: true }])
+  })
+})
+
 // `chelonia/contract/release` drops the reference count at once, but only
 // queues the removal on the contract's lane. A KV height recovery (of a
 // write, or of a slot's deferred load) that starts in between must not
@@ -330,7 +461,8 @@ describe('a KV height recovery racing a release', () => {
     })
     assert.strictEqual(attempts, 1)
     // The recovery ran, and its sync refused the removed contract.
-    assert.ok(logged(warnings, 'failed during height recovery'))
+    assert.ok(logged(warnings, `contract sync for ${contractID} failed; giving up`))
+    assert.ok(warnedWith(`${contractID} is no longer subscribed`))
     assertRemoved()
   })
 
@@ -360,7 +492,10 @@ describe('a KV height recovery racing a release', () => {
     await within(sbp('chelonia/private/queueEvent', contractID, () => {}), 'the lane')
     assertRemoved()
     // Its sync refused the removed contract.
-    await until(() => logged(warnings, 'failed during height recovery'), 'the refusal warning')
+    await until(
+      () => logged(warnings, `contract sync for ${contractID} failed; giving up`),
+      'the refusal warning'
+    )
   })
 })
 
@@ -410,6 +545,48 @@ describe('a KV height recovery racing a resync', () => {
       await within(resyncing, 'the resync').catch(() => {})
     }
   })
+
+  // The contract is still retained, but not subscribed: the recovery gives
+  // up, saying so rather than that the contract was removed.
+  it('gives up when the resync fails, saying the contract is no longer subscribed', async () => {
+    await retain()
+    let releaseResync!: () => void
+    const resyncHeld = new Promise<void>((resolve) => { releaseResync = resolve })
+    let resyncStarted = false
+    onLatestHEADinfo = async () => {
+      onLatestHEADinfo = undefined
+      resyncStarted = true
+      await resyncHeld
+    }
+    // The resync fails once it fetches the contract's events.
+    eventsAfterStatus = 500
+    const resyncing = sbp('chelonia/contract/sync', contractID, { resync: true })
+    resyncing.catch(() => {})
+    try {
+      await until(() => resyncStarted, 'the resync started')
+      let attempts = 0
+      const recovering = sbp('chelonia/kv/withHeightRecovery', contractID, async () => {
+        attempts++
+        throw new ChelErrorKvHeightAhead('[test] ahead', {
+          cause: { requiredHeight: 5, exact: true, localHeight: 0, etag: null, httpStatus: 412 }
+        })
+      })
+      releaseResync()
+      await assert.rejects(within(recovering, 'the recovery'), isKvHeightAhead)
+      await assert.rejects(within(resyncing, 'the resync'), {
+        name: 'ChelErrorUnexpectedHttpResponseCode'
+      })
+      assert.strictEqual(attempts, 1)
+      assert.deepStrictEqual({ ...rootState().contracts[contractID] }, { references: 1 })
+      assert.ok(warnedWith(
+        `${contractID} is no longer subscribed (released, or its re-sync failed)`
+      ))
+    } finally {
+      releaseResync()
+      eventsAfterStatus = 200
+    }
+    await release()
+  })
 })
 
 // `chelonia/kv/whenSettled` called before the contract has synced, or
@@ -420,7 +597,9 @@ describe("whenSettled across a contract's lifecycle", () => {
   // What `chelonia/connect` mounts: slots are reconciled as contracts are
   // added, and cleaned up as they are removed.
   beforeEach(() => {
-    offReconcile = sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (_: string[], change: unknown) => {
+    offReconcile = sbp('okTurtles.events/on', CONTRACTS_MODIFIED, (
+      _: string[], change: ContractsModifiedChange
+    ) => {
       sbp('chelonia/kv/_onContractsModified', change)
     })
   })
@@ -475,11 +654,17 @@ describe("whenSettled across a contract's lifecycle", () => {
       await assert.rejects(within(retaining, how), { name: 'ChelErrorUnexpectedHttpResponseCode' })
       eventsAfterStatus = 200
       assert.strictEqual(callbackRan, false)
-      if (how === 'an ephemeral retain') await release({ ephemeral: true })
+      if (how === 'an ephemeral retain') {
+        // Only the release ends the wait.
+        assert.strictEqual(await settledOr(outcome, 100, 'pending'), 'pending')
+        await release({ ephemeral: true })
+      }
       const { error } = await outcome
       assert.strictEqual(error?.name, 'ChelErrorKvSlotUnknown')
       assert.match(error.message, /was removed with its contract/)
       assert.ok(!(contractID in rootState().contracts))
+      // The contract had no entry to remove: that is expected.
+      assert.ok(!logged(errors, 'Missing contract name'))
       await retain()
       await release()
       assert.ok(!(contractID in rootState().contracts))

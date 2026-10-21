@@ -61,7 +61,7 @@ Dual ESM/CJS output with TypeScript declarations:
 
 ## Code Organization
 
-All source lives in `src/`. The largest files are `internals.ts` and `chelonia.ts`.
+All source lives in `src/`. The largest files are `kv.ts`, `chelonia.ts` and `internals.ts`.
 
 ```
 src/
@@ -85,6 +85,7 @@ src/
 ├── persistent-actions.ts # PersistentAction queue with retry
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
+├── kv-constants.ts       # KV constants (`KV_NOOP`, statuses, reasons, key-name defaults)
 ├── kv-height.ts          # KV contract-height awareness (waits, recovery; internal)
 ├── kv-runtime.ts         # KV runtime maps: created by _init, replaced by reset (internal)
 ├── presets.ts            # Server preset for configuring Chelonia
@@ -249,11 +250,13 @@ Full documentation:
   `chelonia/kv/sync`, `whenSettled` or `withHeightRecovery` for a
   contract from code that contract's lanes await (a `sideEffect`, a
   `queueInvocation` body, an `onconflict`, an `onUpdate`): it never
-  settles. (Raw `chelonia/kv/set` and `kv/get` queue on no lane, so they
-  settle, their passive waits timing out.) From another contract's
-  `sideEffect` or `queueInvocation` body, it holds that contract's lane
-  for the whole recovery. Raw pubsub handlers and event listeners aren't
-  awaited, so they may await writes. See
+  settles (a *synchronous* call from a same-contract `onUpdate` rejects
+  with `ChelErrorKvReentrant` instead). (Raw `chelonia/kv/set` and
+  `kv/get` queue on no lane, so they settle: `kv/set`'s passive waits
+  time out, and `kv/get` has none, rejecting at once.) From another
+  contract's `sideEffect` or `queueInvocation` body, it holds that
+  contract's lane for the whole recovery. Raw pubsub handlers and event
+  listeners aren't awaited, so they may await writes. See
   [docs/kv.md](docs/kv.md#how-height-recovery-runs).
 
 ### Contract State Structure
@@ -361,12 +364,16 @@ describe('Feature name', () => {
 Shared helpers live in plain modules that register no selectors and are
 excluded from the CJS build: `src/test-utils.ts` (incl. a simulated KV
 server, `makeKvServer`) and `src/kv-height-harness.ts` (the harness of
-`kv-height.test.ts` and `kv-height-pubsub.test.ts`). Test files may import
-those, never each other.
+every `kv-height*.test.ts` file except `kv-height-events.test.ts`, with
+the helpers they share). Test files may import those, never each other.
 A test must fail rather than hang when the behaviour it checks regresses:
 poll with `until(cond, label)` and bound a promise that might never settle
-with `within(promise, label)` (both in `src/test-utils.ts`); `npm test`
-also runs with `--test-timeout=60000`.
+with `within(promise, label)` (both in `src/test-utils.ts`).
+`npm test` runs with `--test-timeout=60000`. On newer Node lines (checked on
+26) that bounds each test; on Node 22, which CI uses, it bounds each test
+*file*, and only `until` / `within` bound a single test. Keep every test
+file under about 25 s when run alone on Node 22; split one that grows
+past that.
 
 Test files use `.test.ts` suffix and are discovered automatically: `npm test` runs every
 `src/**/*.test.ts` file via the Node test runner, each in its own process (fresh SBP

@@ -1,9 +1,9 @@
 // Height-aware KV handling of pubsub KV frames (KV-REVAMPED.md §3.4).
 //
-// Same harness as `kv-height.test.ts` (see `kv-height-harness.ts`), in its
-// own file because these tests call `chelonia/connect`, whose listeners
-// outlive `chelonia/_init`: in a shared file they would change how every
-// later test reconciles its slots.
+// Same harness as the other `kv-height*.test.ts` files (see
+// `kv-height-harness.ts`), in its own file because these tests call
+// `chelonia/connect`, whose listeners outlive `chelonia/_init`: in a shared
+// file they would change how every later test reconciles its slots.
 
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert'
@@ -61,6 +61,15 @@ installKvHeightHooks()
 let vetoLoads = false
 sbp('sbp/filters/selector/add', 'chelonia/kv/_loadSlot', () => {
   if (vetoLoads) return false
+})
+
+// Vetoes the queueing of work on the contract's internal lane while set
+// (`chelonia/queueInvocation` then rejects).
+let vetoInternalLane = false
+sbp('sbp/filters/selector/add', 'chelonia/private/queueEvent', (
+  _domain: string, _selector: string, data: unknown[]
+) => {
+  if (vetoInternalLane && data[0] === CONTRACT_ID) return false
 })
 
 let client: any
@@ -146,10 +155,37 @@ describe('pubsub frames with a malformed height stamp', () => {
     vetoLoads = false
     assert.strictEqual(await whenSettledWithin(UNREAD, 300), 'error')
     assert.strictEqual(mirror(UNREAD).lastError?.name, 'ChelErrorUnexpected')
-    const vetoed = errors.find((args) => String(args[0]).includes('after a malformed frame failed'))
+    const vetoed = errors.find((args) => String(args[0]) ===
+      `[chelonia/kv] _loadSlot (malformed frame) rejected for ${CONTRACT_ID}::${UNREAD}`)
     assert.match(String((vetoed?.[1] as Error | undefined)?.message), /was vetoed/)
     assert.ok(!errors.some((args) => args.some((arg) => arg instanceof TypeError)))
     assert.strictEqual(server.gets().length, 0)
+  })
+})
+
+describe('a pubsub KV frame whose handling a filter vetoes', () => {
+  // The frame is handled on the contract's lane: a veto of that queueing
+  // must not throw out of the WebSocket message handler.
+  it("is logged, and doesn't throw out of the message handler", async () => {
+    await loadV0At40()
+    connect()
+    await writeAsDeviceB(UNREAD, VB, 40)
+    vetoInternalLane = true
+    addTeardown(() => { vetoInternalLane = false })
+    try {
+      deliverKvFrame()
+    } finally {
+      vetoInternalLane = false
+    }
+    await drainLanes()
+    const logs = errors.filter((args) => String(args[0]).includes('Error processing kv event'))
+    assert.strictEqual(logs.length, 1)
+    assert.strictEqual(
+      (logs[0][2] as Error | undefined)?.message,
+      `[chelonia] queueInvocation: queueing on ${CONTRACT_ID} was vetoed`
+    )
+    // The frame wasn't handled.
+    assert.deepStrictEqual(mirror(UNREAD).value, V0)
   })
 })
 
@@ -224,6 +260,9 @@ describe('pubsub frames while the local contract is behind', () => {
   })
 
   it("a clear retried after a recovery doesn't carry the first attempt's conflict", async () => {
+    // The deferred frame's fallback sync must not catch the contract up
+    // between the clear's attempts on a slow machine.
+    sbp('chelonia/kv/_testSetHeightTimings', { pendingFallbackMs: 10000 })
     await setupStaleDeviceA()
     connect()
     // B's frame for VB (height 42) arrives while A is at 40: deferred.
@@ -239,7 +278,7 @@ describe('pubsub frames while the local contract is behind', () => {
     // So another device's next write is applied as is, without the
     // authoritative GET a conflict-resolved write's echo marker forces.
     const V2 = { ...VB, roomC: room('c1', 3) }
-    await within(writeAsDeviceB(UNREAD, V2, 42), "device B's write")
+    await writeAsDeviceB(UNREAD, V2, 42)
     const getsBefore = server.gets().length
     deliverKvFrame()
     await drainLanes()
@@ -251,7 +290,8 @@ describe('pubsub frames while the local contract is behind', () => {
 // `connect` uses the harness's manual connection options, so the client's
 // socket never opens: no contract event can arrive, and `kv/set` doesn't
 // wait for one. (A stale stamp written with recoveries left skips the wait
-// by itself; `kv-height.test.ts` checks that without a pubsub client.)
+// by itself; `kv-height-recovery.test.ts` checks that without a pubsub
+// client.)
 describe('writes and loads while the pubsub socket is closed', () => {
   // Time of the first contract sync requested at or after `started`.
   const firstSyncAfter = (started: number): number | undefined => server.requests.find((r) =>
@@ -394,6 +434,21 @@ describe('the raw KV callback', () => {
     assert.strictEqual(dropped.length, 1)
     assert.ok(String(dropped[0][0]).includes('the slot reloads the key once the contract catches up'))
   })
+
+  // docs/api.md: a frame whose height stamp is malformed never reaches the
+  // raw handler. The control delivers the same value with its own stamp.
+  for (const malformed of [true, false]) {
+    it(malformed
+      ? "isn't called for a frame whose height stamp is malformed"
+      : 'is called for the same frame with a well-formed stamp (control)', async () => {
+      await loadV0At40()
+      connect({ rawHandler: true })
+      await writeAsDeviceB(UNREAD, VB, 40)
+      deliverBody(UNREAD, malformed ? restampedBody(UNREAD, '040') : server.store.get(UNREAD)!.body)
+      await drainLanes()
+      assert.strictEqual(rawFrames.length, malformed ? 0 : 1)
+    })
+  }
 })
 
 // `chelonia/connect` starts clock sync, which `chelonia/reset` stops while

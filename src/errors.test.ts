@@ -24,8 +24,10 @@ const foreignError = (name: string): unknown => vm.runInNewContext(
 )
 
 // Type-level checks (`tsc -p tsconfig.json` compiles this file): a guard
-// that fails narrows its argument to `never` unless the guard names its
-// type, so that `e.message` would not compile after it.
+// whose type is plain `Error` would narrow an `Error` that fails it to
+// `never`, so that `e.message` would not compile after it. Each guard's
+// type is narrower: an error name, or for `isKvConflict` (which matches two
+// names) a typed `cause`.
 const conflictThenMessage = (e: Error): string => {
   if (isKvConflict(e)) return 'conflict'
   return e.message
@@ -117,7 +119,7 @@ describe('KV error predicates', () => {
     assert.deepStrictEqual(kvHeightAheadCause(foreign), cause)
   })
 
-  it('narrow to their names, so that an Error keeps its members after a failed check', () => {
+  it('narrow to a name or a typed cause, so that an Error keeps its members after a failed check', () => {
     const plain = new Error('plain')
     assert.strictEqual(conflictThenMessage(plain), 'plain')
     assert.strictEqual(heightAheadThenMessage(plain), 'plain')

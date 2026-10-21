@@ -1,8 +1,9 @@
-// Shared harness for the height-aware KV tests (`kv-height.test.ts`,
-// `kv-height-pubsub.test.ts`). A plain module, not a `*.test.ts` file: it
-// registers no SBP selectors. Import `./chelonia.js` (which registers the
-// selectors under test) before calling `installKvHeightHooks()`, once at the
-// top level of a test file.
+// Shared harness for the height-aware KV tests: every `kv-height*.test.ts`
+// file except `kv-height-events.test.ts`. It also holds the helpers those
+// files share. A plain module, not a `*.test.ts` file: it registers no SBP
+// selectors. Import `./chelonia.js` (which registers the selectors under
+// test) before calling `installKvHeightHooks()`, once at the top level of a
+// test file.
 //
 // The tests run the real `chelonia/kv/*` selectors, slot loader and pubsub
 // KV dispatch against a simulated chel server (`makeKvServer`, plus the
@@ -19,6 +20,7 @@ import sbp from '@sbp/sbp'
 import * as assert from 'node:assert'
 import { afterEach, beforeEach } from 'node:test'
 
+import { ChelErrorKvUpdateInvalid, isKvHeightAhead, kvHeightAheadCause } from './errors.js'
 import { CHELONIA_KV_STATUS_CHANGED } from './events.js'
 import { KV_NOOP } from './kv-constants.js'
 import {
@@ -42,6 +44,9 @@ import type { ChelRootState, CheloniaConfig, JSONType, KvMirrorEntry } from './t
 export { sleep, until, within }
 
 export const CONTRACT_ID = 'zKvHeightTestIdentityContract'
+// Another contract, for tests that need a second one (its lanes, or its
+// keys on the simulated server).
+export const OTHER_CONTRACT_ID = 'zKvHeightTestOtherContract'
 export const CTYPE = 'test-identity'
 export const UNREAD = 'unreadMessages'
 export const NS_CACHE = 'namespace-cache'
@@ -98,7 +103,11 @@ const makeServer = (initialHeight: number) => {
       }
       // Clock sync, started by `chelonia/connect`.
       if (pathname === '/time') return new Response(String(Date.now()), { status: 200 })
-      return await server.handleKv(pathname, opts) ?? new Response('', { status: 404 })
+      const response = await server.handleKv(pathname, opts)
+      // As a real `fetch` does, reject an abort that lands while the server
+      // handles the request, even one whose POST has committed.
+      opts.signal?.throwIfAborted()
+      return response ?? new Response('', { status: 404 })
     }
   })
   return server
@@ -167,16 +176,18 @@ export const advanceLocalHeightOnInternalLane = (to: number) =>
   sbp('chelonia/private/queueEvent', CONTRACT_ID, () => setLocalHeight(to))
 
 // A second device of the same user writes `value` at contract height
-// `atHeight` (which becomes the server's contract height).
-export const writeAsDeviceB = async (key: string, value: JSONType, atHeight: number) => {
-  server.height = atHeight
-  await withLocalHeight(CONTRACT_ID, atHeight, () =>
-    sbp('chelonia/kv/set', CONTRACT_ID, key, value, {
-      ifMatch: '*', signingKeyId: cskId, encryptionKeyId: cekId
-    })
-  )
-  return server.store.get(key)!
-}
+// `atHeight` (which becomes the server's contract height). Fails after `ms`
+// rather than hang.
+export const writeAsDeviceB = (key: string, value: JSONType, atHeight: number, ms = 2000) =>
+  within((async () => {
+    server.height = atHeight
+    await withLocalHeight(CONTRACT_ID, atHeight, () =>
+      sbp('chelonia/kv/set', CONTRACT_ID, key, value, {
+        ifMatch: '*', signingKeyId: cskId, encryptionKeyId: cekId
+      })
+    )
+    return server.store.get(key)!
+  })(), `device B's write of ${key}`, ms)
 
 // The value stored for `key`, with its height stamp replaced by `stamp`
 // (the rest, signature included, unchanged).
@@ -480,6 +491,154 @@ export const setupStaleDeviceA = async () => {
   server.log.length = 0
   return { e0 }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers shared by the kv-height*.test.ts files
+// ---------------------------------------------------------------------------
+
+// A snapshot of the height wait of `key`, if any.
+export const heightWait = (
+  key: string
+): { requiredHeight: number; parked: boolean } | undefined =>
+  sbp('chelonia/kv/_testHeightWait', CONTRACT_ID, key)
+
+// Device A's loaded slot (V0) is refreshed by an aggregate `kv/sync`, which
+// finds VB written at height 42. The contract stays at 40 (the 300 ms
+// fallback sync doesn't catch it up), so the deferred reload gives up and
+// the slot keeps presenting V0.
+export const loadedRefreshGivesUp = async () => {
+  await setupStaleDeviceA()
+  await within(sbp('chelonia/kv/sync', CONTRACT_ID), 'the aggregate sync')
+  await untilWarned('keeping the current mirror value')
+  await drainLanes()
+  assert.strictEqual(slotStatus(UNREAD), 'loaded')
+  assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, UNREAD), V0)
+  server.log.length = 0
+}
+
+// Device A's loaded slot (V0) is refreshed by an aggregate `kv/sync`, which
+// finds VB written at height 42: a height wait is registered, and the slot
+// keeps presenting V0, marked with `heightAhead`. The wait's fallback is
+// held off (`timings` is merged into the height timings). Leaves the
+// request log empty.
+export const loadedWithWait = async (timings: Record<string, unknown> = {}) => {
+  sbp('chelonia/kv/_testSetHeightTimings', { pendingFallbackMs: 60000, ...timings })
+  await setupStaleDeviceA()
+  await within(sbp('chelonia/kv/sync', CONTRACT_ID), 'the aggregate sync')
+  await drainLanes()
+  assert.strictEqual(slotStatus(UNREAD), 'loaded')
+  assert.deepStrictEqual(mirror(UNREAD).heightAhead, { requiredHeight: 42 })
+  server.log.length = 0
+}
+
+// A slot whose first load was deferred on height: device B wrote VB at
+// height 42, and the local contract is at 40. `def` is merged into the slot
+// definition (an auto-loaded one). Leaves the request log empty.
+export const deferFirstLoad = async (def: Record<string, unknown> = {}) => {
+  await writeAsDeviceB(UNREAD, VB, 42)
+  defineSlot({ key: UNREAD, ...def })
+  await activateContract()
+  assert.strictEqual(slotStatus(UNREAD), 'loading')
+  assert.strictEqual(mirror(UNREAD).value, undefined)
+  server.log.length = 0
+}
+
+// An `update` of UNREAD that records the basis of each reducer run in
+// `bases`. The reducer defaults to adding a2 to roomA.
+export const recordingUpdate = (
+  bases: unknown[],
+  {
+    reducer = addChatRoomUnreadMessage('roomA', 'a2', 5),
+    ...options
+  }: { reducer?: (prev: any) => unknown } & Record<string, unknown> = {}
+) => sbp('chelonia/kv/update', {
+  contractID: CONTRACT_ID,
+  key: UNREAD,
+  updater: (prev: any) => { bases.push(prev); return reducer(prev) },
+  ...options
+})
+
+// VB with a2 added to roomA (`recordingUpdate`'s default reducer on VB).
+export const MERGED_A2 = { ...VB, roomA: room('a1', 1, [{ messageHash: 'a2', createdHeight: 5 }]) }
+
+// The height error for VB, written at 42.
+export const isAheadAt42 = (e: unknown) =>
+  isKvHeightAhead(e) && kvHeightAheadCause(e)?.requiredHeight === 42
+
+// Height-recovery options that every selector that takes them rejects.
+export const INVALID_HEIGHT_RECOVERY_OPTIONS = [
+  { onHeightAhead: 'retry' }, { maxHeightRecoveries: -1 }, { maxHeightRecoveries: 1.5 },
+  { maxHeightRecoveries: NaN }, { maxHeightRecoveries: Infinity }, { maxHeightRecoveries: '2' }
+]
+
+// The rejection of invalid options, whose message names the operation (and
+// the key): `label`, e.g. `update: <contractID>::<key>`.
+export const isInvalidOptions = (label: string) => (e: unknown) =>
+  e instanceof ChelErrorKvUpdateInvalid && e.message.startsWith(`[chelonia/kv] ${label}: `)
+
+// The writes that recover from a height error themselves, as `[name,
+// write]` pairs, each write of UNREAD taking the options in `extra`, and
+// those that `write` is called with.
+export const heightWrites = (extra: Record<string, unknown> = {}) => [
+  ['update', (more: Record<string, unknown> = {}) => sbp('chelonia/kv/update', {
+    contractID: CONTRACT_ID,
+    key: UNREAD,
+    updater: addChatRoomUnreadMessage('roomA', 'a2', 5),
+    ...extra,
+    ...more
+  })],
+  ['clear', (more: Record<string, unknown> = {}) =>
+    sbp('chelonia/kv/clear', CONTRACT_ID, UNREAD, { ...extra, ...more })],
+  ['queuedSet', (more: Record<string, unknown> = {}) => sbp('chelonia/kv/queuedSet', {
+    contractID: CONTRACT_ID, key: UNREAD, data: V0, ifMatch: '*', ...extra, ...more
+  })]
+] as const
+
+// Device B wrote ['alice', 'bob'] to NS_CACHE at height 42, and this device
+// subscribed to the contract at 40: a height recovery only syncs subscribed
+// contracts (syncing an unsubscribed one would subscribe it).
+export const namesWrittenAhead = async () => {
+  await writeAsDeviceB(NS_CACHE, ['alice', 'bob'], 42)
+  await within(sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true }), 'the sync')
+}
+
+// What an earlier session persisted: UNREAD loaded with V0 (written at 40),
+// merged with `extra`. Device B has since written VB at `vbAt`. Returns
+// V0's etag.
+export const persistLoadedV0 = async (
+  { vbAt = 42, ...extra }: { vbAt?: number } & Partial<KvMirrorEntry> = {}
+): Promise<string> => {
+  await writeAsDeviceB(UNREAD, V0, 40)
+  const etag = server.etagOf(UNREAD)
+  await writeAsDeviceB(UNREAD, VB, vbAt)
+  rootState()._kv![CONTRACT_ID] = {
+    [UNREAD]: { value: V0, etag, status: 'loaded', settled: true, ...extra }
+  }
+  return etag
+}
+
+// The first load of UNREAD failed (500): the slot is 'error' without a
+// value. Device B wrote VB at `vbAt` (at 40, this device can verify it).
+export const failFirstLoad = async (vbAt: number) => {
+  await writeAsDeviceB(UNREAD, VB, vbAt)
+  const restore = failKvGets(1)
+  defineSlot({ key: UNREAD })
+  await activateContract()
+  restore()
+}
+
+// A `queuedSet` `onconflict` for NS_CACHE that adds `names` to the current
+// list (sorted, without duplicates). Records each list it merges into in
+// `seen`.
+export const mergeNames = (names: string[], seen: unknown[] = []) =>
+  async ({ currentData = [], etag }: any = {}) => {
+    seen.push(currentData)
+    return [[...new Set([...currentData, ...names])].sort(), etag]
+  }
+
+// ---------------------------------------------------------------------------
+// Hooks
+// ---------------------------------------------------------------------------
 
 export const installKvHeightHooks = () => {
   beforeEach(() => {

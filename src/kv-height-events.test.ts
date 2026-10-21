@@ -24,6 +24,7 @@ import type { SPOpValue } from './SPMessage.js'
 import { signedOutgoingDataWithRawKey } from './signedData.js'
 import {
   captureConsole,
+  logged,
   makeKvServer,
   makeSelfSignedContract,
   sleep,
@@ -46,6 +47,7 @@ let server: ReturnType<typeof makeKvServer>
 let csk: ReturnType<typeof keygen>
 let contractID: string
 let restoreConsole: () => void
+let errors: unknown[][]
 
 // Events are handled on the contract's internal queue, as the pubsub and
 // sync paths do.
@@ -65,7 +67,7 @@ const createContract = async (): Promise<SPMessage> => {
     [keyId(csk)]: serializeKey(csk, true),
     [keyId(created.sak)]: serializeKey(created.sak, true)
   }
-  await handle(first)
+  await within(handle(first), 'the first message was never handled')
   assert.strictEqual(rootState().contracts[contractID]?.height, 0)
   return first
 }
@@ -89,11 +91,11 @@ const nextEvent = (first: SPMessage): SPMessage => SPMessage.createV1_0({
 // `atHeight`, writes `value` (the server's contract is at that height).
 const writeAsOtherDevice = async (value: JSONType, atHeight: number) => {
   server.height = atHeight
-  await withLocalHeight(contractID, atHeight, () =>
+  await within(withLocalHeight(contractID, atHeight, () =>
     sbp('chelonia/kv/set', contractID, KEY, value, {
       ifMatch: '*', signingKeyId: keyId(csk)
     })
-  )
+  ), "the other device's write")
   server.log.length = 0
 }
 
@@ -107,7 +109,7 @@ beforeEach(() => {
     fetch: async (url: string, opts: Parameters<typeof server.handleKv>[1]) =>
       await server.handleKv(new URL(url).pathname, opts) ?? new Response('', { status: 404 })
   } as unknown as Partial<CheloniaConfig>)
-  restoreConsole = captureConsole().restore
+  ;({ errors, restore: restoreConsole } = captureConsole())
 })
 
 afterEach(() => {
@@ -126,8 +128,9 @@ describe('height waits woken by processed events', () => {
       : 'a kv/set waiting on a stale height stamp is re-signed once the event is processed'
     it(title, async () => {
       // Long enough that a wait resolved by its timeout (rather than by the
-      // height notification) fails the timing assertion below.
-      sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 3000 })
+      // height notification) fails the timing assertion below, and short
+      // enough that the write ends before `within` fails it.
+      sbp('chelonia/kv/_testSetHeightTimings', { waitMs: 2000 })
       const first = await createContract()
       let off = () => {}
       if (listenerThrows) {
@@ -150,10 +153,12 @@ describe('height waits woken by processed events', () => {
           ifMatch: '""', signingKeyId: keyId(csk)
         }), 'kv/set')
         const elapsed = Date.now() - startedAt
-        // With the listener throwing, handling the event rejects.
-        await within(
-          (handled ?? Promise.resolve()).catch((e) => { if (!listenerThrows) throw e }),
-          'the event was never handled'
+        // Handling the event resolves even when the listener throws: the
+        // error is logged, and the event still counts as processed.
+        assert.ok(handled, 'the event was never handled')
+        await within(handled, 'the event was never handled')
+        assert.strictEqual(
+          logged(errors, 'marking the event as processed: app listener failed'), listenerThrows
         )
         assert.strictEqual(rootState().contracts[contractID].height, 1)
         assert.deepStrictEqual(server.posts().map((p) => [p.status, p.height]), [

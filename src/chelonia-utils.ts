@@ -1,16 +1,17 @@
 import sbp from '@sbp/sbp'
-import { ChelErrorKvConflict, ChelErrorKvUpdateInvalid, ChelErrorUnexpected } from './errors.js'
+import { ChelErrorKvConflict, ChelErrorUnexpected } from './errors.js'
 import { isKvMaxAttempts } from './internal-errors.js'
 import { assertValidMaxAttempts } from './kv-height.js'
 import type {
   ChelKvOnConflictCallback, JSONType, KvHeightAheadMode, KvHeightRecoveryAttempt
 } from './types.js'
+import { resolveKvKeyIds } from './utils.js'
 
 // This file contains non-core parts of Chelonia, i.e., functionality that is
 // useful but optional. The threshold for something being 'optional' generally
 // is something that can be implemented externally using only public Chelonia
-// selectors (here plus the library's error predicates and the `maxAttempts`
-// check).
+// selectors (here plus the library's error predicates, the `maxAttempts`
+// check and the key lookup that slot writes share).
 // Optional functionality can make certain assumptions about contracts or
 // actions to make things simpler or easier to implement.
 // Currently, a single selector is defined: 'chelonia/kv/queuedSet'.
@@ -25,9 +26,9 @@ export default sbp('sbp/selectors/register', {
   // `chelonia/kv/set`. However, the `chelonia/kv/set` primitive is needed if
   // the queueing logic needs to be more advanced, the key to use requires
   // custom logic or _if the `onconflict` callback also needs to be queued_.
-  // As for slot writes, a missing named encryption key rejects with
-  // `ChelErrorKvUpdateInvalid` instead of writing plaintext; pass
-  // `encryptionKeyName: null` to store plaintext.
+  // As for slot writes, a missing named key (encryption or signing) rejects
+  // with `ChelErrorKvUpdateInvalid` instead of writing plaintext or sending
+  // the write unsigned; pass `encryptionKeyName: null` to store plaintext.
   // Raw `chelonia/kv/set` never syncs the contract, though: wrap such a call
   // in `chelonia/kv/withHeightRecovery`, as this selector does (see
   // docs/kv.md).
@@ -58,17 +59,20 @@ export default sbp('sbp/selectors/register', {
   // without `onconflict`, rejects with `ChelErrorKvConflict`, like
   // `chelonia/kv/update` and `chelonia/kv/clear`; match it with
   // `isKvConflict(e)`. Its `.cause` is `kv/set`'s: `{ currentStatus,
-  // currentData, requiredHeight, etag }` from the last server response, with
-  // `currentData` only when that value is known (`'present'` and decodable,
-  // or `'absent'`), `requiredHeight` (the value's height stamp) only when it
-  // is `'ahead'`, and `currentStatus` only when the last response could be
-  // read and decoded. The exception is a conflict whose last value is ahead of
-  // the local contract (with an `onconflict`, and without
+  // currentData, requiredHeight, etag }` from the last server response.
+  // `currentStatus` is there when that response could be read and, for a
+  // `'present'` value, decoded (an `'ahead'` or `'malformed'` value isn't
+  // decoded); `currentData` only when the value is known (`'present'` and
+  // decodable, or `'absent'`); `requiredHeight` (the value's height stamp)
+  // only when it is `'ahead'`. The exception is a conflict whose last value
+  // is ahead of the local contract (with an `onconflict`, and without
   // `allowUnverifiedConflict`): `kv/set` rejects with
   // `ChelErrorKvHeightAhead`, which is recovered from as above (and is the
   // rejection once the recoveries run out). A blind write
   // (`allowUnverifiedConflict`) doesn't depend on the value, so that is a
-  // conflict too.
+  // conflict too. A server value whose height stamp is malformed rejects
+  // with `ChelErrorKvHeightMalformed` (`isKvHeightMalformed(e)`), except
+  // for a blind write, which may overwrite it.
   'chelonia/kv/queuedSet': async ({
     contractID,
     key,
@@ -94,7 +98,7 @@ export default sbp('sbp/selectors/register', {
     onHeightAhead?: KvHeightAheadMode | null;
     maxHeightRecoveries?: number | null;
     encryptionKeyName?: string | null;
-    signingKeyName: string;
+    signingKeyName?: string;
   }): Promise<{ etag: string | null }> => {
     const label = `queuedSet: ${contractID}::${key}`
     // Throws, so it rejects: this is an `async` function.
@@ -105,21 +109,14 @@ export default sbp('sbp/selectors/register', {
       // `signal` (and `chelonia/reset`) also end the wait while the write is
       // still queued.
       return queue(() => {
-        // Resolved here, on the lane, as slot writes do. A missing named
-        // key refuses the write rather than storing plaintext; only
-        // `encryptionKeyName: null` stores plaintext.
-        const encryptionKeyId = encryptionKeyName === null
-          ? undefined
-          : sbp('chelonia/contract/currentKeyIdByName', contractID, encryptionKeyName)
-        if (encryptionKeyName !== null && !encryptionKeyId) {
-          throw new ChelErrorKvUpdateInvalid(
-            `[chelonia/kv] ${label}: '${encryptionKeyName}' not found on contract; refusing to write plaintext`
-          )
-        }
+        // Resolved here, on the lane, as slot writes do.
+        const { encryptionKeyId, signingKeyId } = resolveKvKeyIds(
+          contractID, key, { encryptionKeyName, signingKeyName }, 'queuedSet'
+        )
         return sbp('chelonia/kv/set', contractID, key, data, {
           ifMatch,
           encryptionKeyId,
-          signingKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, signingKeyName),
+          signingKeyId,
           onconflict,
           allowUnverifiedConflict,
           maxAttempts,

@@ -4583,8 +4583,8 @@ describe('KV slot API', () => {
   // 77b: the data-loss-guard reload inside `update` reports what it loads,
   // as any load does: a 'load' event and `onUpdate` before the write's
   // 'local' one, and the status leaves 'error' as soon as the reload has
-  // verified the server value (REVIEW 2026-10-18 #5: a silent reload left
-  // the slot in 'error' when the reducer then returned KV_NOOP).
+  // verified the server value (so a reducer that then returns KV_NOOP
+  // doesn't leave the slot in 'error'; see 77d).
   // -----------------------------------------------------------------------
   it('77b: update on error slot reports its guard reload, then the local write', async () => {
     const onUpdateCalls: Array<{ reason?: string; value?: unknown }> = []
@@ -4626,12 +4626,10 @@ describe('KV slot API', () => {
     assert.strictEqual(sbp('chelonia/kv/status', c, 'silentReload'), 'loaded')
     // From an 'error' baseline the reload goes through 'loading' (only a
     // 'loaded' slot keeps its status while it reloads), and the slot is
-    // 'loaded' before the write commits.
+    // 'loaded' before the write commits, which changes the status no more.
     const statusEvents = log.filter((e) => e.type === CHELONIA_KV_STATUS_CHANGED) as
       Array<{ payload: { status: string } }>
-    assert.deepStrictEqual(
-      statusEvents.map((e) => e.payload.status).slice(0, 2), ['loading', 'loaded'])
-    assert.strictEqual(statusEvents.at(-1)?.payload.status, 'loaded')
+    assert.deepStrictEqual(statusEvents.map((e) => e.payload.status), ['loading', 'loaded'])
     offs.forEach((off) => off())
   })
 
@@ -4687,7 +4685,7 @@ describe('KV slot API', () => {
   // 77d: the guard reload verifies another device's value, and the reducer
   // then returns KV_NOOP: the slot holds a verified value, so it leaves
   // 'error', `read` returns that value, and the next update needs no
-  // request (REVIEW 2026-10-18 #5).
+  // request (a reload that only seeded the reducer would leave it 'error').
   // -----------------------------------------------------------------------
   it("77d: a KV_NOOP after the guard reload leaves the slot 'loaded'", async () => {
     sbp('chelonia/kv/defineSlot', {
@@ -5768,12 +5766,13 @@ describe('KV slot API', () => {
 })
 
 describe('KV runtime fields across chelonia/reset', () => {
-  it('only the slot definitions keep their content', () => {
+  it('only the slot definitions and the count of resets in progress keep their content', () => {
     const ctx = {} as CheloniaContext
     initKvRuntime(ctx)
     const fields = ctx as unknown as Record<string, unknown>
     // Put in place of every field that isn't a collection (the height
-    // session, the flush flag, the retry timer...): reset must replace it.
+    // session, the flush flag, the retry timer...): reset must replace it,
+    // except `kvHeightSessionHolds`, which counts the resets themselves.
     const SENTINEL = { sentinel: true }
     const marked: string[] = []
     for (const [name, value] of Object.entries(fields)) {

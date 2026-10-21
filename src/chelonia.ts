@@ -394,6 +394,7 @@ export default sbp('sbp/selectors/register', {
     this.manifestToContract = {}
     this.whitelistedActions = {}
     this.currentSyncs = Object.create(null)
+    this.contractTypesBeforeResync = Object.create(null)
     this.postSyncOperations = Object.create(null)
     this.sideEffectStacks = Object.create(null) // [contractID]: Array<unknown>
     this.sideEffectStack = (contractID: string) => {
@@ -846,6 +847,8 @@ export default sbp('sbp/selectors/register', {
     clearObject(this.ephemeralReferenceCount)
     this.pending.splice(0)
     clearObject(this.currentSyncs)
+    // A reset calls no destructors, also for contracts whose re-sync failed.
+    clearObject(this.contractTypesBeforeResync)
     clearObject(this.postSyncOperations)
     clearObject(this.sideEffectStacks)
     const removedContractIDs = Array.from(this.subscriptionSet)
@@ -1305,7 +1308,7 @@ export default sbp('sbp/selectors/register', {
               if (slot) {
                 sbp('chelonia/kv/_loadSlotInBackground', {
                   contractID: msg.channelID, slot, reason: 'remote'
-                }, `[chelonia] reloading ${msg.channelID}::${msg.key} after a malformed frame failed`)
+                }, `[chelonia/kv] _loadSlot (malformed frame) rejected for ${msg.channelID}::${msg.key}`)
               }
               throw frame.error
             }
@@ -1621,7 +1624,15 @@ export default sbp('sbp/selectors/register', {
     //        return this.config.fetch(profilePictureUrl).then(doSomeWorkWithTheFile)
     //      })
     //    }
-    return sbp('chelonia/private/queueEvent', contractID, ['chelonia/private/noop']).then(() =>
+    // A filter that vetoes the queueing on the internal lane makes
+    // `queueEvent` return nothing: reject, rather than throw a `TypeError`.
+    const internal = sbp('chelonia/private/queueEvent', contractID, ['chelonia/private/noop'])
+    if (internal === undefined) {
+      return Promise.reject(new ChelErrorUnexpected(
+        `[chelonia] queueInvocation: queueing on ${contractID} was vetoed`
+      ))
+    }
+    return internal.then(() =>
       sbp('chelonia/private/queueEvent', 'public:' + contractID, sbpInvocation)
     )
   },
@@ -3052,8 +3063,10 @@ export default sbp('sbp/selectors/register', {
       // the server requires (a `409`, or a conflicting value that is
       // ahead), per wait. Defaults to `KV_HEIGHT_WAIT_MS` (1.5 s). `0`
       // skips the wait: the call rejects with `ChelErrorKvHeightAhead` at
-      // once unless the height is already reached. For callers that sync
-      // and retry on that error anyway.
+      // once unless the height is already reached (after a `409` while a
+      // sync of the contract runs, it rejects even then: a `409` waits for
+      // that sync to end first). For callers that sync and retry on that
+      // error anyway.
       heightWaitMs?: number | null;
       signal?: AbortSignal;
     }
@@ -3161,11 +3174,13 @@ export default sbp('sbp/selectors/register', {
     }
     // Reads what the current `response` (a 412, or the fetch-first GET) says
     // about the server value, doing at most one recovery GET per `kv/set`
-    // call. With `wait`, a value that is ahead is first given a bounded,
-    // passive wait for the local contract to catch up. `status` is that of
-    // the response `etag` came from (the recovery GET's, once it ran).
+    // call, and none without `recover`. With `wait`, a value that is ahead
+    // is first given a bounded, passive wait for the local contract to
+    // catch up. `status` is that of the response `etag` came from (the
+    // recovery GET's, once it ran).
     const readServerValue = async (
-      wait: boolean
+      wait: boolean,
+      recover = true
     ): Promise<{ body: KvServerValue<JSONType>; etag: string | null; status: number }> => {
       let body: KvServerValue<JSONType> = { kind: 'absent' }
       let etag = responseEtag(response)
@@ -3196,14 +3211,17 @@ export default sbp('sbp/selectors/register', {
       // body, the retry loop cannot recover — it would re-send
       // if-match: '""' and loop until maxAttempts. Do at most one GET
       // per set call to recover the current etag and value so
-      // onconflict can produce a valid retry. chel's 412 carries the
+      // onconflict can produce a valid retry (only with `recover`: there
+      // is nothing to retry without `onconflict`). chel's 412 carries the
       // stored value as its body (empty when there is none), so a
       // body-less 412 does mean absent. This GET recovers the etag, and
       // its body replaces the `'absent'` one: a value written since is
       // classified as usual (a malformed stamp throws
-      // `ChelErrorKvHeightMalformed`). If it fails, `'absent'` stands
-      // rather than failing the write.
+      // `ChelErrorKvHeightMalformed`). If it answers with an error status,
+      // `'absent'` stands rather than failing the write; a fetch that
+      // rejects (e.g. on an abort) fails it.
       if (
+        recover &&
         !recoveryGetAttempted &&
         !etag &&
         body.kind === 'absent' &&
@@ -3366,7 +3384,10 @@ export default sbp('sbp/selectors/register', {
               // on any earlier attempt. (A blind writer gets `'malformed'`
               // from `classifyBody` instead of a throw; without
               // `onconflict` it stays a conflict, as `'ahead'` does below.)
-              const last = await readServerValue(false).catch((e: unknown) => {
+              // Without `onconflict` there is no recovery GET either: the
+              // cause reports what the 412 itself said (`'absent'` for a
+              // body-less one).
+              const last = await readServerValue(false, hasOnconflict).catch((e: unknown) => {
                 throwIfAborted(fetchSignal)
                 if (hasOnconflict && isKvHeightMalformed(e)) throw e
                 return undefined
@@ -3400,7 +3421,9 @@ export default sbp('sbp/selectors/register', {
                     }),
                     ...(currentStatus !== undefined && { currentStatus }),
                     // The value's height stamp, for a value that is ahead.
-                    ...(last?.body.kind === 'ahead' && { requiredHeight: last.body.requiredHeight }),
+                    ...(last?.body.kind === 'ahead' && {
+                      requiredHeight: last.body.requiredHeight
+                    }),
                     etag: (last ? last.etag : responseEtag(response)) ?? null
                   }
                 }

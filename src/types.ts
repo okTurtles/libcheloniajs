@@ -280,8 +280,9 @@ export type KvMirrorEntry = {
   // reports `'loading'` meanwhile, except that a `'loaded'` slot keeps its
   // status during the reloads that preserve it (deferred reloads,
   // `update`'s reloads, the reload after a pubsub conflict, the later
-  // rounds of a single-key `sync`); `sync`'s own loads and reconnect
-  // reloads take it through `'loading'` too. A resync re-activates the
+  // rounds of a single-key `sync`); `sync`'s own loads, reconnect reloads
+  // and the reload of a pubsub frame with a malformed height stamp take it
+  // through `'loading'` too. A resync re-activates the
   // contract's slots: their entries (kept, values included) go
   // `settled: false` until the reload that follows.
   // Always present on entries of active slots; entries persisted by older
@@ -300,14 +301,13 @@ export type KvMirrorEntry = {
   // request was in flight remains (a slot that found no value is then
   // `'loading'`, not `'non-init'`); when a local write commits (with the
   // same exception); when a resync cancels the key's wait; and once the
-  // deferred reload
-  // started by reaching the height verifies the key. A deferred reload
-  // that fails, can't start or is vetoed leaves it, even though the height
-  // was reached: nothing verified the key, so `update` keeps reloading
-  // before running its reducer, and rejects with the reload's error if
-  // that fails too, until a load verifies the key. Changes are announced
-  // with `CHELONIA_KV_STATUS_CHANGED`, possibly with an unchanged status.
-  // See KV-REVAMPED.md §4.9.
+  // deferred reload started by reaching the height verifies the key. A
+  // deferred reload that fails, can't start or is vetoed leaves it, even
+  // though the height was reached: nothing verified the key, so `update`
+  // keeps reloading before running its reducer, and rejects with the
+  // reload's error if that fails too, until a load verifies the key.
+  // Changes are announced with `CHELONIA_KV_STATUS_CHANGED`, possibly with
+  // an unchanged status. See KV-REVAMPED.md §4.9.
   heightAhead?: { requiredHeight: number };
 };
 
@@ -390,9 +390,10 @@ export type KvHeightRecoveryAttempt = {
   // caller's `signal` and `chelonia/reset` reject the result at once, and
   // `body` then never runs. A body that never runs rejects rather than
   // resolving `undefined`: with `AbortError` when the lane dropped it
-  // (`chelonia/reset` does, and so does a filter that vetoes one of the
-  // selectors `chelonia/queueInvocation` calls), and `ChelErrorUnexpected`
-  // when a filter vetoed `chelonia/queueInvocation` itself.
+  // (`chelonia/reset` does, and so does a filter that vetoes the queueing of
+  // `body` on the public lane), and `ChelErrorUnexpected` when a filter
+  // vetoed `chelonia/queueInvocation` itself, or its queueing on the
+  // contract's internal lane.
   queue: <T>(body: () => Promise<T>) => Promise<T>;
 }
 
@@ -649,6 +650,10 @@ export type CheloniaContext = {
   >;
   whitelistedActions: Record<string, true>;
   currentSyncs: Record<string, { firstSync: boolean }>;
+  // The type of each contract that a re-sync cleared, until the re-sync
+  // applies the contract's first message again: if it fails, the contract's
+  // final removal still calls its `_cleanup` destructor. In memory only.
+  contractTypesBeforeResync: Record<string, string>;
   postSyncOperations: Record<string, Record<string, Parameters<typeof sbp>>>;
   sideEffectStacks: Record<string, Parameters<typeof sbp>[]>;
   sideEffectStack: (contractID: string) => Array<Parameters<typeof sbp>>;
@@ -725,8 +730,10 @@ export type CheloniaContext = {
   // value the superseded load is about to discard at its staleness guard
   // — which would otherwise leave the mirror silently stale.
   kvPendingLoads: Map<string, number>;
-  // Per-contract count of `onUpdate` callbacks currently executing
-  // inside the contract's `chelonia/queueInvocation` lane. A KV selector
+  // Per-contract count of `onUpdate` callbacks whose synchronous part is
+  // currently executing inside the contract's `chelonia/queueInvocation`
+  // lane (the count drops when the callback returns or reaches its first
+  // `await`, see `safeOnUpdateGuarded`). A KV selector
   // (`update`, `clear`, single-key and aggregate `sync`,
   // `withHeightRecovery` and so `queuedSet`), or a `whenSettled` that would
   // wait, invoked while this is non-zero for the same contract would
@@ -770,10 +777,13 @@ export type CheloniaContext = {
   // session already ended. Survives `chelonia/reset`. Runtime-only.
   kvHeightSessionHolds: number;
   // The height waits `chelonia/reset` dropped when it ended the height
-  // session. If the reset fails before tearing the session down, they are
-  // registered again, parked ones as parked
+  // session, and those that would have been registered while it was ended
+  // (`suspendHeightWait`). If the reset fails before tearing the session
+  // down, they are registered again, parked ones as parked
   // (`chelonia/kv/_resumeHeightSession`). Runtime-only.
-  kvSuspendedHeightWaits: Array<Pick<KvHeightWait, 'contractID' | 'key' | 'requiredHeight' | 'reason' | 'parked'>>;
+  kvSuspendedHeightWaits: Array<
+    Pick<KvHeightWait, 'contractID' | 'key' | 'requiredHeight' | 'reason' | 'parked'>
+  >;
   // The pending `chelonia/kv/whenSettled` calls, keyed by
   // `${contractID}::${key}`: the function that rejects each one, called
   // when the slot it waits for can't settle any more (deactivated, not
@@ -786,6 +796,13 @@ export type CheloniaContext = {
   // isn't active won't activate unless its `match` changes, so
   // `whenSettled` rejects at once. Runtime-only.
   kvReconciledContracts: Set<string>;
+  // Contracts whose removal for a resync kept their mirror entries
+  // (`chelonia/kv/_cleanupContractRuntime`), until their slots are
+  // reconciled again: that reconcile drops the kept entries no active slot
+  // claims (e.g. of a slot unregistered during the resync, which no
+  // cleanup could reach while the contract's type was unknown). Any other
+  // removal unmarks the contract. Runtime-only.
+  kvResyncedContracts: Set<string>;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
@@ -999,7 +1016,7 @@ export type ChelKvOnConflictCallback = (args: {
    * **Throws on access.** The runtime value is a lazy getter (see
    * `resolveData` in `src/chelonia.ts`) that forces decryption and
    * signature verification the first time it is read, and may throw
-   * `ChelErrorDecryptionError` or `ChelErrorSignatureError`, also
+   * `ChelErrorDecryptionError` or `ChelErrorSignatureError`, even
    * when `currentStatus` is `'present'`. When `currentStatus` is
    * `'ahead'` it throws `ChelErrorKvHeightAhead`, and when it is
    * `'malformed'` it throws `ChelErrorKvHeightMalformed`.

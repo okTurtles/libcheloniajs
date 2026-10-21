@@ -33,6 +33,7 @@ const initKvSession = (ctx: CheloniaContext): void => {
   ctx.kvSuspendedHeightWaits = []
   ctx.kvSettleWaiters = new Map()
   ctx.kvReconciledContracts = new Set()
+  ctx.kvResyncedContracts = new Set()
 }
 
 // Creates every KV field of the context. Not `kvReconnectListener` /
@@ -75,7 +76,8 @@ export const resetKvSession = (ctx: CheloniaContext): void => {
   // map, so iterate over copies.
   for (const [waitKey, waiters] of Array.from(settleWaiters)) {
     const error = new DOMException(
-      `chelonia/reset while waiting for ${waitKey} to settle`, 'AbortError'
+      `[chelonia/kv] whenSettled: chelonia/reset while waiting for ${waitKey} to settle`,
+      'AbortError'
     )
     for (const reject of Array.from(waiters)) reject(error)
   }
