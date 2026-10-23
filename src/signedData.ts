@@ -156,25 +156,21 @@ const verifySignatureData = function <T, U extends object = object> (
     height < designatedKey._notBeforeHeight ||
     !designatedKey.purpose.includes('sig')
   ) {
-    // These errors (ChelErrorSignatureKeyUnauthorized) are serious and
-    // indicate a bug. Make them fatal when running integration tests
-    // (otherwise, they get swallowed and shown as a notification)
-    if (process.env.CI) {
-      console.error(`Key ${sKeyId} is unauthorized or expired for the current contract`, {
-        designatedKey,
-        height,
-        state: JSON.parse(JSON.stringify(sbp('state/vuex/state')))
-      })
+    const message = `Key ${sKeyId} is unauthorized or expired for the current contract`
+    // These errors are serious and indicate a bug. Make them fatal in the
+    // host app's integration tests (otherwise they're shown as a notification)
+    if (process.env.CI && sbp('sbp/selectors/fn', 'state/vuex/state')) {
+      let appState: unknown
+      try {
+        appState = JSON.parse(JSON.stringify(sbp('state/vuex/state')))
+      } catch {
+        appState = '[unserializable]'
+      }
+      console.error(message, { designatedKey, height, state: appState })
       // An unhandled promise rejection will cause Cypress to fail
-      Promise.reject(
-        new ChelErrorSignatureKeyUnauthorized(
-          `Key ${sKeyId} is unauthorized or expired for the current contract`
-        )
-      )
+      Promise.reject(new ChelErrorSignatureKeyUnauthorized(message))
     }
-    throw new ChelErrorSignatureKeyUnauthorized(
-      `Key ${sKeyId} is unauthorized or expired for the current contract`
-    )
+    throw new ChelErrorSignatureKeyUnauthorized(message)
   }
 
   // TODO
