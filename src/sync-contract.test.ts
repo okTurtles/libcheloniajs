@@ -131,4 +131,36 @@ describe('Contract sync and removal', () => {
     assert.deepStrictEqual(added, [cid])
     assert.strictEqual(rootState().contracts[cid]?.HEAD, cid)
   })
+
+  // A leaked ephemeral reference would keep the contract after this release.
+  const assertRemovedOnLastRelease = async (cid: string) => {
+    server.failEvents = false
+    await within(sbp('chelonia/contract/retain', cid, { ephemeral: true }), 'retain')
+    assert.strictEqual(rootState().contracts[cid]?.HEAD, cid)
+    await within(sbp('chelonia/contract/release', cid, { ephemeral: true }), 'release')
+    assert.strictEqual(rootState().contracts[cid], undefined)
+  }
+
+  it('withRetained gives back its references when the first sync fails', async () => {
+    const cid = server.contract!.hash()
+    server.failEvents = true
+    let ran = false
+    await assert.rejects(
+      within(sbp('chelonia/contract/withRetained', cid, () => { ran = true }), 'withRetained'),
+      { name: 'ChelErrorUnexpectedHttpResponseCode' }
+    )
+    assert.strictEqual(ran, false)
+    await assertRemovedOnLastRelease(cid)
+  })
+
+  it('withRetained gives back the references taken before a deleted contract', async () => {
+    const cid = server.contract!.hash()
+    const contracts: Record<string, unknown> = rootState().contracts
+    contracts.gone = null
+    await assert.rejects(
+      within(sbp('chelonia/contract/withRetained', [cid, 'gone'], () => {}), 'withRetained'),
+      { name: 'ChelErrorResourceGone' }
+    )
+    await assertRemovedOnLastRelease(cid)
+  })
 })

@@ -1832,14 +1832,33 @@ export default sbp('sbp/selectors/register', {
       : undefined
   },
   // Higher level function to automatically retain / release a contract
-  'chelonia/contract/withRetained': async function (contractIDs: string | string[], callback: () => unknown | Promise<unknown>) {
-    await sbp('chelonia/contract/retain', contractIDs, { ephemeral: true })
+  'chelonia/contract/withRetained': async function (
+    this: CheloniaContext,
+    contractIDs: string | string[],
+    callback: () => unknown | Promise<unknown>
+  ) {
+    const release = (ids: string | string[]) =>
+      sbp('chelonia/contract/release', ids, { ephemeral: true }).catch((e: unknown) => {
+        console.error('[withRetained] Error releasing contract:', e)
+      })
+    const countsBefore = { ...this.ephemeralReferenceCount }
+    // `retain` takes its references before its first await, so the ones it
+    // took are known here even if it then rejects (e.g., a failed first sync)
+    const retaining = sbp('chelonia/contract/retain', contractIDs, { ephemeral: true })
+    const taken: string[] = []
+    for (const [id, count] of Object.entries(this.ephemeralReferenceCount)) {
+      for (let i = countsBefore[id] ?? 0; i < count; i++) taken.push(id)
+    }
+    try {
+      await retaining
+    } catch (e) {
+      if (taken.length) await release(taken)
+      throw e
+    }
     try {
       return await callback()
     } finally {
-      await sbp('chelonia/contract/release', contractIDs, { ephemeral: true }).catch((e: unknown) => {
-        console.error('[withRetained] Error releasing contract:', e)
-      })
+      await release(contractIDs)
     }
   },
   'chelonia/contract/disconnect': async function (
