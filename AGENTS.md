@@ -335,6 +335,14 @@ scope, so a stub registered by one file (e.g. the `chelonia/contract/fullState` 
 Shared helpers live in `src/test-utils.ts`, a plain module that registers no selectors. A
 test must fail rather than hang when the behaviour it checks regresses: poll with
 `until(cond, label)` and bound a promise that might never settle with `within(promise, label)`.
+`makeKvServer` there simulates the server's KV store (`if-match` and height checks).
+`src/kv-height-harness.ts` (imports `chelonia.ts`, excluded from the CJS build) runs the real
+KV slot layer against it for the `kv-height*.test.ts` files; test files may import these two
+modules, never each other.
+
+`npm test` passes `--test-timeout=60000`. On Node 22, which CI uses, that bounds a whole
+test *file* (newer Node lines bound each test), so keep each file under about 25 s when run
+alone on Node 22, and split one that grows past that.
 
 ## Common Gotchas
 

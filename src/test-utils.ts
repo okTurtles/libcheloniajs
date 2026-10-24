@@ -1,3 +1,5 @@
+import { createCID } from './functions.js'
+
 // Shared test helpers. This is a plain module, not a `*.test.ts` file: the
 // `test` script never runs it directly, and it registers no SBP selectors,
 // so any test file may import it without contaminating registrations.
@@ -46,3 +48,72 @@ export const captureConsole = (
     restore: () => { for (const [method, fn] of originals) console[method] = fn }
   }
 }
+
+export type KvServerRequest = {
+  method: 'GET' | 'POST';
+  key: string;
+  status: number;
+  ifMatch?: string | null;
+  height?: unknown;
+}
+
+export type FetchInit = Parameters<typeof fetch>[1]
+
+// One contract's KV store as the server keeps it. A POST needs `if-match`
+// (400) matching the stored value (412) and a stamp equal to the server's
+// contract height (409). Etags are the quoted CID of the stored body.
+export const makeKvServer = (contractID: string, { height = 0 } = {}) => {
+  const store = new Map<string, { body: string; etag: string }>()
+  const prefix = `/kv/${encodeURIComponent(contractID)}/`
+  const respond = (status: number, body: string | null, etag: string) =>
+    new Response(body, { status, headers: { etag, 'x-cid': etag } })
+  const server = {
+    height,
+    store,
+    log: [] as KvServerRequest[],
+    // Runs when a POST arrives, before it's checked (e.g. another device wins the race)
+    onPost: undefined as ((key: string) => unknown) | undefined,
+    etagOf: (key: string) => store.get(key)?.etag ?? '""',
+    // Stores `body` as is, bypassing every check
+    put (key: string, body: unknown): string {
+      const text = typeof body === 'string' ? body : JSON.stringify(body)
+      const etag = `"${createCID(text)}"`
+      store.set(key, { body: text, etag })
+      return etag
+    },
+    posts: () => server.log.filter(({ method }) => method === 'POST'),
+    // Answers a request for this contract's KV store, `undefined` for any other URL
+    async handle (url: string, init?: FetchInit): Promise<Response | undefined> {
+      const { pathname } = new URL(url)
+      if (!pathname.startsWith(prefix)) return undefined
+      const key = decodeURIComponent(pathname.slice(prefix.length))
+      if (init?.method !== 'POST') {
+        const stored = store.get(key)
+        server.log.push({ method: 'GET', key, status: stored ? 200 : 404 })
+        return stored ? respond(200, stored.body, stored.etag) : new Response(null, { status: 404 })
+      }
+      const body = String(init.body)
+      const ifMatch = new Headers(init.headers).get('if-match')
+      let stamp: unknown
+      try { stamp = JSON.parse(body).height } catch {}
+      const request: KvServerRequest = { method: 'POST', key, status: 0, ifMatch, height: stamp }
+      server.log.push(request)
+      await server.onPost?.(key)
+      const stored = store.get(key)
+      const current = server.etagOf(key)
+      const reject = (status: number) => {
+        request.status = status
+        return respond(status, status === 400 ? null : stored?.body ?? '', current)
+      }
+      if (!ifMatch) return reject(400)
+      const accepted = ifMatch.split(',').map((tag) => tag.trim())
+      if (!accepted.includes('*') && !accepted.includes(current)) return reject(412)
+      if (Number(stamp) !== server.height) return reject(409)
+      request.status = 204
+      return respond(204, null, server.put(key, body))
+    }
+  }
+  return server
+}
+
+export type KvServer = ReturnType<typeof makeKvServer>
