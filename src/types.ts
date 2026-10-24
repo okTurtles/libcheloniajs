@@ -750,21 +750,13 @@ export type ChelKvOnConflictCallback = (args: {
   status: number;
   etag: string | null | undefined;
   /**
-   * The decrypted/verified server data for the conflicting key.
-   *
-   * **Throws on access.** The runtime value is a lazy getter (see
-   * `resolveData` in `src/chelonia.ts`) that forces decryption and
-   * signature verification the first time it is read, and may reject
-   * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`.
-   * Access it inside a `try`/`catch` (falling back to `undefined` or
-   * re-throwing as appropriate), or read `currentValue.data` directly
-   * with the same precaution. The bundled slot API (`chelonia/kv/update`,
-   * `chelonia/kv/clear`) already guards access; this note applies to
-   * direct `chelonia/kv/set` callers supplying a custom `onconflict`.
+   * The verified server data, decrypted lazily. **Throws on access** if it
+   * can't be decrypted or verified, and for an `'ahead'`
+   * (`ChelErrorKvHeightAhead`) or `'malformed'` (`ChelErrorKvHeightMalformed`)
+   * value, so read it inside a `try`/`catch`.
    */
   currentData: JSONType | undefined;
-  currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string | undefined] | false>;
+} & KvConflictServerValue) => Promise<[JSONType, string | undefined] | false>;
 
 // 'ahead': stamped at a contract height not reached locally, so it can't be
 // verified yet. 'malformed': its height stamp is missing or invalid.

@@ -65,7 +65,8 @@ import {
   heightAheadError,
   localHeight,
   readHeightStamp,
-  sleep
+  sleep,
+  waitForHeight
 } from './kv-height.js'
 import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import { queueEventOrReject } from './queue-event.js'
@@ -105,6 +106,7 @@ import {
   JSONType,
   JournalConfig,
   KvConflictCause,
+  KvConflictServerValue,
   ParsedEncryptedOrUnencryptedMessage,
   ChelKvGetResult
 } from './types.js'
@@ -2888,6 +2890,8 @@ export default sbp('sbp/selectors/register', {
       encryptionKeyId,
       signingKeyId,
       maxAttempts,
+      heightWaitMs,
+      allowUnverifiedConflict,
       onconflict,
       signal: callerSignal
     }: {
@@ -2896,12 +2900,20 @@ export default sbp('sbp/selectors/register', {
       encryptionKeyId?: string | null | undefined;
       signingKeyId: string;
       maxAttempts?: number | null | undefined;
+      // How long a conflict value stamped ahead of the local contract may
+      // wait for the contract to reach its height
+      heightWaitMs?: number | null | undefined;
+      // Give `onconflict` values that can't be verified instead of failing
+      allowUnverifiedConflict?: boolean;
       onconflict?: ChelKvOnConflictCallback | null | undefined;
       signal?: AbortSignal;
     }
   ) {
     if (maxAttempts != null && !(Number.isSafeInteger(maxAttempts) && maxAttempts >= 1)) {
       throw new TypeError('[chelonia/kv] set: `maxAttempts` must be an integer >= 1')
+    }
+    if (heightWaitMs != null && !(Number.isFinite(heightWaitMs) && heightWaitMs >= 0)) {
+      throw new TypeError('[chelonia/kv] set: `heightWaitMs` must be a finite number >= 0')
     }
     if (data === undefined && typeof onconflict !== 'function') {
       throw new TypeError('[chelonia/kv] set: `onconflict` is required when `data` is undefined')
@@ -2923,45 +2935,72 @@ export default sbp('sbp/selectors/register', {
     )
     let recoveryGetDone = false
     // A conflict with neither a body nor an etag can't be retried as is, so
-    // `recover` allows one GET per call to fetch both
+    // `recover` allows one GET per call to fetch both. With `wait`, an ahead
+    // value gets one chance to become verifiable.
     const readServerValue = async (
       response: Response,
-      recover: boolean
+      { recover = false, wait = false } = {}
     ): Promise<KvServerValue> => {
       const etag = responseEtag(response)
       const text = response.ok || isConflict(response) ? await response.text() : ''
       if (recover && !text && !etag && !recoveryGetDone && isConflict(response)) {
         recoveryGetDone = true
         const recovered = await get()
-        if (recovered.ok) return readServerValue(recovered, false)
+        if (recovered.ok) return readServerValue(recovered, { wait })
         console.warn(`[kv/set] recovery GET for ${contractID}/${key} returned ${recovered.status}`)
       }
-      const value = text
-        ? classifyKvValue<JSONType>(this, contractID, key, JSON.parse(text))
-        : { status: 'absent' as const }
+      if (!text) return { status: 'absent', etag, httpStatus: response.status }
+      const body = JSON.parse(text)
+      let value = classifyKvValue<JSONType>(this, contractID, key, body)
+      if (value.status === 'ahead' && wait && !allowUnverifiedConflict) {
+        await waitForHeight(this, contractID, value.requiredHeight, {
+          timeoutMs: heightWaitMs ?? undefined, signal
+        })
+        value = classifyKvValue<JSONType>(this, contractID, key, body)
+      }
       return { ...value, etag, httpStatus: response.status }
     }
     // An unreadable final conflict only leaves its value unknown
     const readFinal = async (response: Response, recover: boolean) => {
       try {
-        return await readServerValue(response, recover)
+        return await readServerValue(response, { recover })
       } catch {
         if (signal.aborted) throw abortReason(signal)
         return undefined
       }
     }
+    // For values that can't be verified yet (ahead) or ever (malformed)
+    const unverifiedError = (value: KvServerValue | undefined) => {
+      if (value?.status === 'malformed') return value.error
+      if (value?.status !== 'ahead') return null
+      const { requiredHeight, etag, httpStatus } = value
+      return heightAheadError(this, contractID, key, {
+        requiredHeight, exact: true, etag, httpStatus
+      })
+    }
+    const verified = <T extends KvServerValue | undefined>(value: T): T => {
+      const error = allowUnverifiedConflict ? null : unverifiedError(value)
+      if (error) throw error
+      return value
+    }
     const resolveConflict = async (value: KvServerValue, status: number) => {
-      const currentValue = value.status === 'present' ? value.parsed : undefined
+      const serverValue: KvConflictServerValue = value.status === 'present'
+        ? { currentStatus: 'present', currentValue: value.parsed }
+        : value.status === 'ahead'
+          ? { currentStatus: 'ahead', currentValue: undefined, requiredHeight: value.requiredHeight }
+          : { currentStatus: value.status, currentValue: undefined }
       const result = await onconflict!({
         contractID,
         key,
         failedData: data,
         status,
         etag: value.etag,
+        ...serverValue,
         get currentData () {
-          return currentValue?.data
-        },
-        currentValue
+          const error = unverifiedError(value)
+          if (error) throw error
+          return serverValue.currentValue?.data
+        }
       })
       if (!result) return false
       ;[data, ifMatch] = result
@@ -2975,9 +3014,8 @@ export default sbp('sbp/selectors/register', {
           if (!response.ok && response.status !== 404 && response.status !== 410) {
             throw unexpected(response)
           }
-          if (await resolveConflict(await readServerValue(response, false), response.status)) {
-            continue
-          }
+          const value = verified(await readServerValue(response, { wait: true }))
+          if (await resolveConflict(value, response.status)) continue
           return { etag: null }
         }
         const response = await this.config.fetch(url, {
@@ -3000,21 +3038,12 @@ export default sbp('sbp/selectors/register', {
           )
         }
         if (--attemptsLeft <= 0) {
-          const value = await readFinal(response, true)
-          if (value?.status === 'ahead') {
-            throw heightAheadError(this, contractID, key, {
-              requiredHeight: value.requiredHeight,
-              exact: true,
-              etag: value.etag,
-              httpStatus: value.httpStatus
-            })
-          }
-          if (value?.status === 'malformed') throw value.error
+          const value = verified(await readFinal(response, true))
           throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
             cause: conflictCause(value, response)
           })
         }
-        const value = await readServerValue(response, true)
+        const value = verified(await readServerValue(response, { recover: true, wait: true }))
         await sleep(randomIntFromRange(0, 1500), signal)
         if (!(await resolveConflict(value, response.status))) return { etag: null }
       }
@@ -3172,6 +3201,7 @@ function conflictCause (value: KvServerValue | undefined, response: Response): K
   if (value.status === 'ahead') {
     return { currentStatus: 'ahead', requiredHeight: value.requiredHeight, etag }
   }
+  if (value.status === 'malformed') return { currentStatus: 'malformed', etag }
   if (value.status === 'present') {
     try {
       return { currentStatus: 'present', currentData: value.parsed.data, etag }
