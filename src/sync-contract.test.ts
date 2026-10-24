@@ -5,10 +5,11 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
 import { CONTRACTS_MODIFIED } from './events.js'
+import type { PubSubClient } from './pubsub/index.js'
 import { SPMessage } from './SPMessage.js'
 import type { SPKey, SPOpContract, SPOpValue } from './SPMessage.js'
 import { signedOutgoingDataWithRawKey } from './signedData.js'
-import { captureConsole, within } from './test-utils.js'
+import { captureConsole, until, within } from './test-utils.js'
 import type { ChelRootState, CheloniaConfig } from './types.js'
 
 let vetoedQueue: string | undefined
@@ -313,5 +314,62 @@ describe('Contract sync and removal', () => {
       assert.deepStrictEqual(resyncFlags(), [true])
       assert.strictEqual(rootState().contracts[cid], undefined)
     })
+  })
+})
+
+describe('chelonia/reset and clock sync', () => {
+  let timeRequests = 0
+  let failTeardown = false
+  let pubsub: PubSubClient | undefined
+
+  beforeEach(async () => {
+    sbp('chelonia/_init')
+    timeRequests = 0
+    failTeardown = false
+    await sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      connectionOptions: { manual: true },
+      fetch: async (url: string) => {
+        if (!url.endsWith('/time')) return new Response('', { status: 500 })
+        timeRequests++
+        return new Response(new Date().toISOString())
+      },
+      reactiveDel: (obj: Record<string, unknown>, key: string) => {
+        if (failTeardown) throw new Error('teardown failed')
+        delete obj[key]
+      }
+    } as unknown as Partial<CheloniaConfig>)
+    pubsub = sbp('chelonia/connect')
+    await until(() => timeRequests === 1, 'first clock sync')
+  })
+
+  afterEach(() => {
+    pubsub?.destroy()
+    sbp('chelonia/private/stopClockSync')
+    sbp('chelonia/_init')
+  })
+
+  const clockResynced = () => until(() => timeRequests > 1, 'clock sync restart')
+
+  it('restarts clock sync after a reset', async () => {
+    await within(sbp('chelonia/reset'), 'reset')
+    await clockResynced()
+  })
+
+  it('restarts clock sync when postCleanupFn fails', async () => {
+    const hook = () => { throw new Error('hook failed') }
+    await assert.rejects(within(sbp('chelonia/reset', hook), 'reset'), /hook failed/)
+    await clockResynced()
+  })
+
+  it('restarts clock sync when the teardown fails', async () => {
+    failTeardown = true
+    await assert.rejects(within(sbp('chelonia/reset'), 'reset'), /teardown failed/)
+    await clockResynced()
+  })
+
+  it('lets overlapping resets both finish and restart clock sync', async () => {
+    await within(Promise.all([sbp('chelonia/reset'), sbp('chelonia/reset')]), 'resets')
+    await clockResynced()
   })
 })
