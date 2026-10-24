@@ -102,15 +102,6 @@ export function composeSignals (signals: AbortSignal[]): ComposedAbortSignal {
   return composed
 }
 
-export function abortable<T> (promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const onAbort = () => reject(abortReason(signal))
-    signal.addEventListener('abort', onAbort, { once: true })
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
-    if (signal.aborted) onAbort()
-  })
-}
-
 type HeightListeners = Set<{ minHeight: number; fire: () => void }>
 
 const dropIfEmpty = (ctx: CheloniaContext, contractID: string, listeners: HeightListeners) => {
@@ -241,24 +232,32 @@ export async function waitForHeightAfterSync (
 }
 
 // Runs `body` on the contract's public lane, but rejects at once if `signal`
-// aborts while it's queued, and rejects if `body` never runs
+// aborts while it's queued, and rejects if `body` never runs. Once running,
+// `body` alone decides the outcome (a write may have committed).
 export function queueOnLane<T> (
   contractID: string,
   signal: AbortSignal,
   body: () => T | Promise<T>
 ): Promise<T> {
-  if (signal.aborted) return Promise.reject(abortReason(signal))
-  let ran = false
-  const queued = (sbp('chelonia/queueInvocation', contractID, () => {
-    if (signal.aborted) return Promise.reject(abortReason(signal))
-    ran = true
-    return body()
-  }) as Promise<T>).then((result) => {
-    // `chelonia/reset` drops queued work
-    if (!ran) throw new DOMException(`[chelonia/kv] Work queued for ${contractID} never ran`, 'AbortError')
-    return result
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(abortReason(signal))
+    let ran = false
+    const onAbort = () => { if (!ran) reject(abortReason(signal)) }
+    const queued = sbp('chelonia/queueInvocation', contractID, () => {
+      if (signal.aborted) return Promise.reject(abortReason(signal))
+      ran = true
+      return body()
+    }) as Promise<T> | undefined
+    if (!queued) {
+      throw new ChelErrorUnexpected(`[chelonia/kv] Queueing work for ${contractID} was vetoed`)
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    queued.then((result) => {
+      // `chelonia/reset` drops queued work
+      if (!ran) throw new DOMException(`[chelonia/kv] Work queued for ${contractID} never ran`, 'AbortError')
+      resolve(result)
+    }).catch(reject).finally(() => signal.removeEventListener('abort', onAbort))
   })
-  return abortable(queued, signal)
 }
 
 export function resolveRecoveryOptions (

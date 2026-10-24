@@ -3,11 +3,13 @@ import assert from 'node:assert'
 import { describe, it } from 'node:test'
 
 import {
-  ChelErrorKvHeightAhead, ChelErrorKvReentrant, isKvConflict, isKvHeightAhead
+  ChelErrorKvHeightAhead, ChelErrorKvReentrant, isKvConflict, isKvHeightAhead, isKvHeightMalformed,
+  kvHeightAheadCause
 } from './errors.js'
 import {
   activate, CONTRACT_ID, defineSlot, drainLanes, gateLane, holdSyncs, installKvHarness, keys,
-  mirror, rootState, server, serverValue, setLocalHeight, START_HEIGHT, syncs, writeAsDeviceB
+  mirror, restamp, rootState, server, serverValue, setLocalHeight, START_HEIGHT, syncs,
+  writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
 import { until, waitMicrotasks, within } from './test-utils.js'
@@ -508,5 +510,209 @@ describe('chelonia/kv/queuedSet', () => {
     assert.ok(direct instanceof ChelErrorKvReentrant)
     assert.match(direct.message, /sbp\('chelonia\/kv\/queuedSet'/)
     assert.strictEqual(serverValue('note'), 'deferred')
+  })
+})
+
+const AHEAD = START_HEIGHT + 2
+const names = (value: JSONType) => [...(value as string[]), 'x']
+const updateWith = (key: string, options: Record<string, unknown> = {}) => within(
+  sbp('chelonia/kv/update', { contractID: CONTRACT_ID, key, updater: names, ...options }) as
+    Promise<JSONType | undefined>,
+  `update of ${key}`
+)
+const clear = (key: string, options?: Record<string, unknown>) =>
+  within(sbp('chelonia/kv/clear', CONTRACT_ID, key, options) as Promise<void>, `clear of ${key}`)
+const aheadAt = (height: number) => (e: unknown) => kvHeightAheadCause(e)?.requiredHeight === height
+const gets = (key: string) =>
+  server.log.filter((request) => request.method === 'GET' && request.key === key).length
+const slotState = (key: string) => {
+  const entry = mirror(key)
+  return [entry?.status, entry?.heightAhead?.requiredHeight, entry?.settled]
+}
+
+describe('Slot writes and contract heights', () => {
+  installKvHarness()
+
+  it('update syncs a contract behind a newer value and retries, holding no lane meanwhile', async () => {
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    writeAsDeviceB('names', ['a'], AHEAD)
+    syncs.catchUp = true
+    kvHeightTimings.waitMs = 60_000
+    const release = holdSyncs()
+    const write = updateWith('names')
+    await until(() => syncs.count === 2, 'the recovery sync')
+    const probe = sbp('chelonia/private/queueEvent', `public:${CONTRACT_ID}`, () => 'free')
+    assert.strictEqual(await within(probe, 'the public lane'), 'free')
+    release()
+    assert.deepStrictEqual(await write, ['a', 'x'])
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [412, 412, 204])
+    assert.strictEqual(syncs.count, 2)
+    assert.deepStrictEqual(slotState('names'), ['loaded', undefined, true])
+  })
+
+  it('gives up on a value from a newer height and reloads the key once the height arrives', async () => {
+    const keys = ['reject', 'passive', 'failed', 'aborted']
+    for (const key of keys) defineSlot({ key, defaultValue: [] })
+    await activate()
+    for (const key of keys) writeAsDeviceB(key, [key], AHEAD)
+    kvHeightTimings.waitMs = 20
+    await assert.rejects(updateWith('reject', { onHeightAhead: 'reject' }), aheadAt(AHEAD))
+    await assert.rejects(updateWith('passive', { maxHeightRecoveries: 0 }), aheadAt(AHEAD))
+    assert.strictEqual(syncs.count, 1)
+    syncs.fail = true
+    await assert.rejects(updateWith('failed'), aheadAt(AHEAD))
+    syncs.fail = false
+    const release = holdSyncs()
+    const controller = new AbortController()
+    const aborted = updateWith('aborted', { signal: controller.signal })
+    await until(() => syncs.count === 3, 'the recovery sync')
+    controller.abort('stop')
+    await assert.rejects(aborted, (e) => e === 'stop')
+    for (const key of keys) assert.deepStrictEqual(slotState(key), ['loading', AHEAD, true], key)
+    release()
+    // A stale stamp (409) reveals no value
+    defineSlot({ key: 'stale', defaultValue: [] })
+    await drainLanes()
+    await assert.rejects(updateWith('stale', { maxHeightRecoveries: 0 }), (e) =>
+      isKvHeightAhead(e) && e.cause?.exact === false)
+    assert.deepStrictEqual(slotState('stale'), ['non-init', undefined, true])
+
+    setLocalHeight(AHEAD)
+    await until(() => keys.every((key) => mirror(key)?.status === 'loaded'), 'the reloads')
+    for (const key of keys) {
+      assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, key), [key])
+      assert.deepStrictEqual(slotState(key), ['loaded', undefined, true], key)
+    }
+    assert.strictEqual(server.posts().filter(({ status }) => status === 204).length, 0)
+  })
+
+  it('clear overwrites values it can\'t verify without waiting; giving up marks the slot', async () => {
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    kvHeightTimings.waitMs = 60_000
+    writeAsDeviceB('names', ['a'])
+    restamp('names', 'not a height')
+    await assert.rejects(updateWith('names'), (e) => isKvHeightMalformed(e))
+    await clear('names')
+    assert.strictEqual(serverValue('names'), null)
+    assert.deepStrictEqual(slotState('names'), ['non-init', undefined, true])
+
+    const etag = writeAsDeviceB('names', ['b'], AHEAD)
+    await assert.rejects(clear('names', { maxAttempts: 1 }), (e: Error) => {
+      assert.strictEqual(e.name, 'ChelErrorKvConflict')
+      assert.deepStrictEqual(e.cause, { currentStatus: 'ahead', requiredHeight: AHEAD, etag })
+      return true
+    })
+    assert.deepStrictEqual(slotState('names'), ['loading', AHEAD, true])
+    assert.strictEqual(syncs.count, 1)
+  })
+
+  it('reports the final conflict\'s value, as the slot reads it', async () => {
+    const schema = {
+      parse: (value: unknown) => {
+        if (!Array.isArray(value)) throw new Error('not a list')
+        return value.map(String)
+      }
+    }
+    defineSlot({ key: 'names', defaultValue: [], schema })
+    await activate()
+    const conflict = (cause: unknown) => (e: Error) => {
+      assert.strictEqual(e.name, 'ChelErrorKvConflict')
+      assert.deepStrictEqual(e.cause, cause)
+      return true
+    }
+    let etag = writeAsDeviceB('names', [1])
+    await assert.rejects(updateWith('names', { maxAttempts: 1 }), conflict({
+      currentStatus: 'present', currentData: ['1'], etag
+    }))
+    // An invalid final value is left out, even after a valid one
+    server.onPost = () => {
+      if (server.posts().length === 3) etag = writeAsDeviceB('names', 'oops')
+    }
+    await assert.rejects(updateWith('names', { maxAttempts: 2 }), (e: Error) =>
+      conflict({ currentStatus: 'present', etag })(e))
+  })
+
+  it('a committed write drops the key\'s wait it saw, but not one for a value found meanwhile', async () => {
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    writeAsDeviceB('names', ['a'], AHEAD)
+    kvHeightTimings.waitMs = 60_000
+    await assert.rejects(updateWith('names', { onHeightAhead: 'reject' }), aheadAt(AHEAD))
+    // The clear waits for the height after a stale stamp (409); the height
+    // arriving then also fires the key's reload, behind the clear
+    const cleared = clear('names', { maxHeightRecoveries: 0 })
+    await until(() => server.posts().some(({ status }) => status === 409), 'the stale stamp')
+    let before = gets('names')
+    setLocalHeight(AHEAD)
+    await cleared
+    await drainLanes()
+    assert.strictEqual(gets('names'), before)
+    assert.deepStrictEqual(slotState('names'), ['non-init', undefined, true])
+
+    // Found meanwhile: an update gives up while the clear waits after a 409
+    writeAsDeviceB('names', ['b'], AHEAD + 1)
+    syncs.fail = true
+    const controller = new AbortController()
+    const stopped = updateWith('names', { signal: controller.signal })
+    // Waiting for the height after its sync failed: the lanes are free
+    await until(syncEnded(2), 'the failed recovery sync')
+    const clearing = clear('names', { maxHeightRecoveries: 0 })
+    await until(() => server.posts().filter(({ status }) => status === 409).length === 2, '409')
+    controller.abort('stop')
+    await assert.rejects(stopped, (e) => e === 'stop')
+    assert.deepStrictEqual(slotState('names'), ['loading', AHEAD + 1, true])
+    before = gets('names')
+    setLocalHeight(AHEAD + 1)
+    await clearing
+    await drainLanes()
+    assert.strictEqual(gets('names'), before + 1)
+    assert.deepStrictEqual(slotState('names'), ['non-init', undefined, true])
+    assert.strictEqual(serverValue('names'), null)
+  })
+
+  it('an abort while queued rejects at once; one after the write committed is ignored', async () => {
+    const late = new AbortController()
+    defineSlot({ key: 'names', defaultValue: [], onUpdate: () => late.abort('late') })
+    await activate()
+    const open = gateLane('public')
+    const controller = new AbortController()
+    const updating = updateWith('names', { signal: controller.signal })
+    const clearing = clear('names', { signal: controller.signal })
+    await waitMicrotasks()
+    controller.abort('stop')
+    await assert.rejects(updating, (e) => e === 'stop')
+    await assert.rejects(clearing, (e) => e === 'stop')
+    open()
+    await drainLanes()
+    assert.deepStrictEqual(server.posts(), [])
+
+    assert.deepStrictEqual(await updateWith('names', { signal: late.signal }), ['x'])
+    assert.ok(late.signal.aborted)
+    assert.deepStrictEqual(slotState('names'), ['loaded', undefined, true])
+  })
+
+  it('validates its options before any request', async () => {
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    const requests = server.log.length
+    for (const options of [
+      { maxAttempts: 0 }, { maxAttempts: '3' }, { onHeightAhead: 'never' }, { maxHeightRecoveries: -1 }
+    ]) {
+      await assert.rejects(updateWith('names', options), {
+        name: 'ChelErrorKvUpdateInvalid', message: /update: /
+      })
+      await assert.rejects(clear('names', options), {
+        name: 'ChelErrorKvUpdateInvalid', message: /clear: /
+      })
+    }
+    await assert.rejects(updateWith('other', { maxAttempts: 0 }), { name: 'ChelErrorKvSlotUnknown' })
+    assert.strictEqual(server.log.length, requests)
+    // `null` means the default
+    const defaults = { maxAttempts: null, onHeightAhead: null, maxHeightRecoveries: null }
+    await updateWith('names', defaults)
+    await clear('names', defaults)
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [204, 204])
   })
 })

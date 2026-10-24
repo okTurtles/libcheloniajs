@@ -16,6 +16,7 @@ import {
   ChelErrorKvUpdateInvalid,
   ChelErrorKvValidation,
   ChelErrorUnexpected,
+  isKvConflict,
   isKvHeightAhead,
   kvHeightAheadCause
 } from './errors.js'
@@ -25,16 +26,18 @@ import {
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
 import { isKvMaxAttempts } from './internal-errors.js'
-import { assertNotReentrant, resolveKvKeyIds } from './kv-checks.js'
+import { assertMaxAttempts, assertNotReentrant, resolveKvKeyIds } from './kv-checks.js'
 import {
   abortReason,
+  composeSignals,
   heightAheadError,
   kvHeightTimings,
   localHeight,
   notifyContractHeight,
   onHeight,
   recoverContractHeight,
-  withHeightRecovery
+  withHeightRecovery,
+  type ComposedAbortSignal
 } from './kv-height.js'
 import {
   KV_AUTO_LOAD,
@@ -56,6 +59,7 @@ import type {
   CheloniaContext,
   ChelRootState,
   JSONType,
+  KvConflictCause,
   KvHeightRecoveryAttempt,
   KvHeightRecoveryOptions,
   KvHeightWait,
@@ -883,10 +887,9 @@ function recordEchoCID (
   }
 }
 
-// Per-contract pending-write counter. `chelonia/kv/update` and
-// `chelonia/kv/clear` increment this at call time (before their queued
-// body runs) and decrement it from inside the body's `finally`. The
-// counter is the third source for `chelonia/kv/_waitInFlight` so a
+// Per-contract pending-write counter, held by each `update` / `clear` call
+// until it settles. The counter is the third source for
+// `chelonia/kv/_waitInFlight` so a
 // write whose slot index entry and echo CID have both been removed
 // mid-flight (contract release, match→false, defineSlot replacement)
 // still settles before `chelonia/reset` tears down state. See the
@@ -924,14 +927,6 @@ function decrementPendingLoad (ctx: CheloniaContext, contractID: string): void {
   else ctx.kvPendingLoads.set(contractID, n)
 }
 
-function throwIfSignalAborted (signal?: AbortSignal): void {
-  if (!signal?.aborted) return
-  throw signal.reason instanceof Error
-    ? signal.reason
-    : new DOMException('Aborted', 'AbortError')
-}
-
-type KvConflictCause = { currentData?: JSONType; etag?: string | null }
 type NormalizedKvConflictData =
   | { present: false }
   | { present: true; currentData: JSONType | undefined }
@@ -1057,6 +1052,127 @@ function slotIsCurrent (
 // reactive observer downstream. Primitives pass through untouched.
 function cloneForEmit (v: JSONType | undefined): JSONType | undefined {
   return (v === null || typeof v !== 'object') ? v : cloneDeep(v)
+}
+
+type SlotWriteAttempt = {
+  heightWaitMs: 0 | undefined;
+  // Aborted by the caller's signal or by `chelonia/reset`
+  signal: AbortSignal;
+}
+
+// Each attempt queues `body` on the lane anew, as height recoveries run off
+// the lane. Giving up on a value the contract can't verify yet reloads the key
+// once it can.
+async function runSlotWrite<T> (
+  ctx: CheloniaContext,
+  contractID: string,
+  slot: SlotDefinition,
+  options: KvHeightRecoveryOptions,
+  label: string,
+  body: (attempt: SlotWriteAttempt) => Promise<T>
+): Promise<T> {
+  // Captured now, as `chelonia/reset` replaces the controller it aborts
+  const signal: ComposedAbortSignal = options.signal
+    ? composeSignals([ctx.abortController.signal, options.signal])
+    : ctx.abortController.signal
+  const { onHeightAhead, maxHeightRecoveries } = options
+  let aheadAt: number | undefined
+  incrementPending(ctx, contractID)
+  try {
+    return await withHeightRecovery(ctx, contractID, async ({ heightWaitMs, queue }) => {
+      try {
+        return await queue(() => body({ heightWaitMs, signal }))
+      } catch (e) {
+        const cause = kvHeightAheadCause(e)
+        aheadAt = cause?.exact ? cause.requiredHeight : undefined
+        throw e
+      }
+    }, { onHeightAhead, maxHeightRecoveries, signal }, label)
+  } catch (e) {
+    const conflict = isKvConflict(e) ? kvConflictCause(e) : undefined
+    const requiredHeight = aheadAt ??
+      (conflict?.currentStatus === 'ahead' ? conflict.requiredHeight : undefined)
+    if (typeof requiredHeight === 'number') {
+      registerHeightWait(ctx, contractID, slot, requiredHeight, KV_UPDATE_REASON.LOAD)
+    }
+    throw e
+  } finally {
+    signal._cleanup?.()
+    decrementPending(ctx, contractID)
+  }
+}
+
+// The final conflict's server value as the slot reads it; left out if it
+// doesn't decode or validate
+function slotConflictError (
+  slot: SlotDefinition,
+  contractID: string,
+  label: string,
+  e: unknown
+): Error {
+  const cause = kvConflictCause(e)
+  let data: NormalizedKvConflictData = { present: false }
+  try {
+    data = normalizeKvConflictCurrentData(slot, contractID, slot.key, cause)
+  } catch {}
+  return new ChelErrorKvConflict(`[chelonia/kv] ${label} ran out of attempts resolving conflicts`, {
+    cause: {
+      ...(cause?.currentStatus && { currentStatus: cause.currentStatus }),
+      ...(typeof cause?.requiredHeight === 'number' && { requiredHeight: cause.requiredHeight }),
+      ...(data.present && { currentData: data.currentData }),
+      etag: cause?.etag ?? null
+    }
+  })
+}
+
+// Applies a write the server committed (`value` undefined: a clear). It
+// stands even if the caller has aborted since.
+async function commitSlotWrite (
+  ctx: CheloniaContext,
+  contractID: string,
+  slot: SlotDefinition,
+  seen: HeightWaitSnapshot,
+  { value, etag, sawConflict, operation }: {
+    value: JSONType | undefined; etag: string | null; sawConflict: boolean; operation: string
+  }
+): Promise<void> {
+  const { contractType, key } = slot
+  if (etag == null) {
+    console.warn(
+      `[chelonia/kv] ${operation}: ${contractID}::${key} successful write returned no ` +
+      'etag/x-cid header; self-echo suppression is inactive for this write'
+    )
+  }
+  // Even with the slot gone, the write's echo mustn't apply as a remote change
+  recordEchoCID(ctx, contractID, key, etag, sawConflict)
+  const entry = (sbp(ctx.config.stateSelector) as ChelRootState)._kv?.[contractID]?.[key]
+  if (!entry || !slotIsCurrent(ctx, contractID, slot)) return
+  const previousValue = entry.value
+  ctx.config.reactiveSet(entry, 'value', cloneForEmit(value))
+  ctx.config.reactiveSet(entry, 'etag', etag)
+  sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
+    contractID,
+    contractType,
+    key,
+    value: cloneForEmit(value),
+    previousValue: cloneForEmit(previousValue),
+    reason: KV_UPDATE_REASON.LOCAL,
+    etag
+  })
+  settleVerified(ctx, contractID, slot, seen,
+    value === undefined ? KV_LOAD_STATUS.NON_INIT : KV_LOAD_STATUS.LOADED)
+  if (!slotIsCurrent(ctx, contractID, slot)) return
+  const delivered = value !== undefined
+    ? cloneForEmit(value)
+    : slot.resolvedDefault !== undefined ? cloneDeep(slot.resolvedDefault) : undefined
+  await safeOnUpdateGuarded(ctx, contractID, slot, delivered, {
+    contractID,
+    contractType,
+    key,
+    reason: KV_UPDATE_REASON.LOCAL,
+    etag,
+    previousValue: cloneForEmit(previousValue)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -2601,39 +2717,13 @@ export default (sbp('sbp/selectors/register', {
     })
   },
 
-  // Public. See KV-REVAMPED §4.2, §11.3 step 5. The ergonomic write
-  // path: resolves the slot, runs the reducer, validates, and writes via
-  // `chelonia/kv/set` directly inside
-  // the same per-contract queueInvocation lane used by `_handleRemote`.
-  //
-  // Resolves with the stored value (the reducer's last accepted
-  // output), or `undefined` when the reducer returned `KV_NOOP`.
-  //
-  // Rejection taxonomy (§4.2):
-  //   - `ChelErrorKvSlotUnknown`   — contract not synced, or no slot
-  //                                  registered for `(contractType, key)`.
-  //   - `ChelErrorKvUpdateInvalid` — `updater`/`value` misuse; thrown
-  //                                  synchronously before any I/O.
-  //                                  Also covers reducer throws and
-  //                                  reducer returns of `null` /
-  //                                  `undefined` (use `KV_NOOP` to
-  //                                  abort explicitly). The original
-  //                                  thrown value is preserved on
-  //                                  `.cause`.
-  //   - `ChelErrorKvValidation`    — reducer output (or server
-  //                                  `currentData` on retry) fails
-  //                                  `schema.parse`. Original Zod
-  //                                  error attached on `.cause`.
-  //   - `ChelErrorKvConflict`      — `maxAttempts` exhausted on
-  //                                  real 409/412 contention. Last
-  //                                  observed `{ currentData, etag }`
-  //                                  attached on `.cause`.
-  //   - `AbortError`               — `signal` aborted. Mirror is
-  //                                  unchanged; no event fires.
-  //   - other errors propagated verbatim from `chelonia/kv/set` (called
-  //     directly inside the per-contract queue; not via `queuedSet`) for
-  //     non-409/412 HTTP failures (5xx, offline). `status` is NOT flipped
-  //     to `'error'` (that state is reserved for load failures — §4.9).
+  // Public. See KV-REVAMPED §4.2. Runs the reducer on the slot's value and
+  // writes the result on the contract's lane. Resolves with the stored value,
+  // or `undefined` for `KV_NOOP`. Rejects with `ChelErrorKvConflict` once out
+  // of attempts (`.cause`: the final conflict's server value), with
+  // `ChelErrorKvHeightAhead` once out of height recoveries, or with the abort
+  // reason if aborted before the write committed. A failed write never sets
+  // the status to `'error'`.
   'chelonia/kv/update': async function (
     this: CheloniaContext,
     args: {
@@ -2641,23 +2731,17 @@ export default (sbp('sbp/selectors/register', {
       key: string;
       updater?: KvUpdater<JSONType>;
       value?: JSONType;
-      maxAttempts?: number;
+      maxAttempts?: number | null;
       signal?: AbortSignal;
       ifMatch?: string;
-    }
+    } & KvHeightRecoveryOptions
   ): Promise<JSONType | undefined> {
-    const { contractID, key, updater, value, maxAttempts, signal, ifMatch } = args
-    // ----- Step 1: resolve the slot via active index. -----
+    const { contractID, key, updater, value, maxAttempts, ifMatch } = args
     const rootState = sbp(this.config.stateSelector) as ChelRootState
     const slot = resolveActiveSlot(this, rootState, contractID, key, 'update')
-    // Reject a write re-entered from this contract's own onUpdate
-    // callback before any state mutation — it would deadlock the lane.
     assertNotReentrant(this, contractID, key, 'update')
-    // ----- Step 1a: normalise the write input (synchronous). -----
-    // Property-presence checks per §4.2: "Exactly one of `updater` or
-    // `value` must be provided" discriminates on which channel the
-    // caller chose, not on the runtime value (so `value: undefined`
-    // counts as "value was provided").
+    // Which of `updater` / `value` was passed, not their values (`value:
+    // undefined` counts as passed)
     const hasUpdater = has(args, 'updater')
     const hasValue = has(args, 'value')
     if (hasUpdater && hasValue) {
@@ -2688,8 +2772,7 @@ export default (sbp('sbp/selectors/register', {
           'provided but the slot has no `defaultUpdater`'
         )
       }
-      // Synthesise the reducer once — the same closure is re-invoked
-      // on conflict retries (§4.2 step 1a).
+      // Built once: conflict retries re-run the same reducer
       let factoryOut: KvUpdater<JSONType>
       try {
         factoryOut = slot.defaultUpdater(value as JSONType) as KvUpdater<JSONType>
@@ -2708,48 +2791,22 @@ export default (sbp('sbp/selectors/register', {
       }
       reducer = factoryOut
     }
-    // Honour a pre-aborted signal before touching the network.
-    throwIfSignalAborted(signal)
-    // Track this operation on the pending-writes counter so
-    // `chelonia/kv/_waitInFlight` can drain the contract even if the
-    // slot index / nonce sources miss it (slot torn down mid-flight,
-    // nonce not yet recorded). The increment runs at call time — before
-    // the body is enqueued — so a concurrent `reset` cannot escape the
-    // gate; the decrement runs in the queued body's `finally` so it
-    // clears only when the body has settled.
-    incrementPending(this, contractID)
-    // The mirror read, reducer, and network write must all run inside the
-    // per-contract serial queue so that each write sees the etag left by
-    // the preceding one. Reading the mirror outside the queue means
-    // concurrent calls all snapshot the same stale etag → guaranteed 412
-    // → ONCONFLICT thrashing.
-    const runBody = async (): Promise<JSONType | undefined> => {
-      throwIfSignalAborted(signal)
-      // Re-read rootState inside the queue for fresh mirror state.
-      const liveState = sbp(this.config.stateSelector) as ChelRootState
-      if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
+    const label = `update: ${contractID}::${key}`
+    assertMaxAttempts(maxAttempts, label)
+    // The basis and the write share one lane turn, so each write sees the
+    // etag the previous one left
+    return runSlotWrite(this, contractID, slot, args, label, async ({ heightWaitMs, signal }) => {
+      if (!slotIsCurrent(this, contractID, slot)) {
         throw new ChelErrorKvSlotUnknown(
           `[chelonia/kv] update: no active slot for ${contractID}::${key}`
         )
       }
-      // ----- Step 2: read current mirror value. -----
+      const liveState = sbp(this.config.stateSelector) as ChelRootState
       const perContract = ensureContractKv(this, liveState, contractID)
       let mirrorEntry = perContract[key]
-      // Data-loss guard: when the slot is in 'error' but still holds a
-      // retained value + etag (e.g. a transient load-network failure that
-      // didn't change server state), seeding the reducer from the default
-      // while the write carries `ifMatch: mirrorEtag` would silently
-      // overwrite the real server value if that etag still matches. Force
-      // one authoritative reload so the reducer seeds from — and the write
-      // guards against — the live server state instead. `_loadSlotNow`
-      // runs inline (it is the un-queued worker), so awaiting it here does
-      // not deadlock the lane. If the reload itself fails we must NOT fall
-      // back to the default: the write still carries `ifMatch: mirrorEtag`,
-      // so a default-seeded write could match the retained etag and
-      // silently overwrite the live value. Instead we seed from the
-      // retained value below — it is exactly what the retained etag
-      // describes, keeping the basis and the precondition paired (a server
-      // value that actually changed produces a 412 → onconflict re-seed).
+      // Data-loss guard: a default-seeded write under the retained etag could
+      // overwrite the server value, so reload first. If that fails, seed from
+      // the retained value, which that etag describes.
       let reloadRan = false
       if (
         mirrorEntry &&
@@ -2772,35 +2829,16 @@ export default (sbp('sbp/selectors/register', {
             e
           )
         }
-        throwIfSignalAborted(signal)
-        if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
+        if (signal.aborted) throw abortReason(signal)
+        if (!slotIsCurrent(this, contractID, slot)) {
           throw new ChelErrorKvSlotUnknown(
             `[chelonia/kv] update: no active slot for ${contractID}::${key}`
           )
         }
-        // Re-read from live state (not the pre-reload `perContract`
-        // capture): a concurrent release+resync could have replaced the
-        // `_kv[contractID]` record while the reload awaited.
+        // A release and resync may have replaced `_kv[contractID]` meanwhile
         mirrorEntry = liveState._kv?.[contractID]?.[key] ?? perContract[key]
       }
-      // Seed precedence. NOTE: when the data-loss-guard reload ran it was
-      // `silent`, so the mirror `status` is intentionally frozen at
-      // `'error'` (the consumer must not see the reload's transient status
-      // churn — #2). We therefore branch on `reloadRan`, NOT on `status`,
-      // to know what the (refreshed or retained) mirror value represents:
-      //  - reload ran: the mirror value is now either the live server
-      //    value (reload success) or the retained value (reload failure).
-      //    Both are correctly paired with the etag the write will send, so
-      //    seed from it; fall back to the default only when it is
-      //    `undefined` (a 404'd reload on a slot with no retained value).
-      //    A failed reload leaves the retained value+etag untouched,
-      //    keeping the reducer basis and `ifMatch` paired so a no-conflict
-      //    commit cannot overwrite live data from a stale default basis.
-      //  - no reload: the normal happy path — seed from a non-error live
-      //    value, else the default (mirrors `read`'s error semantics for a
-      //    genuinely empty / errored slot).
       const seedValue = computeSeedValue(slot, mirrorEntry, reloadRan)
-      // ----- Step 3: run reducer and validate. -----
       let reducerOut: unknown
       try {
         reducerOut = reducer(seedValue)
@@ -2813,19 +2851,15 @@ export default (sbp('sbp/selectors/register', {
       const firstResult = validateReducerOutput(slot, reducerOut, contractID, key, '')
       if (firstResult.noop) return undefined
       let nextValue: JSONType = firstResult.value
-      // ----- Step 5: kv/set with onconflict. -----
-      throwIfSignalAborted(signal)
-      let lastCurrentData: JSONType | undefined
-      let lastEtag: string | null | undefined
+      if (signal.aborted) throw abortReason(signal)
       let sawConflict = false
       const onconflict = async (conflictArgs: {
         currentData: JSONType | undefined;
         etag: string | null | undefined;
       }): Promise<[JSONType, string | undefined]> => {
         const { etag } = conflictArgs
-        lastEtag = etag
         sawConflict = true
-        throwIfSignalAborted(signal)
+        if (signal.aborted) throw abortReason(signal)
         let currentData: JSONType | undefined
         try {
           currentData = conflictArgs.currentData
@@ -2843,11 +2877,8 @@ export default (sbp('sbp/selectors/register', {
             : undefined
         } else if (slot.schema) {
           try {
-            // Clone the parsed result before it reaches the reducer: a
-            // mutating reducer must not corrupt the server's cached
-            // decode (currentValue.data in kv/set), which is re-read for
-            // lastRecoveredValue and the conflict-exhaustion error cause.
-            // Mirrors the first-attempt seed clone (step 2).
+            // Cloned so that a mutating reducer can't change `kv/set`'s cached
+            // decode, which the conflict cause reuses
             basis = cloneDeep(
               parseSyncSlotValue(slot, currentData, `update onconflict currentData ${contractID}::${key}`)
             )
@@ -2860,8 +2891,6 @@ export default (sbp('sbp/selectors/register', {
           }
         } else {
           try {
-            // assertJsonShape returns its input unchanged, so clone to
-            // detach the reducer's basis from the cached server decode.
             basis = cloneDeep(
               assertJsonShape(currentData, `update onconflict currentData ${contractID}::${key}`)
             )
@@ -2873,7 +2902,6 @@ export default (sbp('sbp/selectors/register', {
             )
           }
         }
-        lastCurrentData = basis
         let retried: unknown
         try {
           retried = reducer(basis)
@@ -2885,156 +2913,33 @@ export default (sbp('sbp/selectors/register', {
         }
         const retryResult = validateReducerOutput(slot, retried, contractID, key, 'on retry')
         if (retryResult.noop) throw new KvNoopAbort()
-        const validated: JSONType = retryResult.value
-        nextValue = validated
-        return [validated, typeof etag === 'string' ? etag : undefined] as [JSONType, string | undefined]
+        nextValue = retryResult.value
+        return [nextValue, typeof etag === 'string' ? etag : undefined]
       }
-      const mirrorEtag = mirrorEntry?.etag ?? undefined
-      let setResult: { etag: string | null }
+      const seen = heightWaitSnapshot(this, contractID, key)
+      let etag: string | null
       try {
-        // Call chelonia/kv/set directly (not via queuedSet) since we are
-        // already inside the per-contract serial queue. Resolving key IDs
-        // here (not at call-site) ensures key rotation that landed before
-        // this write is seen; the IDs are fixed for kv/set's retries.
-        const keyIds = resolveKvKeyIds(contractID, slot, `update: ${contractID}::${key}`)
-        setResult = await sbp('chelonia/kv/set', contractID, key,
-          nextValue,
-          {
-            // Never-loaded slots: a `non-init` slot has `etag: null`, so
-            // `mirrorEtag` is `undefined` and `kv/set` falls back to
-            // `if-match: '""'` ("key must not exist"). If the server
-            // already holds a value this client never read, the write
-            // gets a 412 (not a silent overwrite) and `onconflict`
-            // merges against the server's current value as usual.
-            ifMatch: ifMatch ?? mirrorEtag,
-            encryptionKeyId: keyIds.encryptionKeyId,
-            signingKeyId: keyIds.signingKeyId,
-            onconflict,
-            maxAttempts,
-            signal
-          }
-        ) as { etag: string | null }
+        ;({ etag } = await sbp('chelonia/kv/set', contractID, key, nextValue, {
+          // With no etag, `kv/set` sends `if-match: ""`: a value this client
+          // never read then comes back as a 412 to merge, not overwritten
+          ifMatch: ifMatch ?? mirrorEntry?.etag ?? undefined,
+          // Resolved now, to use keys rotated while the write was queued
+          ...resolveKvKeyIds(contractID, slot, label),
+          onconflict,
+          maxAttempts,
+          heightWaitMs,
+          signal
+        }) as { etag: string | null })
       } catch (e) {
-        // KV_NOOP abort: onconflict threw KvNoopAbort to signal that the
-        // reducer chose not to write. The lower-level kv/set propagates
-        // this throw, breaking the retry loop. Resolve as a no-op.
-        // Use the Symbol.for marker (not instanceof) for realm safety.
-        if (e && typeof e === 'object' && KV_NOOP_ABORT_SYMBOL in (e as object)) {
-          return undefined
-        }
-        // Map the lower-level conflict-exhaustion Error to the public
-        // taxonomy (§4.2 step 6 / rejection table).
-        if (isKvMaxAttempts(e)) {
-          const cause = kvConflictCause(e)
-          let carriedCurrentData: NormalizedKvConflictData = { present: false }
-          try {
-            carriedCurrentData = normalizeKvConflictCurrentData(slot, contractID, key, cause)
-          } catch {}
-          throw new ChelErrorKvConflict(
-            `[chelonia/kv] update: ${contractID}::${key} ran out of attempts ` +
-            'resolving conflicts',
-            {
-              cause: {
-                currentData: carriedCurrentData.present
-                  ? carriedCurrentData.currentData
-                  : lastCurrentData,
-                etag: cause?.etag ?? lastEtag ?? null
-              }
-            }
-          )
-        }
-        throw e
+        // The reducer returned `KV_NOOP` on a conflict retry (marker, not
+        // `instanceof`, to work across copies of this module)
+        if (e && typeof e === 'object' && KV_NOOP_ABORT_SYMBOL in e) return undefined
+        throw isKvMaxAttempts(e) ? slotConflictError(slot, contractID, label, e) : e
       }
-      // ----- Step 6: write mirror + emit events. -----
-      // Echo-suppress unconditionally, BEFORE the abort check and the
-      // staleness/liveness guards below. The write already committed to
-      // the server, so its pubsub echo must be dropped regardless of
-      // whether the caller's `signal` aborted mid-write or the slot was
-      // replaced (defineSlot/HMR) or dropped (reconcile) mid-write.
-      // `kvLocalEchoCIDs` is keyed by (contractID, key), not slot
-      // identity, so the suppression entry stays valid across slot
-      // replacement; recording after an early `return`/throw would let
-      // the committed write's echo arrive unsuppressed and be
-      // re-validated as a 'remote' frame (spuriously flipping the
-      // replacement slot to 'error' — staleness case — or mutating the
-      // mirror and firing CHELONIA_KV_UPDATED against an AbortError the
-      // contract at §4.2 promises leaves the mirror untouched — abort
-      // case). The abort check therefore runs AFTER `recordEchoCID`,
-      // never between `kv/set` resolving and the suppression recording.
-      if (setResult.etag == null) {
-        console.warn(
-          `[chelonia/kv] update: ${contractID}::${key} successful write returned no ` +
-          'etag/x-cid header; self-echo suppression is inactive for this write'
-        )
-      }
-      recordEchoCID(this, contractID, key, setResult.etag, sawConflict)
-      throwIfSignalAborted(signal)
-      if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
-        // Slot replaced mid-write. The value DID commit to the server,
-        // so resolve with it (not `undefined`) — `undefined` is reserved
-        // for `KV_NOOP`/abort, i.e. "no write happened". Returning the
-        // committed value lets callers distinguish a persisted write
-        // from a genuine no-op even though no live mirror received it.
-        return nextValue
-      }
-      const perContractAfter = ensureContractKv(this, liveState, contractID)
-      const entryAfter = perContractAfter[key]
-      const previousValue = entryAfter?.value
-      if (!entryAfter) {
-        // Reconcile dropped the slot mid-write — nothing to mirror into.
-        // The value still committed to the server, so resolve with it
-        // (same rationale as the staleness path above) rather than
-        // misleading the caller with `undefined`.
-        return nextValue
-      }
-      // Clone before the mirror write so neither the caller (via the
-      // resolved promise) nor the reducer author holds a live alias into
-      // the mirror — same invariant as `_handleRemote` (see its clone
-      // comment). `read` clones on the way out; this closes the write side.
-      this.config.reactiveSet(entryAfter, 'value', cloneDeep(nextValue))
-      this.config.reactiveSet(entryAfter, 'etag', setResult.etag)
-      sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
-        contractID,
-        contractType: slot.contractType,
-        key,
-        value: cloneForEmit(nextValue),
-        previousValue: cloneForEmit(previousValue),
-        reason: KV_UPDATE_REASON.LOCAL,
-        etag: setResult.etag
+      await commitSlotWrite(this, contractID, slot, seen, {
+        value: nextValue, etag, sawConflict, operation: 'update'
       })
-      patchEntry(this, contractID, slot, { status: KV_LOAD_STATUS.LOADED, settled: true })
-      if (slotIsCurrent(this, contractID, slot)) {
-        await safeOnUpdateGuarded(this, contractID, slot, cloneForEmit(nextValue), {
-          contractID,
-          contractType: slot.contractType,
-          key,
-          reason: KV_UPDATE_REASON.LOCAL,
-          etag: setResult.etag,
-          previousValue: cloneForEmit(previousValue)
-        })
-      }
       return nextValue
-    }
-    // Enqueue the body on the per-contract lane while keeping the
-    // pending-write counter balanced no matter how `queueInvocation`
-    // misbehaves. Two failure shapes are guarded:
-    //   1. It throws *synchronously* (e.g. an SBP filter throws instead of
-    //      returning `false`): the `try/catch` decrements and rethrows. A
-    //      veto of the underlying `queueEvent` makes it reject instead.
-    //   2. It returns a non-promise / `undefined` (e.g. a filter vetoes
-    //      `queueInvocation` itself, so `sbp(...)` returns `undefined`):
-    //      `Promise.resolve(queued)` normalises it so `.finally` always
-    //      attaches and decrements. For a real promise `Promise.resolve`
-    //      returns it unchanged, so the normal path is unaffected.
-    let queued: Promise<JSONType | undefined> | undefined
-    try {
-      queued = sbp('chelonia/queueInvocation', contractID, runBody) as Promise<JSONType | undefined>
-    } catch (e) {
-      decrementPending(this, contractID)
-      throw e
-    }
-    return Promise.resolve(queued).finally(() => {
-      decrementPending(this, contractID)
     })
   },
 
@@ -3133,189 +3038,56 @@ export default (sbp('sbp/selectors/register', {
     ))
   },
 
-  // Public. See KV-REVAMPED §4.5. Resets a slot to its declared
-  // default by writing `null` through the per-contract serial queue via
-  // `chelonia/kv/set`. The `null` value is the wire-level clear sentinel; `_handleRemote`
-  // on other clients maps it back to the declared default before
-  // any `schema.parse`.
-  //
-  // Local-side behaviour after the network write resolves:
-  //   - mirror.value ← undefined (canonical 'non-init'; §4.3/§4.5).
-  //     The deep-cloned default is surfaced only via `read`/`onUpdate`,
-  //     never written into the raw mirror.
-  //   - mirror.etag  ← setResult.etag
-  //   - status       ← 'non-init'
-  //   - CHELONIA_KV_UPDATED fires with `reason: 'local'` and `value`
-  //     set to `undefined` (matching the mirror); `onUpdate` receives
-  //     the cloned default
-  //   - safeOnUpdateGuarded dispatched
-  //
-  // Throws `ChelErrorKvSlotUnknown` on the same conditions as
-  // `chelonia/kv/update`. Other errors from `chelonia/kv/set` (called
-  // directly inside the per-contract queue; not via `queuedSet`)
-  // propagate verbatim; the mirror is untouched on failure.
+  // Public. See KV-REVAMPED §4.5. Writes the clear sentinel (`null`) on the
+  // contract's lane over whatever the server holds, even a value that can't be
+  // verified. The mirror then holds no value (`'non-init'`) and `read` gives
+  // the default. Rejects like `update`.
   'chelonia/kv/clear': async function (
     this: CheloniaContext,
     contractID: string,
     key: string,
-    {
-      maxAttempts,
-      signal
-    }: { maxAttempts?: number; signal?: AbortSignal } = {}
+    options: { maxAttempts?: number | null; signal?: AbortSignal } & KvHeightRecoveryOptions = {}
   ): Promise<void> {
     const rootState = sbp(this.config.stateSelector) as ChelRootState
     const slot = resolveActiveSlot(this, rootState, contractID, key, 'clear')
-    // Reject a clear re-entered from this contract's own onUpdate
-    // callback before any state mutation — it would deadlock the lane.
     assertNotReentrant(this, contractID, key, 'clear')
-    throwIfSignalAborted(signal)
-    // Track on the pending-writes counter (see `update` / `_waitInFlight`).
-    incrementPending(this, contractID)
-    let lastEtag: string | null | undefined
-    let lastCurrentData: NormalizedKvConflictData = { present: false }
-    let sawConflict = false
-    const onconflict = async (conflictArgs: {
-      currentData: JSONType;
-      etag: string | null;
-    }): Promise<[JSONType, string | undefined]> => {
-      // Read `etag` (a plain value) eagerly, but NEVER destructure
-      // `currentData` in the parameter list: the real `chelonia/kv/set`
-      // passes it as a getter that throws on decrypt/signature failure
-      // (chelonia.ts), and parameter-position destructuring would invoke
-      // that getter *before* the try/catch below, rejecting clear with a
-      // raw decode error. Keep the getter access inside the guarded
-      // `normalizeKvConflictCurrentData` call so a failure is swallowed
-      // and clear still writes `null`.
-      const etag = conflictArgs.etag
-      lastEtag = etag
-      sawConflict = true
-      // Capture the server's observed state so a conflict-exhaustion
-      // rejection can report it (§4.2), matching `update`. Wrapped in
-      // try/catch so a decode/validation failure of server data can't
-      // break clear's own error path; clear still writes `null`.
-      try {
-        lastCurrentData = normalizeKvConflictCurrentData(
-          slot, contractID, key, conflictArgs
-        )
-      } catch {}
-      throwIfSignalAborted(signal)
-      return [null, typeof etag === 'string' ? etag : undefined] as [JSONType, string | undefined]
-    }
-    const runBody = async (): Promise<void> => {
-      throwIfSignalAborted(signal)
-      const liveState = sbp(this.config.stateSelector) as ChelRootState
-      if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
+    const label = `clear: ${contractID}::${key}`
+    const { maxAttempts } = options
+    assertMaxAttempts(maxAttempts, label)
+    const write = async ({ heightWaitMs, signal }: SlotWriteAttempt): Promise<void> => {
+      if (!slotIsCurrent(this, contractID, slot)) {
         throw new ChelErrorKvSlotUnknown(
-            `[chelonia/kv] clear: no active slot for ${contractID}::${key}`
+          `[chelonia/kv] clear: no active slot for ${contractID}::${key}`
         )
       }
-      const mirrorEtag = liveState._kv?.[contractID]?.[key]?.etag ?? undefined
-      let setResult: { etag: string | null }
+      let sawConflict = false
+      // Never reads `currentData`: the server value doesn't matter
+      const onconflict = async ({ etag }: { etag: string | null | undefined }) => {
+        sawConflict = true
+        return [null, typeof etag === 'string' ? etag : undefined] as [null, string | undefined]
+      }
+      const liveState = sbp(this.config.stateSelector) as ChelRootState
+      const mirrorEtag = liveState._kv?.[contractID]?.[key]?.etag
+      const seen = heightWaitSnapshot(this, contractID, key)
+      let etag: string | null
       try {
-        // Resolve key IDs inside the queue so rotations that landed
-        // before this clear are seen; they stay fixed for kv/set's retries.
-        const keyIds = resolveKvKeyIds(contractID, slot, `clear: ${contractID}::${key}`)
-        setResult = await sbp('chelonia/kv/set', contractID, key,
-          null,
-          {
-            ifMatch: mirrorEtag,
-            encryptionKeyId: keyIds.encryptionKeyId,
-            signingKeyId: keyIds.signingKeyId,
-            onconflict,
-            maxAttempts,
-            signal
-          }
-        ) as { etag: string | null }
+        ;({ etag } = await sbp('chelonia/kv/set', contractID, key, null, {
+          ifMatch: mirrorEtag ?? undefined,
+          ...resolveKvKeyIds(contractID, slot, label),
+          onconflict,
+          allowUnverifiedConflict: true,
+          maxAttempts,
+          heightWaitMs,
+          signal
+        }) as { etag: string | null })
       } catch (e) {
-        if (isKvMaxAttempts(e)) {
-          const cause = kvConflictCause(e)
-          throw new ChelErrorKvConflict(
-              `[chelonia/kv] clear: ${contractID}::${key} ran out of attempts ` +
-              'resolving conflicts',
-              {
-                cause: {
-                  // Report the server's last observed state when it
-                  // surfaced one; otherwise fall back to `null` (clear's
-                  // intended write value) as before.
-                  currentData: lastCurrentData.present
-                    ? lastCurrentData.currentData
-                    : null,
-                  etag: cause?.etag ?? lastEtag ?? null
-                }
-              }
-          )
-        }
-        throw e
+        throw isKvMaxAttempts(e) ? slotConflictError(slot, contractID, label, e) : e
       }
-      // Echo-suppress unconditionally, BEFORE the abort check and the
-      // staleness/liveness guards: the clear already committed to the
-      // server, so its pubsub echo must be dropped regardless of slot
-      // replacement/drop or an aborting `signal`. See the matching note
-      // in `chelonia/kv/update` for the full rationale (the abort check
-      // must run AFTER `recordEchoCID`, never between `kv/set` resolving
-      // and the suppression recording, or the committed write's echo
-      // would re-validate against the §4.2 abort contract).
-      if (setResult.etag == null) {
-        console.warn(
-          `[chelonia/kv] clear: ${contractID}::${key} successful write returned no ` +
-          'etag/x-cid header; self-echo suppression is inactive for this write'
-        )
-      }
-      recordEchoCID(this, contractID, key, setResult.etag, sawConflict)
-      throwIfSignalAborted(signal)
-      if (this.kvSlotsByContractID.get(contractID)?.get(key) !== slot) {
-        return
-      }
-      const perContract = ensureContractKv(this, liveState, contractID)
-      const entry = perContract[key]
-      if (!entry) {
-        return
-      }
-      const previousValue = entry.value
-      const defaultClone = slot.resolvedDefault !== undefined
-        ? cloneDeep(slot.resolvedDefault)
-        : undefined
-      // §4.3/§4.5: a 'non-init' mirror `value` is always `undefined` (the
-      // canonical "nothing server-confirmed" representation), matching the
-      // 404 branch in `_loadSlotNow`. `read` and `onUpdate` still surface
-      // the deep-cloned default; only the raw mirror + event payload carry
-      // `undefined` so direct `rootState._kv` observers see one shape.
-      this.config.reactiveSet(entry, 'value', undefined)
-      this.config.reactiveSet(entry, 'etag', setResult.etag)
-      sbp('okTurtles.events/emit', CHELONIA_KV_UPDATED, {
-        contractID,
-        contractType: slot.contractType,
-        key,
-        value: undefined,
-        previousValue: cloneForEmit(previousValue),
-        reason: KV_UPDATE_REASON.LOCAL,
-        etag: setResult.etag
+      await commitSlotWrite(this, contractID, slot, seen, {
+        value: undefined, etag, sawConflict, operation: 'clear'
       })
-      patchEntry(this, contractID, slot, { status: KV_LOAD_STATUS.NON_INIT, settled: true })
-      if (slotIsCurrent(this, contractID, slot)) {
-        await safeOnUpdateGuarded(this, contractID, slot, defaultClone, {
-          contractID,
-          contractType: slot.contractType,
-          key,
-          reason: KV_UPDATE_REASON.LOCAL,
-          etag: setResult.etag,
-          previousValue: cloneForEmit(previousValue)
-        })
-      }
     }
-    // Enqueue on the per-contract lane, balancing the pending counter
-    // under both a synchronous throw and a non-promise return from
-    // `queueInvocation` (see the matching note in `chelonia/kv/update`).
-    let queued: Promise<void> | undefined
-    try {
-      queued = sbp('chelonia/queueInvocation', contractID, runBody) as Promise<void>
-    } catch (e) {
-      decrementPending(this, contractID)
-      throw e
-    }
-    return Promise.resolve(queued).finally(() => {
-      decrementPending(this, contractID)
-    })
+    return runSlotWrite(this, contractID, slot, options, label, write)
   },
 
   // Public. See KV-REVAMPED §4.6. Reports the load state of a slot,

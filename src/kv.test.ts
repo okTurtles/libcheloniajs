@@ -2288,16 +2288,7 @@ describe('KV slot API', () => {
     offs.forEach((off) => off())
   })
 
-  it('43a: post-success abort still echo-suppresses the committed write (update)', async () => {
-    // An abort that lands between `kv/set` resolving (write committed)
-    // and the post-success `throwIfSignalAborted` check must
-    // NOT leave the committed write's pubsub echo unsuppressed. The
-    // documented AbortError contract (§4.2: "Mirror is unchanged; no
-    // event fires") requires the echo-suppression recording to run
-    // before the abort check; otherwise the unsuppressed echo would
-    // later re-validate as a 'remote' frame, mutating the mirror and
-    // firing CHELONIA_KV_UPDATED against an AbortError the contract
-    // promises leaves the mirror untouched.
+  it('43a: an abort after the write committed still applies it (update)', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'abortUpdate', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
     })
@@ -2307,41 +2298,24 @@ describe('KV slot API', () => {
     const echoCID = 'post-success-abort-update'
     const ac = new AbortController()
     stubSet = async () => {
-      // The POST just committed (we're about to return the etag); the
-      // caller aborts inside this window before update's step-6 runs.
       ac.abort()
       return { etag: echoCID }
     }
 
     const { log, offs } = collectEvents()
-    await assert.rejects(
-      () => sbp('chelonia/kv/update', {
-        contractID: c, key: 'abortUpdate', signal: ac.signal, updater: () => ({ x: 1 })
-      }),
-      (e: unknown) => e instanceof DOMException && e.name === 'AbortError'
-    )
+    const result = await sbp('chelonia/kv/update', {
+      contractID: c, key: 'abortUpdate', signal: ac.signal, updater: () => ({ x: 1 })
+    })
+    assert.deepStrictEqual(result, { x: 1 })
+    const entry = rootState()._kv![c]!.abortUpdate
+    assert.deepStrictEqual([entry.value, entry.etag, entry.status, entry.settled],
+      [{ x: 1 }, echoCID, 'loaded', true])
+    assert.deepStrictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED)
+      .map((e) => (e.payload as { reason: string }).reason), ['local'])
 
-    // (a) AbortError contract holds: no events fired, mirror untouched.
-    assert.strictEqual(log.length, 0, 'no events should fire on abort')
-    assert.strictEqual(rootState()._kv![c]!.abortUpdate.value, undefined)
-    assert.strictEqual(rootState()._kv![c]!.abortUpdate.status, 'non-init')
-
-    // (b) Echo CID was recorded DESPITE the abort — the write committed,
-    // so its echo must be suppressed. Pre-fix this entry was missing
-    // because the abort check ran before recordEchoCID.
-    assert.ok(
-      sbp('chelonia/test/echoCIDPresent', `${c}${KV_KEY_SEPARATOR}abortUpdate`, echoCID),
-      'echo CID must be recorded before the abort check'
-    )
-
-    // (c) The committed write's pubsub echo arrives: it must be
-    // suppressed, not re-validated as 'remote' (which would breach the
-    // abort contract by mutating the mirror after the AbortError).
+    // The committed write's echo is not applied again as a remote change
     await sbp('chelonia/kv/_handleRemote', c, 'abortUpdate', fakeParsed({ x: 1 }), echoCID)
-    assert.ok(!log.some((e) =>
-      e.type === CHELONIA_KV_UPDATED
-    ), 'echo of aborted-but-committed write should be suppressed')
-    assert.strictEqual(rootState()._kv![c]!.abortUpdate.value, undefined)
+    assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 1)
     offs.forEach((off) => off())
   })
 
@@ -2641,15 +2615,7 @@ describe('KV slot API', () => {
     assert.ok(String(warnings[1][0]).includes('clear:'))
   })
 
-  it('44h: post-success abort still echo-suppresses the committed write (clear)', async () => {
-    // Clear analog of 43a: an abort that lands between
-    // `kv/set` resolving (clear committed) and the post-success
-    // `throwIfSignalAborted` check must NOT leave the committed clear's
-    // pubsub echo unsuppressed. The AbortError contract (§4.2) requires
-    // "Mirror is unchanged; no event fires" — `recordEchoCID` must run
-    // before the abort check, otherwise the unsuppressed echo would
-    // re-validate as a 'remote' frame and mutate the mirror after the
-    // AbortError was already thrown.
+  it('44h: an abort after the write committed still applies it (clear)', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'abortClear', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
     })
@@ -2666,30 +2632,15 @@ describe('KV slot API', () => {
     }
 
     const { log, offs } = collectEvents()
-    await assert.rejects(
-      () => sbp('chelonia/kv/clear', c, 'abortClear', { signal: ac.signal }),
-      (e: unknown) => e instanceof DOMException && e.name === 'AbortError'
-    )
+    await sbp('chelonia/kv/clear', c, 'abortClear', { signal: ac.signal })
+    const entry = rootState()._kv![c]!.abortClear
+    assert.deepStrictEqual([entry.value, entry.etag, entry.status, entry.settled],
+      [undefined, echoCID, 'non-init', true])
+    assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 1)
 
-    // (a) AbortError contract holds: no events fired, mirror untouched
-    //     (the pre-existing { x: 5 } value remains).
-    assert.strictEqual(log.length, 0, 'no events should fire on abort')
-    assert.deepStrictEqual(rootState()._kv![c]!.abortClear.value, { x: 5 })
-
-    // (b) Echo CID was recorded DESPITE the abort. Pre-fix this entry
-    //     was missing because the abort check ran before recordEchoCID.
-    assert.ok(
-      sbp('chelonia/test/echoCIDPresent', `${c}${KV_KEY_SEPARATOR}abortClear`, echoCID),
-      'echo CID must be recorded before the abort check'
-    )
-
-    // (c) The committed clear's pubsub echo arrives: it must be
-    //     suppressed, not re-validated as 'remote'.
+    // The committed clear's echo is not applied again as a remote change
     await sbp('chelonia/kv/_handleRemote', c, 'abortClear', fakeParsed(null), echoCID)
-    assert.ok(!log.some((e) =>
-      e.type === CHELONIA_KV_UPDATED
-    ), 'echo of aborted-but-committed clear should be suppressed')
-    assert.deepStrictEqual(rootState()._kv![c]!.abortClear.value, { x: 5 })
+    assert.strictEqual(log.filter((e) => e.type === CHELONIA_KV_UPDATED).length, 1)
     offs.forEach((off) => off())
   })
 
@@ -3825,7 +3776,7 @@ describe('KV slot API', () => {
     )
   })
 
-  it('64e: clear conflict exhaustion falls back to null without server data', async () => {
+  it('64e: clear conflict exhaustion without server data gives only the etag', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'clearNoData', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
     })
@@ -3842,7 +3793,7 @@ describe('KV slot API', () => {
       () => sbp('chelonia/kv/clear', c, 'clearNoData'),
       (e: unknown) => {
         assert.ok(e instanceof ChelErrorKvConflict)
-        assert.deepStrictEqual(e.cause, { currentData: null, etag: 'e-final' })
+        assert.deepStrictEqual(e.cause, { etag: 'e-final' })
         return true
       }
     )
@@ -3884,7 +3835,7 @@ describe('KV slot API', () => {
     assert.deepStrictEqual(sbp('chelonia/kv/read', c, 'clrDecode'), { x: 0 })
   })
 
-  it('64g: clear conflict exhaustion with undecodable server data falls back to null', async () => {
+  it('64g: clear conflict exhaustion with undecodable server data gives only the etag', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'clrDecodeExhaust', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
     })
@@ -3905,9 +3856,8 @@ describe('KV slot API', () => {
       () => sbp('chelonia/kv/clear', c, 'clrDecodeExhaust'),
       (e: unknown) => {
         assert.ok(e instanceof ChelErrorKvConflict)
-        // Server data couldn't be captured (getter threw), so currentData
-        // falls back to null — clear's intended write value.
-        assert.deepStrictEqual(e.cause, { currentData: null, etag: 'e-final' })
+        // Only the final conflict counts, and its data is unknown
+        assert.deepStrictEqual(e.cause, { etag: 'e-final' })
         return true
       }
     )
@@ -5670,11 +5620,7 @@ describe('KV slot API', () => {
     }
   })
 
-  it('87c: pending counter does not leak when queueInvocation returns undefined (filter veto)', async () => {
-    // A more insidious failure mode than 87/87b: an SBP filter vetoes
-    // `chelonia/queueInvocation` itself, so `sbp(...)` returns undefined
-    // (no throw). `queued.finally` would then throw a TypeError and the
-    // increment would leak. `Promise.resolve(queued)` neutralises this.
+  it('87c: a vetoed queueInvocation rejects, and the pending counter does not leak', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'k', contractType: CTYPE, defaultValue: { x: 0 }
     })
@@ -5682,12 +5628,15 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     const savedQI = stubQueueInvocation
+    // What `sbp` returns when a filter vetoes the selector
     stubQueueInvocation = (() => undefined) as unknown as typeof stubQueueInvocation
 
     try {
-      // The write resolves (Promise.resolve(undefined) → fulfilled),
-      // not rejects. The assertion is really about the counter.
-      await sbp('chelonia/kv/update', { contractID: c, key: 'k', updater: () => ({ x: 1 }) })
+      await assert.rejects(
+        sbp('chelonia/kv/update', { contractID: c, key: 'k', updater: () => ({ x: 1 }) }),
+        (e: unknown) => e instanceof ChelErrorUnexpected && /vetoed/.test(e.message)
+      )
+      await assert.rejects(sbp('chelonia/kv/clear', c, 'k'), ChelErrorUnexpected)
       assert.strictEqual(sbp('chelonia/test/pendingCount', c), 0,
         'pending counter must not leak when queueInvocation returns undefined')
     } finally {
