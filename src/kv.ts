@@ -11,7 +11,6 @@ import sbp from '@sbp/sbp'
 import { cloneDeep, deepEqualJSONType, has } from 'turtledash'
 import {
   ChelErrorKvConflict,
-  ChelErrorKvReentrant,
   ChelErrorKvSlotInvalid,
   ChelErrorKvSlotUnknown,
   ChelErrorKvUpdateInvalid,
@@ -23,6 +22,7 @@ import {
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
 import { isKvMaxAttempts } from './internal-errors.js'
+import { assertNotReentrant, resolveKvKeyIds } from './kv-checks.js'
 import { notifyContractHeight, withHeightRecovery } from './kv-height.js'
 import {
   KV_AUTO_LOAD,
@@ -137,31 +137,6 @@ function resolveSlotDefinition (
     onUpdate: def.onUpdate,
     source
   }
-}
-
-function resolveSlotKeyIds (
-  contractID: string,
-  key: string,
-  slot: SlotDefinition,
-  operation: 'update' | 'clear'
-): { encryptionKeyId: string | null; signingKeyId: string } {
-  const encryptionKeyId = slot.encryptionKeyName === null
-    ? null
-    : sbp('chelonia/contract/currentKeyIdByName', contractID, slot.encryptionKeyName)
-  const signingKeyId = sbp('chelonia/contract/currentKeyIdByName', contractID, slot.signingKeyName)
-  if (slot.encryptionKeyName !== null && !encryptionKeyId) {
-    throw new ChelErrorKvUpdateInvalid(
-      `[chelonia/kv] ${operation}: ${contractID}::${key} — encryption key ` +
-      `'${slot.encryptionKeyName}' not found on contract; refusing to write plaintext`
-    )
-  }
-  if (!signingKeyId) {
-    throw new ChelErrorKvUpdateInvalid(
-      `[chelonia/kv] ${operation}: ${contractID}::${key} — signing key ` +
-      `'${slot.signingKeyName}' not found on contract`
-    )
-  }
-  return { encryptionKeyId, signingKeyId }
 }
 
 function assertParsedDefaultValue (
@@ -816,33 +791,6 @@ async function safeOnUpdateGuarded (
         e
       )
     }
-  }
-}
-
-// Reject a KV write selector that was invoked from within an `onUpdate`
-// callback for the *same* contract — doing so would deadlock the
-// contract's `chelonia/queueInvocation` lane (see `safeOnUpdateGuarded`).
-// Only synchronous re-entrancy is detected (the flag is held just for the
-// callback's synchronous portion), so the recommended way to trigger a
-// same-contract write from `onUpdate` is to schedule it off the
-// synchronous stack and NOT await it within the callback, e.g.
-// `queueMicrotask(() => sbp('chelonia/kv/update', …))`. The scheduled
-// write simply queues behind the lane and runs once it releases.
-function assertNotReentrant (
-  ctx: CheloniaContext,
-  contractID: string,
-  key: string | undefined,
-  operation: 'update' | 'clear' | 'sync' | 'withHeightRecovery'
-): void {
-  if ((ctx.kvOnUpdateActive.get(contractID) ?? 0) > 0) {
-    const target = key === undefined ? contractID : `${contractID}::${key}`
-    throw new ChelErrorKvReentrant(
-      `[chelonia/kv] ${operation}: ${target} was called ` +
-      'synchronously from within an onUpdate callback for the same ' +
-      'contract; this would deadlock the contract lane. Schedule the ' +
-      'write off the synchronous stack instead, e.g. ' +
-      "queueMicrotask(() => sbp('chelonia/kv/" + operation + "', …))."
-    )
   }
 }
 
@@ -2670,7 +2618,7 @@ export default (sbp('sbp/selectors/register', {
         // already inside the per-contract serial queue. Resolving key IDs
         // here (not at call-site) ensures key rotation that landed before
         // this write is seen; the IDs are fixed for kv/set's retries.
-        const keyIds = resolveSlotKeyIds(contractID, key, slot, 'update')
+        const keyIds = resolveKvKeyIds(contractID, slot, `update: ${contractID}::${key}`)
         setResult = await sbp('chelonia/kv/set', contractID, key,
           nextValue,
           {
@@ -2996,7 +2944,7 @@ export default (sbp('sbp/selectors/register', {
       try {
         // Resolve key IDs inside the queue so rotations that landed
         // before this clear are seen; they stay fixed for kv/set's retries.
-        const keyIds = resolveSlotKeyIds(contractID, key, slot, 'clear')
+        const keyIds = resolveKvKeyIds(contractID, slot, `clear: ${contractID}::${key}`)
         setResult = await sbp('chelonia/kv/set', contractID, key,
           null,
           {

@@ -347,10 +347,10 @@ export async function withHeightRecovery<T> (
   ctx: CheloniaContext,
   contractID: string,
   attempt: (args: KvHeightRecoveryAttempt) => T | Promise<T>,
-  options: KvHeightRecoveryOptions | null | undefined
+  options: KvHeightRecoveryOptions | null | undefined,
+  operation = 'withHeightRecovery'
 ): Promise<T> {
-  const { onHeightAhead, maxHeightRecoveries } =
-    resolveRecoveryOptions(options, 'withHeightRecovery')
+  const { onHeightAhead, maxHeightRecoveries } = resolveRecoveryOptions(options, operation)
   const signal: ComposedAbortSignal = options?.signal
     ? composeSignals([ctx.abortController.signal, options.signal])
     : ctx.abortController.signal

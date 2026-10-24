@@ -165,7 +165,8 @@ describe('package root', () => {
     }
     for (const name of [
       'hasErrorName', 'isKvMaxAttempts', 'ChelErrorKvMaxAttempts', 'resolveKvKeyIds',
-      'assertMaxAttempts', 'resolveRecoveryOptions', 'withHeightRecovery', 'recoverContractHeight'
+      'assertMaxAttempts', 'resolveRecoveryOptions', 'withHeightRecovery', 'recoverContractHeight',
+      'assertNotReentrant'
     ]) {
       assert.ok(!(name in root), name)
     }

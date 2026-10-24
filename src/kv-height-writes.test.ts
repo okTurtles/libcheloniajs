@@ -2,7 +2,9 @@ import sbp from '@sbp/sbp'
 import assert from 'node:assert'
 import { describe, it } from 'node:test'
 
-import { ChelErrorKvHeightAhead, ChelErrorKvReentrant } from './errors.js'
+import {
+  ChelErrorKvHeightAhead, ChelErrorKvReentrant, isKvConflict, isKvHeightAhead
+} from './errors.js'
 import {
   activate, CONTRACT_ID, defineSlot, drainLanes, gateLane, holdSyncs, installKvHarness, keys,
   mirror, rootState, server, serverValue, setLocalHeight, START_HEIGHT, syncs, writeAsDeviceB
@@ -10,7 +12,8 @@ import {
 import { kvHeightTimings } from './kv-height.js'
 import { until, waitMicrotasks, within } from './test-utils.js'
 import type {
-  ChelKvGetResult, JSONType, KvHeightRecoveryAttempt, KvHeightRecoveryOptions
+  ChelContractState, ChelKvGetResult, ChelKvOnConflictCallback, JSONType, KvHeightRecoveryAttempt,
+  KvHeightRecoveryOptions
 } from './types.js'
 
 const update = (key: string, updater: (value: JSONType) => JSONType) =>
@@ -358,5 +361,152 @@ describe('chelonia/kv/withHeightRecovery', () => {
     const [direct, deferred] = await within(Promise.all(results), 'both calls')
     assert.ok(direct instanceof ChelErrorKvReentrant)
     assert.strictEqual(deferred, 'deferred')
+  })
+})
+
+const queuedSet = (args: Record<string, unknown>) =>
+  sbp('chelonia/kv/queuedSet', { contractID: CONTRACT_ID, ...args }) as Promise<{
+    etag: string | null
+  }>
+
+const renameKey = (id: string, name: string) => {
+  const state = rootState() as unknown as Record<string, ChelContractState>
+  state[CONTRACT_ID]._vm.authorizedKeys[id].name = name
+}
+
+describe('chelonia/kv/queuedSet', () => {
+  installKvHarness()
+
+  it('refuses to write plaintext unless asked to, and needs its signing key', async () => {
+    renameKey(keys.cekId, 'old-cek')
+    await assert.rejects(within(queuedSet({ key: 'note', data: 'secret' }), 'no cek'), {
+      name: 'ChelErrorKvUpdateInvalid', message: /refusing to write plaintext/
+    })
+    await assert.rejects(within(queuedSet({
+      key: 'note', data: 'secret', encryptionKeyName: null, signingKeyName: 'nope'
+    }), 'no signing key'), { name: 'ChelErrorKvUpdateInvalid', message: /signing key 'nope'/ })
+    assert.deepStrictEqual(server.log, [])
+
+    await within(queuedSet({ key: 'note', data: 'in the clear', encryptionKeyName: null }), 'plaintext')
+    assert.ok(server.store.get('note')!.body.includes('in the clear'))
+    assert.strictEqual(serverValue('note'), 'in the clear')
+  })
+
+  it('resolves key names when its turn comes; an abort while queued writes nothing', async () => {
+    renameKey(keys.cekId, 'old-cek')
+    const open = gateLane('public')
+    const write = queuedSet({ key: 'note', data: 'secret' })
+    const controller = new AbortController()
+    const aborted = queuedSet({ key: 'other', data: 'x', signal: controller.signal })
+    await waitMicrotasks()
+    renameKey(keys.cekId, 'cek')
+    controller.abort('stop')
+    await assert.rejects(within(aborted, 'the aborted write'), (e) => e === 'stop')
+    open()
+    await within(write, 'the queued write')
+    assert.deepStrictEqual(server.posts().map(({ key, status }) => [key, status]), [['note', 204]])
+    assert.ok(!server.store.get('note')!.body.includes('secret'))
+    assert.strictEqual(serverValue('note'), 'secret')
+  })
+
+  it('syncs at once a contract that is behind and retries, holding no lane meanwhile', async () => {
+    await activate()
+    server.height = START_HEIGHT + 2
+    syncs.catchUp = true
+    kvHeightTimings.waitMs = 60_000
+    const release = holdSyncs()
+    const before = syncs.count
+    const write = queuedSet({ key: 'note', data: 'x' })
+    await until(() => syncs.count === before + 1, 'the recovery sync')
+    const probe = sbp('chelonia/private/queueEvent', `public:${CONTRACT_ID}`, () => 'free')
+    assert.strictEqual(await within(probe, 'the public lane'), 'free')
+    release()
+    await within(write, 'the write')
+    assert.deepStrictEqual(server.posts().map(({ status, height }) => [status, height]), [
+      [409, String(START_HEIGHT)], [204, String(START_HEIGHT + 2)]
+    ])
+    assert.strictEqual(syncs.count, before + 1)
+  })
+
+  it('reports conflicts as ChelErrorKvConflict, with kv/set\'s cause', async () => {
+    const etag = writeAsDeviceB('names', ['a'])
+    const conflict = (message: RegExp) => (e: Error) => {
+      assert.ok(isKvConflict(e))
+      assert.strictEqual(e.name, 'ChelErrorKvConflict')
+      assert.match(e.message, message)
+      assert.deepStrictEqual(e.cause, { currentStatus: 'present', currentData: ['a'], etag })
+      return true
+    }
+    await assert.rejects(
+      within(queuedSet({ key: 'names', data: ['b'], maxAttempts: 5 }), 'no onconflict'),
+      conflict(/no onconflict handler/)
+    )
+    assert.strictEqual(server.posts().length, 1)
+
+    let calls = 0
+    const onconflict: ChelKvOnConflictCallback = async () => {
+      calls++
+      return [['b'], '"stale"']
+    }
+    await assert.rejects(
+      within(queuedSet({ key: 'names', data: ['b'], maxAttempts: null, onconflict }), 'retries'),
+      conflict(/ran out of attempts/)
+    )
+    assert.strictEqual(calls, 2)
+    assert.strictEqual(server.posts().length, 4)
+  })
+
+  it('gives onconflict a value from a newer height with allowUnverifiedConflict', async () => {
+    writeAsDeviceB('names', ['a'], START_HEIGHT + 2)
+    const seen: unknown[] = []
+    const onconflict: ChelKvOnConflictCallback = async ({ currentStatus, requiredHeight }) => {
+      seen.push([currentStatus, requiredHeight])
+      return false
+    }
+    const args = { key: 'names', data: ['b'], onconflict, onHeightAhead: 'reject' }
+    await assert.rejects(within(queuedSet(args), 'a verified write'), (e) => isKvHeightAhead(e))
+    assert.deepStrictEqual(seen, [])
+    const unverified = queuedSet({ ...args, allowUnverifiedConflict: true })
+    assert.deepStrictEqual(await within(unverified, 'an unverified write'), { etag: null })
+    assert.deepStrictEqual(seen, [['ahead', START_HEIGHT + 2]])
+    assert.strictEqual(syncs.count, 0)
+  })
+
+  it('validates its options before any request', async () => {
+    for (const options of [
+      { maxAttempts: 0 }, { maxAttempts: 1.5 }, { maxAttempts: '3' }, { onHeightAhead: 'never' },
+      { maxHeightRecoveries: -1 }
+    ]) {
+      await assert.rejects(queuedSet({ key: 'note', data: 'x', ...options }), {
+        name: 'ChelErrorKvUpdateInvalid', message: /queuedSet: /
+      })
+    }
+    const gone = queuedSet({ key: 'note', data: 'x', signal: AbortSignal.abort('gone') })
+    await assert.rejects(gone, (e) => e === 'gone')
+    assert.deepStrictEqual(server.log, [])
+    // `null` means the default
+    const defaults = { maxAttempts: null, onHeightAhead: null, maxHeightRecoveries: null }
+    await within(queuedSet({ key: 'note', data: 'x', ...defaults }), 'defaults')
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [204])
+  })
+
+  it('rejects a synchronous call from the same contract\'s onUpdate', async () => {
+    const results: Promise<unknown>[] = []
+    defineSlot({
+      key: 'prefs',
+      defaultValue: {},
+      onUpdate: (_value, { reason }) => {
+        if (reason !== 'local') return
+        results.push(queuedSet({ key: 'note', data: 'direct' }).catch((e) => e))
+        queueMicrotask(() => results.push(queuedSet({ key: 'note', data: 'deferred' })))
+      }
+    })
+    await activate()
+    await update('prefs', () => ({ lang: 'en' }))
+    await until(() => results.length === 2, 'both calls')
+    const [direct] = await within(Promise.all(results), 'both calls')
+    assert.ok(direct instanceof ChelErrorKvReentrant)
+    assert.match(direct.message, /sbp\('chelonia\/kv\/queuedSet'/)
+    assert.strictEqual(serverValue('note'), 'deferred')
   })
 })
