@@ -353,10 +353,8 @@ function assertJsonShape (input: unknown, where: string): JSONType {
 }
 
 // Compute the reducer seed for `chelonia/kv/update`:
-//  - `reloadRan`: after `update`'s reload, the mirror holds the live
-//    server value (success) or the value it had (failure), both paired
-//    with the etag the write will send, so seed from it, falling back
-//    to the default only when `undefined`.
+//  - `reloadRan`: the mirror pairs the reloaded (or kept) value with the
+//    etag the write sends, so seed from it; the default only if `undefined`.
 //  - otherwise: the normal happy path — seed from a non-error live
 //    value, else the default (mirrors `read`'s error semantics for a
 //    genuinely empty / errored slot).
@@ -473,9 +471,8 @@ type EntryPatch = {
   heightAhead?: number | null;
 }
 
-// The only writer of an entry's status fields. Emits one
-// `CHELONIA_KV_STATUS_CHANGED` if any of them changed. `lastError` exists
-// exactly while the status is `'error'`.
+// The only writer of an entry's status fields; one `CHELONIA_KV_STATUS_CHANGED`
+// if any changed. `lastError` exists exactly while the status is `'error'`.
 function patchEntry (
   ctx: CheloniaContext,
   contractID: string,
@@ -550,18 +547,19 @@ function normalizeError (e: unknown): { name: string; message: string } {
   return { name: 'Error', message }
 }
 
-// A load that never ran, or a height that never came, still ends the wait for
-// a first outcome. A value already in the mirror stays usable; a verified
-// outcome isn't replaced.
+// A load that never ran, or a height that never came, still ends the wait for a
+// first outcome; a value in the mirror stays usable, a verified outcome stays.
 function settleUnloaded (
   ctx: CheloniaContext,
   contractID: string,
   slot: SlotDefinition,
-  error: unknown
+  error: unknown,
+  { replaceError = false } = {}
 ): void {
   const entry = (sbp(ctx.config.stateSelector) as ChelRootState)._kv?.[contractID]?.[slot.key]
   if (!entry || !slotIsCurrent(ctx, contractID, slot)) return
-  if (entry.settled && entry.status !== KV_LOAD_STATUS.LOADING) return
+  const replace = replaceError && entry.status === KV_LOAD_STATUS.ERROR && entry.value === undefined
+  if (entry.settled && entry.status !== KV_LOAD_STATUS.LOADING && !replace) return
   patchEntry(ctx, contractID, slot, entry.value !== undefined
     ? { settled: true }
     : { status: KV_LOAD_STATUS.ERROR, lastError: normalizeError(error), settled: true })
@@ -618,16 +616,19 @@ function registerHeightWait (
     { contractID, key: slot.key, reason, requiredHeight: -1, gen: 0, off: () => {} }
   ctx.kvHeightWaits.set(waitKey, wait)
   wait.gen++
+  if (requiredHeight > wait.requiredHeight) {
+    wait.requiredHeight = requiredHeight
+    wait.off()
+    wait.off = () => {}
+    // Reached since the value was found: reload now, nothing to mark
+    if (heightReached(ctx, wait)) return fireHeightWait(ctx, wait)
+    wait.off = onHeight(ctx, contractID, requiredHeight, () => fireHeightWait(ctx, wait))
+  }
   if (!wait.timer) armHeightFallback(ctx, wait)
   patchEntry(ctx, contractID, slot, {
     heightAhead: Math.max(entry.heightAhead?.requiredHeight ?? -1, requiredHeight),
     status: entry.status === KV_LOAD_STATUS.NON_INIT ? KV_LOAD_STATUS.LOADING : undefined
   })
-  if (requiredHeight <= wait.requiredHeight) return
-  wait.requiredHeight = requiredHeight
-  wait.off()
-  if (heightReached(ctx, wait)) fireHeightWait(ctx, wait)
-  else wait.off = onHeight(ctx, contractID, requiredHeight, () => fireHeightWait(ctx, wait))
 }
 
 function fireHeightWait (ctx: CheloniaContext, wait: KvHeightWait): void {
@@ -649,8 +650,10 @@ function fireHeightWait (ctx: CheloniaContext, wait: KvHeightWait): void {
   }).finally(() => {
     if (!current()) return
     // A reload that failed or never ran leaves the marker for `update` to see
-    if (wait.gen === gen) dropHeightWait(ctx, wait)
-    else wait.reload = undefined
+    if (wait.gen === gen) return dropHeightWait(ctx, wait)
+    wait.reload = undefined
+    // A fallback that ran during the reload left this newer finding to it
+    if (!wait.timer) armHeightFallback(ctx, wait)
   })
 }
 
@@ -670,7 +673,7 @@ function giveUpHeightWait (ctx: CheloniaContext, wait: KvHeightWait): void {
     `[chelonia/kv] ${contractID}::${key}: settling without the server value, ` +
       `which needs contract height ${wait.requiredHeight}`
   )
-  settleUnloaded(ctx, contractID, slot, aheadOf(ctx, wait))
+  settleUnloaded(ctx, contractID, slot, aheadOf(ctx, wait), { replaceError: true })
 }
 
 // Syncs the contract once, then gives up if that didn't bring the height
@@ -679,9 +682,8 @@ async function heightWaitFallback (ctx: CheloniaContext, wait: KvHeightWait): Pr
   const { contractID, key } = wait
   const { signal } = ctx.abortController
   await recoverContractHeight(ctx, contractID, aheadOf(ctx, wait), { signal }).catch(() => {})
-  if (ctx.kvHeightWaits.get(waitKeyOf(contractID, key)) !== wait || wait.timer || wait.reload) {
-    return
-  }
+  // Findings during the sync don't postpone giving up
+  if (ctx.kvHeightWaits.get(waitKeyOf(contractID, key)) !== wait || wait.reload) return
   // `chelonia/reset` drops the waits once it tears down
   if (ctx.kvResetsInProgress) return armHeightFallback(ctx, wait)
   if (heightReached(ctx, wait)) return fireHeightWait(ctx, wait)
@@ -936,13 +938,8 @@ function recordEchoCID (
   }
 }
 
-// Per-contract pending-write counter, held by each `update` / `clear` call
-// until it settles. The counter is the third source for
-// `chelonia/kv/_waitInFlight` so a
-// write whose slot index entry and echo CID have both been removed
-// mid-flight (contract release, match→false, defineSlot replacement)
-// still settles before `chelonia/reset` tears down state. See the
-// `_waitInFlight` comment for the full three-source rationale.
+// Held by each `update` / `clear` call until it settles: `_waitInFlight`'s third
+// source, for writes whose slot and echo CID were dropped mid-flight.
 function incrementPending (ctx: CheloniaContext, contractID: string): void {
   ctx.kvPendingWrites.set(contractID, (ctx.kvPendingWrites.get(contractID) ?? 0) + 1)
 }
@@ -1110,9 +1107,8 @@ type SlotWriteAttempt = {
   signal: AbortSignal;
 }
 
-// Each attempt queues `body` on the lane anew, as height recoveries run off
-// the lane. Giving up on a value the contract can't verify yet reloads the key
-// once it can.
+// Height recoveries run off the lane, so each attempt queues `body` anew. Giving
+// up on a value the contract can't verify yet reloads the key once it can.
 async function runSlotWrite<T> (
   ctx: CheloniaContext,
   contractID: string,
@@ -1202,7 +1198,7 @@ async function syncSlot (
     const requiredHeight = kvHeightAheadCause(e)?.requiredHeight
     if (onHeightAhead === 'reject' || typeof requiredHeight !== 'number') throw e
     if ((localHeight(ctx, contractID) ?? -1) >= requiredHeight) return await load(true)
-    // Not if a load verified the key since, or found a newer value
+    // Give up unless a load verified the key since, or found a newer value
     const wait = ctx.kvHeightWaits.get(waitKey)
     if (maxHeightRecoveries > 0 && wait && wait === found.wait && wait.gen === found.gen) {
       giveUpHeightWait(ctx, wait)
@@ -2328,8 +2324,8 @@ export default (sbp('sbp/selectors/register', {
     } else if (record) {
       // Kept for the slots to use once they activate again
       this.kvResyncedContracts.add(contractID)
-      // The markers go with the waits. The slots give the events the contract
-      // type, as the contract's state is gone already.
+      // The markers go with the waits; `slot` gives the events the contract
+      // type, as the contract's state is gone
       slots?.forEach((slot, key) => {
         if (record[key]?.heightAhead) patchEntry(this, contractID, slot, { heightAhead: null })
       })
@@ -2406,9 +2402,8 @@ export default (sbp('sbp/selectors/register', {
     notifyContractHeight(this, contractID, height)
   },
 
-  // Private. For the pubsub handler's frames that can't be verified: one
-  // from a newer contract height (`requiredHeight`) reloads the key once the
-  // contract gets there, one with a malformed height stamp reloads it now
+  // Private. For pubsub frames that can't be verified: an ahead one
+  // (`requiredHeight`) reloads the key at that height, a malformed one now
   'chelonia/kv/_onUnverifiableFrame': function (
     this: CheloniaContext,
     contractID: string,
@@ -2768,14 +2763,8 @@ export default (sbp('sbp/selectors/register', {
     })
   },
 
-  // Public. See KV-REVAMPED §4.2. Runs the reducer on the slot's value and
-  // writes the result on the contract's lane. Resolves with the stored value,
-  // or `undefined` for `KV_NOOP` (unless a reload it needed failed: then it
-  // rejects with that error). Rejects with `ChelErrorKvConflict` once out
-  // of attempts (`.cause`: the final conflict's server value), with
-  // `ChelErrorKvHeightAhead` once out of height recoveries, or with the abort
-  // reason if aborted before the write committed. A failed write never sets
-  // the status to `'error'`.
+  // Public. See KV-REVAMPED §4.2. Reduces the slot's value and writes it on the
+  // contract's lane (rejections: docs/kv.md); a failed write never sets `'error'`.
   'chelonia/kv/update': async function (
     this: CheloniaContext,
     args: {
@@ -2865,9 +2854,8 @@ export default (sbp('sbp/selectors/register', {
     // Left by the last failed attempt for the next one
     let afterClean409 = false
     let aheadEtag: string | undefined
-    // The basis and the write share one lane turn, so each write sees the
-    // etag the previous one left. `forced`: re-run after a `KV_NOOP` on a
-    // basis that this activation never loaded.
+    // Basis and write share one lane turn, so each write sees the etag the last
+    // one left. `forced`: re-run after a `KV_NOOP` on a never-loaded basis.
     const write = async (
       attempt: SlotWriteAttempt,
       forced = false
@@ -3123,9 +3111,7 @@ export default (sbp('sbp/selectors/register', {
   },
 
   // Public. See KV-REVAMPED §4.5. Writes the clear sentinel (`null`) on the
-  // contract's lane over whatever the server holds, even a value that can't be
-  // verified. The mirror then holds no value (`'non-init'`) and `read` gives
-  // the default. Rejects like `update`.
+  // contract's lane over whatever the server holds, even an unverifiable value.
   'chelonia/kv/clear': async function (
     this: CheloniaContext,
     contractID: string,

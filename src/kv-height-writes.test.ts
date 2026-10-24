@@ -221,10 +221,17 @@ describe('chelonia/kv/withHeightRecovery', () => {
     await assert.rejects(within(recover(failed.attempt), 'a failed sync'), (e) => e === failed.errors[0])
     assert.strictEqual(failed.calls.length, 1)
 
+    // The passive wait after a failed sync stays within the recovery deadline
     kvHeightTimings.waitMs = 60_000
+    kvHeightTimings.recoveryTimeoutMs = 50
+    const late = needs(START_HEIGHT + 1)
+    await assert.rejects(within(recover(late.attempt), 'the deadline'), (e) => e === late.errors[0])
+    await until(syncEnded(before + 2), 'the second failed sync')
+    kvHeightTimings.recoveryTimeoutMs = 60_000
+
     const waiting = needs(START_HEIGHT + 1)
     const pending = recover(waiting.attempt)
-    await until(syncEnded(before + 2), 'the second failed sync')
+    await until(syncEnded(before + 3), 'the third failed sync')
     setLocalHeight(START_HEIGHT + 1)
     assert.strictEqual(await within(pending, 'the height after a failed sync'), 'done')
   })
@@ -802,9 +809,8 @@ describe('update\'s reducer basis', () => {
     assert.deepStrictEqual(failing.calls, [])
     assert.deepStrictEqual(slotState('names'), ['loading', AHEAD, true])
     restore()
-    // The reload finds the value ahead; the recovery's sync brings the key's
-    // deferred reload, so the retry doesn't reload again. Only the last
-    // attempt would wait for the height.
+    // The reload finds the value ahead; the recovery's sync fires the key's deferred
+    // reload, so the retry doesn't reload again (only a last attempt would wait).
     syncs.catchUp = true
     kvHeightTimings.waitMs = 60_000
     const before = gets('names')

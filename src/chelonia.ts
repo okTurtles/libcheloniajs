@@ -2951,9 +2951,8 @@ export default sbp('sbp/selectors/register', {
       `[kv/set] ${httpErrorMessage(response)}`, { cause: response.status }
     )
     let recoveryGetDone = false
-    // A conflict with neither a body nor an etag can't be retried as is, so
-    // `recover` allows one GET per call to fetch both. With `wait`, an ahead
-    // value gets one chance to become verifiable.
+    // A 412 with neither body nor etag can't be retried as is: `recover` allows one
+    // GET per call to fetch both. `wait` gives an ahead value one chance to verify.
     const readServerValue = async (
       response: Response,
       { recover = false, wait = false } = {}

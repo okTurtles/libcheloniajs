@@ -67,9 +67,8 @@ export type KvServerRequest = {
 
 export type FetchInit = Parameters<typeof fetch>[1]
 
-// One contract's KV store as the server keeps it. A POST needs `if-match`
-// (400) matching the stored value (412) and a stamp equal to the server's
-// contract height (409). Etags are the quoted CID of the stored body.
+// One contract's KV store: a POST needs `if-match` (400), matching the stored
+// value (412), stamped with the server's height (409). Etag = quoted body CID.
 export const makeKvServer = (contractID: string, { height = 0 } = {}) => {
   const store = new Map<string, { body: string; etag: string }>()
   const prefix = `/kv/${encodeURIComponent(contractID)}/`

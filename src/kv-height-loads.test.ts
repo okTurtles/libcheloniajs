@@ -164,6 +164,9 @@ const aheadAt = (height: number) => (e: unknown) =>
 // A load that finds the value ahead, without recovering
 const findAhead = (key: string, height = AHEAD) =>
   assert.rejects(sync(key, { onHeightAhead: 'reject' }), aheadAt(height))
+// What a pubsub frame for `prefs` from contract height `height` does
+const frameAhead = (height: number) =>
+  sbp('chelonia/kv/_onUnverifiableFrame', CONTRACT_ID, 'prefs', height)
 
 // Defines `prefs`, loads it empty, then has another device write a value
 // from a newer height and makes a load find it
@@ -279,6 +282,77 @@ describe('Slot loads of values from a newer contract height', () => {
     syncs.catchUp = true
     assert.strictEqual(await whenSettled('prefs'), 'loaded')
     assert.deepStrictEqual(read('prefs'), { theme: 'dark' })
+  })
+
+  it("doesn't postpone the fallback for findings before or during its sync", async () => {
+    kvHeightTimings.pendingFallbackMs = 20
+    await deferEmptySlot()
+    const release = holdSyncs()
+    const before = syncs.count
+    kvHeightTimings.pendingFallbackMs = 60_000
+    frameAhead(AHEAD + 1)
+    await until(() => syncs.count > before, 'the fallback sync armed first')
+    frameAhead(AHEAD + 2)
+    release()
+    assert.strictEqual(await whenSettled('prefs'), 'error')
+    assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD + 2 })
+  })
+
+  it('gives up with a height error on a slot that failed to load before', async () => {
+    const { handle } = server
+    server.handle = async (url, init) => init?.method !== 'POST' && url.endsWith('/prefs')
+      ? new Response(null, { status: 500 })
+      : handle(url, init)
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    assert.strictEqual(await whenSettled('prefs'), 'error')
+    server.handle = handle
+    assert.notStrictEqual(mirror('prefs')?.lastError?.name, 'ChelErrorKvHeightAhead')
+    kvHeightTimings.pendingFallbackMs = 20
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    await findAhead('prefs')
+    await until(() => mirror('prefs')?.lastError?.name === 'ChelErrorKvHeightAhead', 'the give-up')
+    assert.strictEqual(settledStatus('prefs'), 'error')
+  })
+
+  it('reloads at once, unmarked, a value whose height arrived before it registered', async () => {
+    writeAsDeviceB('prefs', { theme: 'light' })
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    writeAsDeviceB('prefs', { theme: 'dark' })
+    const markers: unknown[] = []
+    const listener = ({ heightAhead }: { heightAhead: unknown }) => { markers.push(heightAhead) }
+    sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, listener)
+    try {
+      frameAhead(START_HEIGHT)
+      await until(() => read('prefs')?.theme === 'dark', 'the reload')
+    } finally {
+      sbp('okTurtles.events/off', CHELONIA_KV_STATUS_CHANGED, listener)
+    }
+    assert.deepStrictEqual(markers.filter((marker) => marker !== null), [])
+  })
+
+  it('re-arms the fallback when one ran during a reload that ends up empty', async () => {
+    kvHeightTimings.pendingFallbackMs = 60_000
+    await deferEmptySlot()
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => { answer = resolve })
+    let held = false
+    server.onGet = () => { held = true; return answered }
+    try {
+      setLocalHeight(AHEAD)
+      await until(() => held, 'the reload')
+      server.store.delete('prefs')
+      kvHeightTimings.pendingFallbackMs = 20
+      const before = syncs.count
+      frameAhead(AHEAD + 1)
+      await until(() => syncs.count > before && !sbp('chelonia/contract/isSyncing', CONTRACT_ID),
+        'the fallback sync during the reload')
+      await sleep(20)
+    } finally {
+      answer()
+    }
+    assert.strictEqual(await whenSettled('prefs'), 'error')
   })
 
   it('reloads nothing more once a load queued earlier verified the value', async () => {

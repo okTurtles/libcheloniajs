@@ -241,9 +241,8 @@ export async function waitForHeightAfterSync (
   })
 }
 
-// Runs `body` on the contract's public lane, but rejects at once if `signal`
-// aborts while it's queued, and rejects if `body` never runs. Once running,
-// `body` alone decides the outcome (a write may have committed).
+// Rejects at once if `signal` aborts while `body` is queued, or if it never runs.
+// Once running, `body` alone decides the outcome (a write may have committed).
 export function queueOnLane<T> (
   contractID: string,
   signal: AbortSignal,
@@ -328,6 +327,7 @@ export async function recoverContractHeight (
     throw new DOMException('[chelonia/kv] chelonia/reset is in progress', 'AbortError')
   }
   const outcome: { failed?: true; error?: unknown } = {}
+  const deadline = Date.now() + kvHeightTimings.recoveryTimeoutMs
   const synced = await waitFor(kvHeightTimings.recoveryTimeoutMs, signal, (done) => {
     let waiting = true
     // A sync that was already running may have stopped short of the height
@@ -344,7 +344,9 @@ export async function recoverContractHeight (
   })
   if (synced && !outcome.failed) return
   if (outcome.failed && typeof required === 'number' && ctx.subscriptionSet.has(contractID)) {
-    await waitForHeight(ctx, contractID, required, { signal })
+    await waitForHeight(ctx, contractID, required, {
+      timeoutMs: Math.min(kvHeightTimings.waitMs, Math.max(0, deadline - Date.now())), signal
+    })
   }
   const why = outcome.failed ? 'its sync failed' : 'its sync is taking too long'
   if (!reached()) {

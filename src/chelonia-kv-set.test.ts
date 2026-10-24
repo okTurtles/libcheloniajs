@@ -244,13 +244,15 @@ describe('chelonia/kv/set', () => {
 
   it('rejects a final ahead or malformed 412 with a height error unless allowed', async () => {
     const { contractID, signingKeyId, signingKey } = setupContract()
+    kvHeightTimings.waitMs = 60_000
     let onconflictCalls = 0
-    const set = (blind?: boolean) => sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+    // The final 412 is read without waiting for the height
+    const set = (blind?: boolean) => within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
       signingKeyId,
       maxAttempts: 1,
       allowUnverifiedConflict: blind,
       onconflict: () => { onconflictCalls++; return merge({ etag: null }) }
-    }).catch((e: unknown) => e)
+    }).catch((e: unknown) => e), 'kv/set', 1000)
     const ahead = () => conflict(signValue(signingKey, 'settings', { x: 9 }, '5'), 'etag-5')
     const malformed = () => conflict(signValue(signingKey, 'settings', { x: 9 }, '1e0'), 'etag-m')
 
@@ -300,13 +302,16 @@ describe('chelonia/kv/set', () => {
     ['Chelonia resets', () => sbp('chelonia/reset'),
       (e: unknown) => (e as Error).name === 'AbortError']
   ] as const) {
-    for (const phase of ['conflict backoff', 'height wait', 'stale-stamp wait'] as const) {
+    for (const phase of [
+      'conflict backoff', 'blind writer\'s conflict backoff', 'height wait', 'stale-stamp wait'
+    ] as const) {
       it(`ends the ${phase} at once when ${label}`, async () => {
         const { contractID, signingKeyId, signingKey } = setupContract()
-        const body = phase === 'height wait'
+        const blind = phase === 'blind writer\'s conflict backoff'
+        const body = phase === 'height wait' || blind
           ? signValue(signingKey, 'settings', { x: 9 }, '5')
           : undefined
-        if (phase === 'conflict backoff') Math.random = () => 0.999
+        if (phase.endsWith('conflict backoff')) Math.random = () => 0.999
         const controller = new AbortController()
         let onconflictCalls = 0
         let aborted: unknown
@@ -319,6 +324,7 @@ describe('chelonia/kv/set', () => {
           signingKeyId,
           signal: controller.signal,
           heightWaitMs: 60_000,
+          allowUnverifiedConflict: blind,
           onconflict: () => { onconflictCalls++; return merge({ etag: null }) }
         }).catch((e: unknown) => e), `kv/set in its ${phase}`, 1000)
         assert.ok(expected(e), String(e))
@@ -731,7 +737,9 @@ describe('chelonia/kv/get', () => {
   })
 
   // Same leak-prevention as the `chelonia/kv/set` block above.
+  const timings = { ...kvHeightTimings }
   afterEach(() => {
+    Object.assign(kvHeightTimings, timings)
     sbp('chelonia/_init')
   })
 
@@ -751,8 +759,12 @@ describe('chelonia/kv/get', () => {
   it('rejects a value ahead of the local height with ChelErrorKvHeightAhead', async () => {
     const { contractID, signingKey } = setupContract()
     serve({ body: signValue(signingKey, 'settings', { x: 1 }, '5') })
+    kvHeightTimings.waitMs = 60_000
 
-    const e = await sbp('chelonia/kv/get', contractID, 'settings').catch((e: unknown) => e)
+    // Without waiting for the height
+    const e = await within(
+      sbp('chelonia/kv/get', contractID, 'settings').catch((e: unknown) => e), 'kv/get', 1000
+    )
     assert.ok(isKvHeightAhead(e) && e instanceof ChelErrorInvalidMessageHeight)
     assert.deepStrictEqual(kvHeightAheadCause(e), {
       requiredHeight: 5, exact: true, localHeight: 1, etag: 'etag-1', httpStatus: 200

@@ -1,9 +1,6 @@
-// Shared by the `kv-height*.test.ts` files: the real slot layer, `kv/set` and
-// `kv/get` against a simulated server. Not a test file; excluded from the CJS
-// build. Call `installKvHarness()` at the top of a `describe`; tests may change
-// `kvHeightTimings`, which is restored after each test. A pubsub client
-// (`connectPubsub`) and its listeners outlive `chelonia/_init`, so files that
-// connect must connect in every test.
+// The real slot layer and `kv/set`/`kv/get` against a simulated server, for the
+// `kv-height*.test.ts` files (`installKvHarness()` per `describe`). A pubsub client
+// outlives `chelonia/_init`, so a file that connects must connect in every test.
 import {
   CURVE25519XSALSA20POLY1305, EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey
 } from '@chelonia/crypto'

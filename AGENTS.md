@@ -235,7 +235,7 @@ Full documentation:
   and `isKvConflict` (`src/errors.ts`), not `instanceof` or `e.name`. See
   [docs/kv.md](docs/kv.md#contract-heights); rules in
   [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery).
-- Never await `update`, `clear`, `queuedSet`, single-key `sync`,
+- Never await `update`, `clear`, `queuedSet`, `sync`,
   `whenSettled` or `withHeightRecovery` from code running on the same
   contract's queue (side effects, `queueInvocation` bodies, `onUpdate`,
   reducers, `onconflict`): they may never settle. See

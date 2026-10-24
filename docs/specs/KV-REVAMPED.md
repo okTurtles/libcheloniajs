@@ -316,10 +316,13 @@ and `chelonia/reset` end it at any wait or backoff with
 | `412`, last attempt | Read without a wait: `ahead` / `malformed` ⇒ the height error (with this response's etag), else `ChelErrorKvMaxAttempts`. |
 
 The fetch-first GET (`data === undefined`) is read like a non-final
-`412`. `onconflict` receives `currentStatus`, `currentValue` (only when
+`412`; so is the one GET per call that stands in for a `412` with
+neither body nor etag (with `onconflict`). `onconflict` receives
+`currentStatus`, `currentValue` (only when
 `present`), `requiredHeight` (only when `ahead`) and a lazy
 `currentData` that throws for `ahead` / `malformed`. With
-`allowUnverifiedConflict: true` (for blind writers) nothing waits,
+`allowUnverifiedConflict: true` (for blind writers) no passive height
+wait runs (the backoff and `409` waits still do),
 `onconflict` also receives `ahead` / `malformed` values, and running
 out of attempts on one is a conflict. A conflict's `.cause`
 (`KvConflictCause`) describes the last `412` only: `{ currentStatus?,
@@ -354,9 +357,9 @@ single-key `sync` run the same one, with the same options.
    height still isn't reached, if the contract is no longer subscribed
    (it never re-subscribes), or after 30 s (unless the height was
    reached). A recovery that races a re-sync waits for it.
-5. No recovery sync starts while `chelonia/reset` runs (`AbortError`),
-   and the reset waits for running ones. `signal` and a reset end only
-   the caller's wait, never a shared sync.
+5. No recovery sync starts from `chelonia/reset`'s abort until the reset
+   ends (`AbortError`), and the reset waits for running ones. `signal`
+   and a reset end only the caller's wait, never a shared sync.
 6. `queue(body)` runs `body` on the contract's public lane. `signal`
    and a reset reject it at once while it is queued (the body then
    never runs). A body that never runs rejects (`ChelErrorUnexpected`
@@ -371,11 +374,11 @@ value `ahead`:
   caller gets the error.
 - The key gets one wait. Once the contract reaches the height, the key
   reloads with the reason that registered the wait (`'load'` or
-  `'remote'`), without showing `loading` if the slot holds a value: one
+  `'remote'`), without showing `loading` if the slot is `loaded`: one
   GET, one event and one `onUpdate` per recovered value.
-- 10 s after the wait was armed without the height (later findings
-  don't postpone it), the library syncs the contract once (shared with
-  recoveries). Then the key reloads if the height was reached; else the
+- 10 s after the wait was armed without the height, the library syncs
+  the contract once (shared with recoveries); findings meanwhile don't
+  postpone this. Then the key reloads if the height was reached; else the
   slot settles: a value keeps `loaded` / `error` (`loading` while a
   reload runs), no value gives `error` with `lastError.name ===
   'ChelErrorKvHeightAhead'`. The wait keeps listening, and the next
@@ -425,8 +428,9 @@ reloads the key (once per attempt, plus the retry below) when:
 
 A reload that finds the value `ahead` goes to recovery without running
 the reducer; on the last `'sync'` attempt it first waits passively once
-and reloads again. When a reload fails otherwise, cases 1 and 3 reject
-with its error. In the other cases the reducer runs on the mirror (or
+and reloads again. When a reload fails otherwise, cases 1 and 3 (and
+any reload when the caller passed `ifMatch`) reject with its error. In
+the other cases the reducer runs on the mirror (or
 the retained value) under the mirror's etag, and a `KV_NOOP` rejects
 with the reload error, unless the only reload was case 4's and it never
 found the value ahead.
@@ -452,7 +456,7 @@ nothing; then, and after an abort or a later round failing for another
 reason, the key's deferred reload stays armed. `signal` and
 `chelonia/reset` reject the call at once (`AbortError` for a reset; a
 running load finishes in the background); a load that can't start
-rejects. The aggregate form takes no options and never rejects.
+rejects. The aggregate form takes no options and is unchanged (§4.4).
 
 ### 3.5 Settled status
 
@@ -491,7 +495,7 @@ if it is active, settled and not `loading`, else `undefined`.
 | `ChelErrorKvSlotUnknown`, at once | No slot is defined for the key (for the contract's type, or for any type while it is unknown), or the contract is reconciled and the slot inactive. |
 | `ChelErrorKvSlotUnknown`, later | The slot is deactivated or unregistered; the contract is removed (also if it never activated, e.g. its first sync failed and it was released); its type becomes known without the slot; its first reconcile leaves the slot inactive. |
 | `signal.reason` | `signal` aborts (also if already settled). |
-| `AbortError` | `chelonia/reset`. |
+| `AbortError` | `chelonia/reset`'s teardown. |
 
 **Resync.** A contract resync keeps `_kv[contractID]` (values and
 statuses), cancels the contract's waits and clears its active slots'
@@ -506,10 +510,11 @@ longer active. The contract's final removal rejects its waiters.
 already running on a drained lane finish. Then it aborts: writes still
 queued, or running but not yet posted (e.g. reloading their basis),
 reject with `AbortError` without posting (the reducer doesn't run);
-running single-key syncs and pending `whenSettled` reject with
-`AbortError`; loads it drops resolve and settle nothing. Until its
+running single-key syncs reject with `AbortError`; loads it drops
+resolve and settle nothing. Until its
 teardown no recovery or fallback sync starts (a due fallback re-arms).
-The teardown cancels every wait, and the next session starts with fresh
+The teardown cancels every wait and rejects pending `whenSettled` with
+`AbortError`, and the next session starts with fresh
 KV runtime state even if the teardown throws; a reset that fails before
 its teardown leaves every wait working. Entries restored by
 `reset(newState)` start unsettled.
@@ -942,8 +947,8 @@ Internally:
 2. Looks up the current `(value, etag)` from the local mirror,
    reloading the key first when the mirror can't be trusted (§3.4,
    "Reducer basis").
-3. Calls `updater(value)`. If the result is `KV_NOOP`, resolves with
-   `undefined` and skips the network entirely.
+3. Calls `updater(value)`. If the result is `KV_NOOP`, skips the network
+   and resolves with `undefined` (unless a needed reload failed, §3.4).
 4. Validates the result through `schema.parse` (if defined). On
    failure, rejects with `ChelErrorKvValidation` — the network is
    never hit.

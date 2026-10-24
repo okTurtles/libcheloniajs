@@ -90,7 +90,7 @@ export function isKvHeightMalformed (e: unknown): e is Error & {
   return hasErrorName(e, 'ChelErrorKvHeightMalformed')
 }
 
-// Also matches the error raw `chelonia/kv/set` throws when it runs out of attempts
+// Also matches the error raw `chelonia/kv/set` throws for a 412 it won't retry
 export function isKvConflict (e: unknown): e is Error & {
   name: 'ChelErrorKvConflict' | 'ChelErrorKvMaxAttempts'; cause?: KvConflictCause
 } {

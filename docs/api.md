@@ -221,13 +221,13 @@ All slot selectors live in `src/kv.ts`.
 | `chelonia/kv/update` | `sbp('chelonia/kv/update', { contractID, key, updater? \| value?, maxAttempts?, signal?, ifMatch?, onHeightAhead?, maxHeightRecoveries? })`. Writes a slot value via an `updater(prev) → next` reducer or a plain `value` (requires `defaultUpdater` on the slot). Returns `Promise<JSONType \| undefined>`, retries on `412` and recovers from height errors ([options](./kv.md#options-and-timings)). |
 | `chelonia/kv/read` | Synchronous read of the local mirror for `(contractID, key)`. Returns the cloned default if no mirror entry exists or the slot is in `'error'` status. Non-primitive mirror values are deep-cloned on every call, so reads of large slot values are O(size); cache the result instead of reading on every frame. Check `chelonia/kv/status` to distinguish "empty" from "failed to load". |
 | `chelonia/kv/sync` | `(contractID, key?, options?)`. Force-fetch a single slot (with `key`) or every active slot for a contract and refresh the mirror. The single-slot form takes `signal`, `onHeightAhead` and `maxHeightRecoveries`, and recovers from a value found ahead. |
-| `chelonia/kv/clear` | `(contractID, key, options?)`. Reset a slot to its declared `defaultValue` by writing the internal clear sentinel (`null`), even over a value it can't verify; the mirror value becomes a cloned default and status returns to `'non-init'`. Options as for `update` (`maxAttempts`, `signal`, `onHeightAhead`, `maxHeightRecoveries`). |
+| `chelonia/kv/clear` | `(contractID, key, options?)`. Reset a slot to its declared `defaultValue` by writing the internal clear sentinel (`null`), even over a value it can't verify; the mirror value becomes `undefined` (`read` gives the default) and status returns to `'non-init'`. Options as for `update` (`maxAttempts`, `signal`, `onHeightAhead`, `maxHeightRecoveries`). |
 | `chelonia/kv/status` | Report the `KvLoadStatus` of a single slot (`'non-init' | 'loading' | 'loaded' | 'error'`) or the aggregate status of all slots for a contract. |
 | `chelonia/kv/settledStatus` | `(contractID, key)`. The active slot's status once it has [settled](./kv.md#pending-vs-settled) (`'loaded'`, `'non-init'` or `'error'`), else `undefined`. |
 | `chelonia/kv/whenSettled` | `(contractID, key, { signal? })`. Resolves with `settledStatus` once it is defined; rejects with `ChelErrorKvSlotUnknown` when the slot can't become active. |
 | `chelonia/kv/refreshFilters` | Re-evaluate every slot's `match` predicate against the current root state. Call after login / logout transitions. |
 
-Never await `update`, `clear`, `queuedSet`, single-slot `sync`,
+Never await `update`, `clear`, `queuedSet`, `sync`,
 `whenSettled` or `withHeightRecovery` from code running on the same
 contract's queue: see [Where not to await](./kv.md#where-not-to-await).
 

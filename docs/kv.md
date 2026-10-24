@@ -73,7 +73,8 @@ loaded yet: both are `'non-init'`. Each entry therefore also carries:
   local write was applied, a load failed, or the library gave up
   waiting for a contract height. It turns `false` whenever the slot
   becomes active (after a contract sync or resync, also for entries
-  restored from persistence), then stays `true` through later reloads.
+  restored from persistence or by `chelonia/reset(newState)`), then
+  stays `true` through later reloads.
 - `heightAhead: { requiredHeight }`: the server holds a value for the
   key that this client can't verify yet (see
   [Contract heights](#contract-heights)). It is removed once a load or
@@ -100,9 +101,9 @@ and `heightAhead` (`null` when there is none), and fires when only
 these (or `lastError`) change.
 
 When `stateSelector` points at an app store that persists `_kv`,
-restored entries keep the previous session's `settled: true` until
-their slot becomes active. Use `settledStatus`, which only reports
-active slots, instead of the raw flag.
+entries the app restores itself keep the previous session's
+`settled: true` until their slot becomes active. Use `settledStatus`,
+which only reports active slots, instead of the raw flag.
 
 ## Contract heights
 
@@ -133,8 +134,8 @@ still holds), but have their own names.
 
 ### What the library does
 
-- **Slot loads and pubsub frames** that find a value ahead leave the
-  slot pending: the mirror keeps its value (a `'non-init'` slot shows
+- **Slot loads and pubsub frames** that find a value ahead defer a
+  reload: the mirror keeps its value (a `'non-init'` slot shows
   `'loading'`), the entry gets `heightAhead`, and the key reloads once
   the contract reaches the height. After 10 s without it, the library
   syncs the contract once; if that isn't enough, the slot settles (as
@@ -146,7 +147,7 @@ still holds), but have their own names.
   `ChelErrorKvHeightAhead`: they sync the contract and retry. A write
   gives up its place in the contract's queue while the sync runs, and
   concurrent callers share one sync. A slot write that still fails on a
-  value ahead leaves the slot pending, like a load.
+  value ahead defers a reload, like a load.
 - **`chelonia/kv/set`** waits briefly for incoming events to bring the
   contract to a conflicting value's height before giving up. After a
   `409` it re-signs the same data once the contract catches up (waiting
@@ -170,12 +171,13 @@ request):
 | `signal` | none | Aborting rejects with `signal.reason`; a write the server already accepted still resolves. |
 
 Whatever the options, a slot found ahead still reloads once the
-contract reaches the height.
+contract reaches the height. The writers' `maxAttempts` (conflict
+attempts, default `3`) also accepts `null` for the default.
 
 | Timing | Value |
 |---|---|
 | Wait for incoming events to reach a height (`kv/set`'s `heightWaitMs` default; no wait while the pubsub socket is down) | 1.5 s |
-| A pending slot stops waiting: one sync, then it settles if still behind | 10 s |
+| A deferred reload's fallback: one sync, then the slot settles if still behind | 10 s |
 | One caller's wait for a recovery sync, then it rejects with the original error | 30 s |
 | `kv/set` re-signs after `409`s | at most 5 per call |
 | Random backoff before each `onconflict` retry | 0-1.5 s |
@@ -199,7 +201,7 @@ await sbp('chelonia/kv/withHeightRecovery', contractID,
 
 The attempt runs outside the contract's queue unless it calls
 `queue(body)`. Pass `heightWaitMs` on to `kv/set`: it is `0` except on
-the last attempt, so earlier attempts sync instead of waiting. Only a
+the last `'sync'` attempt, so earlier attempts sync instead of waiting. Only a
 `ChelErrorKvHeightAhead` thrown as is (not wrapped) is recovered.
 
 `onconflict` gets `currentStatus` (`'present'`, `'absent'`, `'ahead'`
@@ -213,7 +215,7 @@ the current value, can pass `allowUnverifiedConflict: true` to get it
 A contract's side effects, `queueInvocation` bodies, and slot loads and
 writes (so `onUpdate`, reducers and `onconflict`) run on that
 contract's queue. From there, never await `update`, `clear`,
-`queuedSet`, single-key `sync` or a pending `whenSettled` for the same
+`queuedSet`, `sync` or a pending `whenSettled` for the same
 contract: they wait for the queue you hold, so they never settle. A
 synchronous call from the same contract's `onUpdate` rejects with
 `ChelErrorKvReentrant` instead; schedule it with `queueMicrotask` and
@@ -380,19 +382,12 @@ await it inside the callback:
 behind the lane and runs once it releases.
 
 **Reducer basis.** `update` reloads the slot before running the
-reducer when the mirror can't be trusted: the slot is `'loading'` or
-has `heightAhead`, the attempt follows a height recovery, the slot
-hasn't settled and you passed `ifMatch`, or the slot is `'error'` but
-still holds a value (seeding that write from the default could
-overwrite the live value). These reloads emit `'load'` events and call
-`onUpdate` like any load. If one fails, `update` rejects without
-running the reducer when the slot was `'loading'` or had `heightAhead`,
-or you passed `ifMatch`; otherwise the reducer runs on the mirror (or
-the `'error'` slot's retained value) under the mirror's etag, and a
-`KV_NOOP` rejects with the reload error (it resolves for the retained
-value). Without those triggers, a slot that hasn't settled yet isn't
-reloaded first: its reducer runs on the mirror or default, and a
-`KV_NOOP` there forces one reload and a second run. Fine print:
+reducer when the mirror can't be trusted (e.g. it is `'loading'`, has
+`heightAhead`, follows a height recovery, or is `'error'` but holds a
+value). These reloads emit `'load'` events and call `onUpdate` like any
+load. When one fails, `update` either rejects or runs the reducer on
+the mirror under its etag, where a `KV_NOOP` rejects with the reload
+error. Rules:
 [KV-REVAMPED.md §3.4](specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery)
 ("Reducer basis").
 
