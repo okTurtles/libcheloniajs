@@ -277,6 +277,21 @@ export type KvMirrorEntry = {
   heightAhead?: { requiredHeight: number };
 };
 
+// A slot key whose server value needs a contract height not reached yet
+export type KvHeightWait = {
+  contractID: string;
+  key: string;
+  reason: Exclude<KvUpdateCtx['reason'], 'local'>;
+  requiredHeight: number;
+  // Bumped by every finding, so that a load only drops the wait it saw
+  gen: number;
+  off: () => void;
+  // The fallback; none while reloading, or once it gave up (still listening)
+  timer?: ReturnType<typeof setTimeout>;
+  // The reload started when the height was reached, until it ends
+  reload?: object;
+};
+
 // Context passed to `onUpdate` and embedded in the `CHELONIA_KV_UPDATED`
 // event payload. See KV-REVAMPED.md §4.1.
 export type KvUpdateCtx = {
@@ -551,6 +566,8 @@ export type CheloniaContext = {
   kvHeightListeners: Map<string, Set<{ minHeight: number; fire: () => void }>>;
   // Running height-recovery syncs, each shared by all its callers
   kvRecoveries: Map<string, Promise<void>>;
+  // Slot keys to reload once the contract reaches a height, by `contractID::key`
+  kvHeightWaits: Map<string, KvHeightWait>;
   // Pending `chelonia/kv/whenSettled` calls, keyed by `contractID::key`
   kvSettleWaiters: Map<string, Set<{
     resolve: (status: Exclude<KvLoadStatus, 'loading'>) => void;

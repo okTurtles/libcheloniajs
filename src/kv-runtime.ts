@@ -5,6 +5,8 @@ import type { CheloniaContext } from './types.js'
 const startKvSession = (ctx: CheloniaContext): void => {
   clearTimeout(ctx.kvFilterRetryTimer)
   ctx.kvFilterRetryTimer = undefined
+  ctx.kvHeightWaits?.forEach((wait) => clearTimeout(wait.timer))
+  ctx.kvHeightWaits = new Map()
   ctx.kvSlotsByContractID = new Map()
   ctx.kvActiveFilters = new Map()
   ctx.kvFilterDirty = new Set()

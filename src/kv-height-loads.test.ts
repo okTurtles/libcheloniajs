@@ -2,12 +2,17 @@ import sbp from '@sbp/sbp'
 import assert from 'node:assert'
 import { beforeEach, describe, it } from 'node:test'
 
-import { CONTRACT_IS_SYNCING } from './events.js'
+import { isKvHeightAhead, kvHeightAheadCause } from './errors.js'
+import { CHELONIA_KV_STATUS_CHANGED, CONTRACT_IS_SYNCING, CONTRACTS_MODIFIED } from './events.js'
 import {
-  notifyContractHeight, onHeight, waitForHeight, waitForHeightAfterSync
+  activate, CONTRACT_ID, defineSlot, drainLanes, gateLane, holdSyncs, installKvHarness, logs,
+  mirror, rootState, server, setLocalHeight, START_HEIGHT, syncs, writeAsDeviceB
+} from './kv-height-harness.js'
+import {
+  kvHeightTimings, notifyContractHeight, onHeight, waitForHeight, waitForHeightAfterSync
 } from './kv-height.js'
-import { captureConsole, within } from './test-utils.js'
-import type { CheloniaContext } from './types.js'
+import { captureConsole, until, within } from './test-utils.js'
+import type { CheloniaContext, KvLoadStatus } from './types.js'
 
 const CID = 'zHeightContract'
 const contracts: Record<string, { height: number }> = {}
@@ -136,5 +141,198 @@ describe('waitForHeight', () => {
       endSync()
       assert.strictEqual(await within(wait, 'the wait'), false)
     })
+  })
+})
+
+let vetoedQueue: string | undefined
+sbp('sbp/filters/selector/add', 'chelonia/private/queueEvent',
+  (_domain: string, _selector: string, [queueName]: unknown[]) => queueName !== vetoedQueue
+)
+
+const AHEAD = START_HEIGHT + 2
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+const gets = (key: string) =>
+  server.log.filter((request) => request.method === 'GET' && request.key === key).length
+const read = (key: string) => sbp('chelonia/kv/read', CONTRACT_ID, key)
+const sync = (key: string) =>
+  within(sbp('chelonia/kv/sync', CONTRACT_ID, key) as Promise<void>, `kv/sync of ${key}`)
+const settledStatus = (key: string) => sbp('chelonia/kv/settledStatus', CONTRACT_ID, key)
+const whenSettled = (key: string) =>
+  within(sbp('chelonia/kv/whenSettled', CONTRACT_ID, key) as Promise<string>, `${key} to settle`)
+const aheadAt = (height: number) => (e: unknown) =>
+  kvHeightAheadCause(e)?.requiredHeight === height
+
+// Defines `prefs`, loads it empty, then has another device write a value
+// from a newer height and makes a load find it
+const deferEmptySlot = async (match?: () => boolean) => {
+  defineSlot({ key: 'prefs', defaultValue: {}, match })
+  await activate()
+  writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+  await assert.rejects(sync('prefs'), aheadAt(AHEAD))
+}
+
+describe('Slot loads of values from a newer contract height', () => {
+  installKvHarness()
+
+  it('defers a background load and reloads the key once the height arrives', async () => {
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    const updates: unknown[] = []
+    defineSlot({
+      key: 'prefs', defaultValue: {}, onUpdate: (value, { reason }) => { updates.push([value, reason]) }
+    })
+    await activate()
+    assert.strictEqual(mirror('prefs')?.status, 'loading')
+    assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
+    assert.strictEqual(settledStatus('prefs'), undefined)
+    const logged = (method: string) =>
+      logs.logged.some((entry) => entry.method === method && isKvHeightAhead(entry.args[1]))
+    assert.ok(logged('debug') && !logged('error'), 'a deferral is logged at debug level')
+    // Another finding of the same value doesn't add a reload
+    await assert.rejects(sync('prefs'), aheadAt(AHEAD))
+    const before = gets('prefs')
+
+    setLocalHeight(AHEAD)
+    await until(() => settledStatus('prefs') === 'loaded', 'the reload')
+    await drainLanes()
+    assert.strictEqual(gets('prefs'), before + 1)
+    assert.deepStrictEqual(read('prefs'), { theme: 'dark' })
+    assert.strictEqual(mirror('prefs')?.heightAhead, undefined)
+    assert.deepStrictEqual(updates, [[{ theme: 'dark' }, 'load']])
+  })
+
+  it('keeps a loaded value and its status, and reloads without a loading flicker', async () => {
+    writeAsDeviceB('prefs', { theme: 'light' })
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    await assert.rejects(sync('prefs'), aheadAt(AHEAD))
+    assert.strictEqual(settledStatus('prefs'), 'loaded')
+    assert.deepStrictEqual(read('prefs'), { theme: 'light' })
+    assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
+
+    const statuses: KvLoadStatus[] = []
+    const listener = ({ status }: { status: KvLoadStatus }) => { statuses.push(status) }
+    sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, listener)
+    try {
+      setLocalHeight(AHEAD)
+      await until(() => mirror('prefs')?.heightAhead === undefined, 'the reload')
+    } finally {
+      sbp('okTurtles.events/off', CHELONIA_KV_STATUS_CHANGED, listener)
+    }
+    assert.deepStrictEqual(read('prefs'), { theme: 'dark' })
+    assert.deepStrictEqual(statuses, ['loaded'])
+  })
+
+  it('syncs once after the fallback period, then settles an empty slot as an error', async () => {
+    kvHeightTimings.pendingFallbackMs = 20
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    assert.strictEqual(settledStatus('prefs'), 'non-init')
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    const before = syncs.count
+    await assert.rejects(sync('prefs'), aheadAt(AHEAD))
+    // No longer known to be empty
+    assert.strictEqual(mirror('prefs')?.status, 'loading')
+
+    assert.strictEqual(await whenSettled('prefs'), 'error')
+    assert.strictEqual(mirror('prefs')?.lastError?.name, 'ChelErrorKvHeightAhead')
+    assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
+    assert.strictEqual(syncs.count, before + 1)
+    // The next finding arms a new fallback
+    await assert.rejects(sync('prefs'), aheadAt(AHEAD))
+    await until(() => syncs.count === before + 2, 'the second fallback sync')
+    // Catching up later still reloads the key
+    setLocalHeight(AHEAD)
+    await until(() => settledStatus('prefs') === 'loaded', 'the late reload')
+    assert.deepStrictEqual(read('prefs'), { theme: 'dark' })
+  })
+
+  it('keeps a held value usable but unsettled until the fallback gives up', async () => {
+    kvHeightTimings.pendingFallbackMs = 20
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    rootState()._kv = {
+      [CONTRACT_ID]: { prefs: { value: { theme: 'light' }, etag: '"old"', status: 'loaded' } }
+    }
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    const openLane = gateLane()
+    await within(sbp('chelonia/private/in/sync', CONTRACT_ID), 'the activating sync')
+    const releaseSyncs = holdSyncs()
+    const before = syncs.count
+    openLane()
+    await until(() => syncs.count > before, 'the fallback sync')
+    assert.strictEqual(mirror('prefs')?.status, 'loaded')
+    assert.deepStrictEqual(read('prefs'), { theme: 'light' })
+    assert.strictEqual(settledStatus('prefs'), undefined)
+
+    releaseSyncs()
+    assert.strictEqual(await whenSettled('prefs'), 'loaded')
+    assert.deepStrictEqual(read('prefs'), { theme: 'light' })
+    assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
+  })
+
+  it('reloads the key when the fallback sync brings the height', async () => {
+    kvHeightTimings.pendingFallbackMs = 20
+    await deferEmptySlot()
+    syncs.catchUp = true
+    assert.strictEqual(await whenSettled('prefs'), 'loaded')
+    assert.deepStrictEqual(read('prefs'), { theme: 'dark' })
+  })
+
+  it('reloads nothing more once a load queued earlier verified the value', async () => {
+    const reasons: string[] = []
+    defineSlot({ key: 'prefs', defaultValue: {}, onUpdate: (_value, { reason }) => { reasons.push(reason) } })
+    await activate()
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    await assert.rejects(sync('prefs'), aheadAt(AHEAD))
+    const before = gets('prefs')
+    const openLane = gateLane()
+    const explicit = sync('prefs')
+    // Its reload queues behind the explicit sync
+    setLocalHeight(AHEAD)
+    openLane()
+    await explicit
+    await drainLanes()
+    assert.strictEqual(gets('prefs'), before + 1)
+    assert.deepStrictEqual(reasons, ['load'])
+    assert.strictEqual(mirror('prefs')?.heightAhead, undefined)
+  })
+
+  it('cancels the wait when the slot deactivates or its contract is removed', async () => {
+    kvHeightTimings.pendingFallbackMs = 50
+    let active = true
+    await deferEmptySlot(() => active)
+    const cancellations = {
+      deactivation: () => {
+        active = false
+        sbp('chelonia/kv/refreshFilters', CONTRACT_ID)
+      },
+      removal: () => {
+        sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, [], { added: [], removed: [CONTRACT_ID] })
+      }
+    }
+    for (const [label, cancel] of Object.entries(cancellations)) {
+      active = true
+      sbp('chelonia/kv/refreshFilters', CONTRACT_ID)
+      await until(() => mirror('prefs')?.heightAhead, `${label}: a deferred load`)
+      cancel()
+      const before = syncs.count
+      await sleep(150)
+      assert.strictEqual(syncs.count, before, `${label}: no fallback sync`)
+    }
+  })
+
+  it("settles the slot and keeps the marker when the reload can't start", async () => {
+    await deferEmptySlot()
+    vetoedQueue = `public:${CONTRACT_ID}`
+    try {
+      setLocalHeight(AHEAD)
+      await until(() => settledStatus('prefs') === 'error', 'the vetoed reload to settle')
+    } finally {
+      vetoedQueue = undefined
+    }
+    assert.strictEqual(mirror('prefs')?.lastError?.name, 'ChelErrorUnexpected')
+    assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
+    assert.ok(logs.logged.some(({ method, args }) =>
+      method === 'error' && String(args[0]).includes('deferred reload')))
   })
 })

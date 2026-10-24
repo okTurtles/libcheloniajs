@@ -23,6 +23,8 @@ const CANONICAL_HEIGHT = /^(?:0|[1-9][0-9]*)$/
 export const kvHeightTimings = {
   // How long to wait for an incoming event to bring the contract to a height
   waitMs: 1500,
+  // How long a slot waits for a height before syncing, then settling without it
+  pendingFallbackMs: 10000,
   // How long one caller waits for a height-recovery sync
   recoveryTimeoutMs: 30000
 }
