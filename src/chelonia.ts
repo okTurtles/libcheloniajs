@@ -1518,8 +1518,18 @@ export default sbp('sbp/selectors/register', {
     //        return this.config.fetch(profilePictureUrl).then(doSomeWorkWithTheFile)
     //      })
     //    }
-    return sbp('chelonia/private/queueEvent', contractID, ['chelonia/private/noop']).then(() =>
-      sbp('chelonia/private/queueEvent', 'public:' + contractID, sbpInvocation)
+    // An SBP filter veto makes `queueEvent` return `undefined`; reject so that
+    // callers can't mistake a body that never ran for one that did.
+    const queue = (name: string, invocation: Parameters<typeof sbp>) => {
+      const queued = sbp('chelonia/private/queueEvent', name, invocation)
+      return queued === undefined
+        ? Promise.reject(
+          new ChelErrorUnexpected(`[chelonia] queueInvocation: queueing on ${name} was vetoed`)
+        )
+        : queued
+    }
+    return queue(contractID, ['chelonia/private/noop']).then(() =>
+      queue('public:' + contractID, sbpInvocation)
     )
   },
   'chelonia/begin': async (...invocations: Parameters<typeof sbp>[]) => {
