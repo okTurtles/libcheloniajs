@@ -1,3 +1,5 @@
+import type { KvConflictCause, KvHeightAheadCause } from './types.js'
+
 // ugly boilerplate because JavaScript is stupid
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error#Custom_Error_Types
 
@@ -60,3 +62,55 @@ export const ChelErrorKvUpdateInvalid = ChelErrorGenerator('ChelErrorKvUpdateInv
 export const ChelErrorKvValidation = ChelErrorGenerator('ChelErrorKvValidation')
 export const ChelErrorKvConflict = ChelErrorGenerator('ChelErrorKvConflict')
 export const ChelErrorKvReentrant = ChelErrorGenerator('ChelErrorKvReentrant')
+export const ChelErrorKvHeightAhead = ChelErrorGenerator(
+  'ChelErrorKvHeightAhead',
+  ChelErrorInvalidMessageHeight
+)
+export const ChelErrorKvHeightMalformed = ChelErrorGenerator(
+  'ChelErrorKvHeightMalformed',
+  ChelErrorInvalidMessageHeight
+)
+
+// Names, not classes: the error may come from another copy of the library or
+// another realm, or be a plain `{ name, message }` such as a slot's `lastError`.
+function hasErrorName<N extends string> (e: unknown, ...names: N[]): e is Error & { name: N } {
+  return typeof e === 'object' && e !== null &&
+    (names as unknown[]).includes((e as { name?: unknown }).name)
+}
+
+export function isKvHeightAhead (e: unknown): e is Error & {
+  name: 'ChelErrorKvHeightAhead'; cause?: KvHeightAheadCause
+} {
+  return hasErrorName(e, 'ChelErrorKvHeightAhead')
+}
+
+export function isKvHeightMalformed (e: unknown): e is Error & {
+  name: 'ChelErrorKvHeightMalformed'
+} {
+  return hasErrorName(e, 'ChelErrorKvHeightMalformed')
+}
+
+// Also matches the error raw `chelonia/kv/set` throws when it runs out of attempts
+export function isKvConflict (e: unknown): e is Error & {
+  name: 'ChelErrorKvConflict' | 'ChelErrorKvMaxAttempts'; cause?: KvConflictCause
+} {
+  return hasErrorName(e, 'ChelErrorKvConflict', 'ChelErrorKvMaxAttempts')
+}
+
+export function kvHeightAheadCause (e: unknown): KvHeightAheadCause | undefined {
+  const cause = isKvHeightAhead(e) ? e.cause : undefined
+  return typeof cause === 'object' && cause !== null ? cause : undefined
+}
+
+// Walks `e` and its `.cause` chain; `maxDepth` counts the errors checked, `e` included.
+export function findErrorCause<T> (
+  e: unknown,
+  predicate: (e: unknown) => e is T,
+  maxDepth = 8
+): T | undefined {
+  for (let depth = 0; depth < maxDepth && typeof e === 'object' && e !== null; depth++) {
+    if (predicate(e)) return e
+    e = (e as { cause?: unknown }).cause
+  }
+  return undefined
+}

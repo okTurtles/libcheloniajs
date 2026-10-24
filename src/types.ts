@@ -763,3 +763,49 @@ export type ChelKvOnConflictCallback = (args: {
   currentData: JSONType | undefined;
   currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
 }) => Promise<[JSONType, string | undefined] | false>;
+
+// 'ahead': stamped at a contract height not reached locally, so it can't be
+// verified yet. 'malformed': its height stamp is missing or invalid.
+export type KvServerValueStatus = 'absent' | 'present' | 'ahead' | 'malformed';
+
+export type KvHeightAheadCause = {
+  requiredHeight: number;
+  // false: `requiredHeight` is only a lower bound (inferred from a 409)
+  exact: boolean;
+  localHeight: number | undefined;
+  etag: string | null;
+  httpStatus: number;
+};
+
+export type KvHeightAheadMode = 'sync' | 'reject';
+
+// `null` means the default.
+export type KvHeightRecoveryOptions = {
+  onHeightAhead?: KvHeightAheadMode | null;
+  maxHeightRecoveries?: number | null;
+  signal?: AbortSignal;
+};
+
+export type KvHeightRecoveryAttempt = {
+  recoveries: number;
+  // `undefined`: let `chelonia/kv/set` wait for the height (default wait)
+  heightWaitMs: 0 | undefined;
+  queue: <T>(body: () => Promise<T>) => Promise<T>;
+};
+
+// Describes the server value of the final 412 only.
+export type KvConflictCause = {
+  currentStatus?: KvServerValueStatus;
+  currentData?: JSONType;
+  requiredHeight?: number;
+  etag?: string | null;
+};
+
+export type KvConflictServerValue =
+  | {
+      currentStatus: 'present';
+      currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType>;
+      requiredHeight?: undefined;
+    }
+  | { currentStatus: 'absent' | 'malformed'; currentValue: undefined; requiredHeight?: undefined }
+  | { currentStatus: 'ahead'; currentValue: undefined; requiredHeight: number };

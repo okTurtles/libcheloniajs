@@ -22,6 +22,7 @@ import {
   CHELONIA_KV_UPDATED,
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
+import { isKvMaxAttempts } from './internal-errors.js'
 import {
   KV_AUTO_LOAD,
   KV_DEFAULT_ENCRYPTION_KEY_NAME,
@@ -552,16 +553,6 @@ function normalizeError (e: unknown): { name: string; message: string } {
   let message: string
   try { message = String(e) } catch { message = '' }
   return { name: 'Error', message }
-}
-
-// Realm-safe detection of the low-level conflict-exhaustion error.
-// `ChelErrorGenerator` assigns `.name` from a string literal (see
-// errors.ts), so it survives a dual ESM/CJS or cross-realm load of
-// `@chelonia/lib` where `instanceof ChelErrorKvMaxAttempts` would fail
-// against an error constructed by the other copy. This mirrors the
-// `Symbol.for`-based realm safety of the `KV_NOOP` path (kv-constants.ts).
-function isKvMaxAttempts (e: unknown): boolean {
-  return e instanceof Error && e.name === 'ChelErrorKvMaxAttempts'
 }
 
 // Resolve the contract type from rootState. The spec (KV-REVAMPED §4.2
