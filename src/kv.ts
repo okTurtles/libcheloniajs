@@ -23,7 +23,7 @@ import {
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
 import { isKvMaxAttempts } from './internal-errors.js'
-import { notifyContractHeight } from './kv-height.js'
+import { notifyContractHeight, withHeightRecovery } from './kv-height.js'
 import {
   KV_AUTO_LOAD,
   KV_DEFAULT_ENCRYPTION_KEY_NAME,
@@ -44,6 +44,8 @@ import type {
   CheloniaContext,
   ChelRootState,
   JSONType,
+  KvHeightRecoveryAttempt,
+  KvHeightRecoveryOptions,
   KvLoadStatus,
   KvMirrorEntry,
   KvSlotDefinition,
@@ -829,12 +831,13 @@ async function safeOnUpdateGuarded (
 function assertNotReentrant (
   ctx: CheloniaContext,
   contractID: string,
-  key: string,
-  operation: 'update' | 'clear' | 'sync'
+  key: string | undefined,
+  operation: 'update' | 'clear' | 'sync' | 'withHeightRecovery'
 ): void {
   if ((ctx.kvOnUpdateActive.get(contractID) ?? 0) > 0) {
+    const target = key === undefined ? contractID : `${contractID}::${key}`
     throw new ChelErrorKvReentrant(
-      `[chelonia/kv] ${operation}: ${contractID}::${key} was called ` +
+      `[chelonia/kv] ${operation}: ${target} was called ` +
       'synchronously from within an onUpdate callback for the same ' +
       'contract; this would deadlock the contract lane. Schedule the ' +
       'write off the synchronous stack instead, e.g. ' +
@@ -1981,11 +1984,12 @@ export default (sbp('sbp/selectors/register', {
       if (idx > 0) ids.add(echoKey.slice(0, idx))
     })
     this.kvPendingWrites.forEach((_n, cID) => ids.add(cID))
-    return Promise.all(
-      Array.from(ids).map((cID) =>
+    return Promise.all([
+      ...Array.from(ids, (cID) =>
         sbp('chelonia/queueInvocation', cID, ['chelonia/private/noop'])
-      )
-    )
+      ),
+      ...Array.from(this.kvRecoveries.values(), (sync) => sync.catch(() => {}))
+    ])
   },
 
   // Private. See KV-REVAMPED §11.4 bullet 3 (reconnect hook).
@@ -2012,6 +2016,21 @@ export default (sbp('sbp/selectors/register', {
     height: number
   ): void {
     notifyContractHeight(this, contractID, height)
+  },
+
+  // Retries `attempt` (e.g. raw `kv/get` / `kv/set` calls) after syncing the
+  // contract when it rejects with `ChelErrorKvHeightAhead`
+  'chelonia/kv/withHeightRecovery': async function <T> (
+    this: CheloniaContext,
+    contractID: string,
+    attempt: (args: KvHeightRecoveryAttempt) => T | Promise<T>,
+    options?: KvHeightRecoveryOptions | null
+  ): Promise<T> {
+    if (typeof attempt !== 'function') {
+      throw new TypeError('[chelonia/kv] withHeightRecovery: `attempt` must be a function')
+    }
+    assertNotReentrant(this, contractID, undefined, 'withHeightRecovery')
+    return withHeightRecovery(this, contractID, attempt, options)
   },
 
   'chelonia/kv/_onContractResynced': function (this: CheloniaContext, contractID: string): void {

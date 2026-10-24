@@ -16,11 +16,13 @@ const startKvSession = (ctx: CheloniaContext): void => {
   ctx.kvPendingLoads = new Map()
   ctx.kvOnUpdateActive = new Map()
   ctx.kvHeightListeners = new Map()
+  ctx.kvRecoveries = new Map()
 }
 
 export const initKvRuntime = (ctx: CheloniaContext): void => {
   ctx.kvSlots = new Map()
   ctx.defContractKvByManifest = new Map()
+  ctx.kvResetsInProgress = 0
   startKvSession(ctx)
 }
 

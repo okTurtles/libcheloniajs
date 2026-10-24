@@ -62,13 +62,15 @@ import { clearReprocessDebounceAll, type PublishOptions } from './internals.js'
 import './kv.js'
 import {
   abortReason,
+  composeSignals,
   heightAheadError,
   localHeight,
   MAX_STALE_STAMP_RETRIES,
   readHeightStamp,
   sleep,
   waitForHeight,
-  waitForHeightAfterSync
+  waitForHeightAfterSync,
+  type ComposedAbortSignal
 } from './kv-height.js'
 import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import { queueEventOrReject } from './queue-event.js'
@@ -284,8 +286,6 @@ export type ChelAtomicParams = {
 };
 
 export { SPMessage }
-
-type ComposedAbortSignal = AbortSignal & { _cleanup?: () => void }
 
 type KvValueClass<T> =
   | { status: 'present'; parsed: ParsedEncryptedOrUnencryptedMessage<T> }
@@ -751,6 +751,7 @@ export default sbp('sbp/selectors/register', {
     if (this.pubsub) {
       sbp('chelonia/private/stopClockSync')
     }
+    let drainingKv = false
     try {
       // wait for any pending sync operations to finish before saving
       Object.keys(this.postSyncOperations).forEach((cID) => {
@@ -769,7 +770,9 @@ export default sbp('sbp/selectors/register', {
       // state teardown. `chelonia/kv/update` / `chelonia/kv/clear` run inside
       // the per-contract `chelonia/queueInvocation` lane, so `_waitInFlight`
       // resolves only once they settle. The trailing `wait` drains follow-up
-      // work a KV continuation enqueued.
+      // work a KV continuation enqueued. No height-recovery syncs start meanwhile.
+      drainingKv = true
+      this.kvResetsInProgress++
       this.abortController.abort()
       this.abortController = new AbortController()
       await sbp('chelonia/kv/_waitInFlight')
@@ -820,6 +823,7 @@ export default sbp('sbp/selectors/register', {
       }
       return result
     } finally {
+      if (drainingKv) this.kvResetsInProgress--
       // Stop first: an overlapping reset may have restarted it already
       if (this.pubsub) {
         sbp('chelonia/private/stopClockSync')
@@ -3151,29 +3155,6 @@ export default sbp('sbp/selectors/register', {
     })
   }
 }) as string[]
-
-function composeSignals (signals: AbortSignal[]): ComposedAbortSignal {
-  if (typeof AbortSignal.any === 'function') return AbortSignal.any(signals) as ComposedAbortSignal
-  const controller = new AbortController()
-  const cleanupFns: Array<() => void> = []
-  const abort = (signal: AbortSignal): void => {
-    if (!controller.signal.aborted) controller.abort(signal.reason)
-  }
-  for (const signal of signals) {
-    if (signal.aborted) {
-      abort(signal)
-      break
-    }
-    const handler = () => abort(signal)
-    signal.addEventListener('abort', handler, { once: true })
-    cleanupFns.push(() => signal.removeEventListener('abort', handler))
-  }
-  const composed = controller.signal as ComposedAbortSignal
-  composed._cleanup = () => {
-    for (const cleanup of cleanupFns.splice(0)) cleanup()
-  }
-  return composed
-}
 
 function contractNameFromAction (action: string): string {
   const regexResult = ACTION_REGEX.exec(action)
