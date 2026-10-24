@@ -2007,6 +2007,9 @@ export default sbp('sbp/selectors/register', {
       throw new ChelErrorResourceGone('Cannot sync permanently deleted contract ' + contractID)
     }
 
+    // Owned by this sync and dropped when it ends, so that a sync that fails
+    // early can't leave the contract accepting outside events
+    const pendingEntry = { contractID }
     try {
       this.currentSyncs[contractID] = { firstSync: !state.contracts[contractID]?.type }
       sbp('okTurtles.events/emit', CONTRACT_IS_SYNCING, contractID, true)
@@ -2029,12 +2032,9 @@ export default sbp('sbp/selectors/register', {
       const { HEAD: recentHEAD, height: recentHeight } = state.contracts[contractID] || {}
       const isSubscribed = this.subscriptionSet.has(contractID)
       if (!isSubscribed) {
-        const entry = this.pending.find((entry) => entry?.contractID === contractID)
         // we're syncing a contract for the first time, make sure to add to pending
         // so that handleEvents knows to expect events from this contract
-        if (!entry) {
-          this.pending.push({ contractID })
-        }
+        this.pending.push(pendingEntry)
       }
       this.postSyncOperations[contractID] =
         this.postSyncOperations[contractID] ?? Object.create(null)
@@ -2082,10 +2082,6 @@ export default sbp('sbp/selectors/register', {
           added: [contractID],
           removed: []
         })
-        const entryIndex = this.pending.findIndex((entry) => entry?.contractID === contractID)
-        if (entryIndex !== -1) {
-          this.pending.splice(entryIndex, 1)
-        }
         console.debug(`[chelonia] added already synchronized ${contractID} to subscription set`)
       } else {
         console.debug(`[chelonia] contract ${contractID} was already synchronized`)
@@ -2099,6 +2095,8 @@ export default sbp('sbp/selectors/register', {
       this.config.hooks.syncContractError?.(e, contractID)
       throw e
     } finally {
+      const pendingIndex = this.pending.indexOf(pendingEntry)
+      if (pendingIndex !== -1) this.pending.splice(pendingIndex, 1)
       if (state[contractID]?._volatile?.resyncing) {
         this.config.reactiveDel(state[contractID]._volatile, 'resyncing')
       }

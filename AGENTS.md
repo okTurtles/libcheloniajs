@@ -331,6 +331,10 @@ registration of a selector, and `src/chelonia.ts` locks the `chelonia` SBP domai
 scope, so a stub registered by one file (e.g. the `chelonia/contract/fullState` stub in
 `src/local-selectors/index.test.ts`) would shadow the real selectors for the whole process.
 
+Shared helpers live in `src/test-utils.ts`, a plain module that registers no selectors. A
+test must fail rather than hang when the behaviour it checks regresses: poll with
+`until(cond, label)` and bound a promise that might never settle with `within(promise, label)`.
+
 ## Common Gotchas
 
 1. **Import extensions**: Always use `.js` extension in imports, even for TypeScript files. The build process does not transform these.
