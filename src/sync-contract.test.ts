@@ -532,4 +532,11 @@ describe('chelonia/reset', () => {
     await within(sbp('chelonia/contract/retain', cid), 'retain again')
     assert.strictEqual(read(), 0)
   })
+
+  it('restores KV mirror entries from newState unsettled', async () => {
+    const kept = { value: 1, etag: 'e', status: 'loaded', settled: true }
+    await within(sbp('chelonia/reset', { _kv: { 'cid-kept': { counter: kept } } }), 'reset')
+    assert.deepStrictEqual(rootState()._kv?.['cid-kept']?.counter,
+      { value: 1, etag: 'e', status: 'loaded', settled: false })
+  })
 })

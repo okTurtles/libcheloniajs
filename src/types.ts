@@ -270,6 +270,11 @@ export type KvMirrorEntry = {
   etag: string | null;
   status: KvLoadStatus;
   lastError?: { name: string; message: string };
+  // Reached a final outcome since the slot was last activated; stays true
+  // through later reloads. Only meaningful while the slot is active.
+  settled?: boolean;
+  // The server holds a value stamped at a contract height not reached yet.
+  heightAhead?: { requiredHeight: number };
 };
 
 // Context passed to `onUpdate` and embedded in the `CHELONIA_KV_UPDATED`

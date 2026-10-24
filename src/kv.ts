@@ -14,7 +14,8 @@ import {
   ChelErrorKvSlotInvalid,
   ChelErrorKvSlotUnknown,
   ChelErrorKvUpdateInvalid,
-  ChelErrorKvValidation
+  ChelErrorKvValidation,
+  ChelErrorUnexpected
 } from './errors.js'
 import {
   CHELONIA_KV_STATUS_CHANGED,
@@ -424,7 +425,7 @@ function validateReducerOutput (
 // `_kv[contractID]` record if absent, so calling it for a contract with
 // no active slots would leave an orphaned, never-cleaned-up empty record
 // in persisted state. A read-only caller that must not create the record
-// should follow `setSlotStatus`'s non-destructive pattern
+// should follow `patchEntry`'s non-destructive pattern
 // (`rootState._kv?.[contractID]?.[key]`) instead.
 
 function ensureContractKv (
@@ -444,60 +445,55 @@ function ensureContractKv (
   return perContract
 }
 
-// Emit a `CHELONIA_KV_STATUS_CHANGED` event after writing status / lastError
-// onto the mirror entry. Skips the emit only when both status and lastError
-// are unchanged.
-function setSlotStatus (
+type EntryPatch = {
+  status?: KvLoadStatus;
+  lastError?: { name: string; message: string };
+  settled?: boolean;
+  // `null` clears the marker
+  heightAhead?: number | null;
+}
+
+// The only writer of an entry's status fields. Emits one
+// `CHELONIA_KV_STATUS_CHANGED` if any of them changed. `lastError` exists
+// exactly while the status is `'error'`.
+function patchEntry (
   ctx: CheloniaContext,
-  rootState: ChelRootState,
   contractID: string,
-  contractType: string,
-  key: string,
-  status: KvLoadStatus,
-  lastError?: { name: string; message: string }
+  slot: Pick<SlotDefinition, 'contractType' | 'key'>,
+  patch: EntryPatch
 ): void {
-  // Check-then-create: read the entry WITHOUT forcing creation of the
-  // `_kv[contractID]` record. `ensureContractKv` would create that record
-  // before the existence check below, leaving an orphaned empty record in
-  // prod when the per-key entry is missing. Every legitimate caller seeds
-  // the entry (and thus the record) first, so reading non-destructively is
-  // safe here.
-  const entry = rootState._kv?.[contractID]?.[key]
+  const { contractType, key } = slot
+  // Read without creating `_kv[contractID]` (see `ensureContractKv`)
+  const entry = (sbp(ctx.config.stateSelector) as ChelRootState)._kv?.[contractID]?.[key]
   if (!entry) {
     if (process.env.NODE_ENV !== 'production') {
-      throw new Error(
-        `[chelonia/kv] setSlotStatus called for ${contractID}::${key} before ` +
-        'the mirror entry was seeded'
-      )
+      throw new Error(`[chelonia/kv] status patch for unseeded ${contractID}::${key}`)
     }
     return
   }
   const previousStatus = entry.status
-  const statusUnchanged = previousStatus === status
-  // `lastErrorChanged` detects a structural difference (name or message)
-  // between the new and old error objects. It is false when both sides
-  // carry an error with identical content AND when neither side has an
-  // error. Those two cases are disambiguated by the early return below:
-  // when the status is also unchanged we skip the event and reactivity
-  // entirely (identical-error repeat or plain no-op); only a genuine
-  // change in status or error content falls through to mutate the entry.
-  const lastErrorChanged =
-    !!lastError !== !!entry.lastError ||
-    (lastError && entry.lastError &&
-      (lastError.name !== entry.lastError.name ||
-       lastError.message !== entry.lastError.message))
-  // Status unchanged AND error content unchanged → nothing to do. A
-  // repeated identical validation error therefore emits no
-  // CHELONIA_KV_STATUS_CHANGED; the diagnostic CHELONIA_KV_VALIDATION_ERROR
-  // is emitted separately by the caller and still fires every time.
-  if (statusUnchanged && !lastErrorChanged) return
-  if (!statusUnchanged) {
-    ctx.config.reactiveSet(entry, 'status', status)
+  const previousError = entry.lastError
+  const previousSettled = entry.settled === true
+  const previousHeight = entry.heightAhead?.requiredHeight
+  const status = patch.status ?? previousStatus
+  const lastError = status === KV_LOAD_STATUS.ERROR ? patch.lastError ?? previousError : undefined
+  const settled = patch.settled ?? previousSettled
+  const height = patch.heightAhead === undefined ? previousHeight : patch.heightAhead ?? undefined
+  const errorChanged = lastError?.name !== previousError?.name ||
+    lastError?.message !== previousError?.message
+  const { config } = ctx
+  const fields = entry as unknown as Record<string, unknown>
+  if (entry.settled !== settled) config.reactiveSet(entry, 'settled', settled)
+  if (status === previousStatus && !errorChanged && settled === previousSettled &&
+      height === previousHeight) return
+  if (status !== previousStatus) config.reactiveSet(entry, 'status', status)
+  if (errorChanged) {
+    if (lastError) config.reactiveSet(entry, 'lastError', lastError)
+    else config.reactiveDel(fields, 'lastError')
   }
-  if (!lastError && entry.lastError) {
-    ctx.config.reactiveDel(entry as unknown as Record<string, unknown>, 'lastError')
-  } else if (lastError) {
-    ctx.config.reactiveSet(entry, 'lastError', lastError)
+  if (height !== previousHeight) {
+    if (height === undefined) config.reactiveDel(fields, 'heightAhead')
+    else config.reactiveSet(entry, 'heightAhead', { requiredHeight: height })
   }
   sbp('okTurtles.events/emit', CHELONIA_KV_STATUS_CHANGED, {
     contractID,
@@ -505,16 +501,10 @@ function setSlotStatus (
     key,
     status,
     previousStatus,
-    // Representation note: the EVENT always carries `lastError` —
-    // normalized to `null` when there is no error — whereas the mirror
-    // ENTRY omits the property entirely when absent (`lastError?` is
-    // optional on `KvMirrorEntry`, and is `reactiveDel`'d above). This is
-    // intentional and is asserted by tests: an event listener reads
-    // `event.lastError === null` for "no error", while a mirror reader
-    // sees `entry.lastError === undefined`. Code diffing the two
-    // representations must treat `null` (event) and `undefined` (entry) as
-    // equivalent "no error".
-    ...(lastError ? { lastError } : { lastError: null })
+    lastError: lastError ?? null,
+    settled,
+    previousSettled,
+    heightAhead: height === undefined ? null : { requiredHeight: height }
   })
 }
 
@@ -531,6 +521,34 @@ function normalizeError (e: unknown): { name: string; message: string } {
   let message: string
   try { message = String(e) } catch { message = '' }
   return { name: 'Error', message }
+}
+
+// A load that never ran still ends the wait for a first outcome. A value
+// already in the mirror stays usable; a verified outcome isn't replaced.
+function settleUnstartedLoad (
+  ctx: CheloniaContext,
+  contractID: string,
+  slot: SlotDefinition,
+  error: unknown
+): void {
+  const entry = (sbp(ctx.config.stateSelector) as ChelRootState)._kv?.[contractID]?.[slot.key]
+  if (!entry || !slotIsCurrent(ctx, contractID, slot)) return
+  if (entry.settled && entry.status !== KV_LOAD_STATUS.LOADING) return
+  patchEntry(ctx, contractID, slot, entry.value !== undefined
+    ? { settled: true }
+    : { status: KV_LOAD_STATUS.ERROR, lastError: normalizeError(error), settled: true })
+}
+
+// Status for consumers that must tell "empty" from "not known yet":
+// `undefined` until the active slot has settled, and while it reloads.
+function settledStatusOf (
+  ctx: CheloniaContext,
+  contractID: string,
+  key: string
+): KvLoadStatus | undefined {
+  if (!ctx.kvSlotsByContractID.get(contractID)?.has(key)) return
+  const entry = (sbp(ctx.config.stateSelector) as ChelRootState)._kv?.[contractID]?.[key]
+  if (entry?.settled && entry.status !== KV_LOAD_STATUS.LOADING) return entry.status
 }
 
 // Resolve the contract type from rootState. The spec (KV-REVAMPED §4.2
@@ -1365,11 +1383,22 @@ export default (sbp('sbp/selectors/register', {
       // Seed the mirror entry as 'non-init' if absent so consumers
       // can observe the slot before the first load resolves.
       const perContract = ensureContractKv(this, rootState, contractID)
-      if (!perContract[slot.key]) {
+      const existing = perContract[slot.key]
+      if (!existing) {
         this.config.reactiveSet(perContract, slot.key, {
           value: undefined,
           etag: null,
-          status: KV_LOAD_STATUS.NON_INIT
+          status: KV_LOAD_STATUS.NON_INIT,
+          settled: false
+        })
+      } else if (!wasActive) {
+        // A kept or persisted entry is unverified until this activation's
+        // first outcome; a `'loading'` left over from before is stale.
+        patchEntry(this, contractID, slot, {
+          settled: false,
+          status: existing.status !== KV_LOAD_STATUS.LOADING
+            ? undefined
+            : existing.value === undefined ? KV_LOAD_STATUS.NON_INIT : KV_LOAD_STATUS.LOADED
         })
       }
       // Schedule a load. The actual fetch is serialised against
@@ -1434,22 +1463,28 @@ export default (sbp('sbp/selectors/register', {
     // its lane callback starts: a load queued behind busy lane work has
     // not yet flipped the slot to 'loading', so `defineSlot`'s gate
     // would otherwise miss it and revalidate a value this load is about
-    // to discard at its staleness guard (#1). Balanced in `finally`,
-    // including the synchronous-undefined return from a stubbed/!
-    // re-entrant `queueInvocation` (mirrors `update`'s counter handling).
+    // to discard at its staleness guard (#1).
     incrementPendingLoad(this, contractID)
-    let queued: Promise<void> | undefined
-    try {
-      queued = sbp('chelonia/queueInvocation', contractID, () =>
-        sbp('chelonia/kv/_loadSlotNow', { contractID, slot, reason })
-      ) as Promise<void>
-    } catch (e) {
-      decrementPendingLoad(this, contractID)
-      throw e
-    }
-    return Promise.resolve(queued).finally(() => {
-      decrementPendingLoad(this, contractID)
-    })
+    const instance = this._instance
+    let started = false
+    return (async () => {
+      try {
+        await sbp('chelonia/queueInvocation', contractID, () => {
+          started = true
+          return sbp('chelonia/kv/_loadSlotNow', { contractID, slot, reason })
+        })
+        if (started || this._instance !== instance) return
+        throw new ChelErrorUnexpected(
+          `[chelonia/kv] load of ${contractID}::${slot.key} was vetoed`
+        )
+      } catch (e) {
+        // Work dropped by a reset belongs to the previous session
+        if (!started && this._instance === instance) settleUnstartedLoad(this, contractID, slot, e)
+        throw e
+      } finally {
+        decrementPendingLoad(this, contractID)
+      }
+    })()
   },
 
   // Private unqueued implementation. Fetches via `chelonia/kv/get`,
@@ -1518,7 +1553,7 @@ export default (sbp('sbp/selectors/register', {
       // persisted state until contract release. The subscription guard
       // above doesn't cover this — the contract is still subscribed, only
       // the slot entry was removed. Matches the non-destructive read
-      // pattern `setSlotStatus` uses (see line 384).
+      // pattern `patchEntry` uses.
       if (!rootState._kv?.[contractID]?.[slot.key]) {
         return
       }
@@ -1527,7 +1562,9 @@ export default (sbp('sbp/selectors/register', {
         // Reconcile dropped the entry while we were queued.
         return
       }
-      const priorStatus = perContract[slot.key]?.status
+      const priorEntry = perContract[slot.key]
+      const priorStatus = priorEntry.status
+      const priorError = priorEntry.lastError
       // `silent` (update's data-loss-guard reload) must hide ALL of this
       // reload's status transitions from the `update` caller: the guard
       // reload runs from an `'error'` baseline, so `suppressLoadingStatus`
@@ -1542,27 +1579,22 @@ export default (sbp('sbp/selectors/register', {
       // seed precedence from whether the reload ran/failed, not from the
       // (now-frozen) status field. Non-silent loads transition normally.
       // NOTE: under `silent`, status transitions AND `lastError` updates
-      // are intentionally swallowed (the no-op stub below discards both
-      // args). The slot was already in `'error'` (that's what triggered
+      // are intentionally swallowed (the no-op stub below discards the
+      // patch). The slot was already in `'error'` (that's what triggered
       // the reload), and the enclosing `update` will overwrite both on
       // write success or stamp a fresh error on write failure. A failed
       // silent reload therefore leaves the prior `lastError` in place —
       // acceptable because the write's own outcome reconciles it.
-      const setStatus = silent
+      const setStatus: (patch: EntryPatch) => void = silent
         ? () => {}
-        : (
-            status: KvLoadStatus,
-            lastError?: { name: string; message: string }
-          ) => setSlotStatus(
-            this, rootState, contractID, slot.contractType, slot.key, status, lastError
-          )
+        : (patch) => patchEntry(this, contractID, slot, patch)
       // Staleness teardown shared by all three guards below. Re-reads
       // the LIVE mirror (`rootState._kv`) rather than the `perContract`
       // captured above: `chelonia/kv/_cleanupContractRuntime` can run
       // (outside this lane) during the GET await and `reactiveDel` the
       // whole `_kv[contractID]` record. The captured `perContract` then
       // points at a detached object whose entry still reads
-      // `'loading'`, so trusting it would call `setSlotStatus` →
+      // `'loading'`, so trusting it would call `patchEntry` →
       // `ensureContractKv` and silently re-create the deleted record
       // (orphan leak in prod, throw in dev, `_assertIndexConsistent`
       // trip). Re-reading live means a released contract yields no
@@ -1574,8 +1606,8 @@ export default (sbp('sbp/selectors/register', {
       const restorePriorStatusIfStale = () => {
         const liveEntry = rootState._kv?.[contractID]?.[slot.key]
         if (!liveEntry) return
-        if (liveEntry.status === KV_LOAD_STATUS.LOADING && priorStatus != null) {
-          setStatus(priorStatus)
+        if (liveEntry.status === KV_LOAD_STATUS.LOADING) {
+          setStatus({ status: priorStatus, lastError: priorError })
         }
       }
       const slotReplacedOrReleased = () =>
@@ -1610,12 +1642,12 @@ export default (sbp('sbp/selectors/register', {
         if (preserveStatusOnError) {
           restorePriorStatusIfStale()
         } else {
-          setStatus(KV_LOAD_STATUS.ERROR, normalizeError(e))
+          setStatus({ status: KV_LOAD_STATUS.ERROR, lastError: normalizeError(e), settled: true })
         }
         throw new ChelErrorKvValidation(wrappedMessage, { cause: e })
       }
       if (!(suppressLoadingStatus && priorStatus === KV_LOAD_STATUS.LOADED)) {
-        setStatus(KV_LOAD_STATUS.LOADING)
+        setStatus({ status: KV_LOAD_STATUS.LOADING })
       }
       let parsed: ChelKvGetResult | null
       try {
@@ -1639,7 +1671,7 @@ export default (sbp('sbp/selectors/register', {
           throw e
         }
         const lastError = normalizeError(e)
-        setStatus(KV_LOAD_STATUS.ERROR, lastError)
+        setStatus({ status: KV_LOAD_STATUS.ERROR, lastError, settled: true })
         throw e
       }
       if (parsed === null) {
@@ -1685,8 +1717,8 @@ export default (sbp('sbp/selectors/register', {
           }
         }
         // Transition to 'non-init' before onUpdate (matching the
-        // success-path sequencing of setSlotStatus → safeOnUpdateGuarded).
-        setStatus(KV_LOAD_STATUS.NON_INIT)
+        // success-path sequencing of patchEntry → safeOnUpdateGuarded).
+        setStatus({ status: KV_LOAD_STATUS.NON_INIT, settled: true })
         if (!silent && existingEntry && previousValue !== undefined &&
             slotIsCurrent(this, contractID, slot)) {
           const defaultedValue = slot.resolvedDefault !== undefined
@@ -1740,7 +1772,7 @@ export default (sbp('sbp/selectors/register', {
       // because the surviving slot object is re-indexed unchanged.
       // Writing the captured `perContract` entry would land on the
       // detached, dropped object — lost from the live mirror — while
-      // `setSlotStatus` (which re-reads live) would stamp the fresh
+      // `patchEntry` (which re-reads live) would stamp the fresh
       // entry 'loaded' with no value. Bail if no live entry exists
       // (released without re-sync, or reconcile dropped it).
       const entry = rootState._kv?.[contractID]?.[slot.key]
@@ -1779,7 +1811,7 @@ export default (sbp('sbp/selectors/register', {
       const mirrorValue = wasClear ? undefined : nextValue
       this.config.reactiveSet(entry, 'value', mirrorValue)
       this.config.reactiveSet(entry, 'etag', getEtag)
-      // Emit order: `CHELONIA_KV_UPDATED` fires BEFORE `setSlotStatus`
+      // Emit order: `CHELONIA_KV_UPDATED` fires BEFORE `patchEntry`
       // below. Since `okTurtles.events/emit` is synchronous, a handler
       // reading `chelonia/kv/status` here sees the pre-transition status
       // (e.g. still `'loading'`). Consumers needing a settled status
@@ -1801,7 +1833,10 @@ export default (sbp('sbp/selectors/register', {
           etag: getEtag
         })
       }
-      setStatus(wasClear ? KV_LOAD_STATUS.NON_INIT : KV_LOAD_STATUS.LOADED)
+      setStatus({
+        status: wasClear ? KV_LOAD_STATUS.NON_INIT : KV_LOAD_STATUS.LOADED,
+        settled: true
+      })
       if (!silent && slotIsCurrent(this, contractID, slot)) {
         await safeOnUpdateGuarded(this, contractID, slot, cloneForEmit(nextValue), {
           contractID,
@@ -2143,7 +2178,7 @@ export default (sbp('sbp/selectors/register', {
     if (!entry) {
       // Reconcile dropped the mirror entry — nothing to write into.
       // Resolved before decoding so the decode-failure branch never
-      // calls `setSlotStatus` against a missing entry (which throws in
+      // calls `patchEntry` against a missing entry (which throws in
       // dev/test).
       return Promise.resolve()
     }
@@ -2217,8 +2252,9 @@ export default (sbp('sbp/selectors/register', {
         error: e,
         reason: KV_UPDATE_REASON.REMOTE
       })
-      setSlotStatus(this, rootState, contractID, slot.contractType, key,
-        KV_LOAD_STATUS.ERROR, normalizeError(e))
+      patchEntry(this, contractID, slot, {
+        status: KV_LOAD_STATUS.ERROR, lastError: normalizeError(e), settled: true
+      })
       return Promise.resolve()
     }
 
@@ -2297,19 +2333,11 @@ export default (sbp('sbp/selectors/register', {
       etag: remoteEtag
     })
     // A remote clear (unwrapped === null) transitions to 'non-init',
-    // matching local clear semantics (§4.5). A successful remote update
-    // always calls setSlotStatus('loaded') so that any stale `lastError`
-    // is cleared (setSlotStatus internally skips the event when both
-    // status and lastError are unchanged).
-    if (unwrapped === null) {
-      setSlotStatus(
-        this, rootState, contractID, slot.contractType, key, KV_LOAD_STATUS.NON_INIT
-      )
-    } else {
-      setSlotStatus(
-        this, rootState, contractID, slot.contractType, key, KV_LOAD_STATUS.LOADED
-      )
-    }
+    // matching local clear semantics (§4.5).
+    patchEntry(this, contractID, slot, {
+      status: unwrapped === null ? KV_LOAD_STATUS.NON_INIT : KV_LOAD_STATUS.LOADED,
+      settled: true
+    })
     if (!slotIsCurrent(this, contractID, slot)) {
       return Promise.resolve()
     }
@@ -2724,12 +2752,7 @@ export default (sbp('sbp/selectors/register', {
         reason: KV_UPDATE_REASON.LOCAL,
         etag: setResult.etag
       })
-      if (entryAfter.status !== KV_LOAD_STATUS.LOADED) {
-        setSlotStatus(
-          this, liveState, contractID, slot.contractType, key,
-          KV_LOAD_STATUS.LOADED
-        )
-      }
+      patchEntry(this, contractID, slot, { status: KV_LOAD_STATUS.LOADED, settled: true })
       if (slotIsCurrent(this, contractID, slot)) {
         await safeOnUpdateGuarded(this, contractID, slot, cloneForEmit(nextValue), {
           contractID,
@@ -3021,12 +3044,7 @@ export default (sbp('sbp/selectors/register', {
         reason: KV_UPDATE_REASON.LOCAL,
         etag: setResult.etag
       })
-      if (entry.status !== KV_LOAD_STATUS.NON_INIT) {
-        setSlotStatus(
-          this, liveState, contractID, slot.contractType, key,
-          KV_LOAD_STATUS.NON_INIT
-        )
-      }
+      patchEntry(this, contractID, slot, { status: KV_LOAD_STATUS.NON_INIT, settled: true })
       if (slotIsCurrent(this, contractID, slot)) {
         await safeOnUpdateGuarded(this, contractID, slot, defaultClone, {
           contractID,
@@ -3097,6 +3115,14 @@ export default (sbp('sbp/selectors/register', {
     if (sawLoading) return KV_LOAD_STATUS.LOADING
     if (sawNonInit) return KV_LOAD_STATUS.NON_INIT
     return KV_LOAD_STATUS.LOADED
+  },
+
+  'chelonia/kv/settledStatus': function (
+    this: CheloniaContext,
+    contractID: string,
+    key: string
+  ): KvLoadStatus | undefined {
+    return settledStatusOf(this, contractID, key)
   },
 
   // Private convenience used by `chelonia/defineContract`. Accepts the
@@ -3303,7 +3329,7 @@ function revalidateMirrorEntry (
     // boot re-validation). A coercing schema that genuinely transforms
     // the stored value still emits via `changed`. Status is always
     // restored to 'loaded' so a slot transitioning out of 'error' clears
-    // its `lastError` (setSlotStatus suppresses the no-op event).
+    // its `lastError` (patchEntry suppresses the no-op event).
     const changed = !deepEqualJSONType(parsed, previousValue)
     const recoveredFromError = priorStatus === KV_LOAD_STATUS.ERROR
     const shouldEmit = changed || recoveredFromError
@@ -3328,7 +3354,7 @@ function revalidateMirrorEntry (
     const isIndexed = ctx.kvSlotsByContractID.get(contractID)?.has(slot.key) === true
     const deferStatusFlip = changed && isIndexed
     if (!hasInflight && !deferStatusFlip) {
-      setSlotStatus(ctx, rootState, contractID, slot.contractType, slot.key, KV_LOAD_STATUS.LOADED)
+      patchEntry(ctx, contractID, slot, { status: KV_LOAD_STATUS.LOADED })
     }
     // A non-subscribed contract (persisted mirror entry from a prior session,
     // re-validated by the `_defineSlotInternal` non-subscribed loop) has no
@@ -3366,9 +3392,7 @@ function revalidateMirrorEntry (
       sbp('chelonia/queueInvocation', contractID, () => {
         if (ctx.kvSlotsByContractID.get(contractID)?.get(slot.key) !== slot) return
         if (hasInflight || deferStatusFlip) {
-          setSlotStatus(
-            ctx, rootState, contractID, slot.contractType, slot.key, KV_LOAD_STATUS.LOADED
-          )
+          patchEntry(ctx, contractID, slot, { status: KV_LOAD_STATUS.LOADED })
         }
         if (!shouldEmit) return
         const live = rootState._kv?.[contractID]?.[slot.key]
@@ -3429,20 +3453,18 @@ function revalidateMirrorEntry (
         // one that failed to parse.
         const live = rootState._kv?.[contractID]?.[slot.key]
         if (!live || !deepEqualJSONType(live.value, previousValue)) return
-        setSlotStatus(
-          ctx, rootState, contractID, slot.contractType, slot.key,
-          KV_LOAD_STATUS.ERROR, normalizeError(e)
-        )
+        patchEntry(ctx, contractID, slot, {
+          status: KV_LOAD_STATUS.ERROR, lastError: normalizeError(e)
+        })
       }).catch((err: unknown) => {
         console.error(
           `[chelonia/kv] re-validate ERROR flip enqueue failed for ${contractID}::${slot.key}`, err
         )
       })
     } else {
-      setSlotStatus(
-        ctx, rootState, contractID, slot.contractType, slot.key,
-        KV_LOAD_STATUS.ERROR, normalizeError(e)
-      )
+      patchEntry(ctx, contractID, slot, {
+        status: KV_LOAD_STATUS.ERROR, lastError: normalizeError(e)
+      })
     }
   }
 }

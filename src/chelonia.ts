@@ -820,6 +820,12 @@ export default sbp('sbp/selectors/register', {
         Object.entries(newState).forEach(([key, value]) => {
           this.config.reactiveSet(rootState, key, value)
         })
+        // Restored KV values settle again only once their slots load
+        for (const entries of Object.values((rootState as ChelRootState)._kv ?? {})) {
+          for (const entry of Object.values(entries ?? {})) {
+            if (entry?.settled) this.config.reactiveSet(entry, 'settled', false)
+          }
+        }
       }
       return result
     } finally {
