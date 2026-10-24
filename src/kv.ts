@@ -684,6 +684,19 @@ const heightWaitSnapshot = (
   return { wait, gen: wait?.gen }
 }
 
+// A verified empty outcome doesn't make a slot "empty" while the server is
+// known to hold a newer value: it stays `loading`, with the fallback armed
+function emptyStatus (
+  ctx: CheloniaContext,
+  contractID: string,
+  key: string
+): typeof KV_LOAD_STATUS.LOADING | typeof KV_LOAD_STATUS.NON_INIT {
+  const wait = ctx.kvHeightWaits.get(waitKeyOf(contractID, key))
+  if (!wait) return KV_LOAD_STATUS.NON_INIT
+  if (!wait.timer && !wait.reload) armHeightFallback(ctx, wait)
+  return KV_LOAD_STATUS.LOADING
+}
+
 // For a load or write that verified the value: the wait it saw at its start
 // is moot, but one for a value found since keeps an empty slot pending
 function settleVerified (
@@ -699,10 +712,9 @@ function settleVerified (
   if (!remaining) {
     return patchEntry(ctx, contractID, slot, { status, settled: true, heightAhead: null })
   }
-  const empty = status === KV_LOAD_STATUS.NON_INIT
-  if (empty && !remaining.timer && !remaining.reload) armHeightFallback(ctx, remaining)
   patchEntry(ctx, contractID, slot, {
-    status: empty ? KV_LOAD_STATUS.LOADING : status, settled: true
+    status: status === KV_LOAD_STATUS.NON_INIT ? emptyStatus(ctx, contractID, slot.key) : status,
+    settled: true
   })
 }
 
@@ -2227,6 +2239,26 @@ export default (sbp('sbp/selectors/register', {
     notifyContractHeight(this, contractID, height)
   },
 
+  // Private. For the pubsub handler's frames that can't be verified: one
+  // from a newer contract height (`requiredHeight`) reloads the key once the
+  // contract gets there, one with a malformed height stamp reloads it now
+  'chelonia/kv/_onUnverifiableFrame': function (
+    this: CheloniaContext,
+    contractID: string,
+    key: string,
+    requiredHeight?: number
+  ): void {
+    const slot = this.kvSlotsByContractID.get(contractID)?.get(key)
+    if (!slot) return
+    if (requiredHeight !== undefined) {
+      return registerHeightWait(this, contractID, slot, requiredHeight, KV_UPDATE_REASON.REMOTE)
+    }
+    sbp('chelonia/kv/_loadSlot', { contractID, slot, reason: KV_UPDATE_REASON.REMOTE })
+      .catch((e: unknown) => {
+        logLoadRejection(`reload after a malformed frame rejected for ${contractID}::${key}`, e)
+      })
+  },
+
   // Retries `attempt` (e.g. raw `kv/get` / `kv/set` calls) after syncing the
   // contract when it rejects with `ChelErrorKvHeightAhead`
   'chelonia/kv/withHeightRecovery': async function <T> (
@@ -2550,10 +2582,10 @@ export default (sbp('sbp/selectors/register', {
       reason: KV_UPDATE_REASON.REMOTE,
       etag: remoteEtag
     })
-    // A remote clear (unwrapped === null) transitions to 'non-init',
-    // matching local clear semantics (§4.5).
+    // A remote clear (unwrapped === null) empties the slot, matching local
+    // clear semantics (§4.5). Applied frames leave height waits and markers.
     patchEntry(this, contractID, slot, {
-      status: unwrapped === null ? KV_LOAD_STATUS.NON_INIT : KV_LOAD_STATUS.LOADED,
+      status: unwrapped === null ? emptyStatus(this, contractID, key) : KV_LOAD_STATUS.LOADED,
       settled: true
     })
     if (!slotIsCurrent(this, contractID, slot)) {

@@ -1,7 +1,9 @@
 // Shared by the `kv-height*.test.ts` files: the real slot layer, `kv/set` and
 // `kv/get` against a simulated server. Not a test file; excluded from the CJS
 // build. Call `installKvHarness()` at the top of a `describe`; tests may change
-// `kvHeightTimings`, which is restored after each test.
+// `kvHeightTimings`, which is restored after each test. A pubsub client
+// (`connectPubsub`) and its listeners outlive `chelonia/_init`, so files that
+// connect must connect in every test.
 import {
   CURVE25519XSALSA20POLY1305, EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey
 } from '@chelonia/crypto'
@@ -12,6 +14,7 @@ import './chelonia.js'
 import { encryptedOutgoingData } from './encryptedData.js'
 import { CONTRACTS_MODIFIED } from './events.js'
 import { kvHeightTimings } from './kv-height.js'
+import { NOTIFICATION_TYPE, type PubSubClient } from './pubsub/index.js'
 import { signedOutgoingData } from './signedData.js'
 import {
   captureConsole, makeKvServer, waitMicrotasks, within, type FetchInit, type KvServer
@@ -38,6 +41,7 @@ export const syncs = {
 }
 
 const teardowns: (() => void)[] = []
+let pubsub: PubSubClient
 
 export const rootState = (): ChelRootState => sbp('chelonia/private/state')
 
@@ -64,7 +68,10 @@ const route = async (url: string, init?: FetchInit): Promise<Response> => {
   init?.signal?.throwIfAborted()
   const kvResponse = await server.handle(url, init)
   if (kvResponse) return kvResponse
-  if (new URL(url).pathname !== `/latestHEADinfo/${CONTRACT_ID}`) {
+  const { pathname } = new URL(url)
+  // Clock sync, which `chelonia/connect` starts
+  if (pathname === '/time') return new Response(new Date().toISOString())
+  if (pathname !== `/latestHEADinfo/${CONTRACT_ID}`) {
     return new Response(null, { status: 404 })
   }
   syncs.count++
@@ -181,6 +188,30 @@ export const serverValue = (key: string): JSONType | undefined => {
   }) as ChelKvGetResult).data
 }
 
+// A pubsub client that never opens its socket; returns the frames its raw KV
+// handler (if `rawHandler`) gets
+export const connectPubsub = ({ rawHandler = false } = {}): unknown[] => {
+  const rawFrames: unknown[] = []
+  const client: PubSubClient = pubsub = sbp('chelonia/connect', rawHandler
+    ? { messageHandlers: { [NOTIFICATION_TYPE.KV]: (msg: unknown) => { rawFrames.push(msg) } } }
+    : {})
+  teardowns.push(() => {
+    client.destroy()
+    sbp('chelonia/private/stopClockSync')
+  })
+  return rawFrames
+}
+
+// Delivers a KV frame as the server would; by default the stored value
+export const deliverFrame = (
+  key: string,
+  { body = server.store.get(key)!.body, cid = server.etagOf(key) } = {}
+): void => {
+  pubsub.messageHandlers[NOTIFICATION_TYPE.KV].call(pubsub, {
+    type: NOTIFICATION_TYPE.KV, channelID: CONTRACT_ID, key, data: body, cid
+  })
+}
+
 const reconcile = (_ids: string[], change: { added: string[]; removed: string[] }) => {
   sbp('chelonia/kv/_onContractsModified', change)
 }
@@ -194,8 +225,9 @@ export const installKvHarness = (): void => {
     Object.assign(syncs, { count: 0, catchUp: false, fail: false, hold: undefined })
     await sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
+      connectionOptions: { manual: true },
       fetch: route
-    } as Partial<CheloniaConfig>)
+    } as unknown as Partial<CheloniaConfig>)
     setupContract()
     // What `chelonia/connect` installs: slots activate when a contract is added
     sbp('okTurtles.events/on', CONTRACTS_MODIFIED, reconcile)

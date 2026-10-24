@@ -1235,25 +1235,29 @@ export default sbp('sbp/selectors/register', {
           // matches `_handleRemote`'s own no-op-on-miss semantics.
           if (!rawKvHandler && !this.kvSlotsByContractID.get(msg.channelID)?.size) return
           sbp('chelonia/queueInvocation', msg.channelID, async () => {
+            const frame = classifyKvValue<object>(
+              this, msg.channelID, msg.key, JSON.parse(Buffer.from(msg.data).toString())
+            )
+            // Unverifiable: a slot for the key reloads it (now, or once the
+            // contract reaches the frame's height); the raw handler misses it
+            if (frame.status !== 'present') {
+              const requiredHeight = frame.status === 'ahead' ? frame.requiredHeight : undefined
+              sbp('chelonia/kv/_onUnverifiableFrame', msg.channelID, msg.key, requiredHeight)
+              if (frame.status === 'malformed') throw frame.error
+              if (rawKvHandler) {
+                console.warn(
+                  `[chelonia] kv pubsub frame for ${msg.channelID}::${msg.key} is from contract ` +
+                    `height ${requiredHeight}, ahead of local state; not passed to the raw KV handler`
+                )
+              }
+              return
+            }
             // Share one lazy parsed wrapper between the raw KV callback and the
             // slot layer. If either consumer forces `.data`, the decoded value
             // or thrown error is cached; both consumers can therefore observe
             // and log the same decode failure, and the raw KV callback may
             // decode frames the slot layer would skip as self-echoes.
-            let parsed: ReturnType<typeof parseEncryptedOrUnencryptedMessage<object>>
-            try {
-              parsed = parseEncryptedOrUnencryptedMessage<object>(this, {
-                contractID: msg.channelID,
-                meta: msg.key,
-                serializedData: JSON.parse(Buffer.from(msg.data).toString())
-              })
-            } catch (e) {
-              if (e instanceof ChelErrorInvalidMessageHeight) {
-                console.warn(`[chelonia] kv pubsub frame for ${msg.channelID}::${msg.key} has height ahead of local state; dropping until contract syncs`)
-                return
-              }
-              throw e
-            }
+            const { parsed } = frame
             if (rawKvHandler) {
               try {
                 ;(
