@@ -1,8 +1,57 @@
 name: AI PR Review (Crush)
 
+# Reusable workflow: a member comments `/review` (optionally
+# `/review {{provider, model, small_model}}`) on a pull request.
+#
+# Caller requirements:
+#   - Trigger on `issue_comment: types: [created]`. The job reads
+#     github.event.comment and github.event.issue, which come from the caller.
+#   - Grant the calling job `contents: read`, `pull-requests: write` and
+#     `issues: write`. This job can only lower the caller's token permissions.
+#   - Pass the API key secret of each provider you use: OPENROUTER_API_KEY,
+#     ZAI_API_KEY and/or KIMI_API_KEY.
+#   - The calling repo must be public (see "Checkout repository").
+#   - Do not give the calling job the concurrency group used below.
+#
+# Example caller: copy .github/workflows/pr-review.yml from this repo and set
+#   uses: okTurtles/libcheloniajs/.github/workflows/pull-review-crush.yml@main
+# It reads its inputs from these optional repo variables (Settings → Secrets
+# and variables → Actions → Variables): REVIEW_PROVIDER, REVIEW_MODEL,
+# PROJECT_CTX and REVIEW_TIMEOUT_MINUTES.
+
 on:
-  issue_comment:
-    types: [created]
+  workflow_call:
+    inputs:
+      provider:
+        description: 'LLM provider: openrouter, zai-coding-plan or kimi. Empty means openrouter.'
+        type: string
+        required: false
+      model:
+        description: >-
+          Model ID for the provider. Empty means the provider default
+          (openrouter: stepfun/step-3.5-flash, zai-coding-plan: glm-5,
+          kimi: k3.1-pro-highspeed).
+        type: string
+        required: false
+      project-context:
+        description: First paragraph of the review prompt, e.g. what the project is.
+        type: string
+        required: false
+      timeout-minutes:
+        description: Job timeout in minutes.
+        type: number
+        required: false
+        default: 30
+    secrets:
+      OPENROUTER_API_KEY:
+        description: API key for the openrouter provider.
+        required: false
+      ZAI_API_KEY:
+        description: API key for the zai-coding-plan provider.
+        required: false
+      KIMI_API_KEY:
+        description: API key for the kimi provider.
+        required: false
 
 jobs:
   review:
@@ -29,10 +78,9 @@ jobs:
     concurrency:
       group: pr-review-crush-${{ github.event.issue.number }}
       cancel-in-progress: true
-    # Configurable via the REVIEW_TIMEOUT_MINUTES repo variable (default: 30).
     # The 'Report timeout on trigger comment' step derives its TIMEOUT_SECONDS
-    # from the same variable, so the two stay in sync automatically.
-    timeout-minutes: ${{ fromJSON(vars.REVIEW_TIMEOUT_MINUTES || '30') }}
+    # from the same input, so the two stay in sync automatically.
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
       pull-requests: write
@@ -45,11 +93,9 @@ jobs:
       # directory read-write into the review sandbox and reads it back.
       REVIEW_OUTPUT_FILE: /tmp/review-output/REVIEW.md
       # ── Provider configuration ─────────────────────────────
-      # Set via Settings → Secrets and variables → Actions → Variables:
-      #   REVIEW_PROVIDER: openrouter | zai-coding-plan | kimi
-      #   REVIEW_MODEL:    stepfun/step-3.5-flash | glm-5 | k3.1-pro-highspeed
-      REVIEW_PROVIDER: ${{ vars.REVIEW_PROVIDER || 'openrouter' }}
-      REVIEW_MODEL: ${{ vars.REVIEW_MODEL }}
+      # Set by the caller through the `provider` and `model` inputs.
+      REVIEW_PROVIDER: ${{ inputs.provider || 'openrouter' }}
+      REVIEW_MODEL: ${{ inputs.model }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
       KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
@@ -219,11 +265,10 @@ jobs:
           # http.https://github.com/.extraheader) — the workspace is
           # readable inside the review sandbox below, so persisted
           # credentials would leak the token to the review agent. The
-          # repo is public, so the anonymous `git fetch origin` in
-          # "Merge master into PR branch" still works; if this repo
-          # ever becomes private, that fetch will need an explicitly
-          # scoped token supplied some other way (NOT re-enabling
-          # persist-credentials).
+          # calling repo must be public, so that the anonymous `git fetch
+          # origin` in "Merge master into PR branch" works; a private repo
+          # would need an explicitly scoped token supplied some other way
+          # (NOT re-enabling persist-credentials).
           persist-credentials: false
 
       # Outputs the base ref the code-review skill reviews against. After a
@@ -357,7 +402,7 @@ jobs:
       # skill, which also generates the diff itself from the checkout.
       - name: Build review prompt
         env:
-          PROJECT_CTX: ${{ vars.PROJECT_CTX }}
+          PROJECT_CTX: ${{ inputs.project-context }}
           BASE_REF: ${{ steps.pr-details.outputs.base_ref }}
           REVIEW_BASE: ${{ steps.merge.outputs.review_base }}
           MERGE_CONFLICT: ${{ steps.merge.outputs.conflict }}
@@ -733,9 +778,9 @@ jobs:
         if: cancelled()
         env:
           COMMENT_ID: ${{ github.event.comment.id }}
-          TIMEOUT_MINUTES: ${{ fromJSON(vars.REVIEW_TIMEOUT_MINUTES || '30') }}
+          TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
         run: |
-          # Derived from the same variable as the job-level `timeout-minutes`.
+          # Derived from the same input as the job-level `timeout-minutes`.
           TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
           if [ -z "$JOB_STARTED_AT" ]; then
             echo "Job start time unknown — skipping timeout report"
