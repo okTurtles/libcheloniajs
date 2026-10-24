@@ -81,6 +81,8 @@ export const makeKvServer = (contractID: string, { height = 0 } = {}) => {
     log: [] as KvServerRequest[],
     // Runs when a POST arrives, before it's checked (e.g. another device wins the race)
     onPost: undefined as ((key: string) => unknown) | undefined,
+    // Runs when a GET arrives, before it's answered
+    onGet: undefined as ((key: string) => unknown) | undefined,
     etagOf: (key: string) => store.get(key)?.etag ?? '""',
     // Stores `body` as is, bypassing every check
     put (key: string, body: unknown): string {
@@ -96,6 +98,7 @@ export const makeKvServer = (contractID: string, { height = 0 } = {}) => {
       if (!pathname.startsWith(prefix)) return undefined
       const key = decodeURIComponent(pathname.slice(prefix.length))
       if (init?.method !== 'POST') {
+        await server.onGet?.(key)
         const stored = store.get(key)
         server.log.push({ method: 'GET', key, status: stored ? 200 : 404 })
         return stored ? respond(200, stored.body, stored.etag) : new Response(null, { status: 404 })

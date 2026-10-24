@@ -5,11 +5,12 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 import { kvHeightAheadCause } from './errors.js'
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import {
-  activate, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes, holdSyncs, installKvHarness,
-  mirror, resync, rootState, server, setLocalHeight, START_HEIGHT, syncs, writeAsDeviceB
+  activate, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes, gateLane, holdSyncs,
+  installKvHarness, mirror, resync, rootState, server, setLocalHeight, setupContract, START_HEIGHT,
+  syncs, writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
-import { isPending, until, within } from './test-utils.js'
+import { isPending, until, waitMicrotasks, within } from './test-utils.js'
 import type { JSONType, KvHeightRecoveryOptions } from './types.js'
 
 const AHEAD = START_HEIGHT + 1
@@ -185,5 +186,168 @@ describe('A contract resync', () => {
       [['GET', 200], ['POST', 204]]
     )
     assert.deepStrictEqual(read('count'), { n: 2 })
+  })
+})
+
+const OTHER_ID = 'zKvOtherContract'
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+const increment = (value: JSONType) => ({ n: (value as { n: number }).n + 1 })
+const update = (key: string, updater: (value: JSONType) => JSONType, options = {}) => within(
+  sbp('chelonia/kv/update', { contractID: CONTRACT_ID, key, updater, ...options }) as
+    Promise<JSONType | undefined>,
+  `update of ${key}`
+)
+const findAhead = (key: string) =>
+  assert.rejects(sync(key, { onHeightAhead: 'reject' }), aheadAt(AHEAD))
+
+// `chelonia/reset` drains the lanes twice, then aborts and calls
+// `chelonia/kv/_waitInFlight`
+const resetProbe = { waits: 0, aborted: false, atLastDrain: undefined as (() => void) | undefined }
+sbp('sbp/filters/selector/add', 'chelonia/contract/wait', () => {
+  if (++resetProbe.waits === 2) resetProbe.atLastDrain?.()
+})
+sbp('sbp/filters/selector/add', 'chelonia/kv/_waitInFlight', () => { resetProbe.aborted = true })
+
+// Starts a reset and holds it in its last drain before the abort, on the lane
+// of another contract it drains, so that this contract's lanes are free
+const startHeldReset = () => {
+  rootState().contracts[OTHER_ID] = { HEAD: 'other', height: 0, previousKeyOp: '', type: 'other' }
+  let open: (() => void) | undefined
+  Object.assign(resetProbe, {
+    waits: 0, aborted: false, atLastDrain: () => { open = gateLane('public', OTHER_ID) }
+  })
+  return {
+    reset: within(sbp('chelonia/reset') as Promise<unknown>, 'the reset'),
+    held: async () => {
+      await until(() => open, 'the last drain')
+      await drainLanes()
+    },
+    abort: async () => {
+      open!()
+      await until(() => resetProbe.aborted, 'the abort')
+    }
+  }
+}
+
+describe('chelonia/reset', () => {
+  installKvHarness()
+
+  it('finishes the writes its drain runs, and rejects later ones without posting', async () => {
+    writeAsDeviceB('count', { n: 1 })
+    defineSlot({ key: 'count', defaultValue: { n: 0 } })
+    await activate()
+    const openLane = gateLane()
+    const drained = update('count', increment)
+    const { reset, held, abort } = startHeldReset()
+    openLane()
+    assert.deepStrictEqual(await drained, { n: 2 })
+
+    await held()
+    const openAgain = gateLane()
+    const queued = [
+      update('count', increment),
+      sbp('chelonia/kv/clear', CONTRACT_ID, 'count'),
+      sbp('chelonia/kv/queuedSet', { contractID: CONTRACT_ID, key: 'count', data: { n: 9 } })
+    ].map((write) => assert.rejects(within(write, 'a queued write'), { name: 'AbortError' }))
+    await waitMicrotasks()
+    await abort()
+    await Promise.all(queued)
+    openAgain()
+    await reset
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [204])
+  })
+
+  it('rejects an update whose reload is running when it aborts, before its updater runs', async () => {
+    writeAsDeviceB('count', { n: 1 })
+    defineSlot({ key: 'count', defaultValue: { n: 0 }, autoLoad: 'never' })
+    await activate()
+    const { reset, held, abort } = startHeldReset()
+    await held()
+    let releaseGet: (() => void) | undefined
+    server.onGet = () => new Promise<void>((resolve) => { releaseGet = resolve })
+    let calls = 0
+    const write = assert.rejects(
+      update('count', (value) => { calls++; return increment(value) }, { ifMatch: '*' }),
+      { name: 'AbortError' }
+    )
+    await until(() => releaseGet, 'the reload')
+    await abort()
+    releaseGet!()
+    await write
+    await reset
+    assert.strictEqual(calls, 0)
+    assert.deepStrictEqual(server.posts(), [])
+  })
+
+  it('keeps deferred loads working when it fails before its teardown', async () => {
+    kvHeightTimings.pendingFallbackMs = 20
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    const before = syncs.count
+    const persist = async () => {
+      await findAhead('prefs')
+      // Its fallback falls due meanwhile
+      await sleep(100)
+      throw new Error('persist failed')
+    }
+    await assert.rejects(within(sbp('chelonia/reset', persist), 'the reset'), /persist failed/)
+    assert.strictEqual(syncs.count, before)
+    assert.strictEqual(settledStatus('prefs'), undefined)
+
+    // The fallback syncs, then settles the slot without the value
+    assert.strictEqual(await whenSettled('prefs'), 'error')
+    assert.strictEqual(syncs.count, before + 1)
+    setLocalHeight(AHEAD)
+    await until(() => mirror('prefs')?.status === 'loaded', 'the reload')
+    assert.deepStrictEqual(read('prefs'), { theme: 'dark' })
+  })
+
+  it('lets later sessions recover after a reset whose teardown throws', async () => {
+    await activate()
+    const failing = () => { throw new Error('teardown failed') }
+    await sbp('chelonia/configure', { reactiveDel: failing })
+    await assert.rejects(within(sbp('chelonia/reset'), 'the reset'), /teardown failed/)
+    const reactiveDel = (obj: Record<string, unknown>, key: string) => { delete obj[key] }
+    await sbp('chelonia/configure', { reactiveDel })
+    await within(sbp('chelonia/reset'), 'the next reset')
+
+    kvHeightTimings.pendingFallbackMs = 20
+    setupContract()
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    syncs.catchUp = true
+    await findAhead('prefs')
+    // The fallback syncs and reloads
+    assert.strictEqual(await whenSettled('prefs'), 'loaded')
+    assert.deepStrictEqual(read('prefs'), { theme: 'dark' })
+
+    writeAsDeviceB('prefs', { theme: 'light' }, AHEAD + 1)
+    const synced = syncs.count
+    const written = await update('prefs', (value) => ({ ...(value as object), lang: 'en' }))
+    assert.deepStrictEqual(written, { theme: 'light', lang: 'en' })
+    assert.strictEqual(syncs.count, synced + 1)
+  })
+
+  it('cancels the deferred loads of the session it ends', async () => {
+    kvHeightTimings.pendingFallbackMs = 50
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    await findAhead('prefs')
+    await within(sbp('chelonia/reset'), 'the reset')
+
+    server.store.delete('prefs')
+    setupContract()
+    await activate()
+    const synced = syncs.count
+    // Past the old fallback
+    await sleep(100)
+    assert.strictEqual(syncs.count, synced)
+    const loads = gets('prefs')
+    setLocalHeight(AHEAD)
+    await drainLanes()
+    assert.strictEqual(gets('prefs'), loads)
   })
 })

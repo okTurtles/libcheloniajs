@@ -677,10 +677,8 @@ function giveUpHeightWait (ctx: CheloniaContext, wait: KvHeightWait): void {
 async function heightWaitFallback (ctx: CheloniaContext, wait: KvHeightWait): Promise<void> {
   wait.timer = undefined
   const { contractID, key } = wait
-  if (!ctx.kvResetsInProgress) {
-    const { signal } = ctx.abortController
-    await recoverContractHeight(ctx, contractID, aheadOf(ctx, wait), { signal }).catch(() => {})
-  }
+  const { signal } = ctx.abortController
+  await recoverContractHeight(ctx, contractID, aheadOf(ctx, wait), { signal }).catch(() => {})
   if (ctx.kvHeightWaits.get(waitKeyOf(contractID, key)) !== wait || wait.timer || wait.reload) {
     return
   }
