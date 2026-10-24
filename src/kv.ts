@@ -28,6 +28,7 @@ import {
 import { isKvMaxAttempts } from './internal-errors.js'
 import { assertMaxAttempts, assertNotReentrant, resolveKvKeyIds } from './kv-checks.js'
 import {
+  abortable,
   abortReason,
   composeSignals,
   heightAheadError,
@@ -36,6 +37,7 @@ import {
   notifyContractHeight,
   onHeight,
   recoverContractHeight,
+  resolveRecoveryOptions,
   waitForHeight,
   withHeightRecovery,
   type ComposedAbortSignal
@@ -635,13 +637,14 @@ function fireHeightWait (ctx: CheloniaContext, wait: KvHeightWait): void {
   // The height came; a newer value found by the reload gets a full fallback period
   clearTimeout(wait.timer)
   wait.timer = undefined
-  const reload = {}
+  const reload: NonNullable<KvHeightWait['reload']> = {}
   wait.reload = reload
   const current = () =>
     ctx.kvHeightWaits.get(waitKeyOf(contractID, key)) === wait && wait.reload === reload
-  sbp('chelonia/kv/_loadSlot', {
+  reload.done = sbp('chelonia/kv/_loadSlot', {
     contractID, slot, reason: wait.reason, suppressLoadingStatus: true, stale: () => !current()
-  }).catch((e: unknown) => {
+  }) as Promise<void>
+  reload.done.catch((e: unknown) => {
     logLoadRejection(`deferred reload rejected for ${contractID}::${key}`, e)
   }).finally(() => {
     if (!current()) return
@@ -651,17 +654,32 @@ function fireHeightWait (ctx: CheloniaContext, wait: KvHeightWait): void {
   })
 }
 
-// Syncs the contract once, then settles the slot without the value if that
-// didn't bring the height. The wait keeps listening.
+const aheadOf = (ctx: CheloniaContext, { contractID, key, requiredHeight }: KvHeightWait) =>
+  heightAheadError(ctx, contractID, key, {
+    requiredHeight, exact: true, etag: null, httpStatus: 200
+  })
+
+// Settles the slot without the value. The wait keeps listening.
+function giveUpHeightWait (ctx: CheloniaContext, wait: KvHeightWait): void {
+  clearTimeout(wait.timer)
+  wait.timer = undefined
+  const { contractID, key } = wait
+  const slot = ctx.kvSlotsByContractID.get(contractID)?.get(key)
+  if (!slot) return dropHeightWait(ctx, wait)
+  console.warn(
+    `[chelonia/kv] ${contractID}::${key}: settling without the server value, ` +
+      `which needs contract height ${wait.requiredHeight}`
+  )
+  settleUnloaded(ctx, contractID, slot, aheadOf(ctx, wait))
+}
+
+// Syncs the contract once, then gives up if that didn't bring the height
 async function heightWaitFallback (ctx: CheloniaContext, wait: KvHeightWait): Promise<void> {
   wait.timer = undefined
   const { contractID, key } = wait
-  const aheadError = () => heightAheadError(ctx, contractID, key, {
-    requiredHeight: wait.requiredHeight, exact: true, etag: null, httpStatus: 200
-  })
   if (!ctx.kvResetsInProgress) {
     const { signal } = ctx.abortController
-    await recoverContractHeight(ctx, contractID, aheadError(), { signal }).catch(() => {})
+    await recoverContractHeight(ctx, contractID, aheadOf(ctx, wait), { signal }).catch(() => {})
   }
   if (ctx.kvHeightWaits.get(waitKeyOf(contractID, key)) !== wait || wait.timer || wait.reload) {
     return
@@ -669,13 +687,7 @@ async function heightWaitFallback (ctx: CheloniaContext, wait: KvHeightWait): Pr
   // `chelonia/reset` drops the waits once it tears down
   if (ctx.kvResetsInProgress) return armHeightFallback(ctx, wait)
   if (heightReached(ctx, wait)) return fireHeightWait(ctx, wait)
-  const slot = ctx.kvSlotsByContractID.get(contractID)?.get(key)
-  if (!slot) return dropHeightWait(ctx, wait)
-  console.warn(
-    `[chelonia/kv] ${contractID}::${key}: settling without the server value, ` +
-      `which needs contract height ${wait.requiredHeight}`
-  )
-  settleUnloaded(ctx, contractID, slot, aheadError())
+  giveUpHeightWait(ctx, wait)
 }
 
 type HeightWaitSnapshot = { wait?: KvHeightWait; gen?: number }
@@ -1112,6 +1124,70 @@ async function runSlotWrite<T> (
   } finally {
     signal._cleanup?.()
     decrementPending(ctx, contractID)
+  }
+}
+
+// On a value from a contract height not reached yet, gives incoming events a
+// chance to bring the height, then syncs the contract and loads again
+async function syncSlot (
+  ctx: CheloniaContext,
+  contractID: string,
+  slot: SlotDefinition,
+  options: KvHeightRecoveryOptions
+): Promise<void> {
+  const label = `sync: ${contractID}::${slot.key}`
+  const { onHeightAhead, maxHeightRecoveries } = resolveRecoveryOptions(options, label)
+  const signal: ComposedAbortSignal = options.signal
+    ? composeSignals([ctx.abortController.signal, options.signal])
+    : ctx.abortController.signal
+  const waitKey = waitKeyOf(contractID, slot.key)
+  // The key's wait after the last finding, and its reload from before that
+  let found: HeightWaitSnapshot & { reload?: KvHeightWait['reload'] } = {}
+  const load = async (suppressLoadingStatus: boolean): Promise<void> => {
+    // Loading again would repeat a reload the wait fired since
+    const fired = found.wait?.reload !== found.reload ? found.wait?.reload?.done : undefined
+    const before = ctx.kvHeightWaits.get(waitKey)
+    const reloadBefore = before?.reload
+    try {
+      await abortable(fired ?? sbp('chelonia/kv/_loadSlot', {
+        contractID, slot, reason: KV_UPDATE_REASON.LOAD, suppressLoadingStatus
+      }), signal)
+    } catch (e) {
+      if (isKvHeightAhead(e)) {
+        const wait = ctx.kvHeightWaits.get(waitKey)
+        found = { wait, gen: wait?.gen, reload: wait === before ? reloadBefore : undefined }
+      }
+      throw e
+    }
+  }
+  try {
+    await withHeightRecovery(ctx, contractID, async ({ recoveries }) => {
+      try {
+        await load(recoveries > 0)
+      } catch (e) {
+        const requiredHeight = kvHeightAheadCause(e)?.requiredHeight
+        // Once this brings the height, recovery reloads without syncing;
+        // a recovery sync already running is joined at once
+        if (typeof requiredHeight === 'number' && onHeightAhead === 'sync' &&
+            recoveries < Math.max(1, maxHeightRecoveries)) {
+          const timeoutMs = ctx.kvRecoveries.has(contractID) ? 0 : undefined
+          await waitForHeight(ctx, contractID, requiredHeight, { timeoutMs, signal })
+        }
+        throw e
+      }
+    }, { onHeightAhead, maxHeightRecoveries, signal }, label)
+  } catch (e) {
+    const requiredHeight = kvHeightAheadCause(e)?.requiredHeight
+    if (onHeightAhead === 'reject' || typeof requiredHeight !== 'number') throw e
+    if ((localHeight(ctx, contractID) ?? -1) >= requiredHeight) return await load(true)
+    // Not if a load verified the key since, or found a newer value
+    const wait = ctx.kvHeightWaits.get(waitKey)
+    if (maxHeightRecoveries > 0 && wait && wait === found.wait && wait.gen === found.gen) {
+      giveUpHeightWait(ctx, wait)
+    }
+    throw e
+  } finally {
+    signal._cleanup?.()
   }
 }
 
@@ -2977,7 +3053,8 @@ export default (sbp('sbp/selectors/register', {
   // slot for a contract) and refresh the mirror.
   //
   // Single-slot form (with `key`) — rejects on slot failure, matching
-  // the rejection semantics of `chelonia/kv/update`.
+  // the rejection semantics of `chelonia/kv/update`. Like `update`, it
+  // recovers from a value the contract can't verify yet.
   //
   // Aggregate form (no `key`) — dispatches loads for every entry in the
   // last-reconciled active-slot index (`kvSlotsByContractID[contractID]`).
@@ -2987,7 +3064,8 @@ export default (sbp('sbp/selectors/register', {
   'chelonia/kv/sync': async function (
     this: CheloniaContext,
     contractID: string,
-    key?: string
+    key?: string,
+    options: KvHeightRecoveryOptions = {}
   ): Promise<void> {
     const rootState = sbp(this.config.stateSelector) as ChelRootState
     if (key !== undefined) {
@@ -2995,12 +3073,7 @@ export default (sbp('sbp/selectors/register', {
       // Reject a sync re-entered from this contract's own onUpdate
       // callback — `_loadSlot` enqueues on the same lane → deadlock.
       assertNotReentrant(this, contractID, key, 'sync')
-      // _loadSlot rethrows GET failures verbatim, and wraps decode /
-      // validation failures in ChelErrorKvValidation with the original
-      // error on cause. Let the error propagate for the single-slot
-      // rejection semantics.
-      await sbp('chelonia/kv/_loadSlot', { contractID, slot, reason: KV_UPDATE_REASON.LOAD })
-      return
+      return syncSlot(this, contractID, slot, options)
     }
     // Aggregate form — per §4.4 the aggregate form never rejects.
     // If the contract isn't synced there are no active slots to

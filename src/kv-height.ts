@@ -178,6 +178,16 @@ export async function sleep (ms: number, signal?: AbortSignal | null): Promise<v
   await waitFor(ms, signal, () => () => {})
 }
 
+// Rejects as soon as `signal` aborts; `promise` carries on regardless
+export function abortable<T> (promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal))
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) onAbort()
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
 // Waits for an incoming event to bring the contract to `minHeight`; not while
 // a pubsub socket is down, as no event can arrive then
 export async function waitForHeight (

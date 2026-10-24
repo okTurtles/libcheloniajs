@@ -288,8 +288,9 @@ export type KvHeightWait = {
   off: () => void;
   // The fallback; none while reloading, or once it gave up (still listening)
   timer?: ReturnType<typeof setTimeout>;
-  // The reload started when the height was reached, until it ends
-  reload?: object;
+  // The reload started when the height was reached; cleared when it ends with
+  // a newer finding pending
+  reload?: { done?: Promise<void> };
 };
 
 // Context passed to `onUpdate` and embedded in the `CHELONIA_KV_UPDATED`

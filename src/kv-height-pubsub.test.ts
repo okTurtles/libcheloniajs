@@ -2,11 +2,11 @@ import sbp from '@sbp/sbp'
 import assert from 'node:assert'
 import { describe, it } from 'node:test'
 
-import { isKvHeightMalformed } from './errors.js'
+import { isKvHeightMalformed, kvHeightAheadCause } from './errors.js'
 import { CHELONIA_KV_STATUS_CHANGED } from './events.js'
 import {
-  activate, CONTRACT_ID, connectPubsub, defineSlot, deliverFrame, drainLanes, installKvHarness,
-  logs, mirror, server, setLocalHeight, START_HEIGHT, syncs, writeAsDeviceB
+  activate, CONTRACT_ID, connectPubsub, defineSlot, deliverFrame, drainLanes, holdSyncs,
+  installKvHarness, logs, mirror, server, setLocalHeight, START_HEIGHT, syncs, writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
 import { until, within } from './test-utils.js'
@@ -220,5 +220,34 @@ describe('Vetoed pubsub KV frame work', () => {
     assert.strictEqual(mirror('prefs')?.lastError?.name, 'ChelErrorUnexpected')
     assert.strictEqual(logged('error', 'malformed frame').length, 1)
     assert.strictEqual(gets('prefs'), 0)
+  })
+})
+
+describe('Single-key kv/sync with the pubsub socket down', () => {
+  installKvHarness()
+
+  it('syncs without waiting, and leaves a slot a newer frame waits on unsettled', async () => {
+    kvHeightTimings.waitMs = 60_000
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    connectPubsub()
+    await activate()
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    syncs.fail = true
+    const releaseSyncs = holdSyncs()
+    const before = syncs.count
+    const explicit = assert.rejects(
+      within(sbp('chelonia/kv/sync', CONTRACT_ID, 'prefs'), 'kv/sync'),
+      (e) => kvHeightAheadCause(e)?.requiredHeight === AHEAD
+    )
+    await until(() => syncs.count === before + 1, 'the recovery sync')
+    writeAsDeviceB('prefs', { theme: 'light' }, AHEAD + 1)
+    deliverFrame('prefs')
+    releaseSyncs()
+    await explicit
+    // Its failed recovery sync ended the recovery
+    assert.strictEqual(syncs.count, before + 1)
+    assert.strictEqual(mirror('prefs')?.status, 'loading')
+    assert.strictEqual(settledStatus('prefs'), undefined)
+    assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD + 1 })
   })
 })
