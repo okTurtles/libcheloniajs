@@ -46,12 +46,13 @@ jobs:
       REVIEW_OUTPUT_FILE: /tmp/review-output/REVIEW.md
       # ── Provider configuration ─────────────────────────────
       # Set via Settings → Secrets and variables → Actions → Variables:
-      #   REVIEW_PROVIDER: openrouter | zai-coding-plan
-      #   REVIEW_MODEL:    stepfun/step-3.5-flash | glm-5
+      #   REVIEW_PROVIDER: openrouter | zai-coding-plan | kimi
+      #   REVIEW_MODEL:    stepfun/step-3.5-flash | glm-5 | k3.1-pro-highspeed
       REVIEW_PROVIDER: ${{ vars.REVIEW_PROVIDER || 'openrouter' }}
-      REVIEW_MODEL: ${{ vars.REVIEW_MODEL || 'stepfun/step-3.5-flash' }}
+      REVIEW_MODEL: ${{ vars.REVIEW_MODEL }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+      KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
 
     steps:
       - name: Update comment with status
@@ -80,17 +81,25 @@ jobs:
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          # Check for {{provider, model}} or {{provider, model, small_model}} override syntax after the /review command
-          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/review[[:space:]]+\{\{[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^,}]+)[[:space:]]*(,[[:space:]]*([^}]+)[[:space:]]*)?\}\} ]]; then
+          # Check for {{provider}}, {{provider, model}}, or
+          # {{provider, model, small_model}} after the /review command.
+          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/review[[:space:]]+\{\{[[:space:]]*([^,}]+)[[:space:]]*(,[[:space:]]*([^,}]+)[[:space:]]*(,[[:space:]]*([^}]+)[[:space:]]*)?)?\}\} ]]; then
             PROVIDER=$(echo "${BASH_REMATCH[1]}" | xargs)
-            MODEL=$(echo "${BASH_REMATCH[2]}" | xargs)
-            SMALL_MODEL=$(echo "${BASH_REMATCH[4]}" | xargs)
+            MODEL=$(echo "${BASH_REMATCH[3]}" | xargs)
+            SMALL_MODEL=$(echo "${BASH_REMATCH[5]}" | xargs)
             # Validate provider and models contain only safe characters
-            if [[ "$PROVIDER" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "$MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]] && { [[ -z "$SMALL_MODEL" ]] || [[ "$SMALL_MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; }; then
+            if [[ "$PROVIDER" =~ ^[a-zA-Z0-9_-]+$ ]] &&
+              { [[ -z "$MODEL" ]] || [[ "$MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; } &&
+              { [[ -z "$SMALL_MODEL" ]] || [[ "$SMALL_MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; }; then
               echo "Overriding provider to: $PROVIDER"
-              echo "Overriding model to: $MODEL"
               echo "REVIEW_PROVIDER=$PROVIDER" >> "$GITHUB_ENV"
-              echo "REVIEW_MODEL=$MODEL" >> "$GITHUB_ENV"
+              if [[ -n "$MODEL" ]]; then
+                echo "Overriding model to: $MODEL"
+                echo "REVIEW_MODEL=$MODEL" >> "$GITHUB_ENV"
+              else
+                # Do not inherit the default model from another provider.
+                echo "REVIEW_MODEL=" >> "$GITHUB_ENV"
+              fi
               if [[ -n "$SMALL_MODEL" ]]; then
                 echo "Overriding small model to: $SMALL_MODEL"
                 echo "REVIEW_SMALL_MODEL=$SMALL_MODEL" >> "$GITHUB_ENV"
@@ -104,30 +113,55 @@ jobs:
         run: |
           case "$REVIEW_PROVIDER" in
             openrouter)
+              REVIEW_MODEL="${REVIEW_MODEL:-stepfun/step-3.5-flash}"
               {
                 echo "PROVIDER_API_URL=https://openrouter.ai/api/v1/chat/completions"
+                echo "PROVIDER_API_TYPE=openai"
                 echo "PROVIDER_API_KEY=$OPENROUTER_API_KEY"
                 echo "CRUSH_MODEL=openrouter/$REVIEW_MODEL"
                 echo "PROVIDER_DISPLAY=OpenRouter"
               } >> "$GITHUB_ENV"
               ;;
             zai-coding-plan)
+              REVIEW_MODEL="${REVIEW_MODEL:-glm-5}"
               {
                 echo "PROVIDER_API_URL=https://api.z.ai/api/coding/paas/v4/chat/completions"
+                echo "PROVIDER_API_TYPE=openai"
                 echo "PROVIDER_API_KEY=$ZAI_API_KEY"
                 echo "CRUSH_MODEL=zai/$REVIEW_MODEL"
                 echo "PROVIDER_DISPLAY=Z.AI"
               } >> "$GITHUB_ENV"
               ;;
+            kimi)
+              if [[ -n "$REVIEW_MODEL" && "$REVIEW_MODEL" != "k3.1-pro-highspeed" ]]; then
+                echo "::error::Unsupported Kimi model '$REVIEW_MODEL' (supported: k3.1-pro-highspeed)"
+                exit 1
+              fi
+              if [[ -n "$REVIEW_SMALL_MODEL" && "$REVIEW_SMALL_MODEL" != "k3.1-pro-highspeed" ]]; then
+                echo "::error::Unsupported Kimi small model '$REVIEW_SMALL_MODEL' (supported: k3.1-pro-highspeed)"
+                exit 1
+              fi
+              REVIEW_MODEL="k3.1-pro-highspeed"
+              {
+                echo "PROVIDER_API_URL=https://api.kimi.com/coding/v1/messages"
+                echo "PROVIDER_API_TYPE=anthropic"
+                echo "PROVIDER_API_KEY=$KIMI_API_KEY"
+                echo "CRUSH_MODEL=kimi-custom/$REVIEW_MODEL"
+                echo "PROVIDER_DISPLAY=Kimi"
+              } >> "$GITHUB_ENV"
+              ;;
             *)
-              echo "::error::Unknown REVIEW_PROVIDER '$REVIEW_PROVIDER' (supported: openrouter, zai-coding-plan)"
+              echo "::error::Unknown REVIEW_PROVIDER '$REVIEW_PROVIDER' (supported: openrouter, zai-coding-plan, kimi)"
               exit 1
               ;;
           esac
+          echo "REVIEW_MODEL=$REVIEW_MODEL" >> "$GITHUB_ENV"
 
           # Set SMALL_MODEL based on provider (with override support)
           if [ -n "$REVIEW_SMALL_MODEL" ]; then
             SMALL_MODEL="$REVIEW_SMALL_MODEL"
+          elif [ "$REVIEW_PROVIDER" = "kimi" ]; then
+            SMALL_MODEL="k3.1-pro-highspeed"
           elif [ "$REVIEW_PROVIDER" = "zai-coding-plan" ]; then
             SMALL_MODEL="glm-5.1"
           else
@@ -138,6 +172,7 @@ jobs:
           case "$REVIEW_PROVIDER" in
             openrouter) echo "SMALL_MODEL=openrouter/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
             zai-coding-plan) echo "SMALL_MODEL=zai/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
+            kimi) echo "SMALL_MODEL=kimi-custom/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
           esac
 
       - name: Get PR number
@@ -279,15 +314,31 @@ jobs:
                   messages: [{role: "user", content: ("Summarize the following GitHub issue conversation. Focus on: 1) What the issue is about, 2) Key discussion points, 3) Any final decision or conclusion reached about what to do (if one exists). Be concise but thorough.\n\n" + $conversation)}]
                 }' > /tmp/context_payload.json
 
+              PROVIDER_HEADERS=(-H "Content-Type: application/json")
+              RESPONSE_CONTENT='.choices[0].message.content'
+              if [ "$PROVIDER_API_TYPE" = "anthropic" ]; then
+                jq '. + {max_tokens: 4096}' /tmp/context_payload.json \
+                  > /tmp/context_payload_anthropic.json
+                mv /tmp/context_payload_anthropic.json /tmp/context_payload.json
+                PROVIDER_HEADERS+=(
+                  -H "x-api-key: $PROVIDER_API_KEY"
+                  -H "anthropic-version: 2023-06-01"
+                )
+                # Reasoning models (Kimi K3.1) reply with a thinking block
+                # before the text block, so content[0] has no text.
+                RESPONSE_CONTENT='first(.content[] | select(.type == "text") | .text)'
+              else
+                PROVIDER_HEADERS+=(-H "Authorization: Bearer $PROVIDER_API_KEY")
+              fi
+
               HTTP_CODE=$(curl -s -w '%{http_code}' \
                 "$PROVIDER_API_URL" \
-                -H "Authorization: Bearer $PROVIDER_API_KEY" \
-                -H "Content-Type: application/json" \
+                "${PROVIDER_HEADERS[@]}" \
                 -d @/tmp/context_payload.json \
                 -o /tmp/context_response.json)
 
-              if [ "$HTTP_CODE" -eq 200 ] && jq -e '.choices[0].message.content' /tmp/context_response.json > /dev/null 2>&1; then
-                SUMMARY=$(jq -r '.choices[0].message.content' /tmp/context_response.json)
+              if [ "$HTTP_CODE" -eq 200 ] && jq -e "$RESPONSE_CONTENT" /tmp/context_response.json > /dev/null 2>&1; then
+                SUMMARY=$(jq -r "$RESPONSE_CONTENT" /tmp/context_response.json)
               else
                 echo "::warning::Issue #$ISSUE_NUMBER summarization failed (HTTP $HTTP_CODE), using raw issue text"
                 SUMMARY=$(cat /tmp/issue_conversation.txt)
@@ -377,6 +428,26 @@ jobs:
           cat > ~/.config/crush/crush.json << 'EOF'
           {
             "$schema": "https://charm.land/crush.json",
+            "providers": {
+              "kimi-custom": {
+                "type": "anthropic",
+                "base_url": "https://api.kimi.com/coding/",
+                "api_key": "$KIMI_API_KEY",
+                "default_large_model_id": "k3.1-pro-highspeed",
+                "default_small_model_id": "k3.1-pro-highspeed",
+                "models": [
+                  {
+                    "id": "k3.1-pro-highspeed",
+                    "name": "Kimi K3.1 Pro Highspeed",
+                    "context_window": 1048576,
+                    "supports_attachments": true,
+                    "can_reason": true,
+                    "reasoning_levels": ["low", "high", "max"],
+                    "default_reasoning_effort": "max"
+                  }
+                ]
+              }
+            },
             "options": {
               "context_paths": ["AGENTS.md", "CRUSH.md", "CLAUDE.md", "README.md"],
               "disable_metrics": true,
@@ -406,6 +477,7 @@ jobs:
           GH_TOKEN: ''
           OPENROUTER_API_KEY: ''
           ZAI_API_KEY: ''
+          KIMI_API_KEY: ''
           PROVIDER_API_KEY: ''
         run: |
           cd "$HOME"
@@ -460,10 +532,10 @@ jobs:
           #     no such files may exist on disk — the mask mainly protects
           #     self-hosted or differently provisioned runners;
           #   - network access (required for the inference API).
-          # OPENROUTER_API_KEY / ZAI_API_KEY are deliberately passed in:
-          # crush reads whichever one its active provider needs directly
-          # from the environment, so exfiltration of those keys remains
-          # possible in principle — reviewers should still eyeball PR
+          # OPENROUTER_API_KEY / ZAI_API_KEY / KIMI_API_KEY are deliberately
+          # passed in: crush reads whichever one its active provider needs
+          # directly from the environment, so exfiltration of those keys
+          # remains possible in principle — reviewers should still eyeball PR
           # contents.
           # CRUSH_MODEL / SMALL_MODEL are expanded by the outer shell and
           # arrive as plain command arguments, and the stdio redirections
@@ -531,6 +603,7 @@ jobs:
             --setenv TERM dumb
             --setenv OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
             --setenv ZAI_API_KEY "$ZAI_API_KEY"
+            --setenv KIMI_API_KEY "$KIMI_API_KEY"
             --
           )
 
