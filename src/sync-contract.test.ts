@@ -360,20 +360,25 @@ describe('Contract sync and removal', () => {
   })
 })
 
-describe('chelonia/reset and clock sync', () => {
+describe('chelonia/reset', () => {
   let timeRequests = 0
   let failTeardown = false
   let pubsub: PubSubClient | undefined
+  let logs: ReturnType<typeof captureConsole>
 
   beforeEach(async () => {
     sbp('chelonia/_init')
     timeRequests = 0
     failTeardown = false
+    server.contract = makeContract()
+    server.failEvents = false
+    logs = captureConsole()
     await sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
       connectionOptions: { manual: true },
+      skipActionProcessing: true,
       fetch: async (url: string) => {
-        if (!url.endsWith('/time')) return new Response('', { status: 500 })
+        if (!url.endsWith('/time')) return stubFetch(url)
         timeRequests++
         return new Response(new Date().toISOString())
       },
@@ -387,6 +392,7 @@ describe('chelonia/reset and clock sync', () => {
   })
 
   afterEach(() => {
+    logs.restore()
     pubsub?.destroy()
     sbp('chelonia/private/stopClockSync')
     sbp('chelonia/_init')
@@ -414,5 +420,24 @@ describe('chelonia/reset and clock sync', () => {
   it('lets overlapping resets both finish and restart clock sync', async () => {
     await within(Promise.all([sbp('chelonia/reset'), sbp('chelonia/reset')]), 'resets')
     await clockResynced()
+  })
+
+  it('starts a fresh KV session even when the teardown fails', async () => {
+    const cid = server.contract!.hash()
+    const read = () => sbp('chelonia/kv/read', cid, 'counter')
+    sbp('chelonia/kv/defineSlot', {
+      contractType: CONTRACT_TYPE, key: 'counter', defaultValue: 0, autoLoad: 'never'
+    })
+    await within(sbp('chelonia/contract/retain', cid), 'retain')
+    assert.strictEqual(read(), 0)
+
+    failTeardown = true
+    await assert.rejects(within(sbp('chelonia/reset'), 'reset'), /teardown failed/)
+    assert.throws(read, { name: 'ChelErrorKvSlotUnknown' })
+
+    failTeardown = false
+    await within(sbp('chelonia/reset'), 'second reset')
+    await within(sbp('chelonia/contract/retain', cid), 'retain again')
+    assert.strictEqual(read(), 0)
   })
 })

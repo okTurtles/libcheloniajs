@@ -60,6 +60,7 @@ import {
 import './files.js'
 import { clearReprocessDebounceAll, type PublishOptions } from './internals.js'
 import './kv.js'
+import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import { queueEventOrReject } from './queue-event.js'
 import {
   isSignedData,
@@ -430,23 +431,7 @@ export default sbp('sbp/selectors/register', {
     // those rotated keys as foreign keys.
     this.subscriptionSet = new Set()
     // KV slot registry — see KV-REVAMPED.md §11.2.
-    // `kvSlots` and `defContractKvByManifest` survive `chelonia/reset`
-    // because slot definitions are application code.
-    this.kvSlots = new Map()
-    this.kvSlotsByContractID = new Map()
-    this.kvActiveFilters = new Map()
-    this.kvFilterDirty = new Set()
-    this.kvFilterRetry = new Set()
-    this.kvFlushInFlight = false
-    this.kvLocalEchoCIDs = new Map()
-    this.kvReconnectRefresh = new Set()
-    this.kvPendingWrites = new Map()
-    this.kvPendingLoads = new Map()
-    this.kvOnUpdateActive = new Map()
-    // Name for `defContractKvByManifest` doesn't start with
-    // `kv`, like the preceding keys, for consistency with
-    // `defContractManifest`.
-    this.defContractKvByManifest = new Map()
+    initKvRuntime(this)
     // pending includes contracts that are scheduled for syncing or in the
     // process of syncing for the first time. After sync completes for the
     // first time, they are removed from pending and added to subscriptionSet
@@ -768,35 +753,19 @@ export default sbp('sbp/selectors/register', {
       const result = await postCleanupFn?.()
       // The following are all synchronous operations
       const rootState = sbp(this.config.stateSelector)
-      // Cancel all outgoing messages by replacing this._instance
-      this._instance = Object.create(null)
-      // Remove all contracts, including all contracts from pending
-      reactiveClearObject(rootState, this.config.reactiveDel)
-      this.config.reactiveSet(rootState, 'contracts', Object.create(null))
-      this.config.reactiveSet(rootState, 'secretKeys', Object.create(null))
-      // Re-seed the KV mirror — `reactiveClearObject` above stripped it
-      // along with everything else. Slot definitions (`kvSlots`) and the
-      // per-manifest cache (`defContractKvByManifest`) survive reset
-      // because they are code-level state; the five per-subscription maps
-      // are cleared alongside `subscriptionSet` below. In-flight KV writes
-      // were already drained via `chelonia/kv/_waitInFlight` above, so
-      // clearing `kvLocalEchoCIDs` / `kvPendingWrites` here cannot strand a
-      // continuation mid-write.
-      this.config.reactiveSet(rootState, '_kv', Object.create(null))
-      this.kvSlotsByContractID.clear()
-      this.kvActiveFilters.clear()
-      this.kvFilterDirty.clear()
-      this.kvFilterRetry.clear()
-      if (this.kvFilterRetryTimer != null) {
-        clearTimeout(this.kvFilterRetryTimer)
-        this.kvFilterRetryTimer = undefined
+      try {
+        // Cancel all outgoing messages by replacing this._instance
+        this._instance = Object.create(null)
+        // Remove all contracts, including all contracts from pending
+        reactiveClearObject(rootState, this.config.reactiveDel)
+        this.config.reactiveSet(rootState, 'contracts', Object.create(null))
+        this.config.reactiveSet(rootState, 'secretKeys', Object.create(null))
+        this.config.reactiveSet(rootState, '_kv', Object.create(null))
+      } finally {
+        // KV writes were drained above. Start a fresh KV session even if the
+        // teardown throws, so nothing from this one leaks into the next.
+        resetKvRuntime(this)
       }
-      this.kvFlushInFlight = false
-      this.kvLocalEchoCIDs.clear()
-      this.kvReconnectRefresh.clear()
-      this.kvPendingWrites.clear()
-      this.kvPendingLoads.clear()
-      this.kvOnUpdateActive.clear()
       clearObject(this.ephemeralReferenceCount)
       clearObject(this.contractTypesBeforeResync)
       this.pending.splice(0)
