@@ -64,9 +64,11 @@ import {
   abortReason,
   heightAheadError,
   localHeight,
+  MAX_STALE_STAMP_RETRIES,
   readHeightStamp,
   sleep,
-  waitForHeight
+  waitForHeight,
+  waitForHeightAfterSync
 } from './kv-height.js'
 import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import { queueEventOrReject } from './queue-event.js'
@@ -2919,6 +2921,7 @@ export default sbp('sbp/selectors/register', {
       throw new TypeError('[chelonia/kv] set: `onconflict` is required when `data` is undefined')
     }
     let attemptsLeft = maxAttempts ?? 3
+    let staleStampRetries = 0
     const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`
     const signal: ComposedAbortSignal = callerSignal
       ? composeSignals([this.abortController.signal, callerSignal])
@@ -2929,7 +2932,7 @@ export default sbp('sbp/selectors/register', {
       ]),
       signal
     })
-    const isConflict = (response: Response) => response.status === 409 || response.status === 412
+    const isConflict = (response: Response) => response.status === 412
     const unexpected = (response: Response) => new ChelErrorUnexpectedHttpResponseCode(
       `[kv/set] ${httpErrorMessage(response)}`, { cause: response.status }
     )
@@ -3006,6 +3009,14 @@ export default sbp('sbp/selectors/register', {
       ;[data, ifMatch] = result
       return true
     }
+    // The server's height is at least that of the value it stores (unverified)
+    const storedHeight = async (response: Response) => {
+      try {
+        return readHeightStamp(JSON.parse(await response.text()))
+      } catch {
+        return 0
+      }
+    }
 
     try {
       for (;;) {
@@ -3018,18 +3029,34 @@ export default sbp('sbp/selectors/register', {
           if (await resolveConflict(value, response.status)) continue
           return { etag: null }
         }
+        const message = outputEncryptedOrUnencryptedMessage.call(this, {
+          contractID, innerSigningKeyId, encryptionKeyId, signingKeyId, data, meta: key
+        })
         const response = await this.config.fetch(url, {
           headers: new Headers([
             ['authorization', buildShelterAuthorizationHeader.call(this, contractID)],
             ['if-match', ifMatch || '""']
           ]),
           method: 'POST',
-          body: JSON.stringify(outputEncryptedOrUnencryptedMessage.call(this, {
-            contractID, innerSigningKeyId, encryptionKeyId, signingKeyId, data, meta: key
-          })),
+          body: JSON.stringify(message),
           signal
         })
         if (response.ok) return { etag: responseEtag(response) }
+        // A stale height stamp: the same write, signed at the server's height, is accepted
+        if (response.status === 409) {
+          const requiredHeight = Math.max(Number(message.height) + 1, await storedHeight(response))
+          if (
+            ++staleStampRetries > MAX_STALE_STAMP_RETRIES ||
+            !(await waitForHeightAfterSync(this, contractID, requiredHeight, {
+              timeoutMs: heightWaitMs ?? undefined, signal
+            }))
+          ) {
+            throw heightAheadError(this, contractID, key, {
+              requiredHeight, exact: false, etag: responseEtag(response), httpStatus: 409
+            })
+          }
+          continue
+        }
         if (!isConflict(response)) throw unexpected(response)
         if (typeof onconflict !== 'function') {
           throw new ChelErrorKvMaxAttempts(

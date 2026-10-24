@@ -1,5 +1,7 @@
 import sbp from '@sbp/sbp'
+import '@sbp/okturtles.events'
 import { ChelErrorInvalidMessageHeight, ChelErrorKvHeightAhead } from './errors.js'
+import { CONTRACT_IS_SYNCING } from './events.js'
 import type { CheloniaContext, KvHeightAheadCause } from './types.js'
 
 const CANONICAL_HEIGHT = /^(?:0|[1-9][0-9]*)$/
@@ -12,6 +14,9 @@ export const kvHeightTimings = {
 
 // `setTimeout` fires at once for delays of 2^31 ms or more
 const MAX_TIMER_MS = 2 ** 31 - 1
+
+// Re-signs of one `kv/set` call after the server rejected a stale height stamp
+export const MAX_STALE_STAMP_RETRIES = 5
 
 // The server checks `Number(stamp)`; a lenient parse ('1e1' as 1) would let a
 // revoked key pass the key-window check with a stamp the server accepts.
@@ -145,4 +150,39 @@ export async function waitForHeight (
   return waitFor(socketDown ? 0 : timeoutMs, signal, (done) =>
     onHeight(ctx, contractID, minHeight, done)
   )
+}
+
+async function waitForSyncEnd (
+  ctx: CheloniaContext,
+  contractID: string,
+  { timeoutMs = kvHeightTimings.waitMs, signal }: {
+    timeoutMs?: number; signal?: AbortSignal | null
+  } = {}
+): Promise<boolean> {
+  if (signal?.aborted) throw abortReason(signal)
+  if (!ctx.currentSyncs[contractID]) return true
+  return waitFor(timeoutMs, signal, (done) => {
+    const listener = (id: string, syncing: boolean) => {
+      if (id === contractID && !syncing) done()
+    }
+    sbp('okTurtles.events/on', CONTRACT_IS_SYNCING, listener)
+    return () => sbp('okTurtles.events/off', CONTRACT_IS_SYNCING, listener)
+  })
+}
+
+// Acting on the height reached partway through a sync would likely still be
+// behind the server, so a running sync is waited for first, within one budget
+export async function waitForHeightAfterSync (
+  ctx: CheloniaContext,
+  contractID: string,
+  minHeight: number,
+  { timeoutMs = kvHeightTimings.waitMs, signal }: {
+    timeoutMs?: number; signal?: AbortSignal | null
+  } = {}
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  if (!(await waitForSyncEnd(ctx, contractID, { timeoutMs, signal }))) return false
+  return waitForHeight(ctx, contractID, minHeight, {
+    timeoutMs: Math.max(0, deadline - Date.now()), signal
+  })
 }

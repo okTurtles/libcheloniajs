@@ -2,7 +2,10 @@ import sbp from '@sbp/sbp'
 import assert from 'node:assert'
 import { beforeEach, describe, it } from 'node:test'
 
-import { notifyContractHeight, onHeight, waitForHeight } from './kv-height.js'
+import { CONTRACT_IS_SYNCING } from './events.js'
+import {
+  notifyContractHeight, onHeight, waitForHeight, waitForHeightAfterSync
+} from './kv-height.js'
 import { captureConsole, within } from './test-utils.js'
 import type { CheloniaContext } from './types.js'
 
@@ -28,6 +31,7 @@ describe('waitForHeight', () => {
     contracts[CID] = { height: 10 }
     ctx = {
       config: { stateSelector: 'test.kvHeight/state' },
+      currentSyncs: {},
       kvHeightListeners: new Map()
     } as unknown as CheloniaContext
   })
@@ -97,5 +101,40 @@ describe('waitForHeight', () => {
     } finally {
       logs.restore()
     }
+  })
+
+  describe('after a running sync', () => {
+    const endSync = (contractID = CID) => {
+      delete ctx.currentSyncs[contractID]
+      sbp('okTurtles.events/emit', CONTRACT_IS_SYNCING, contractID, false)
+    }
+
+    beforeEach(() => {
+      ctx.currentSyncs[CID] = { firstSync: false }
+      ctx.currentSyncs.zOtherContract = { firstSync: false }
+      ctx.pubsub = pubsubWith(WebSocket.CLOSED)
+    })
+
+    it('waits for the sync to end first, even with the socket closed', async () => {
+      const wait = waitForHeightAfterSync(ctx, CID, 11, { timeoutMs: 60_000 })
+      commit(11)
+      endSync('zOtherContract')
+      assert.strictEqual(await settledSoon(wait), PENDING)
+      endSync()
+      assert.strictEqual(await within(wait, 'the wait'), true)
+    })
+
+    it("gives up if the sync doesn't end in time, even with the height reached", async () => {
+      for (const timeoutMs of [0, 20]) {
+        const wait = waitForHeightAfterSync(ctx, CID, 10, { timeoutMs })
+        assert.strictEqual(await within(wait, `wait (${timeoutMs} ms)`), false)
+      }
+    })
+
+    it("doesn't wait for the height once the sync ended while the socket is closed", async () => {
+      const wait = waitForHeightAfterSync(ctx, CID, 11, { timeoutMs: 60_000 })
+      endSync()
+      assert.strictEqual(await within(wait, 'the wait'), false)
+    })
   })
 })

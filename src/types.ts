@@ -719,7 +719,7 @@ export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<
 };
 
 /**
- * Callback supplied to `chelonia/kv/set` to resolve a `409` / `412`
+ * Callback supplied to `chelonia/kv/set` to resolve a `412`
  * conflict (or to populate the body when `data` was omitted and the
  * primitive performs a fetch-first GET — see the `data === undefined`
  * branch in `src/chelonia.ts`).
