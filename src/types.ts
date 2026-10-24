@@ -542,6 +542,8 @@ export type CheloniaContext = {
   // to match the lane granularity exactly (cross-contract writes from
   // `onUpdate` are safe and not rejected).
   kvOnUpdateActive: Map<string, number>;
+  // Callbacks waiting for a contract to commit a height (`kv-height.ts`)
+  kvHeightListeners: Map<string, Set<{ minHeight: number; fire: () => void }>>;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;

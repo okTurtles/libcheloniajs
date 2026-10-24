@@ -15,6 +15,7 @@ const startKvSession = (ctx: CheloniaContext): void => {
   ctx.kvPendingWrites = new Map()
   ctx.kvPendingLoads = new Map()
   ctx.kvOnUpdateActive = new Map()
+  ctx.kvHeightListeners = new Map()
 }
 
 export const initKvRuntime = (ctx: CheloniaContext): void => {

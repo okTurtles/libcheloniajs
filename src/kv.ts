@@ -23,6 +23,7 @@ import {
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
 import { isKvMaxAttempts } from './internal-errors.js'
+import { notifyContractHeight } from './kv-height.js'
 import {
   KV_AUTO_LOAD,
   KV_DEFAULT_ENCRYPTION_KEY_NAME,
@@ -2001,6 +2002,16 @@ export default (sbp('sbp/selectors/register', {
         }
       }
     }
+  },
+
+  // Private. Event processing calls it right after committing a height; tests
+  // that set a height directly call it too.
+  'chelonia/kv/_notifyHeight': function (
+    this: CheloniaContext,
+    contractID: string,
+    height: number
+  ): void {
+    notifyContractHeight(this, contractID, height)
   },
 
   'chelonia/kv/_onContractResynced': function (this: CheloniaContext, contractID: string): void {

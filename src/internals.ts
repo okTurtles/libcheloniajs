@@ -3452,6 +3452,8 @@ const handleEvent = {
     }
     this.config.reactiveSet(state.contracts[contractID], 'HEAD', hash)
     this.config.reactiveSet(state.contracts[contractID], 'height', height)
+    // Right here, so that a throw further down can't keep KV waits asleep
+    sbp('chelonia/kv/_notifyHeight', contractID, height)
     // If there were decryption errors due to missing encryption keys, we store
     // those key IDs. If those key IDs are later shared with us, we can re-sync
     // the contract. Without this information, we can only guess whether a

@@ -1,6 +1,7 @@
 // Shared by the `kv-height*.test.ts` files: the real slot layer, `kv/set` and
 // `kv/get` against a simulated server. Not a test file; excluded from the CJS
-// build. Call `installKvHarness()` at the top of a `describe`.
+// build. Call `installKvHarness()` at the top of a `describe`; tests may change
+// `kvHeightTimings`, which is restored after each test.
 import {
   CURVE25519XSALSA20POLY1305, EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey
 } from '@chelonia/crypto'
@@ -10,6 +11,7 @@ import { afterEach, beforeEach } from 'node:test'
 import './chelonia.js'
 import { encryptedOutgoingData } from './encryptedData.js'
 import { CONTRACTS_MODIFIED } from './events.js'
+import { kvHeightTimings } from './kv-height.js'
 import { signedOutgoingData } from './signedData.js'
 import {
   captureConsole, makeKvServer, waitMicrotasks, within, type FetchInit, type KvServer
@@ -42,9 +44,12 @@ export const rootState = (): ChelRootState => sbp('chelonia/private/state')
 export const mirror = (key: string): KvMirrorEntry | undefined =>
   rootState()._kv?.[CONTRACT_ID]?.[key]
 
+// As if an event had committed `height`
 export const setLocalHeight = (height: number): void => {
   const meta = rootState().contracts[CONTRACT_ID]
-  if (meta) meta.height = height
+  if (!meta) return
+  meta.height = height
+  sbp('chelonia/kv/_notifyHeight', CONTRACT_ID, height)
 }
 
 const abortable = (promise: Promise<void>, signal?: AbortSignal | null) =>
@@ -182,6 +187,7 @@ const reconcile = (_ids: string[], change: { added: string[]; removed: string[] 
 
 export const installKvHarness = (): void => {
   const random = Math.random
+  const timings = { ...kvHeightTimings }
   beforeEach(async () => {
     sbp('chelonia/_init')
     server = makeKvServer(CONTRACT_ID, { height: START_HEIGHT })
@@ -205,6 +211,7 @@ export const installKvHarness = (): void => {
     } finally {
       sbp('okTurtles.events/off', CONTRACTS_MODIFIED, reconcile)
       Math.random = random
+      Object.assign(kvHeightTimings, timings)
       logs.restore()
     }
   })
