@@ -576,6 +576,8 @@ export type CheloniaContext = {
   }>>;
   // Contracts whose slots were matched since they were last added
   kvReconciledContracts: Set<string>;
+  // Contracts whose mirror entries were kept through a resync teardown
+  kvResyncedContracts: Set<string>;
   // Survives `chelonia/reset`, which blocks recovery syncs while it drains
   kvResetsInProgress: number;
   // Previous `kv` block per manifest, used by `defineContract`

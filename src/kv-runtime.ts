@@ -21,6 +21,7 @@ const startKvSession = (ctx: CheloniaContext): void => {
   ctx.kvRecoveries = new Map()
   ctx.kvSettleWaiters = new Map()
   ctx.kvReconciledContracts = new Set()
+  ctx.kvResyncedContracts = new Set()
 }
 
 export const initKvRuntime = (ctx: CheloniaContext): void => {

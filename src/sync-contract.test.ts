@@ -252,7 +252,8 @@ describe('Contract sync and removal', () => {
     await failFirstSync(cid, false)
     sbp('chelonia/private/removeImmediately', cid, { resync: true })
     assert.deepStrictEqual({ ...rootState().contracts[cid] }, { references: 1 })
-    assert.strictEqual(rootState()._kv?.[cid], undefined)
+    // As for any resync, for the slots to use once the contract is back
+    assert.deepStrictEqual(rootState()._kv?.[cid], {})
     assert.deepStrictEqual([...removed, ...removedPermanently], [])
     assert.deepStrictEqual(errorsLogged(), [])
   })

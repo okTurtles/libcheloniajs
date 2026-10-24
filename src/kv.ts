@@ -798,6 +798,23 @@ const endUndefinedSettleWaits = (ctx: CheloniaContext, contractID?: string): voi
     (contractID === undefined || cID === contractID) && !slotDefinedFor(ctx, cID, key),
   "has no slot for its contract's type")
 
+// Drops a key's mirror entry, and the contract's record once its last key is
+// gone so that an emptied `{}` doesn't linger in persisted state
+function dropEntry (
+  ctx: CheloniaContext,
+  rootState: ChelRootState,
+  contractID: string,
+  key: string
+): void {
+  const perContract = rootState._kv?.[contractID]
+  if (perContract?.[key]) ctx.config.reactiveDel(perContract, key)
+  if (perContract && Object.keys(perContract).length === 0) {
+    ctx.config.reactiveDel(rootState._kv!, contractID)
+  }
+  ctx.kvLocalEchoCIDs.delete(`${contractID}${KV_KEY_SEPARATOR}${key}`)
+  cancelHeightWaits(ctx, contractID, key)
+}
+
 // Activates the matching slots of a contract once its type is known
 function reconcileContract (ctx: CheloniaContext, contractID: string): void {
   const rootState = sbp(ctx.config.stateSelector) as ChelRootState
@@ -809,6 +826,13 @@ function reconcileContract (ctx: CheloniaContext, contractID: string): void {
   }
   if (!ctx.subscriptionSet.has(contractID)) return
   ctx.kvReconciledContracts.add(contractID)
+  // Entries kept through a resync whose slot was unregistered meanwhile
+  if (ctx.kvResyncedContracts.delete(contractID)) {
+    const active = ctx.kvSlotsByContractID.get(contractID)
+    for (const key of Object.keys(rootState._kv?.[contractID] ?? {})) {
+      if (!active?.has(key)) dropEntry(ctx, rootState, contractID, key)
+    }
+  }
   endUndefinedSettleWaits(ctx, contractID)
 }
 
@@ -1859,19 +1883,7 @@ export default (sbp('sbp/selectors/register', {
         }
         if (contractEmptied) this.kvActiveFilters.delete(contractID)
       }
-      const perContract = rootState._kv?.[contractID]
-      if (perContract && perContract[slot.key]) {
-        this.config.reactiveDel(perContract, slot.key)
-      }
-      // Drop the per-contract record once its last key is gone so an
-      // emptied {} doesn't linger in persisted state until contract
-      // release. ensureContractKv re-creates it on demand, and the
-      // load/remote paths re-acquire live entries and bail when absent.
-      if (perContract && rootState._kv && Object.keys(perContract).length === 0) {
-        this.config.reactiveDel(rootState._kv, contractID)
-      }
-      this.kvLocalEchoCIDs.delete(`${contractID}${KV_KEY_SEPARATOR}${slot.key}`)
-      cancelHeightWaits(this, contractID, slot.key)
+      dropEntry(this, rootState, contractID, slot.key)
       rejectSettleWaits(this, `${contractID}${KV_KEY_SEPARATOR}${slot.key}`,
         "isn't active for its contract")
     }
@@ -2267,7 +2279,8 @@ export default (sbp('sbp/selectors/register', {
   // Called from both `chelonia/private/removeImmediately` and the
   // `CONTRACTS_MODIFIED` listener; all operations below are idempotent.
   // Clears per-contract KV runtime state for `contractID`: removes
-  // `rootState._kv[contractID]`, `kvSlotsByContractID[contractID]`,
+  // `rootState._kv[contractID]` (kept through a resync),
+  // `kvSlotsByContractID[contractID]`,
   // `kvActiveFilters[contractID]`, and schedules an empty-filter
   // `setFilter` flush. The `kvFilterDirty` mark is intentionally
   // retained until the microtask fires so the flush sees this
@@ -2280,6 +2293,7 @@ export default (sbp('sbp/selectors/register', {
     contractID: string,
     { resync }: { resync?: boolean } = {}
   ): void {
+    const slots = this.kvSlotsByContractID.get(contractID)
     this.kvReconciledContracts.delete(contractID)
     cancelHeightWaits(this, contractID)
     // A re-sync activates the slots again
@@ -2309,8 +2323,18 @@ export default (sbp('sbp/selectors/register', {
       }
     })
     const rootState = sbp(this.config.stateSelector) as ChelRootState
-    if (rootState._kv && rootState._kv[contractID]) {
-      this.config.reactiveDel(rootState._kv, contractID)
+    const record = rootState._kv?.[contractID]
+    if (!resync) {
+      this.kvResyncedContracts.delete(contractID)
+      if (record) this.config.reactiveDel(rootState._kv!, contractID)
+    } else if (record) {
+      // Kept for the slots to use once they activate again
+      this.kvResyncedContracts.add(contractID)
+      // The markers go with the waits. The slots give the events the contract
+      // type, as the contract's state is gone already.
+      slots?.forEach((slot, key) => {
+        if (record[key]?.heightAhead) patchEntry(this, contractID, slot, { heightAhead: null })
+      })
     }
   },
 

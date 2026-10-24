@@ -42,6 +42,8 @@ export const syncs = {
 
 const teardowns: (() => void)[] = []
 let pubsub: PubSubClient
+// Rebuilds the contract's state, as replaying its events would
+let replay: (() => void) | undefined
 
 export const rootState = (): ChelRootState => sbp('chelonia/private/state')
 
@@ -78,6 +80,8 @@ const route = async (url: string, init?: FetchInit): Promise<Response> => {
   if (syncs.hold) await abortable(syncs.hold, init?.signal)
   const meta = rootState().contracts[CONTRACT_ID]
   if (syncs.fail || !meta) return new Response(null, { status: 500 })
+  replay?.()
+  replay = undefined
   if (syncs.catchUp) setLocalHeight(Math.max(meta.height, server.height))
   // The local HEAD: the sync finds nothing to fetch
   return Response.json({ HEAD: meta.HEAD, height: meta.height })
@@ -158,6 +162,21 @@ export const activate = async (): Promise<void> => {
   await drainLanes()
 }
 
+// Resyncs the contract: its teardown removes it, then the sync replays its
+// current state (once a held sync is let through; a failing one replays nothing)
+export const resync = (): Promise<unknown> => {
+  const state = rootState() as unknown as Record<string, Record<string, unknown>>
+  const meta = { ...rootState().contracts[CONTRACT_ID] }
+  const contractState = { ...state[CONTRACT_ID] }
+  delete contractState._volatile
+  replay = () => {
+    Object.assign(rootState().contracts[CONTRACT_ID], meta)
+    Object.assign(state[CONTRACT_ID], contractState)
+    sbp('chelonia/kv/_notifyHeight', CONTRACT_ID, meta.height)
+  }
+  return sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true, resync: true })
+}
+
 // What `kv/set` would post for `data` stamped with `stamp`
 export const sealValue = (key: string, data: JSONType, stamp: unknown) => {
   const payload = encryptedOutgoingData(CONTRACT_ID, keys.cekId, data)
@@ -223,6 +242,7 @@ export const installKvHarness = (): void => {
     sbp('chelonia/_init')
     server = makeKvServer(CONTRACT_ID, { height: START_HEIGHT })
     Object.assign(syncs, { count: 0, catchUp: false, fail: false, hold: undefined })
+    replay = undefined
     await sbp('chelonia/configure', {
       connectionURL: 'https://example.test',
       connectionOptions: { manual: true },
