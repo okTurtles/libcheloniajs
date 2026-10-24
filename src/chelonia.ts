@@ -1653,7 +1653,9 @@ export default sbp('sbp/selectors/register', {
     const listOfIds = typeof contractIDs === 'string' ? [contractIDs] : contractIDs
     return Promise.all(
       listOfIds.map((contractID) => {
-        if (!rootState?.contracts?.[contractID]) {
+        // Only skip contracts already removed for good: one whose first sync
+        // failed may have no entry (ephemeral), but still needs cleaning up
+        if (!rootState?.contracts || rootState.contracts[contractID] === null) {
           return undefined
         }
 

@@ -625,21 +625,41 @@ export default sbp('sbp/selectors/register', {
     const state = sbp(this.config.stateSelector)
     // Drop any pending re-ingest entries and any scheduled forced
     // re-sync for this contract up-front, unconditionally. We do this
-    // before the contract-name early-return below because if the
+    // before the early returns below because if the
     // contract row is missing the entries can never be re-delivered
     // here, and a pending debounce timer would fire a force-sync
     // against a contract we've already given up on.
     clearReingestTrackerForContract(contractID)
     clearReprocessDebounceForContract(contractID)
-    const contractName = state.contracts[contractID]?.type
-    if (!contractName) {
+    // Drop per-contract KV runtime state on every removal; the
+    // `CONTRACTS_MODIFIED` listener also performs this cleanup via
+    // `_onContractsModified`, so the direct call is an idempotent fast path.
+    const cleanupKvRuntime = () => {
+      try {
+        sbp('chelonia/kv/_cleanupContractRuntime', contractID)
+      } catch (e) {
+        console.error('[chelonia] KV cleanup on contract removal failed', e)
+      }
+    }
+    const entry = state.contracts[contractID]
+    const contractName = entry?.type
+    // Applying the first message sets the type and subscribes, so this
+    // contract never finished its first sync (or was never retained here)
+    const neverSynced = !contractName && !this.subscriptionSet.has(contractID)
+    // Already removed for good, or nothing to clear before a re-sync
+    if (entry === null || (neverSynced && params?.resync)) {
+      cleanupKvRuntime()
+      return
+    }
+    if (!contractName && !neverSynced) {
       console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
         contractID
       })
+      cleanupKvRuntime()
       return
     }
 
-    const manifestHash = this.config.contracts.manifests[contractName]
+    const manifestHash = contractName && this.config.contracts.manifests[contractName]
     if (manifestHash) {
       const destructor = `${manifestHash}/${contractName}/_cleanup`
       // Check if a destructor is defined
@@ -682,15 +702,11 @@ export default sbp('sbp/selectors/register', {
       this.config.reactiveDel(state, contractID)
     }
 
-    // Drop per-contract KV runtime state on every removal; the
-    // `CONTRACTS_MODIFIED` listener also performs this cleanup via
-    // `_onContractsModified`, so the direct call is an idempotent fast path.
-    try {
-      sbp('chelonia/kv/_cleanupContractRuntime', contractID)
-    } catch (e) {
-      console.error('[chelonia] KV cleanup on contract removal failed', e)
-    }
+    cleanupKvRuntime()
 
+    // It was never announced as added. A permanent removal is, so that
+    // copies of `state.contracts` also record `null`.
+    if (neverSynced && !params?.permanent) return
     this.subscriptionSet.delete(contractID)
     // (Tracker + debounce cancellation moved to the top of this selector
     // so the early-return path on a missing contract row also clears.

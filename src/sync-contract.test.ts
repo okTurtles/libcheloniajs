@@ -88,7 +88,17 @@ describe('chelonia/queueInvocation', () => {
 describe('Contract sync and removal', () => {
   let logs: ReturnType<typeof captureConsole>
   const added: string[] = []
-  const onModified = (_ids: string[], change: { added: string[] }) => added.push(...change.added)
+  const removed: string[] = []
+  const removedPermanently: string[] = []
+  const onModified = (
+    _ids: string[],
+    change: { added: string[]; removed: string[]; permanent?: boolean }
+  ) => {
+    added.push(...change.added)
+    const removals = change.permanent ? removedPermanently : removed
+    removals.push(...change.removed)
+  }
+  const errorsLogged = () => logs.logged.filter(({ method }) => method === 'error')
 
   beforeEach(() => {
     sbp('chelonia/_init')
@@ -100,6 +110,8 @@ describe('Contract sync and removal', () => {
     server.contract = makeContract()
     server.failEvents = false
     added.length = 0
+    removed.length = 0
+    removedPermanently.length = 0
     sbp('okTurtles.events/on', CONTRACTS_MODIFIED, onModified)
     logs = captureConsole()
   })
@@ -162,5 +174,79 @@ describe('Contract sync and removal', () => {
       { name: 'ChelErrorResourceGone' }
     )
     await assertRemovedOnLastRelease(cid)
+  })
+
+  // Leaves a KV mirror entry, so that its removal shows the KV cleanup ran
+  const failFirstSync = async (cid: string, ephemeral: boolean) => {
+    server.failEvents = true
+    await assert.rejects(
+      within(sbp('chelonia/contract/retain', cid, { ephemeral }), 'failed retain'),
+      { name: 'ChelErrorUnexpectedHttpResponseCode' }
+    )
+    const state = rootState()
+    state._kv = { ...state._kv, [cid]: {} }
+    logs.logged.length = 0
+  }
+
+  for (const ephemeral of [false, true]) {
+    describe(`after a first sync that failed (ephemeral: ${ephemeral})`, () => {
+      it('release removes the contract quietly', async () => {
+        const cid = server.contract!.hash()
+        await failFirstSync(cid, ephemeral)
+        await within(sbp('chelonia/contract/release', cid, { ephemeral }), 'release')
+        assert.strictEqual(rootState().contracts[cid], undefined)
+        assert.strictEqual(rootState()[cid], undefined)
+        assert.strictEqual(rootState()._kv?.[cid], undefined)
+        assert.deepStrictEqual(removed, [])
+        assert.deepStrictEqual(errorsLogged(), [])
+        await assertRemovedOnLastRelease(cid)
+      })
+
+      it('a permanent removal leaves a null entry and is announced', async () => {
+        const cid = server.contract!.hash()
+        await failFirstSync(cid, ephemeral)
+        await within(sbp('chelonia/contract/remove', cid, { permanent: true }), 'remove')
+        assert.strictEqual(rootState().contracts[cid], null)
+        assert.strictEqual(rootState()._kv?.[cid], undefined)
+        assert.deepStrictEqual(removedPermanently, [cid])
+        assert.deepStrictEqual(errorsLogged(), [])
+        await assert.rejects(
+          within(sbp('chelonia/contract/retain', cid, { ephemeral: true }), 'retain'),
+          { name: 'ChelErrorResourceGone' }
+        )
+      })
+    })
+  }
+
+  it('a resync teardown keeps a never-synced contract and logs nothing', async () => {
+    const cid = server.contract!.hash()
+    await failFirstSync(cid, false)
+    sbp('chelonia/private/removeImmediately', cid, { resync: true })
+    assert.deepStrictEqual({ ...rootState().contracts[cid] }, { references: 1 })
+    assert.strictEqual(rootState()._kv?.[cid], undefined)
+    assert.deepStrictEqual([...removed, ...removedPermanently], [])
+    assert.deepStrictEqual(errorsLogged(), [])
+  })
+
+  it('removing a contract that was never retained changes and logs nothing', async () => {
+    await within(sbp('chelonia/contract/release', 'never-retained', { try: true }), 'release')
+    await within(sbp('chelonia/contract/remove', 'never-retained'), 'remove')
+    assert.ok(!('never-retained' in rootState().contracts))
+    assert.deepStrictEqual([...removed, ...removedPermanently], [])
+    assert.deepStrictEqual(errorsLogged(), [])
+  })
+
+  it('a second permanent removal queued behind the first logs nothing', async () => {
+    const cid = server.contract!.hash()
+    await within(sbp('chelonia/contract/retain', cid), 'retain')
+    let open!: () => void
+    const gate = new Promise<void>((resolve) => { open = resolve })
+    const blocked = sbp('chelonia/private/queueEvent', cid, () => gate)
+    const removals = [1, 2].map(() => sbp('chelonia/contract/remove', cid, { permanent: true }))
+    open()
+    await within(Promise.all([blocked, ...removals]), 'removals')
+    assert.strictEqual(rootState().contracts[cid], null)
+    assert.deepStrictEqual(removedPermanently, [cid])
+    assert.deepStrictEqual(errorsLogged(), [])
   })
 })
