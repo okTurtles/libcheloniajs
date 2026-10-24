@@ -1323,7 +1323,7 @@ export default sbp('sbp/selectors/register', {
       // so multi-instance deployments dispatch against the correct context.
       this.kvContractsModifiedListener = (
         _contracts: string[],
-        payload: { added: string[]; removed: string[] }
+        payload: { added: string[]; removed: string[]; resync?: boolean }
       ) => {
         try {
           sbp('chelonia/kv/_onContractsModified', payload)

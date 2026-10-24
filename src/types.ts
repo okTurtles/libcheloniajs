@@ -551,6 +551,13 @@ export type CheloniaContext = {
   kvHeightListeners: Map<string, Set<{ minHeight: number; fire: () => void }>>;
   // Running height-recovery syncs, each shared by all its callers
   kvRecoveries: Map<string, Promise<void>>;
+  // Pending `chelonia/kv/whenSettled` calls, keyed by `contractID::key`
+  kvSettleWaiters: Map<string, Set<{
+    resolve: (status: Exclude<KvLoadStatus, 'loading'>) => void;
+    reject: (e: unknown) => void;
+  }>>;
+  // Contracts whose slots were matched since they were last added
+  kvReconciledContracts: Set<string>;
   // Survives `chelonia/reset`, which blocks recovery syncs while it drains
   kvResetsInProgress: number;
   // Previous `kv` block per manifest, used by `defineContract`

@@ -9,7 +9,7 @@ import type { PubSubClient } from './pubsub/index.js'
 import { SPMessage } from './SPMessage.js'
 import type { SPKey, SPOpContract, SPOpValue } from './SPMessage.js'
 import { signedOutgoingDataWithRawKey } from './signedData.js'
-import { captureConsole, until, within } from './test-utils.js'
+import { captureConsole, isPending, until, within } from './test-utils.js'
 import type { ChelRootState, CheloniaConfig } from './types.js'
 
 let vetoedQueue: string | undefined
@@ -385,6 +385,78 @@ describe('Contract sync and removal', () => {
     })
   })
 
+  describe('chelonia/kv/whenSettled', () => {
+    const KEY = 'settles'
+    const whenSettled = (cid: string) => sbp('chelonia/kv/whenSettled', cid, KEY)
+    const slotUnknown = { name: 'ChelErrorKvSlotUnknown' }
+    const httpError = { name: 'ChelErrorUnexpectedHttpResponseCode' }
+    // What `chelonia/connect` installs
+    const reconcile = (_ids: string[], change: { added: string[]; removed: string[] }) => {
+      sbp('chelonia/kv/_onContractsModified', change)
+    }
+    const defineSlot = (autoLoad: string) => sbp('chelonia/kv/defineSlot', {
+      contractType: CONTRACT_TYPE, key: KEY, defaultValue: 0, autoLoad
+    })
+    beforeEach(() => sbp('okTurtles.events/on', CONTRACTS_MODIFIED, reconcile))
+    afterEach(() => sbp('okTurtles.events/off', CONTRACTS_MODIFIED, reconcile))
+
+    it('waits through the first sync for the first load', async () => {
+      defineSlot('on-sync')
+      const cid = server.contract!.hash()
+      const settled = whenSettled(cid)
+      await within(sbp('chelonia/contract/retain', cid), 'retain')
+      // The stub server has no KV store
+      assert.strictEqual(await within(settled, 'whenSettled'), 'error')
+    })
+
+    it('rejects once a contract whose first sync failed is released', async () => {
+      defineSlot('on-sync')
+      const cid = server.contract!.hash()
+      server.failEvents = true
+      const settled = whenSettled(cid)
+      await assert.rejects(within(sbp('chelonia/contract/retain', cid), 'retain'), httpError)
+      assert.ok(await isPending(settled))
+      await within(sbp('chelonia/contract/release', cid), 'release')
+      await assert.rejects(within(settled, 'whenSettled'), slotUnknown)
+    })
+
+    it('rejects once withRetained gives back the references of a failed first sync', async () => {
+      defineSlot('on-sync')
+      const cid = server.contract!.hash()
+      server.failEvents = true
+      const settled = assert.rejects(within(whenSettled(cid), 'whenSettled'), slotUnknown)
+      await assert.rejects(
+        within(sbp('chelonia/contract/withRetained', cid, () => {}), 'withRetained'), httpError
+      )
+      await settled
+    })
+
+    it('keeps waiting through a re-sync', async () => {
+      defineSlot('never')
+      const cid = server.contract!.hash()
+      await within(sbp('chelonia/contract/retain', cid), 'retain')
+      const settled = whenSettled(cid)
+      await within(sbp('chelonia/contract/sync', cid, { resync: true }), 'resync')
+      assert.ok(await isPending(settled))
+      await sbp('chelonia/kv/sync', cid, KEY).catch(() => {})
+      assert.strictEqual(await within(settled, 'whenSettled'), 'error')
+    })
+
+    it('keeps waiting after a failed re-sync until the release', async () => {
+      defineSlot('never')
+      const cid = server.contract!.hash()
+      await within(sbp('chelonia/contract/retain', cid), 'retain')
+      const settled = whenSettled(cid)
+      server.failEvents = true
+      await assert.rejects(
+        within(sbp('chelonia/contract/sync', cid, { resync: true }), 'resync'), httpError
+      )
+      assert.ok(await isPending(settled))
+      await within(sbp('chelonia/contract/release', cid), 'release')
+      await assert.rejects(within(settled, 'whenSettled'), slotUnknown)
+    })
+  })
+
   describe('committed heights', () => {
     // Heights passed to the hook that wakes KV height waits
     let notified: number[] | undefined
@@ -522,10 +594,14 @@ describe('chelonia/reset', () => {
     })
     await within(sbp('chelonia/contract/retain', cid), 'retain')
     assert.strictEqual(read(), 0)
+    const settled = assert.rejects(
+      within(sbp('chelonia/kv/whenSettled', cid, 'counter'), 'whenSettled'), { name: 'AbortError' }
+    )
 
     failTeardown = true
     await assert.rejects(within(sbp('chelonia/reset'), 'reset'), /teardown failed/)
     assert.throws(read, { name: 'ChelErrorKvSlotUnknown' })
+    await settled
 
     failTeardown = false
     await within(sbp('chelonia/reset'), 'second reset')

@@ -637,7 +637,7 @@ export default sbp('sbp/selectors/register', {
     // `_onContractsModified`, so the direct call is an idempotent fast path.
     const cleanupKvRuntime = () => {
       try {
-        sbp('chelonia/kv/_cleanupContractRuntime', contractID)
+        sbp('chelonia/kv/_cleanupContractRuntime', contractID, { resync: params?.resync })
       } catch (e) {
         console.error('[chelonia] KV cleanup on contract removal failed', e)
       }

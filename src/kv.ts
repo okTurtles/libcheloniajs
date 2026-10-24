@@ -24,7 +24,7 @@ import {
 } from './events.js'
 import { isKvMaxAttempts } from './internal-errors.js'
 import { assertNotReentrant, resolveKvKeyIds } from './kv-checks.js'
-import { notifyContractHeight, withHeightRecovery } from './kv-height.js'
+import { abortReason, notifyContractHeight, withHeightRecovery } from './kv-height.js'
 import {
   KV_AUTO_LOAD,
   KV_DEFAULT_ENCRYPTION_KEY_NAME,
@@ -76,6 +76,7 @@ class KvNoopAbort extends Error {
 // ---------------------------------------------------------------------------
 
 type KvLoadReason = Exclude<KvUpdateCtx['reason'], typeof KV_UPDATE_REASON.LOCAL>
+type SettledStatus = Exclude<KvLoadStatus, typeof KV_LOAD_STATUS.LOADING>
 
 // Echo-CID TTL clock. Deliberately `performance.now()` (monotonic)
 // rather than the spec's `Date.now()`: it is immune to wall-clock / NTP
@@ -506,6 +507,13 @@ function patchEntry (
     previousSettled,
     heightAhead: height === undefined ? null : { requiredHeight: height }
   })
+  const waitKey = `${contractID}${KV_KEY_SEPARATOR}${key}`
+  const waiters = ctx.kvSettleWaiters.get(waitKey)
+  const settledStatus = waiters && settledStatusOf(ctx, contractID, key)
+  if (settledStatus) {
+    ctx.kvSettleWaiters.delete(waitKey)
+    for (const waiter of waiters) waiter.resolve(settledStatus)
+  }
 }
 
 // Normalize a thrown value into `{ name, message }`, matching the
@@ -545,10 +553,61 @@ function settledStatusOf (
   ctx: CheloniaContext,
   contractID: string,
   key: string
-): KvLoadStatus | undefined {
+): SettledStatus | undefined {
   if (!ctx.kvSlotsByContractID.get(contractID)?.has(key)) return
   const entry = (sbp(ctx.config.stateSelector) as ChelRootState)._kv?.[contractID]?.[key]
   if (entry?.settled && entry.status !== KV_LOAD_STATUS.LOADING) return entry.status
+}
+
+// Whether a slot may still activate for `key`: one for the contract's type,
+// or for any type while the contract's type isn't known
+function slotDefinedFor (ctx: CheloniaContext, contractID: string, key: string): boolean {
+  const contractType = getContractType(sbp(ctx.config.stateSelector), contractID)
+  if (contractType !== undefined) return ctx.kvSlots.has(registryKey(contractType, key))
+  for (const slot of ctx.kvSlots.values()) if (slot.key === key) return true
+  return false
+}
+
+function rejectSettleWaits (ctx: CheloniaContext, waitKey: string, why: string): void {
+  const waiters = ctx.kvSettleWaiters.get(waitKey)
+  if (!waiters) return
+  ctx.kvSettleWaiters.delete(waitKey)
+  const error = new ChelErrorKvSlotUnknown(`[chelonia/kv] whenSettled: ${waitKey} ${why}`)
+  for (const waiter of waiters) waiter.reject(error)
+}
+
+// Rejects the `whenSettled` calls waiting on a pair for which `ends` holds
+function endSettleWaits (
+  ctx: CheloniaContext,
+  ends: (contractID: string, key: string) => boolean,
+  why: string
+): void {
+  for (const waitKey of ctx.kvSettleWaiters.keys()) {
+    const at = waitKey.indexOf(KV_KEY_SEPARATOR)
+    if (ends(waitKey.slice(0, at), waitKey.slice(at + KV_KEY_SEPARATOR.length))) {
+      rejectSettleWaits(ctx, waitKey, why)
+    }
+  }
+}
+
+// Ends the waits (of `contractID` only, if given) that no slot can settle
+const endUndefinedSettleWaits = (ctx: CheloniaContext, contractID?: string): void =>
+  endSettleWaits(ctx, (cID, key) =>
+    (contractID === undefined || cID === contractID) && !slotDefinedFor(ctx, cID, key),
+  "has no slot for its contract's type")
+
+// Activates the matching slots of a contract once its type is known
+function reconcileContract (ctx: CheloniaContext, contractID: string): void {
+  const rootState = sbp(ctx.config.stateSelector) as ChelRootState
+  if (!rootState.contracts?.[contractID]) return
+  const contractType = getContractType(rootState, contractID)
+  if (!contractType) return
+  for (const slot of ctx.kvSlots.values()) {
+    if (slot.contractType === contractType) sbp('chelonia/kv/_reconcileForSlot', slot, contractID)
+  }
+  if (!ctx.subscriptionSet.has(contractID)) return
+  ctx.kvReconciledContracts.add(contractID)
+  endUndefinedSettleWaits(ctx, contractID)
 }
 
 // Resolve the contract type from rootState. The spec (KV-REVAMPED §4.2
@@ -1440,6 +1499,8 @@ export default (sbp('sbp/selectors/register', {
         this.config.reactiveDel(rootState._kv, contractID)
       }
       this.kvLocalEchoCIDs.delete(`${contractID}${KV_KEY_SEPARATOR}${slot.key}`)
+      rejectSettleWaits(this, `${contractID}${KV_KEY_SEPARATOR}${slot.key}`,
+        "isn't active for its contract")
     }
   },
 
@@ -1861,26 +1922,14 @@ export default (sbp('sbp/selectors/register', {
   // intentionally idempotent.
   'chelonia/kv/_onContractsModified': function (
     this: CheloniaContext,
-    { added, removed }: { added: string[]; removed: string[] }
+    { added, removed, resync }: { added: string[]; removed: string[]; resync?: boolean }
   ): void {
-    if (added && added.length > 0) {
-      const rootState = sbp(this.config.stateSelector) as ChelRootState
-      for (const cID of added) {
-        const meta = rootState.contracts?.[cID]
-        if (!meta) continue
-        const contractType = getContractType(rootState, cID)
-        if (!contractType) continue
-        for (const slot of this.kvSlots.values()) {
-          if (slot.contractType !== contractType) continue
-          sbp('chelonia/kv/_reconcileForSlot', slot, cID)
-        }
-      }
-    }
+    for (const cID of added ?? []) reconcileContract(this, cID)
     if (removed && removed.length > 0) {
       for (const cID of removed) {
         // Also invoked directly from `chelonia/private/removeImmediately`
         // as an idempotent fast path; calling twice is safe.
-        sbp('chelonia/kv/_cleanupContractRuntime', cID)
+        sbp('chelonia/kv/_cleanupContractRuntime', cID, { resync })
       }
     }
   },
@@ -1899,8 +1948,12 @@ export default (sbp('sbp/selectors/register', {
   // remain synchronous and idempotent.
   'chelonia/kv/_cleanupContractRuntime': function (
     this: CheloniaContext,
-    contractID: string
+    contractID: string,
+    { resync }: { resync?: boolean } = {}
   ): void {
+    this.kvReconciledContracts.delete(contractID)
+    // A re-sync activates the slots again
+    if (!resync) endSettleWaits(this, (cID) => cID === contractID, 'was removed with its contract')
     const hadFilter = this.kvActiveFilters.has(contractID)
     // Queue a filter flush for this contract *before* dropping state so
     // the server receives the filter-removal frame (§11.5 empty
@@ -3121,8 +3174,55 @@ export default (sbp('sbp/selectors/register', {
     this: CheloniaContext,
     contractID: string,
     key: string
-  ): KvLoadStatus | undefined {
+  ): SettledStatus | undefined {
     return settledStatusOf(this, contractID, key)
+  },
+
+  // Resolves with what `settledStatus` reports once it is defined
+  'chelonia/kv/whenSettled': async function (
+    this: CheloniaContext,
+    contractID: string,
+    key: string,
+    { signal }: { signal?: AbortSignal | null } = {}
+  ): Promise<SettledStatus> {
+    if (signal?.aborted) throw abortReason(signal)
+    const status = settledStatusOf(this, contractID, key)
+    if (status) return status
+    const target = `${contractID}${KV_KEY_SEPARATOR}${key}`
+    if (!slotDefinedFor(this, contractID, key)) {
+      throw new ChelErrorKvSlotUnknown(`[chelonia/kv] whenSettled: no slot is defined for ${target}`)
+    }
+    if (this.kvReconciledContracts.has(contractID) &&
+        !this.kvSlotsByContractID.get(contractID)?.has(key)) {
+      throw new ChelErrorKvSlotUnknown(
+        `[chelonia/kv] whenSettled: ${target} isn't active for its contract`
+      )
+    }
+    assertNotReentrant(this, contractID, key, 'whenSettled')
+    // A reset replaces the map (rejecting this one's waiters)
+    const settleWaiters = this.kvSettleWaiters
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const waiters = settleWaiters.get(target)
+        waiters?.delete(waiter)
+        if (waiters?.size === 0) settleWaiters.delete(target)
+        reject(abortReason(signal!))
+      }
+      const waiter = {
+        resolve: (settled: SettledStatus) => {
+          signal?.removeEventListener('abort', onAbort)
+          resolve(settled)
+        },
+        reject: (e: unknown) => {
+          signal?.removeEventListener('abort', onAbort)
+          reject(e)
+        }
+      }
+      let waiters = settleWaiters.get(target)
+      if (!waiters) settleWaiters.set(target, (waiters = new Set()))
+      waiters.add(waiter)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
   },
 
   // Private convenience used by `chelonia/defineContract`. Accepts the
@@ -3226,6 +3326,7 @@ export default (sbp('sbp/selectors/register', {
         }
       }
     }
+    endUndefinedSettleWaits(this)
   },
 
   // Public. See KV-REVAMPED §4.7. Runs a full reconcile pass: walks
@@ -3245,20 +3346,10 @@ export default (sbp('sbp/selectors/register', {
     this: CheloniaContext,
     contractID?: string
   ): void {
-    const rootState = sbp(this.config.stateSelector) as ChelRootState
     const targets: string[] = contractID !== undefined
       ? (this.subscriptionSet.has(contractID) ? [contractID] : [])
       : Array.from(this.subscriptionSet)
-    for (const cID of targets) {
-      const meta = rootState.contracts?.[cID]
-      if (!meta) continue
-      const contractType = getContractType(rootState, cID)
-      if (typeof contractType !== 'string') continue
-      for (const slot of this.kvSlots.values()) {
-        if (slot.contractType !== contractType) continue
-        sbp('chelonia/kv/_reconcileForSlot', slot, cID)
-      }
-    }
+    for (const cID of targets) reconcileContract(this, cID)
   }
 }) as string[])
 

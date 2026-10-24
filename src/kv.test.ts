@@ -27,7 +27,7 @@ import {
 import { KV_ECHO_CID_MAX, KV_ECHO_TTL_MS, KV_KEY_SEPARATOR } from './kv-constants.js'
 import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import { KV_NOOP } from './kv.js'
-import { captureConsole, until, within } from './test-utils.js'
+import { captureConsole, isPending, until, within } from './test-utils.js'
 import type {
   ChelKvGetResult,
   ChelRootState,
@@ -5918,6 +5918,140 @@ describe('KV slot API', () => {
       } finally {
         stubQueueInvocation = normalQueue
       }
+    })
+  })
+
+  describe('whenSettled', () => {
+    const TYPE = 'when-settled-test'
+    const OTHER_TYPE = 'when-settled-other'
+    const KEY = 'ws'
+    const whenSettled = (c: string, key = KEY, options?: { signal?: AbortSignal }) =>
+      sbp('chelonia/kv/whenSettled', c, key, options) as Promise<string>
+    const defineSlot = (extra: Record<string, unknown> = {}) =>
+      sbp('chelonia/kv/defineSlot', { key: KEY, contractType: TYPE, defaultValue: { x: 0 }, ...extra })
+    const slotUnknown = { name: 'ChelErrorKvSlotUnknown' }
+    let logs: ReturnType<typeof captureConsole>
+    beforeEach(() => { logs = captureConsole() })
+    afterEach(() => logs.restore())
+
+    it('waits through activation and reloads for a settled status', async () => {
+      defineSlot()
+      const responders: Array<(value: GetResult | null) => void> = []
+      stubGet = () => new Promise((resolve) => { responders.push(resolve) })
+      const c = 'cid-ws-boot'
+      const beforeSync = whenSettled(c)
+      await setupContract(c, TYPE)
+      const whileLoading = whenSettled(c)
+      assert.ok(await isPending(beforeSync))
+      responders[0](fakeParsed({ x: 1 }))
+      assert.deepStrictEqual(
+        await within(Promise.all([beforeSync, whileLoading]), 'first load'), ['loaded', 'loaded'])
+      assert.strictEqual(await within(whenSettled(c), 'settled slot'), 'loaded')
+
+      const reload = sbp('chelonia/kv/sync', c, KEY)
+      const whileReloading = whenSettled(c)
+      assert.ok(await isPending(whileReloading))
+      responders[1](null)
+      await within(reload, 'reload')
+      assert.strictEqual(await within(whileReloading, 'reload'), 'non-init')
+    })
+
+    it('rejects at once when no slot can settle, or the signal was aborted', async () => {
+      const unmatched = 'cid-ws-unmatched'
+      defineSlot({ autoLoad: 'never', match: (cID: string) => cID !== unmatched })
+      sbp('chelonia/kv/defineSlot', { key: 'ws-other', contractType: OTHER_TYPE, defaultValue: 0 })
+      const c = 'cid-ws-at-once'
+      for (const cID of [c, unmatched]) await setupContract(cID, TYPE)
+      const rejectsAtOnce = (wait: Promise<unknown>) =>
+        assert.rejects(within(wait, 'rejection'), slotUnknown)
+      await rejectsAtOnce(whenSettled('cid-ws-unknown', 'ws-never-defined'))
+      await rejectsAtOnce(whenSettled(c, 'ws-other'))
+      await rejectsAtOnce(whenSettled(unmatched))
+
+      await sbp('chelonia/kv/clear', c, KEY)
+      assert.strictEqual(await whenSettled(c), 'non-init')
+      const controller = new AbortController()
+      controller.abort('stop')
+      await assert.rejects(
+        within(whenSettled(c, KEY, { signal: controller.signal }), 'abort'), (e) => e === 'stop')
+    })
+
+    it('rejects a waiting call once its slot can no longer settle', async () => {
+      const [deactivated, unmatchedAtFirst, unregistered, removed, otherType] = [
+        'cid-ws-deactivated', 'cid-ws-unmatched-first', 'cid-ws-unregistered', 'cid-ws-removed',
+        'cid-ws-other-type'
+      ]
+      let matching = true
+      defineSlot({ autoLoad: 'never', match: (cID: string) => matching && cID !== unmatchedAtFirst })
+      const manifestKv = { 'ws-manifest': { defaultValue: 0, autoLoad: 'never' } }
+      sbp('chelonia/kv/_registerContractSlots', TYPE, 'manifest-ws', manifestKv)
+      for (const c of [deactivated, unregistered, removed]) await setupContract(c, TYPE)
+      const waits = [
+        whenSettled(deactivated), whenSettled(unmatchedAtFirst), whenSettled(removed),
+        whenSettled(otherType), whenSettled(unregistered, 'ws-manifest')
+      ].map((wait) => assert.rejects(within(wait, 'rejection'), slotUnknown))
+      matching = false
+      sbp('chelonia/kv/refreshFilters', deactivated)
+      matching = true
+      await setupContract(unmatchedAtFirst, TYPE)
+      sbp('chelonia/kv/_cleanupContractRuntime', removed)
+      sbp('chelonia/kv/_cleanupContractSlots', TYPE, 'manifest-ws', manifestKv, {})
+      await setupContract(otherType, OTHER_TYPE)
+      await Promise.all(waits)
+    })
+
+    it('keeps waiting across a resync teardown', async () => {
+      defineSlot({ autoLoad: 'never' })
+      const c = 'cid-ws-resync'
+      await setupContract(c, TYPE)
+      const wait = whenSettled(c)
+      sbp('chelonia/kv/_cleanupContractRuntime', c, { resync: true })
+      const later = whenSettled(c)
+      assert.ok(await isPending(wait))
+      assert.ok(await isPending(later))
+      await setupContract(c, TYPE)
+      await sbp('chelonia/kv/clear', c, KEY)
+      assert.deepStrictEqual(
+        await within(Promise.all([wait, later]), 'settled after the resync'), ['non-init', 'non-init'])
+    })
+
+    it('a signal or a reset ends the wait', async () => {
+      defineSlot({ autoLoad: 'never' })
+      const c = 'cid-ws-abort'
+      await setupContract(c, TYPE)
+      const controller = new AbortController()
+      const aborted = whenSettled(c, KEY, { signal: controller.signal })
+      const other = whenSettled(c)
+      controller.abort('stop')
+      await assert.rejects(within(aborted, 'abort'), (e) => e === 'stop')
+      assert.ok(await isPending(other))
+      await sbp('chelonia/reset')
+      await assert.rejects(within(other, 'reset'), { name: 'AbortError' })
+    })
+
+    it('a same-contract onUpdate gets a settled status at once but cannot wait', async () => {
+      const c = 'cid-ws-reentrant'
+      let settledAtOnce: Promise<string> | undefined
+      let reentrant: Promise<void> | undefined
+      let deferred: Promise<string> | undefined
+      defineSlot({
+        autoLoad: 'never',
+        onUpdate: () => {
+          settledAtOnce = whenSettled(c)
+          reentrant = assert.rejects(whenSettled(c, 'ws-unsettled'), { name: 'ChelErrorKvReentrant' })
+          queueMicrotask(() => { deferred = whenSettled(c, 'ws-unsettled') })
+        }
+      })
+      sbp('chelonia/kv/defineSlot', {
+        key: 'ws-unsettled', contractType: TYPE, defaultValue: 0, autoLoad: 'never'
+      })
+      await setupContract(c, TYPE)
+      await sbp('chelonia/kv/update', { contractID: c, key: KEY, updater: () => ({ x: 1 }) })
+      assert.strictEqual(await within(settledAtOnce!, 'settled key'), 'loaded')
+      await reentrant
+      await until(() => deferred, 'deferred call')
+      await sbp('chelonia/kv/clear', c, 'ws-unsettled')
+      assert.strictEqual(await within(deferred!, 'deferred call'), 'non-init')
     })
   })
 })

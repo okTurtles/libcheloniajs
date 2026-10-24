@@ -33,6 +33,14 @@ export const within = <T>(promise: Promise<T>, label: string, timeoutMs = 5000):
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
 
+// Whether `promise` is still pending once queued work has run
+export const isPending = async (promise: Promise<unknown>): Promise<boolean> => {
+  let pending = true
+  promise.then(() => { pending = false }, () => { pending = false })
+  await waitMicrotasks()
+  return pending
+}
+
 type ConsoleMethod = 'debug' | 'info' | 'log' | 'warn' | 'error'
 
 export const captureConsole = (

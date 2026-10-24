@@ -17,6 +17,8 @@ const startKvSession = (ctx: CheloniaContext): void => {
   ctx.kvOnUpdateActive = new Map()
   ctx.kvHeightListeners = new Map()
   ctx.kvRecoveries = new Map()
+  ctx.kvSettleWaiters = new Map()
+  ctx.kvReconciledContracts = new Set()
 }
 
 export const initKvRuntime = (ctx: CheloniaContext): void => {
@@ -27,5 +29,12 @@ export const initKvRuntime = (ctx: CheloniaContext): void => {
 }
 
 export const resetKvRuntime = (ctx: CheloniaContext): void => {
+  const settleWaiters = ctx.kvSettleWaiters
   startKvSession(ctx)
+  for (const [waitKey, waiters] of settleWaiters) {
+    const error = new DOMException(
+      `[chelonia/kv] whenSettled: chelonia/reset ended the wait for ${waitKey}`, 'AbortError'
+    )
+    for (const waiter of waiters) waiter.reject(error)
+  }
 }

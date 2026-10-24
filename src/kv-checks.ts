@@ -9,7 +9,7 @@ export function assertNotReentrant (
   ctx: CheloniaContext,
   contractID: string,
   key: string | undefined,
-  operation: 'update' | 'clear' | 'sync' | 'withHeightRecovery' | 'queuedSet'
+  operation: 'update' | 'clear' | 'sync' | 'withHeightRecovery' | 'queuedSet' | 'whenSettled'
 ): void {
   if ((ctx.kvOnUpdateActive.get(contractID) ?? 0) > 0) {
     const target = key === undefined ? contractID : `${contractID}::${key}`
@@ -17,7 +17,7 @@ export function assertNotReentrant (
       `[chelonia/kv] ${operation}: ${target} was called ` +
       'synchronously from within an onUpdate callback for the same ' +
       'contract; this would deadlock the contract lane. Schedule the ' +
-      'write off the synchronous stack instead, e.g. ' +
+      'call off the synchronous stack instead, e.g. ' +
       "queueMicrotask(() => sbp('chelonia/kv/" + operation + "', …))."
     )
   }
