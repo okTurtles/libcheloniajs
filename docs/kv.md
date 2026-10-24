@@ -92,7 +92,8 @@ Read them through the selectors rather than the raw entry:
   (none is defined for it, or the contract's slots were reconciled
   without it) or stops being able to (slot deactivated or unregistered,
   contract removed); with `signal.reason` on abort; and with an
-  `AbortError` on `chelonia/reset`. A resync doesn't end the wait.
+  `AbortError` on `chelonia/reset`. A resync doesn't end the wait
+  ([full rules](specs/KV-REVAMPED.md#35-settled-status)).
 
 `CHELONIA_KV_STATUS_CHANGED` also carries `settled`, `previousSettled`
 and `heightAhead` (`null` when there is none), and fires when only
@@ -112,7 +113,8 @@ added after the local height), and the server only accepts writes
 stamped with the contract's current height (`409` otherwise). Both
 happen mostly right after switching devices, or while another device
 is changing the contract. A value that can't be verified yet is not an
-absent value: never treat it as one.
+absent value: never treat it as one. The exact rules are in
+[KV-REVAMPED.md §3.4](specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery).
 
 The KV selectors report these cases with their own errors. Check them
 with the predicates exported from the package root. They compare
@@ -346,7 +348,7 @@ throws `ChelErrorKvSlotInvalid` otherwise.
 
 ## `chelonia/kv/update` rejection taxonomy (extended)
 
-In addition to the cases listed in KV-REVAMPED.md §4.6,
+In addition to the cases listed in KV-REVAMPED.md §4.2,
 `chelonia/kv/update` (and `chelonia/kv/clear`) reject with
 `ChelErrorKvUpdateInvalid` when:
 
@@ -390,7 +392,9 @@ the `'error'` slot's retained value) under the mirror's etag, and a
 `KV_NOOP` rejects with the reload error (it resolves for the retained
 value). Without those triggers, a slot that hasn't settled yet isn't
 reloaded first: its reducer runs on the mirror or default, and a
-`KV_NOOP` there forces one reload and a second run.
+`KV_NOOP` there forces one reload and a second run. Fine print:
+[KV-REVAMPED.md §3.4](specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery)
+("Reducer basis").
 
 **Abort after commit:** a `signal` that aborts after the server
 accepted the write doesn't undo it: the mirror is updated, events fire

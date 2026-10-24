@@ -233,7 +233,8 @@ Full documentation:
   stamped with an older height. A value that can't be verified yet is not
   absent. Detect the errors with `isKvHeightAhead`, `isKvHeightMalformed`
   and `isKvConflict` (`src/errors.ts`), not `instanceof` or `e.name`. See
-  [docs/kv.md](docs/kv.md#contract-heights).
+  [docs/kv.md](docs/kv.md#contract-heights); rules in
+  [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery).
 - Never await `update`, `clear`, `queuedSet`, single-key `sync`,
   `whenSettled` or `withHeightRecovery` from code running on the same
   contract's queue (side effects, `queueInvocation` bodies, `onUpdate`,
