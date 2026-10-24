@@ -1,4 +1,4 @@
-import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/crypto'
+import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey, type Key } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert'
 import { afterEach, beforeEach, describe, it } from 'node:test'
@@ -7,12 +7,20 @@ import './chelonia.js'
 import './internals.js'
 import {
   ChelErrorInvalidMessageHeight,
-  ChelErrorUnexpectedHttpResponseCode
+  ChelErrorSignatureKeyUnauthorized,
+  ChelErrorUnexpectedHttpResponseCode,
+  findErrorCause,
+  isKvHeightAhead,
+  isKvHeightMalformed,
+  kvHeightAheadCause
 } from './errors.js'
 import { ChelErrorKvMaxAttempts } from './internal-errors.js'
-import type { ChelRootState, CheloniaConfig, JSONType } from './types.js'
+import { signedOutgoingDataWithRawKey } from './signedData.js'
+import type {
+  ChelContractState, ChelKvGetResult, ChelRootState, CheloniaConfig, JSONType
+} from './types.js'
 
-const setupContract = (): { contractID: string; signingKeyId: string } => {
+const setupContract = (): { contractID: string; signingKeyId: string; signingKey: Key } => {
   const contractID = 'cid-kv-set-recovery'
   const signingKey = keygen(EDWARDS25519SHA512BATCH)
   const signingKeyId = keyId(signingKey)
@@ -37,8 +45,30 @@ const setupContract = (): { contractID: string; signingKeyId: string } => {
     }
   }
   rootState.secretKeys = { [signingKeyId]: serializeKey(signingKey, true) }
-  return { contractID, signingKeyId }
+  return { contractID, signingKeyId, signingKey }
 }
+
+// A correctly signed KV value with an arbitrary height stamp
+const signValue = (signingKey: Key, key: string, data: JSONType, height: unknown) => ({
+  ...signedOutgoingDataWithRawKey(signingKey, data).serialize(key + String(height)),
+  height
+})
+
+const setLocalHeight = (contractID: string, height: number) => {
+  (sbp('chelonia/private/state') as ChelRootState).contracts[contractID].height = height
+}
+
+// Serves `served.body` to every request (with etag 'etag-1')
+const serve = (served: { body: unknown }) => {
+  sbp('chelonia/configure', {
+    connectionURL: 'https://example.test',
+    fetch: async () => new Response(JSON.stringify(served.body), {
+      status: 200, headers: { etag: 'etag-1' }
+    })
+  } as Partial<CheloniaConfig>)
+}
+
+const NON_CANONICAL_STAMPS = ['1e1', '010', ' 10', '10 ', '-1', '', '0x1', 1.5, -1, null, undefined]
 
 describe('chelonia/kv/set', () => {
   // Intentionally scoped to this describe rather than hoisted to module
@@ -369,30 +399,57 @@ describe('chelonia/kv/get', () => {
     sbp('chelonia/_init')
   })
 
-  it('rejects with a descriptive height error for height-ahead values', async () => {
-    const { contractID, signingKeyId } = setupContract()
-    let capturedBody = ''
-    sbp('chelonia/configure', {
-      connectionURL: 'https://example.test',
-      fetch: async (_url: string, opts?: { method?: string; body?: string }) => {
-        if (opts?.method === 'POST') {
-          capturedBody = opts.body ?? ''
-          return new Response('', { status: 200, headers: { 'x-cid': 'cid-ok' } })
-        }
-        const ahead = { ...JSON.parse(capturedBody), height: '5' }
-        return new Response(JSON.stringify(ahead), {
-          status: 200,
-          headers: { etag: 'etag-ahead' }
-        })
-      }
-    } as Partial<CheloniaConfig>)
+  it('returns values stamped at or below the local height', async () => {
+    const { contractID, signingKey } = setupContract()
+    setLocalHeight(contractID, 10)
+    const served = { body: undefined as unknown }
+    serve(served)
+    for (const height of ['0', '10', 10, 0]) {
+      served.body = signValue(signingKey, 'settings', { height }, height)
+      const result = await sbp('chelonia/kv/get', contractID, 'settings') as ChelKvGetResult
+      assert.deepStrictEqual(result.data, { height })
+      assert.strictEqual(result.etag, 'etag-1')
+    }
+  })
 
-    await sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, { signingKeyId })
-    await assert.rejects(
-      () => sbp('chelonia/kv/get', contractID, 'settings'),
-      (e: unknown) => e instanceof ChelErrorInvalidMessageHeight &&
-        (e as Error).message.includes('sync the contract and retry')
-    )
+  it('rejects a value ahead of the local height with ChelErrorKvHeightAhead', async () => {
+    const { contractID, signingKey } = setupContract()
+    serve({ body: signValue(signingKey, 'settings', { x: 1 }, '5') })
+
+    const e = await sbp('chelonia/kv/get', contractID, 'settings').catch((e: unknown) => e)
+    assert.ok(isKvHeightAhead(e) && e instanceof ChelErrorInvalidMessageHeight)
+    assert.deepStrictEqual(kvHeightAheadCause(e), {
+      requiredHeight: 5, exact: true, localHeight: 1, etag: 'etag-1', httpStatus: 200
+    })
+    assert.match(e.message, /height 5.*height 1.*sync the contract and retry/)
+  })
+
+  it('reports a contract without local height as not loaded', async () => {
+    const { contractID, signingKey } = setupContract()
+    delete (sbp('chelonia/private/state') as ChelRootState).contracts[contractID]
+    serve({ body: signValue(signingKey, 'settings', { x: 1 }, '0') })
+
+    const e = await sbp('chelonia/kv/get', contractID, 'settings').catch((e: unknown) => e)
+    assert.ok(isKvHeightAhead(e))
+    assert.strictEqual(kvHeightAheadCause(e)?.localHeight, undefined)
+    assert.strictEqual(kvHeightAheadCause(e)?.requiredHeight, 0)
+    assert.match(e.message, /not loaded/)
+  })
+
+  it('rejects a malformed stamp with ChelErrorKvHeightMalformed, also on its cause', async () => {
+    const { contractID, signingKey } = setupContract()
+    setLocalHeight(contractID, 20)
+    const served = { body: undefined as unknown }
+    serve(served)
+    const oldName = (e: unknown): e is Error =>
+      (e as Error).name === 'ChelErrorInvalidMessageHeight'
+    for (const height of NON_CANONICAL_STAMPS) {
+      served.body = signValue(signingKey, 'settings', { x: 1 }, height)
+      const e = await sbp('chelonia/kv/get', contractID, 'settings').catch((e: unknown) => e)
+      assert.ok(isKvHeightMalformed(e), `stamp ${JSON.stringify(height)}`)
+      assert.ok(isKvHeightMalformed(e.cause))
+      assert.strictEqual(findErrorCause(e, oldName), undefined)
+    }
   })
 
   // Same reason as the publish path: an app should be able to branch on the
@@ -410,5 +467,62 @@ describe('chelonia/kv/get', () => {
         (e as Error).cause === 503 &&
         (e as Error).message === '[kv/get] 503: Service Unavailable'
     )
+  })
+})
+
+describe('height stamps of detached messages', () => {
+  beforeEach(() => {
+    sbp('chelonia/_init')
+  })
+
+  afterEach(() => {
+    sbp('chelonia/_init')
+  })
+
+  const parse = (contractID: string, serializedData: unknown) =>
+    sbp('chelonia/parseEncryptedOrUnencryptedDetachedMessage', {
+      contractID, serializedData, meta: 'settings'
+    }) as ChelKvGetResult
+  const isGenericHeightError = (e: unknown) =>
+    (e as Error).name === 'ChelErrorInvalidMessageHeight'
+
+  it('rejects non-canonical stamps with ChelErrorInvalidMessageHeight', () => {
+    const { contractID, signingKey } = setupContract()
+    setLocalHeight(contractID, 20)
+    for (const height of NON_CANONICAL_STAMPS) {
+      assert.throws(
+        () => parse(contractID, signValue(signingKey, 'settings', { x: 1 }, height)),
+        isGenericHeightError,
+        `stamp ${JSON.stringify(height)}`
+      )
+    }
+  })
+
+  it("doesn't let a revoked key into its key window with a non-canonical stamp", () => {
+    const { contractID } = setupContract()
+    const revokedKey = keygen(EDWARDS25519SHA512BATCH)
+    const revokedKeyId = keyId(revokedKey)
+    const rootState = sbp('chelonia/private/state') as Record<string, ChelContractState>
+    rootState[contractID]._vm.authorizedKeys[revokedKeyId] = {
+      id: revokedKeyId,
+      name: 'revoked',
+      purpose: ['sig'],
+      ringLevel: 0,
+      permissions: '*',
+      data: serializeKey(revokedKey, false),
+      _notBeforeHeight: 0,
+      _notAfterHeight: 1
+    }
+    setLocalHeight(contractID, 10)
+
+    // The server reads '1e1' as height 10; `parseInt` would read 1, inside the window
+    assert.throws(
+      () => parse(contractID, signValue(revokedKey, 'settings', { x: 1 }, '1e1')),
+      isGenericHeightError
+    )
+    const atTen = parse(contractID, signValue(revokedKey, 'settings', { x: 1 }, '10'))
+    assert.throws(() => atTen.data, ChelErrorSignatureKeyUnauthorized)
+    const atOne = parse(contractID, signValue(revokedKey, 'settings', { x: 1 }, '1'))
+    assert.deepStrictEqual(atOne.data, { x: 1 })
   })
 })

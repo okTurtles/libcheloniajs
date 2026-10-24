@@ -38,6 +38,7 @@ import {
 } from '@chelonia/crypto'
 import {
   ChelErrorInvalidMessageHeight,
+  ChelErrorKvHeightMalformed,
   ChelErrorResourceGone,
   ChelErrorUnexpected,
   ChelErrorUnexpectedHttpResponseCode,
@@ -60,6 +61,7 @@ import {
 import './files.js'
 import { clearReprocessDebounceAll, type PublishOptions } from './internals.js'
 import './kv.js'
+import { heightAheadError, localHeight, readHeightStamp } from './kv-height.js'
 import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import { queueEventOrReject } from './queue-event.js'
 import {
@@ -3120,24 +3122,14 @@ export default sbp('sbp/selectors/register', {
       )
     }
     const etag = response.headers.get('x-cid') || response.headers.get('etag')
-    const data = await response.json()
-    let parsed: ReturnType<typeof parseEncryptedOrUnencryptedMessage>
-    try {
-      parsed = parseEncryptedOrUnencryptedMessage(this, {
-        contractID,
-        serializedData: data,
-        meta: key
+    const value = classifyKvValue<JSONType>(this, contractID, key, await response.json())
+    if (value.status === 'malformed') throw value.error
+    if (value.status === 'ahead') {
+      throw heightAheadError(this, contractID, key, {
+        requiredHeight: value.requiredHeight, exact: true, etag, httpStatus: response.status
       })
-    } catch (e) {
-      if (e instanceof ChelErrorInvalidMessageHeight) {
-        throw new ChelErrorInvalidMessageHeight(
-          `[kv/get] ${contractID}::${key} was written at a contract height ` +
-          'ahead of local state; sync the contract and retry',
-          { cause: e }
-        )
-      }
-      throw e
     }
+    const parsed = value.parsed
     // Attach `etag` in place rather than spreading: `parsed` exposes
     // `data` / `encryptionKeyId` / `innerSigningKeyId` / etc. as
     // accessors that force eager unwrap (and throw on decryption
@@ -3252,6 +3244,39 @@ function outputEncryptedOrUnencryptedMessage (
   return serializedData
 }
 
+// Only a value stamped at or below the local height can be verified (lazily, on `.data`)
+function classifyKvValue<T> (
+  ctx: CheloniaContext,
+  contractID: string,
+  key: string,
+  serializedData: unknown
+):
+  | { status: 'present'; parsed: ParsedEncryptedOrUnencryptedMessage<T> }
+  | { status: 'ahead'; requiredHeight: number }
+  | { status: 'malformed'; error: Error } {
+  let height: number
+  try {
+    height = readHeightStamp(serializedData, ChelErrorKvHeightMalformed)
+  } catch (e) {
+    return {
+      status: 'malformed',
+      error: new ChelErrorKvHeightMalformed(
+        `[chelonia/kv] ${contractID}::${key} has an invalid height stamp`, { cause: e }
+      )
+    }
+  }
+  const local = localHeight(ctx, contractID)
+  if (local === undefined || height > local) return { status: 'ahead', requiredHeight: height }
+  return {
+    status: 'present',
+    parsed: parseEncryptedOrUnencryptedMessage<T>(ctx, {
+      contractID,
+      serializedData: serializedData as RawSignedData<{ height: string }>,
+      meta: key
+    })
+  }
+}
+
 function parseEncryptedOrUnencryptedMessage<T> (
   ctx: CheloniaContext,
   {
@@ -3270,10 +3295,10 @@ function parseEncryptedOrUnencryptedMessage<T> (
     )
   }
   const state = sbp(ctx.config.stateSelector)[contractID]
-  const numericHeight = parseInt(serializedData.height)
+  const numericHeight = readHeightStamp(serializedData)
   const rootState = sbp(ctx.config.stateSelector)
   const currentHeight = rootState.contracts[contractID].height
-  if (!(numericHeight >= 0) || !(numericHeight <= currentHeight)) {
+  if (!(numericHeight <= currentHeight)) {
     throw new ChelErrorInvalidMessageHeight(
       `[chelonia] parseEncryptedOrUnencryptedMessage: Invalid height ${serializedData.height}; it must be between 0 and ${currentHeight}`
     )
