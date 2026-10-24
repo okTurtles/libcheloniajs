@@ -4554,17 +4554,12 @@ describe('KV slot API', () => {
     assert.strictEqual(capturedIfMatch, 'live-etag')
   })
 
-  // -----------------------------------------------------------------------
-  // 77b: issue #3 — the data-loss-guard reload inside `update` must NOT
-  // fire CHELONIA_KV_UPDATED / onUpdate with reason 'load'. A single
-  // `update` call should produce only one event (reason 'local') after the
-  // write commits, not a 'load' + 'local' pair that double-triggers
-  // non-idempotent onUpdate handlers.
-  // -----------------------------------------------------------------------
-  it('77b: update on error slot fires only local event (silent reload)', async () => {
+  // 77b/77c: the data-loss guard's reload of an 'error' slot is a visible
+  // load: it reports the server value (or its removal), then the write
+  const guardReload = async (key: string, contractID: string, served: JSONType | null) => {
     const onUpdateCalls: Array<{ reason?: string; value?: unknown }> = []
     sbp('chelonia/kv/defineSlot', {
-      key: 'silentReload',
+      key,
       contractType: CTYPE,
       defaultValue: { x: 0 },
       schema: objectSchema,
@@ -4572,94 +4567,46 @@ describe('KV slot API', () => {
         onUpdateCalls.push({ reason: ctx.reason, value })
       }
     })
-    const c = 'cid-77b'
-    await setupContract(c)
-    // Seed a loaded mirror value + etag, then force into 'error' (the
-    // data-loss-guard precondition).
-    await sbp('chelonia/kv/_handleRemote', c, 'silentReload', fakeParsed({ x: 5 }), 'e-seed')
-    const entry = rootState()._kv![c]!.silentReload as { status: string }
-    entry.status = 'error'
-
-    // The authoritative reload GETs the server value.
-    stubGet = async () => fakeParsed({ x: 5 })
-
+    await setupContract(contractID)
+    await sbp('chelonia/kv/_handleRemote', contractID, key, fakeParsed({ x: 5 }), 'e-seed')
+    ;(rootState()._kv![contractID]![key] as { status: string }).status = 'error'
+    stubGet = async () => served === null ? null : fakeParsed(served)
     const { log, offs } = collectEvents()
-    // Reset the onUpdate log so only calls from the `update` below are counted.
     onUpdateCalls.length = 0
     await sbp('chelonia/kv/update', {
-      contractID: c, key: 'silentReload', updater: (prev: { x: number }) => ({ x: prev.x + 1 })
+      contractID, key, updater: (prev: { x: number }) => ({ x: prev.x + 1 })
     })
-
-    const updatedEvents = log.filter((e) => e.type === CHELONIA_KV_UPDATED) as
-      Array<{ payload: { reason?: string } }>
-    const loadEvents = updatedEvents.filter((e) => e.payload.reason === 'load')
-    const localEvents = updatedEvents.filter((e) => e.payload.reason === 'local')
-
-    assert.strictEqual(loadEvents.length, 0, 'no load event from the silent data-loss-guard reload')
-    assert.strictEqual(localEvents.length, 1, 'exactly one local event from the write')
-    assert.strictEqual(onUpdateCalls.length, 1, 'onUpdate called once (local only)')
-    assert.strictEqual(onUpdateCalls[0].reason, 'local')
-    assert.deepStrictEqual(rootState()._kv![c]!.silentReload.value, { x: 6 })
-    assert.strictEqual(sbp('chelonia/kv/status', c, 'silentReload'), 'loaded')
-    // Issue #2: the silent reload must not surface its internal status
-    // churn. A single `update` from an 'error' baseline previously leaked
-    // `error → loading → loaded` STATUS_CHANGED events; now the only
-    // status event is the terminal `loaded` the write itself emits.
-    const statusEvents = log.filter((e) => e.type === CHELONIA_KV_STATUS_CHANGED) as
-      Array<{ payload: { status: string } }>
-    assert.strictEqual(
-      statusEvents.filter((e) => e.payload.status === 'loading').length, 0,
-      'no transient loading status event from the silent reload')
-    assert.deepStrictEqual(
-      statusEvents.map((e) => e.payload.status), ['loaded'],
-      'the only status event from a silent-reload update is the terminal loaded')
     offs.forEach((off) => off())
+    const payloads = (type: string) => log.filter((e) => e.type === type)
+      .map((e) => e.payload as { reason?: string; status?: string })
+    return {
+      onUpdateCalls,
+      reasons: payloads(CHELONIA_KV_UPDATED).map((p) => p.reason),
+      statuses: payloads(CHELONIA_KV_STATUS_CHANGED).map((p) => p.status),
+      value: rootState()._kv![contractID]![key].value
+    }
+  }
+
+  it('77b: update on error slot reports its guard reload, then the local write', async () => {
+    const seen = await guardReload('guardReload', 'cid-77b', { x: 7 })
+    assert.deepStrictEqual(seen.reasons, ['load', 'local'])
+    assert.deepStrictEqual(seen.onUpdateCalls, [
+      { reason: 'load', value: { x: 7 } },
+      { reason: 'local', value: { x: 8 } }
+    ])
+    assert.deepStrictEqual(seen.statuses, ['loading', 'loaded'])
+    assert.deepStrictEqual(seen.value, { x: 8 })
   })
 
-  // -----------------------------------------------------------------------
-  // 77c: issue #3 edge case — the data-loss-guard reload returns 404 (server
-  // value was cleared while the slot was in 'error'). The silent flag must
-  // suppress the 404 path's UPDATED + onUpdate too, not just the success
-  // path's. The write then seeds from the default.
-  // -----------------------------------------------------------------------
-  it('77c: silent 404 reload suppresses UPDATED; write seeds from default', async () => {
-    const onUpdateCalls: Array<{ reason?: string; value?: unknown }> = []
-    sbp('chelonia/kv/defineSlot', {
-      key: 'silent404',
-      contractType: CTYPE,
-      defaultValue: { x: 0 },
-      schema: objectSchema,
-      onUpdate: (value: unknown, ctx: { reason?: string }) => {
-        onUpdateCalls.push({ reason: ctx.reason, value })
-      }
-    })
-    const c = 'cid-77c'
-    await setupContract(c)
-    // Seed a loaded mirror, then force into 'error' (data-loss-guard
-    // precondition: retained value + etag with status 'error').
-    await sbp('chelonia/kv/_handleRemote', c, 'silent404', fakeParsed({ x: 5 }), 'e-seed')
-    const entry = rootState()._kv![c]!.silent404 as { status: string }
-    entry.status = 'error'
-
-    // The reload GETs 404 (server value was cleared).
-    stubGet = async () => null
-
-    const { log, offs } = collectEvents()
-    onUpdateCalls.length = 0
-    await sbp('chelonia/kv/update', {
-      contractID: c, key: 'silent404', updater: (prev: { x: number }) => ({ x: prev.x + 1 })
-    })
-
-    const updatedEvents = log.filter((e) => e.type === CHELONIA_KV_UPDATED) as
-      Array<{ payload: { reason?: string } }>
-    const loadEvents = updatedEvents.filter((e) => e.payload.reason === 'load')
-
-    assert.strictEqual(loadEvents.length, 0, 'no load event from the silent 404 reload')
-    assert.strictEqual(onUpdateCalls.length, 1, 'onUpdate called once (local only)')
-    assert.strictEqual(onUpdateCalls[0].reason, 'local')
-    // Reducer seeded from the default ({x:0}), so result is {x:1}.
-    assert.deepStrictEqual(rootState()._kv![c]!.silent404.value, { x: 1 })
-    offs.forEach((off) => off())
+  it('77c: a 404 guard reload reports the removal; the write seeds from default', async () => {
+    const seen = await guardReload('guard404', 'cid-77c', null)
+    assert.deepStrictEqual(seen.reasons, ['load', 'local'])
+    assert.deepStrictEqual(seen.onUpdateCalls, [
+      { reason: 'load', value: { x: 0 } },
+      { reason: 'local', value: { x: 1 } }
+    ])
+    assert.deepStrictEqual(seen.statuses, ['loading', 'non-init', 'loaded'])
+    assert.deepStrictEqual(seen.value, { x: 1 })
   })
 
   // -----------------------------------------------------------------------

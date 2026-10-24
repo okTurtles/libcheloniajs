@@ -11,6 +11,8 @@ import {
   mirror, restamp, rootState, server, serverValue, setLocalHeight, START_HEIGHT, syncs,
   writeAsDeviceB
 } from './kv-height-harness.js'
+import { CHELONIA_KV_STATUS_CHANGED } from './events.js'
+import { KV_NOOP } from './kv-constants.js'
 import { kvHeightTimings } from './kv-height.js'
 import { until, waitMicrotasks, within } from './test-utils.js'
 import type {
@@ -546,7 +548,8 @@ describe('Slot writes and contract heights', () => {
     assert.strictEqual(await within(probe, 'the public lane'), 'free')
     release()
     assert.deepStrictEqual(await write, ['a', 'x'])
-    assert.deepStrictEqual(server.posts().map(({ status }) => status), [412, 412, 204])
+    // The retry reloads the slot first, so it writes under the value's etag
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [412, 204])
     assert.strictEqual(syncs.count, 2)
     assert.deepStrictEqual(slotState('names'), ['loaded', undefined, true])
   })
@@ -714,5 +717,199 @@ describe('Slot writes and contract heights', () => {
     await updateWith('names', defaults)
     await clear('names', defaults)
     assert.deepStrictEqual(server.posts().map(({ status }) => status), [204, 204])
+  })
+})
+
+// GETs of `key` answer 500 until the returned function is called
+const failGets = (key: string): (() => void) => {
+  const { handle } = server
+  server.handle = async (url, init) => {
+    if (init?.method === 'POST' || !url.endsWith(`/${key}`)) return handle(url, init)
+    server.log.push({ method: 'GET', key, status: 500 })
+    return new Response(null, { status: 500 })
+  }
+  return () => { server.handle = handle }
+}
+const httpError = (e: unknown) => (e as Error)?.name === 'ChelErrorUnexpectedHttpResponseCode'
+const listSchema = {
+  parse: (value: unknown) => {
+    if (!Array.isArray(value)) throw new Error('not a list')
+    return value
+  }
+}
+const writes = (key: string) => server.posts().filter((request) => request.key === key)
+  .map(({ ifMatch, status }) => [ifMatch, status])
+const counted = (updater: (value: JSONType) => JSONType | typeof KV_NOOP) => {
+  const calls: JSONType[] = []
+  return {
+    calls,
+    updater: (value: JSONType) => {
+      calls.push(value)
+      return updater(value)
+    }
+  }
+}
+const noopOnEmpty = (value: JSONType) => (value as string[]).length ? names(value) : KV_NOOP
+// Loads `value`, then leaves the slot 'error' with it: a newer value fails the schema
+const breakSlot = async (key: string, value: JSONType) => {
+  writeAsDeviceB(key, value)
+  await within(sbp('chelonia/kv/sync', CONTRACT_ID, key), `load of ${key}`)
+  writeAsDeviceB(key, 'not a list')
+  await assert.rejects(within(sbp('chelonia/kv/sync', CONTRACT_ID, key), `reload of ${key}`))
+  assert.deepStrictEqual([mirror(key)?.status, mirror(key)?.value], ['error', value])
+}
+
+describe('update\'s reducer basis', () => {
+  installKvHarness()
+
+  it('reloads after a height recovery, but not after a stale stamp alone (409)', async () => {
+    defineSlot({ key: 'stale', defaultValue: [] })
+    defineSlot({ key: 'merged', defaultValue: [] })
+    const loaded = writeAsDeviceB('merged', ['a'])
+    await activate()
+    syncs.catchUp = true
+    const etag = writeAsDeviceB('merged', ['b'])
+    server.height = START_HEIGHT + 1
+    assert.deepStrictEqual(await updateWith('stale'), ['x'])
+    assert.strictEqual(gets('stale'), 1)
+    assert.deepStrictEqual(writes('stale').map(([, status]) => status), [409, 204])
+    // A 409 after a 412: the value the 412 brought isn't in the mirror. The
+    // slot stays 'loaded' while it reloads.
+    server.height = START_HEIGHT + 2
+    const statuses: string[] = []
+    const listener = ({ key, status }: { key: string; status: string }) => {
+      if (key === 'merged') statuses.push(status)
+    }
+    sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, listener)
+    try {
+      assert.deepStrictEqual(await updateWith('merged'), ['b', 'x'])
+    } finally {
+      sbp('okTurtles.events/off', CHELONIA_KV_STATUS_CHANGED, listener)
+    }
+    assert.strictEqual(gets('merged'), 2)
+    assert.deepStrictEqual(writes('merged'), [[loaded, 412], [etag, 409], [etag, 204]])
+    assert.deepStrictEqual(statuses, [])
+  })
+
+  it('reloads a slot known to lack the server value first, and rejects if that fails', async () => {
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    const etag = writeAsDeviceB('names', ['a'], AHEAD)
+    await assert.rejects(updateWith('names', { onHeightAhead: 'reject' }), aheadAt(AHEAD))
+    const restore = failGets('names')
+    const failing = counted(names)
+    await assert.rejects(updateWith('names', { updater: failing.updater }), httpError)
+    assert.deepStrictEqual(failing.calls, [])
+    assert.deepStrictEqual(slotState('names'), ['loading', AHEAD, true])
+    restore()
+    // The reload finds the value ahead; the recovery's sync brings the key's
+    // deferred reload, so the retry doesn't reload again. Only the last
+    // attempt would wait for the height.
+    syncs.catchUp = true
+    kvHeightTimings.waitMs = 60_000
+    const before = gets('names')
+    const retried = counted(names)
+    assert.deepStrictEqual(await updateWith('names', { updater: retried.updater }), ['a', 'x'])
+    assert.deepStrictEqual(retried.calls, [['a']])
+    assert.strictEqual(gets('names'), before + 2)
+    assert.deepStrictEqual(writes('names').at(-1), [etag, 204])
+    assert.deepStrictEqual(slotState('names'), ['loaded', undefined, true])
+  })
+
+  it('writes a never-loaded slot under if-match "", reloading only for a KV_NOOP', async () => {
+    const keys = ['lazy', 'noop', 'failing']
+    for (const key of keys) defineSlot({ key, defaultValue: [], autoLoad: 'never' })
+    await activate()
+    const etags = keys.map((key) => writeAsDeviceB(key, ['a']))
+    assert.deepStrictEqual(await updateWith('lazy'), ['a', 'x'])
+    assert.strictEqual(gets('lazy'), 0)
+    assert.deepStrictEqual(writes('lazy'), [['""', 412], [etags[0], 204]])
+
+    const noop = counted(noopOnEmpty)
+    assert.deepStrictEqual(await updateWith('noop', { updater: noop.updater }), ['a', 'x'])
+    assert.deepStrictEqual(noop.calls, [[], ['a']])
+    assert.deepStrictEqual(writes('noop'), [[etags[1], 204]])
+
+    // The slot stays unverified while its reload fails: a second KV_NOOP
+    // rejects, a write still merges on the 412
+    failGets('failing')
+    await assert.rejects(updateWith('failing', { updater: noopOnEmpty }), httpError)
+    assert.deepStrictEqual(slotState('failing'), ['non-init', undefined, false])
+    let first = true
+    const noopOnce = (value: JSONType) => first ? ((first = false), KV_NOOP) : names(value)
+    assert.deepStrictEqual(await updateWith('failing', { updater: noopOnce }), ['a', 'x'])
+    assert.deepStrictEqual(writes('failing'), [['""', 412], [etags[2], 204]])
+    for (const key of keys) assert.deepStrictEqual(slotState(key), ['loaded', undefined, true])
+  })
+
+  it('with the caller\'s ifMatch, reloads an unsettled slot first; any failed reload rejects', async () => {
+    defineSlot({ key: 'names', defaultValue: [], autoLoad: 'never' })
+    defineSlot({ key: 'other', defaultValue: [], autoLoad: 'never' })
+    defineSlot({ key: 'guarded', defaultValue: [], schema: listSchema })
+    await activate()
+    const etag = writeAsDeviceB('names', ['a'])
+    assert.deepStrictEqual(await updateWith('names', { ifMatch: etag }), ['a', 'x'])
+    assert.strictEqual(gets('names'), 1)
+    assert.deepStrictEqual(writes('names'), [[etag, 204]])
+
+    await breakSlot('guarded', ['a'])
+    failGets('guarded')
+    failGets('other')
+    for (const key of ['other', 'guarded']) {
+      const rejected = counted(names)
+      await assert.rejects(updateWith(key, { ifMatch: '*', updater: rejected.updater }), httpError)
+      assert.deepStrictEqual(rejected.calls, [])
+    }
+    // Without it, the guard falls back to the value it kept
+    const noop = counted(() => KV_NOOP)
+    assert.strictEqual(await updateWith('guarded', { updater: noop.updater }), undefined)
+    assert.deepStrictEqual(noop.calls, [['a']])
+    assert.strictEqual(server.posts().length, 1)
+  })
+
+  it('the last attempt waits once for a value its reload found ahead, then reloads', async () => {
+    defineSlot({ key: 'names', defaultValue: [], schema: listSchema })
+    defineSlot({ key: 'other', defaultValue: [], schema: listSchema })
+    await activate()
+    kvHeightTimings.waitMs = 60_000
+    await breakSlot('names', ['a'])
+    const etag = writeAsDeviceB('names', ['b'], AHEAD)
+    const waiting = counted(names)
+    const writing = updateWith('names', { maxHeightRecoveries: 0, updater: waiting.updater })
+    await until(() => mirror('names')?.heightAhead, 'the reload finding the value ahead')
+    assert.deepStrictEqual(waiting.calls, [])
+    setLocalHeight(AHEAD)
+    assert.deepStrictEqual(await writing, ['b', 'x'])
+    assert.deepStrictEqual(writes('names'), [[etag, 204]])
+    assert.deepStrictEqual(slotState('names'), ['loaded', undefined, true])
+
+    // The retained value is known to be outdated: a KV_NOOP on it rejects
+    // once the second reload fails
+    await breakSlot('other', ['a'])
+    writeAsDeviceB('other', ['b'], AHEAD + 1)
+    const noop = updateWith('other', { maxHeightRecoveries: 0, updater: () => KV_NOOP })
+    await until(() => mirror('other')?.heightAhead, 'the reload finding the value ahead')
+    failGets('other')
+    setLocalHeight(AHEAD + 1)
+    await assert.rejects(noop, httpError)
+    assert.deepStrictEqual(writes('other'), [])
+    assert.strictEqual(syncs.count, 1)
+  })
+
+  it('a failed reload after a height recovery makes a KV_NOOP reject; a write merges', async () => {
+    defineSlot({ key: 'noop', defaultValue: [] })
+    defineSlot({ key: 'write', defaultValue: [] })
+    await activate()
+    syncs.catchUp = true
+    writeAsDeviceB('noop', ['a'], AHEAD)
+    failGets('noop')
+    let first = true
+    const noopOnRetry = (value: JSONType) => first ? ((first = false), names(value)) : KV_NOOP
+    await assert.rejects(updateWith('noop', { updater: noopOnRetry }), httpError)
+    assert.deepStrictEqual(writes('noop').map(([, status]) => status), [412])
+    const etag = writeAsDeviceB('write', ['a'], AHEAD + 1)
+    failGets('write')
+    assert.deepStrictEqual(await updateWith('write'), ['a', 'x'])
+    assert.deepStrictEqual(writes('write'), [['""', 412], ['""', 412], [etag, 204]])
   })
 })
