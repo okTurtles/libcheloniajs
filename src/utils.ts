@@ -22,6 +22,7 @@ import { INVITE_STATUS } from './constants.js'
 import type { EncryptedData } from './encryptedData.js'
 import {
   ChelErrorForkedChain,
+  ChelErrorKvUpdateInvalid,
   ChelErrorResourceGone,
   ChelErrorUnexpectedHttpResponseCode,
   ChelErrorWarning
@@ -50,6 +51,41 @@ export const findKeyIdByName = (
   state._vm?.authorizedKeys &&
   Object.values(state._vm.authorizedKeys).find((k) => k.name === name && k._notAfterHeight == null)
     ?.id
+
+// The key IDs a KV write to `key` of `contractID` encrypts and signs with,
+// from the contract's current keys of those names. Called where the write
+// runs, so that it sees a key rotation that landed before it. A named key
+// that is missing rejects the write (`ChelErrorKvUpdateInvalid`), rather
+// than store plaintext or send it unsigned: only `encryptionKeyName: null`
+// stores plaintext. `operation` (e.g. `'update'`) starts the message.
+export const resolveKvKeyIds = (
+  contractID: string,
+  key: string,
+  { encryptionKeyName, signingKeyName }: {
+    encryptionKeyName: string | null;
+    signingKeyName: string;
+  },
+  operation: string
+): { encryptionKeyId: string | null; signingKeyId: string } => {
+  const encryptionKeyId: string | null = encryptionKeyName === null
+    ? null
+    : sbp('chelonia/contract/currentKeyIdByName', contractID, encryptionKeyName)
+  if (encryptionKeyName !== null && !encryptionKeyId) {
+    throw new ChelErrorKvUpdateInvalid(
+      `[chelonia/kv] ${operation}: ${contractID}::${key}: encryption key ` +
+      `'${encryptionKeyName}' not found on contract; refusing to write plaintext`
+    )
+  }
+  const signingKeyId: string | undefined =
+    sbp('chelonia/contract/currentKeyIdByName', contractID, signingKeyName)
+  if (!signingKeyId) {
+    throw new ChelErrorKvUpdateInvalid(
+      `[chelonia/kv] ${operation}: ${contractID}::${key}: signing key ` +
+      `'${signingKeyName}' not found on contract`
+    )
+  }
+  return { encryptionKeyId, signingKeyId }
+}
 
 export const findForeignKeysByContractID = (
   state: ChelContractState,

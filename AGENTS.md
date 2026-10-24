@@ -61,7 +61,7 @@ Dual ESM/CJS output with TypeScript declarations:
 
 ## Code Organization
 
-All source lives in `src/`. The largest files are `internals.ts` and `chelonia.ts`.
+All source lives in `src/`. The largest files are `kv.ts`, `chelonia.ts` and `internals.ts`.
 
 ```
 src/
@@ -78,11 +78,16 @@ src/
 ├── functions.ts          # CID creation, blake32Hash, base64 utilities
 ├── utils.ts              # Key lookup, permissions, event stream utilities
 ├── errors.ts             # Custom error classes via ChelErrorGenerator factory
+├── error-names.ts        # Name-based error check and `.cause` reader behind the realm-safe predicates (internal)
+├── internal-errors.ts    # Internal KV errors (`ChelErrorKvMaxAttempts`, `isKvMaxAttempts`)
 ├── events.ts             # Event name constants
 ├── constants.ts          # INVITE_STATUS enum
 ├── persistent-actions.ts # PersistentAction queue with retry
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
+├── kv-constants.ts       # KV constants (`KV_NOOP`, statuses, reasons, key-name defaults)
+├── kv-height.ts          # KV contract-height awareness (waits, recovery; internal)
+├── kv-runtime.ts         # KV runtime maps: created by _init, replaced by reset (internal)
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time synchronization via monotonic offsets
 ├── chelonia-utils.ts     # Optional utility selectors (e.g., chelonia/kv/queuedSet)
@@ -131,7 +136,8 @@ Often the source file's default export is an array of the selector names it regi
 | `chelonia/journal/*` | `journal.ts` | Public journal API — get, reconstruct, clear |
 | `chelonia/private/journal/*` | `journal.ts` | Internal journal recorder — recordEvent |
 | `chelonia/kv/queuedSet` | `chelonia-utils.ts` | Optional queued raw KV setter |
-| `chelonia/kv/{defineSlot,update,read,sync,clear,status,refreshFilters}` | `kv.ts` | KV slots — declarative typed key/value API |
+| `chelonia/kv/{defineSlot,update,read,sync,clear,status,settledStatus,whenSettled,refreshFilters}` | `kv.ts` | KV slots — declarative typed key/value API |
+| `chelonia/kv/withHeightRecovery` | `kv.ts` | Height recovery (sync and retry) around raw `kv/get` / `kv/set` calls |
 | `chelonia/externalStateSetup` | `local-selectors/` | External state synchronization |
 
 #### Key Public Selectors
@@ -220,7 +226,38 @@ Full documentation:
 - Selector reference and events: [docs/api.md](docs/api.md#kv-slots)
 - Public selectors: `chelonia/kv/defineSlot`, `chelonia/kv/update`,
   `chelonia/kv/read`, `chelonia/kv/sync`, `chelonia/kv/clear`,
-  `chelonia/kv/status`, `chelonia/kv/refreshFilters`
+  `chelonia/kv/status`, `chelonia/kv/settledStatus`,
+  `chelonia/kv/whenSettled`, `chelonia/kv/refreshFilters`, and
+  `chelonia/kv/withHeightRecovery` (the slots' height recovery, for raw
+  `kv/get` / `kv/set` calls)
+- Contract heights: a KV value can only be verified once the local
+  contract has reached the height it was written at, and the server only
+  accepts writes stamped with its current height. Never treat an
+  unverifiable value as absent; see
+  [docs/kv.md](docs/kv.md#contract-heights) and
+  [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-and-verifiability).
+  Detect the resulting error with `isKvHeightAhead(e)` (`src/errors.ts`),
+  not with `instanceof` and not by comparing `e.name` yourself. Detect the
+  error for a value whose stamp is missing or malformed (it can never be
+  verified; syncing doesn't help) with `isKvHeightMalformed(e)`. The KV
+  selectors never reject with the old `'ChelErrorInvalidMessageHeight'`
+  name any more; lower-level parsing
+  (`chelonia/parseEncryptedOrUnencryptedDetachedMessage`) still throws it,
+  both for a value that is ahead and for a malformed stamp. Likewise
+  `isKvConflict(e)` for a write that ran out of attempts, or got a `412`
+  without `onconflict`.
+- Never await `chelonia/kv/update`, `clear`, `queuedSet`, single-key
+  `chelonia/kv/sync`, `whenSettled` or `withHeightRecovery` for a
+  contract from code that contract's lanes await (a `sideEffect`, a
+  `queueInvocation` body, an `onconflict`, an `onUpdate`): it never
+  settles (a *synchronous* call from a same-contract `onUpdate` rejects
+  with `ChelErrorKvReentrant` instead). (Raw `chelonia/kv/set` and
+  `kv/get` queue on no lane, so they settle: `kv/set`'s passive waits
+  time out, and `kv/get` has none, rejecting at once.) From another
+  contract's `sideEffect` or `queueInvocation` body, it holds that
+  contract's lane for the whole recovery. Raw pubsub handlers and event
+  listeners aren't awaited, so they may await writes. See
+  [docs/kv.md](docs/kv.md#how-height-recovery-runs).
 
 ### Contract State Structure
 
@@ -323,6 +360,20 @@ describe('Feature name', () => {
   })
 })
 ```
+
+Shared helpers live in plain modules that register no selectors and are
+excluded from the CJS build: `src/test-utils.ts` (incl. a simulated KV
+server, `makeKvServer`) and `src/kv-height-harness.ts` (the harness of
+every `kv-height*.test.ts` file except `kv-height-events.test.ts`, with
+the helpers they share). Test files may import those, never each other.
+A test must fail rather than hang when the behaviour it checks regresses:
+poll with `until(cond, label)` and bound a promise that might never settle
+with `within(promise, label)` (both in `src/test-utils.ts`).
+`npm test` runs with `--test-timeout=60000`. On newer Node lines (checked on
+26) that bounds each test; on Node 22, which CI uses, it bounds each test
+*file*, and only `until` / `within` bound a single test. Keep every test
+file under about 25 s when run alone on Node 22; split one that grows
+past that.
 
 Test files use `.test.ts` suffix and are discovered automatically: `npm test` runs every
 `src/**/*.test.ts` file via the Node test runner, each in its own process (fresh SBP

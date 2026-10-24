@@ -156,25 +156,29 @@ const verifySignatureData = function <T, U extends object = object> (
     height < designatedKey._notBeforeHeight ||
     !designatedKey.purpose.includes('sig')
   ) {
-    // These errors (ChelErrorSignatureKeyUnauthorized) are serious and
-    // indicate a bug. Make them fatal when running integration tests
-    // (otherwise, they get swallowed and shown as a notification)
-    if (process.env.CI) {
-      console.error(`Key ${sKeyId} is unauthorized or expired for the current contract`, {
-        designatedKey,
-        height,
-        state: JSON.parse(JSON.stringify(sbp('state/vuex/state')))
-      })
+    // An unauthorized or expired key is serious and indicates a bug: make it
+    // fatal in the host app's CI (`CI` is set, and the app registers
+    // `state/vuex/state`, as Group Income's integration tests do), where it
+    // would otherwise only show as a notification. Off in other CI runs
+    // (e.g. this library's own tests), where the state lookup would throw
+    // in place of the real error. The diagnostics never replace it either:
+    // a state that can't be serialized is reported, and the key's diagnostic
+    // is still logged, with `'[unserializable]'` as its state.
+    const message = `Key ${sKeyId} is unauthorized or expired for the current contract`
+    const failInHostAppCI = !!process.env.CI && !!sbp('sbp/selectors/fn', 'state/vuex/state')
+    if (failInHostAppCI) {
+      let appState: unknown
+      try {
+        appState = JSON.parse(JSON.stringify(sbp('state/vuex/state')))
+      } catch (e) {
+        appState = '[unserializable]'
+        console.error('[chelonia] could not serialize the app state for diagnostics', e)
+      }
+      console.error(message, { designatedKey, height, state: appState })
       // An unhandled promise rejection will cause Cypress to fail
-      Promise.reject(
-        new ChelErrorSignatureKeyUnauthorized(
-          `Key ${sKeyId} is unauthorized or expired for the current contract`
-        )
-      )
+      Promise.reject(new ChelErrorSignatureKeyUnauthorized(message))
     }
-    throw new ChelErrorSignatureKeyUnauthorized(
-      `Key ${sKeyId} is unauthorized or expired for the current contract`
-    )
+    throw new ChelErrorSignatureKeyUnauthorized(message)
   }
 
   // TODO

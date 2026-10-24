@@ -367,6 +367,19 @@ You can introspect sync state via `chelonia/contract/isSyncing(id)`,
 `chelonia/contract/isResyncing(id)`, and
 `chelonia/contract/currentSyncs()`.
 
+A contract type can register a `_cleanup` destructor (the
+`<manifest>/<contract name>/_cleanup` selector), called as
+`_cleanup({ contractID, resync, state })` whenever Chelonia removes a
+contract of that type from its state. A re-sync calls it with
+`resync: true` (with the state about to be cleared), and the final
+removal (at refcount 0, or a permanent removal) with `resync: false`.
+That final call also happens after a re-sync that failed: `state` is
+then what the re-sync left (at most `_volatile.watch`), so a destructor
+that releases the contracts it finds in `state` doesn't release them
+twice. The type of a contract whose re-sync failed is only remembered
+in memory: after a restart, its removal makes no call. `chelonia/reset`
+calls no destructors.
+
 ### Booting with a persisted root state
 
 The more common case than `registerContract` is "the app reloads with

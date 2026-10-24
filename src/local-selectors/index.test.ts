@@ -225,4 +225,35 @@ describe('chelonia/externalStateSetup teardown', () => {
 
     teardown()
   })
+
+  it('projects the heightAhead marker on a status event with an unchanged status', async () => {
+    const entry = (heightAhead?: { requiredHeight: number }) => ({
+      value: { kept: true }, status: 'loaded', etag: 'old', ...(heightAhead && { heightAhead })
+    })
+    externalState._kv = { 'cid-KV': { slot: entry() } }
+    const teardown = sbp('chelonia/externalStateSetup', {
+      stateSelector: EXTERNAL_STATE_SELECTOR
+    })
+    const externalKv = externalState._kv as Record<string, Record<string, unknown>>
+    const announce = async (requiredHeight: number | null) => {
+      sbp('okTurtles.events/emit', CHELONIA_KV_STATUS_CHANGED, {
+        contractID: 'cid-KV',
+        key: 'slot',
+        status: 'loaded',
+        previousStatus: 'loaded',
+        heightAhead: requiredHeight === null ? null : { requiredHeight }
+      })
+      await waitMicrotasks()
+    }
+
+    kvStates['cid-KV'] = { slot: entry({ requiredHeight: 42 }) }
+    await announce(42)
+    assert.deepStrictEqual(externalKv['cid-KV'].slot, entry({ requiredHeight: 42 }))
+
+    kvStates['cid-KV'] = { slot: entry() }
+    await announce(null)
+    assert.deepStrictEqual(externalKv['cid-KV'].slot, entry())
+
+    teardown()
+  })
 })

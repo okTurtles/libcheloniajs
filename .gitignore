@@ -2,6 +2,8 @@
 /.parcel-cache/
 *.DS_Store
 dist/**/*.test.*
+dist/**/test-utils.*
+dist/**/kv-height-harness.*
 /.agent/
 /.tldr*
 /.agents
