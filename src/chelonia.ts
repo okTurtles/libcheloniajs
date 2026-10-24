@@ -408,6 +408,7 @@ export default sbp('sbp/selectors/register', {
       ownKeys: secretKeyList
     })
     this.ephemeralReferenceCount = Object.create(null)
+    this.contractTypesBeforeResync = Object.create(null)
     // subscriptionSet includes all the contracts in state.contracts for which
     // we can process events (contracts for which we have called /sync)
     // The reason we can't use, e.g., Object.keys(state.contracts), is that
@@ -795,6 +796,7 @@ export default sbp('sbp/selectors/register', {
     this.kvPendingLoads.clear()
     this.kvOnUpdateActive.clear()
     clearObject(this.ephemeralReferenceCount)
+    clearObject(this.contractTypesBeforeResync)
     this.pending.splice(0)
     clearObject(this.currentSyncs)
     clearObject(this.postSyncOperations)

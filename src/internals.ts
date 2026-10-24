@@ -659,9 +659,14 @@ export default sbp('sbp/selectors/register', {
       return
     }
 
-    const manifestHash = contractName && this.config.contracts.manifests[contractName]
+    // A failed re-sync leaves no type, but its final removal still owes the
+    // destructor call (memory only: after a restart, there is none)
+    const type = contractName || this.contractTypesBeforeResync[contractID]
+    if (params?.resync) this.contractTypesBeforeResync[contractID] = type
+    else delete this.contractTypesBeforeResync[contractID]
+    const manifestHash = type && this.config.contracts.manifests[type]
     if (manifestHash) {
-      const destructor = `${manifestHash}/${contractName}/_cleanup`
+      const destructor = `${manifestHash}/${type}/_cleanup`
       // Check if a destructor is defined
       if (sbp('sbp/selectors/fn', destructor)) {
         // And call it

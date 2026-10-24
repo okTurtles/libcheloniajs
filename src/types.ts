@@ -462,6 +462,7 @@ export type CheloniaContext = {
   setPostSyncOp: (contractID: string, key: string, op: Parameters<typeof sbp>) => void;
   transientSecretKeys: Record<string, Key>;
   ephemeralReferenceCount: Record<string, number>;
+  contractTypesBeforeResync: Record<string, string>;
   subscriptionSet: Set<string>;
   pending: { contractID: string }[];
   pubsub: import('./pubsub/index.js').PubSubClient;

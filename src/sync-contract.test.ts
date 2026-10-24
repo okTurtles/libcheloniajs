@@ -20,12 +20,14 @@ const vetoError = { name: 'ChelErrorUnexpected', message: /vetoed/ }
 
 const rootState = (): ChelRootState => sbp('chelonia/private/state')
 
+const CONTRACT_TYPE = 'test/sync-contract'
+
 // A self-signed contract whose only event is its OP_CONTRACT. With
 // `skipActionProcessing`, no contract source has to be served.
 const makeContract = (): SPMessage => {
   const CSK = keygen(EDWARDS25519SHA512BATCH)
   const payload: SPOpContract = {
-    type: 'test/sync-contract',
+    type: CONTRACT_TYPE,
     keys: [{
       id: keyId(CSK),
       name: '#csk',
@@ -248,5 +250,68 @@ describe('Contract sync and removal', () => {
     assert.strictEqual(rootState().contracts[cid], null)
     assert.deepStrictEqual(removedPermanently, [cid])
     assert.deepStrictEqual(errorsLogged(), [])
+  })
+
+  describe("the contract type's destructor", () => {
+    const calls: Array<{ resync: boolean; state: unknown }> = []
+    const resyncFlags = () => calls.map(({ resync }) => resync)
+    sbp('sbp/selectors/register', {
+      [`test-manifest/${CONTRACT_TYPE}/_cleanup`]: (
+        { resync, state }: { resync: boolean; state: unknown }
+      ) => { calls.push({ resync, state: structuredClone(state) }) }
+    })
+
+    beforeEach(async () => {
+      // The manifest map is merged before its preload, which fails (no server)
+      await sbp('chelonia/configure', {
+        contracts: { manifests: { [CONTRACT_TYPE]: 'test-manifest' } }
+      }).catch(() => {})
+      calls.length = 0
+    })
+
+    const failResync = async (cid: string) => {
+      server.failEvents = false
+      await within(sbp('chelonia/contract/retain', cid), 'retain')
+      server.failEvents = true
+      await assert.rejects(
+        within(sbp('chelonia/contract/sync', cid, { resync: true }), 'resync'),
+        { name: 'ChelErrorUnexpectedHttpResponseCode' }
+      )
+      assert.deepStrictEqual(resyncFlags(), [true])
+    }
+
+    it('runs again at the final removal after a failed re-sync', async () => {
+      const cid = server.contract!.hash()
+      await failResync(cid)
+      const left = structuredClone(rootState()[cid])
+      await within(sbp('chelonia/contract/release', cid), 'release')
+      assert.deepStrictEqual(resyncFlags(), [true, false])
+      assert.deepStrictEqual(calls[1].state, left)
+      assert.strictEqual(rootState().contracts[cid], undefined)
+    })
+
+    it('is not owed to a later contract with the same ID', async () => {
+      const cid = server.contract!.hash()
+      await failResync(cid)
+      await within(sbp('chelonia/contract/release', cid), 'release')
+      calls.length = 0
+      await assert.rejects(
+        within(sbp('chelonia/contract/retain', cid), 'failed retain'),
+        { name: 'ChelErrorUnexpectedHttpResponseCode' }
+      )
+      await within(sbp('chelonia/contract/release', cid), 'release')
+      assert.deepStrictEqual(calls, [])
+    })
+
+    it('is not called by a reset, nor after a restart', async () => {
+      const cid = server.contract!.hash()
+      await failResync(cid)
+      const persisted = JSON.parse(JSON.stringify(rootState()))
+      await within(sbp('chelonia/reset', persisted), 'reset')
+      assert.deepStrictEqual(rootState().contracts[cid], { references: 1 })
+      await within(sbp('chelonia/contract/release', cid), 'release')
+      assert.deepStrictEqual(resyncFlags(), [true])
+      assert.strictEqual(rootState().contracts[cid], undefined)
+    })
   })
 })
