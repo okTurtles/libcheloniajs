@@ -3,7 +3,6 @@ import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
 import {
   cloneDeep,
-  delay,
   difference,
   has,
   intersection,
@@ -61,7 +60,13 @@ import {
 import './files.js'
 import { clearReprocessDebounceAll, type PublishOptions } from './internals.js'
 import './kv.js'
-import { heightAheadError, localHeight, readHeightStamp } from './kv-height.js'
+import {
+  abortReason,
+  heightAheadError,
+  localHeight,
+  readHeightStamp,
+  sleep
+} from './kv-height.js'
 import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import { queueEventOrReject } from './queue-event.js'
 import {
@@ -99,6 +104,7 @@ import {
   CheloniaContractCtx,
   JSONType,
   JournalConfig,
+  KvConflictCause,
   ParsedEncryptedOrUnencryptedMessage,
   ChelKvGetResult
 } from './types.js'
@@ -274,6 +280,18 @@ export type ChelAtomicParams = {
 };
 
 export { SPMessage }
+
+type ComposedAbortSignal = AbortSignal & { _cleanup?: () => void }
+
+type KvValueClass<T> =
+  | { status: 'present'; parsed: ParsedEncryptedOrUnencryptedMessage<T> }
+  | { status: 'ahead'; requiredHeight: number }
+  | { status: 'malformed'; error: Error }
+
+type KvServerValue = (KvValueClass<JSONType> | { status: 'absent' }) & {
+  etag: string | null;
+  httpStatus: number;
+}
 
 export const ACTION_REGEX: RegExp = /^((([\w.]+)\/([^/]+))(?:\/(?:([^/]+)\/)?)?)\w*/
 // ACTION_REGEX.exec('gi.contracts/group/payment/process')
@@ -2857,8 +2875,8 @@ export default sbp('sbp/selectors/register', {
   // a general rule, you shouldn't be calling this selector directly unless
   // you're building a utility library or if you have very specific needs. In
   // this case, see if `chelonia/kv/queuedSet` covers your needs.
-  // `data` is allowed to be falsy, in which case a fetch will occur first and
-  // the `onconflict` handler will be called.
+  // With `data` undefined, the current value is fetched first and
+  // `onconflict` computes what to write.
   'chelonia/kv/set': async function (
     this: CheloniaContext,
     contractID: string,
@@ -2882,225 +2900,126 @@ export default sbp('sbp/selectors/register', {
       signal?: AbortSignal;
     }
   ) {
-    maxAttempts = maxAttempts ?? 3
+    if (maxAttempts != null && !(Number.isSafeInteger(maxAttempts) && maxAttempts >= 1)) {
+      throw new TypeError('[chelonia/kv] set: `maxAttempts` must be an integer >= 1')
+    }
+    if (data === undefined && typeof onconflict !== 'function') {
+      throw new TypeError('[chelonia/kv] set: `onconflict` is required when `data` is undefined')
+    }
+    let attemptsLeft = maxAttempts ?? 3
     const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`
-    const hasOnconflict = typeof onconflict === 'function'
-    // Compose the caller-provided signal with Chelonia's global abort
-    // controller (KV-REVAMPED.md §4.2). When `callerSignal` is omitted,
-    // we fall back to the global signal unchanged for full backwards
-    // compatibility with existing call sites.
-    let cleanupFetchSignal: (() => void) | undefined
-    const fetchSignal: AbortSignal = callerSignal
-      ? (() => {
-          const composed = composeSignals([this.abortController.signal, callerSignal])
-          cleanupFetchSignal = composed._cleanup
-          return composed
-        })()
+    const signal: ComposedAbortSignal = callerSignal
+      ? composeSignals([this.abortController.signal, callerSignal])
       : this.abortController.signal
-
-    let response: Response
-    let conflictEtag: string | null = null
-    let successEtag: string | null = null
-    let currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined
-    let lastRecoveredValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined
-    let recoveryGetAttempted = false
-    // The `resolveData` function is tasked with computing merged data, as in
-    // merging the existing stored values (after a conflict or initial fetch)
-    // and new data. The return value indicates whether there should be a new
-    // attempt at storing updated data (if `true`) or not (if `false`)
-    const resolveData = async (invokeOnConflict = true) => {
-      currentValue = undefined
-      let headerEtag = response.headers.get('x-cid') || response.headers.get('etag')
-      if (headerEtag) conflictEtag = headerEtag
-      // Rationale:
-      //  * response.ok could be the result of `GET` (no initial data)
-      //  * 409 indicates a conflict because the height used is too old
-      //  * 412 indicates a conflict (precondition failed) because the data
-      //    on the KV store have been updated / is not what we expected
-      // All of these situations should trigger parsing the response and
-      // conflict resolution
-      if (response.ok || response.status === 409 || response.status === 412) {
-        const serializedDataText = await response.text()
-        // We can get 409 even if there's no data on the server. We still need
-        // to call `onconflict` in this case, but we don't need to attempt to
-        // parse the response.
-        // This prevents this from failing in such cases, which can result in
-        // race conditions and data not being properly initialised.
-        // See <https://github.com/okTurtles/group-income/issues/2780>
-        if (serializedDataText) {
-          try {
-            currentValue = parseEncryptedOrUnencryptedMessage(this, {
-              contractID,
-              serializedData: JSON.parse(serializedDataText),
-              meta: key
-            })
-            lastRecoveredValue = currentValue
-          } catch (e) {
-            if (!(e instanceof ChelErrorInvalidMessageHeight)) throw e
-          }
-        }
-        // Rationale: 404 and 410 both indicate that the store key doesn't exist.
-        // These are not treated as errors since we could still set the value.
-      } else if (response.status !== 404 && response.status !== 410) {
-        throw new ChelErrorUnexpectedHttpResponseCode(
-          `[kv/set] ${httpErrorMessage(response)}`, { cause: response.status }
-        )
+    const get = () => this.config.fetch(url, {
+      headers: new Headers([
+        ['authorization', buildShelterAuthorizationHeader.call(this, contractID)]
+      ]),
+      signal
+    })
+    const isConflict = (response: Response) => response.status === 409 || response.status === 412
+    const unexpected = (response: Response) => new ChelErrorUnexpectedHttpResponseCode(
+      `[kv/set] ${httpErrorMessage(response)}`, { cause: response.status }
+    )
+    let recoveryGetDone = false
+    // A conflict with neither a body nor an etag can't be retried as is, so
+    // `recover` allows one GET per call to fetch both
+    const readServerValue = async (
+      response: Response,
+      recover: boolean
+    ): Promise<KvServerValue> => {
+      const etag = responseEtag(response)
+      const text = response.ok || isConflict(response) ? await response.text() : ''
+      if (recover && !text && !etag && !recoveryGetDone && isConflict(response)) {
+        recoveryGetDone = true
+        const recovered = await get()
+        if (recovered.ok) return readServerValue(recovered, false)
+        console.warn(`[kv/set] recovery GET for ${contractID}/${key} returned ${recovered.status}`)
       }
-      // When a 409/412 response provides neither an etag header nor a
-      // body, the retry loop cannot recover — it would re-send
-      // if-match: '""' and loop until maxAttempts. Do at most one GET
-      // per set call to recover the current etag and value so
-      // onconflict can produce a valid retry.
-      if (
-        !recoveryGetAttempted &&
-        !headerEtag &&
-        !currentValue &&
-        (response.status === 409 || response.status === 412)
-      ) {
-        recoveryGetAttempted = true
-        const getResp = await this.config.fetch(url, {
-          headers: new Headers([
-            ['authorization', buildShelterAuthorizationHeader.call(this, contractID)]
-          ]),
-          signal: fetchSignal
-        })
-        if (getResp.ok) {
-          const getText = await getResp.text()
-          if (getText) {
-            try {
-              currentValue = parseEncryptedOrUnencryptedMessage(this, {
-                contractID,
-                serializedData: JSON.parse(getText),
-                meta: key
-              })
-              lastRecoveredValue = currentValue
-            } catch (e) {
-              if (!(e instanceof ChelErrorInvalidMessageHeight)) throw e
-            }
-          }
-          headerEtag = getResp.headers.get('x-cid') || getResp.headers.get('etag')
-        } else {
-          console.warn(
-            `[kv/set] recovery GET for ${contractID}/${key} returned ` +
-            `${getResp.status}; proceeding without recovered etag/value`
-          )
-        }
-        if (headerEtag) conflictEtag = headerEtag
+      const value = text
+        ? classifyKvValue<JSONType>(this, contractID, key, JSON.parse(text))
+        : { status: 'absent' as const }
+      return { ...value, etag, httpStatus: response.status }
+    }
+    // An unreadable final conflict only leaves its value unknown
+    const readFinal = async (response: Response, recover: boolean) => {
+      try {
+        return await readServerValue(response, recover)
+      } catch {
+        if (signal.aborted) throw abortReason(signal)
+        return undefined
       }
-      if (!invokeOnConflict) return false
+    }
+    const resolveConflict = async (value: KvServerValue, status: number) => {
+      const currentValue = value.status === 'present' ? value.parsed : undefined
       const result = await onconflict!({
         contractID,
         key,
         failedData: data,
-        status: response.status,
-        // If no x-cid or etag header was returned, `ifMatch` would likely be
-        // returned as undefined, which will then use the `''` fallback value
-        // when writing. This allows 404 / 410 responses to work even if no
-        // etag is explicitly given
-        etag: headerEtag,
+        status,
+        etag: value.etag,
         get currentData () {
           return currentValue?.data
         },
         currentValue
       })
       if (!result) return false
-
-      data = result[0]
-      ifMatch = result[1]
+      ;[data, ifMatch] = result
       return true
     }
 
     try {
       for (;;) {
-        if (data !== undefined) {
-          const serializedData = outputEncryptedOrUnencryptedMessage.call(this, {
-            contractID,
-            innerSigningKeyId,
-            encryptionKeyId,
-            signingKeyId,
-            data: data!,
-            meta: key
-          })
-          response = await this.config.fetch(url, {
-            headers: new Headers([
-              ['authorization', buildShelterAuthorizationHeader.call(this, contractID)],
-              ['if-match', ifMatch || '""']
-            ]),
-            method: 'POST',
-            body: JSON.stringify(serializedData),
-            signal: fetchSignal
-          })
-        } else {
-          if (!hasOnconflict) {
-            throw TypeError('onconflict required with empty data')
+        if (data === undefined) {
+          const response = await get()
+          if (!response.ok && response.status !== 404 && response.status !== 410) {
+            throw unexpected(response)
           }
-          // If no initial data provided, perform a GET `fetch` to get the current
-          // data and CID. Then, `onconflict` will be used to merge the current
-          // and new data.
-          response = await this.config.fetch(url, {
-            headers: new Headers([
-              ['authorization', buildShelterAuthorizationHeader.call(this, contractID)]
-            ]),
-            signal: fetchSignal
-          })
-
-          // This is only for the initial case; the logic is replicated below
-          // for subsequent iterations that require conflict resolution.
-          if (await resolveData()) {
+          if (await resolveConflict(await readServerValue(response, false), response.status)) {
             continue
-          } else {
-            break
           }
+          return { etag: null }
         }
-        if (!response.ok) {
-          // Rationale: 409 and 412 indicate conflict resolution is needed
-          if (response.status === 409 || response.status === 412) {
-            if (--maxAttempts <= 0) {
-              try {
-                await resolveData(false)
-              } catch {}
-              let currentData: JSONType | undefined
-              try {
-                currentData = (currentValue ?? lastRecoveredValue)?.data
-              } catch {}
-              throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
-                cause: { currentData, etag: conflictEtag ?? null }
-              })
-            }
-            // Honour caller-side abort at every retry boundary so a
-            // cancellation that lands between requests is respected
-            // without waiting for the next fetch.
-            if (callerSignal?.aborted) {
-              throw callerSignal.reason instanceof Error
-                ? callerSignal.reason
-                : new DOMException('Aborted', 'AbortError')
-            }
-            if (!hasOnconflict) {
-              // Can't resolve automatically if there's no conflict handler
-              throw new Error(
-                `kv/set failed with status ${response.status} and no onconflict handler was provided`
-              )
-            }
-            await delay(randomIntFromRange(0, 1500))
-            if (await resolveData()) {
-              continue
-            } else {
-              break
-            }
-          }
-          throw new ChelErrorUnexpectedHttpResponseCode(
-            `[kv/set] ${httpErrorMessage(response)}`, { cause: response.status }
+        const response = await this.config.fetch(url, {
+          headers: new Headers([
+            ['authorization', buildShelterAuthorizationHeader.call(this, contractID)],
+            ['if-match', ifMatch || '""']
+          ]),
+          method: 'POST',
+          body: JSON.stringify(outputEncryptedOrUnencryptedMessage.call(this, {
+            contractID, innerSigningKeyId, encryptionKeyId, signingKeyId, data, meta: key
+          })),
+          signal
+        })
+        if (response.ok) return { etag: responseEtag(response) }
+        if (!isConflict(response)) throw unexpected(response)
+        if (typeof onconflict !== 'function') {
+          throw new ChelErrorKvMaxAttempts(
+            `kv/set failed with status ${response.status} and no onconflict handler was provided`,
+            { cause: conflictCause(await readFinal(response, false), response) }
           )
         }
-        // Successful write: capture the server-issued etag (x-cid /
-        // etag header) so the resolved value reflects the freshest
-        // version. See KV-REVAMPED.md §4.2 step 6.
-        successEtag = response.headers.get('x-cid') || response.headers.get('etag')
-        break
+        if (--attemptsLeft <= 0) {
+          const value = await readFinal(response, true)
+          if (value?.status === 'ahead') {
+            throw heightAheadError(this, contractID, key, {
+              requiredHeight: value.requiredHeight,
+              exact: true,
+              etag: value.etag,
+              httpStatus: value.httpStatus
+            })
+          }
+          if (value?.status === 'malformed') throw value.error
+          throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
+            cause: conflictCause(value, response)
+          })
+        }
+        const value = await readServerValue(response, true)
+        await sleep(randomIntFromRange(0, 1500), signal)
+        if (!(await resolveConflict(value, response.status))) return { etag: null }
       }
-      return { etag: successEtag }
     } finally {
-      cleanupFetchSignal?.()
+      signal._cleanup?.()
     }
   },
   'chelonia/kv/get': async function (this: CheloniaContext, contractID: string, key: string): Promise<ChelKvGetResult | null> {
@@ -3121,7 +3040,7 @@ export default sbp('sbp/selectors/register', {
         `[kv/get] ${httpErrorMessage(response)}`, { cause: response.status }
       )
     }
-    const etag = response.headers.get('x-cid') || response.headers.get('etag')
+    const etag = responseEtag(response)
     const value = classifyKvValue<JSONType>(this, contractID, key, await response.json())
     if (value.status === 'malformed') throw value.error
     if (value.status === 'ahead') {
@@ -3176,8 +3095,6 @@ export default sbp('sbp/selectors/register', {
     })
   }
 }) as string[]
-
-type ComposedAbortSignal = AbortSignal & { _cleanup?: () => void }
 
 function composeSignals (signals: AbortSignal[]): ComposedAbortSignal {
   if (typeof AbortSignal.any === 'function') return AbortSignal.any(signals) as ComposedAbortSignal
@@ -3244,16 +3161,32 @@ function outputEncryptedOrUnencryptedMessage (
   return serializedData
 }
 
+const responseEtag = (response: Response): string | null =>
+  response.headers.get('x-cid') || response.headers.get('etag')
+
+// Only what the final conflict revealed; fields that couldn't be read are omitted
+function conflictCause (value: KvServerValue | undefined, response: Response): KvConflictCause {
+  if (!value) return { etag: responseEtag(response) }
+  const { etag } = value
+  if (value.status === 'absent') return { currentStatus: 'absent', currentData: undefined, etag }
+  if (value.status === 'ahead') {
+    return { currentStatus: 'ahead', requiredHeight: value.requiredHeight, etag }
+  }
+  if (value.status === 'present') {
+    try {
+      return { currentStatus: 'present', currentData: value.parsed.data, etag }
+    } catch {}
+  }
+  return { etag }
+}
+
 // Only a value stamped at or below the local height can be verified (lazily, on `.data`)
 function classifyKvValue<T> (
   ctx: CheloniaContext,
   contractID: string,
   key: string,
   serializedData: unknown
-):
-  | { status: 'present'; parsed: ParsedEncryptedOrUnencryptedMessage<T> }
-  | { status: 'ahead'; requiredHeight: number }
-  | { status: 'malformed'; error: Error } {
+): KvValueClass<T> {
   let height: number
   try {
     height = readHeightStamp(serializedData, ChelErrorKvHeightMalformed)

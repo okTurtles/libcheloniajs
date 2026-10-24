@@ -125,6 +125,10 @@ function waitFor (
   })
 }
 
+export async function sleep (ms: number, signal?: AbortSignal | null): Promise<void> {
+  await waitFor(ms, signal, () => () => {})
+}
+
 // Waits for an incoming event to bring the contract to `minHeight`; not while
 // a pubsub socket is down, as no event can arrive then
 export async function waitForHeight (
