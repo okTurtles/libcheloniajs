@@ -289,6 +289,19 @@ describe('Contract sync and removal', () => {
       assert.deepStrictEqual(resyncFlags(), [true, false])
       assert.deepStrictEqual(calls[1].state, left)
       assert.strictEqual(rootState().contracts[cid], undefined)
+      assert.strictEqual(rootState()[cid], undefined)
+      // Only the re-sync's teardown announced the removal
+      assert.deepStrictEqual(removed, [cid])
+    })
+
+    it('runs again at a permanent removal after a failed re-sync, which is announced', async () => {
+      const cid = server.contract!.hash()
+      await failResync(cid)
+      await within(sbp('chelonia/contract/remove', cid, { permanent: true }), 'remove')
+      assert.deepStrictEqual(resyncFlags(), [true, false])
+      assert.strictEqual(rootState().contracts[cid], null)
+      assert.strictEqual(rootState()[cid], undefined)
+      assert.deepStrictEqual(removedPermanently, [cid])
     })
 
     it('is not owed to a later contract with the same ID', async () => {
