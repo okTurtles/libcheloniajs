@@ -94,7 +94,10 @@ Read them through the selectors rather than the raw entry:
   without it) or stops being able to (slot deactivated or unregistered,
   contract removed); with `signal.reason` on abort; and with an
   `AbortError` on `chelonia/reset`. A resync doesn't end the wait
-  ([full rules](specs/KV-REVAMPED.md#35-settled-status)).
+  ([full rules](specs/KV-REVAMPED.md#35-settled-status)). It never
+  resolves for a slot that is never loaded (`autoLoad: 'never'`, or
+  `'on-demand'` until a `sync`, `update`, `clear` or applied pubsub
+  frame): pass a `signal` when that can happen.
 
 `CHELONIA_KV_STATUS_CHANGED` also carries `settled`, `previousSettled`
 and `heightAhead` (`null` when there is none), and fires when only
@@ -168,7 +171,7 @@ request):
 |---|---|---|
 | `onHeightAhead` | `'sync'` | `'reject'`: reject with `ChelErrorKvHeightAhead` at once (no wait, no sync). |
 | `maxHeightRecoveries` | `2` | Syncs before giving up. `0`: one short wait for incoming events, no sync. |
-| `signal` | none | Aborting rejects with `signal.reason`; a write the server already accepted still resolves. |
+| `signal` | none | Aborting rejects with `signal.reason`, even while the POST is in flight, when the server may still store the write (its echo or the next load brings it in). Once the server has confirmed the write, the call resolves. |
 
 Whatever the options, a slot found ahead still reloads once the
 contract reaches the height. The writers' `maxAttempts` (conflict
@@ -193,16 +196,26 @@ const value = await sbp('chelonia/kv/withHeightRecovery', contractID,
   () => sbp('chelonia/kv/get', contractID, key))
 
 await sbp('chelonia/kv/withHeightRecovery', contractID,
-  ({ heightWaitMs, queue }) => queue(() => sbp('chelonia/kv/set', contractID, key, data, {
-    encryptionKeyId, signingKeyId, onconflict, heightWaitMs
-  })),
-  { maxHeightRecoveries: 1 })
+  ({ heightWaitMs, queue }) => queue(async () => {
+    const encryptionKeyId = sbp('chelonia/contract/currentKeyIdByName', contractID, 'cek')
+    if (!encryptionKeyId) throw new Error(`${contractID} has no 'cek' key`)
+    return sbp('chelonia/kv/set', contractID, key, data, {
+      encryptionKeyId,
+      signingKeyId: sbp('chelonia/contract/currentKeyIdByName', contractID, 'csk'),
+      onconflict, heightWaitMs, signal
+    })
+  }),
+  { maxHeightRecoveries: 1, signal })
 ```
 
 The attempt runs outside the contract's queue unless it calls
 `queue(body)`. Pass `heightWaitMs` on to `kv/set`: it is `0` except on
 the last `'sync'` attempt, so earlier attempts sync instead of waiting. Only a
 `ChelErrorKvHeightAhead` thrown as is (not wrapped) is recovered.
+Resolve key IDs in the attempt, since a recovery sync may rotate keys
+(and `kv/set` stores plaintext without an `encryptionKeyId`), and pass
+`signal` to `kv/set` too: the `signal` option alone can't stop a
+running `kv/set`.
 
 `onconflict` gets `currentStatus` (`'present'`, `'absent'`, `'ahead'`
 or `'malformed'`). By default an unverifiable value fails the write
@@ -225,7 +238,8 @@ before its 30 s deadline. Raw `kv/get` and `kv/set` don't use the
 queue, so they settle (at worst, their waits for a height time out).
 
 Awaiting another contract's KV writes from a side effect works, but
-holds your contract's queue for as long as their recoveries take.
+holds your contract's queue for as long as their recoveries take, and
+deadlocks if that contract's queued work awaits yours in turn.
 Event listeners and raw pubsub handlers aren't awaited, so they may
 await anything.
 
@@ -255,7 +269,14 @@ Caveats:
 - A write awaited from another contract's side effect may now sync while
   holding that contract's queue (see [Where not to await](#where-not-to-await)).
   Where that stall matters, don't await it, or pass
-  `onHeightAhead: 'reject'`.
+  `onHeightAhead: 'reject'`. That gives the write up whenever the
+  contract is behind (even one event behind, on a stale-stamp `409`)
+  and nothing retries it, so use it only if the caller re-issues the
+  write.
+- A single-key `chelonia/kv/sync` that finds a value ahead now waits
+  and syncs before rejecting: up to about a minute with the default
+  timings when syncs are slow. `onHeightAhead: 'reject'` gives back the
+  old single GET.
 
 ## `KvSlotDefinition` reference
 
@@ -281,7 +302,7 @@ has neither a mirror value nor a `defaultValue`.
 
 Slot values must reject `null` / `undefined` anywhere in the parsed value, not just at the root. This invariant is enforced for schema-backed and schemaless slots alike: `null` is reserved for wire-clear semantics and `undefined` for unloaded mirror state, so model optional fields as explicit tagged unions or by omitting the field rather than using `T | null`.
 
-Slot writes resolve `encryptionKeyName` / `signingKeyName` inside the per-contract queue. A missing named encryption key rejects with `ChelErrorKvUpdateInvalid` instead of silently writing plaintext. Set `encryptionKeyName: null` explicitly to opt into plaintext slot storage. A missing signing key always rejects.
+Slot writes resolve `encryptionKeyName` / `signingKeyName` inside the per-contract queue. A missing named encryption key rejects with `ChelErrorKvUpdateInvalid` instead of silently writing plaintext. Set `encryptionKeyName: null` explicitly to opt into plaintext slot storage. A missing signing key always rejects. `chelonia/kv/queuedSet` now does the same with its `encryptionKeyName` (default `'cek'`) and `signingKeyName` (`'csk'`) options; it used to write plaintext when the encryption key was missing.
 
 KV pubsub frames should carry `cid`; legacy or non-Chelonia frames without one still apply as `reason: 'remote'`, but preserve the mirror's previous etag and may cause extra conflict retries on the next local write.
 
@@ -392,8 +413,9 @@ error. Rules:
 ("Reducer basis").
 
 **Abort after commit:** a `signal` that aborts after the server
-accepted the write doesn't undo it: the mirror is updated, events fire
-and `update` resolves with the committed value.
+confirmed the write doesn't undo it: the mirror is updated, events
+fire and `update` resolves with the committed value. An abort while
+the POST is in flight rejects ([Options and timings](#options-and-timings)).
 
 ## Inline definition via `chelonia/defineContract`
 

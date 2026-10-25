@@ -201,7 +201,7 @@ See [`files.md`](./files.md) for the prose guide and full signatures.
 | `chelonia/kv/set` | `src/chelonia.ts` | `POST /kv/:contractID/:key`. Encrypts, signs, retries `412` conflicts through `onconflict` (up to `maxAttempts`) and re-signs after a `409` (stale height stamp). For `heightWaitMs` and `allowUnverifiedConflict`, see [Raw `kv/get` and `kv/set`](./kv.md#raw-kvget-and-kvset). Resolves to `{ etag: string | null }`. |
 | `chelonia/kv/get` | `src/chelonia.ts` | `GET /kv/:contractID/:key`. Returns `ChelKvGetResult | null`: the parsed encrypted/unencrypted message with `.data` and `.etag`, or `null` on 404. Rejects with `ChelErrorKvHeightAhead` / `ChelErrorKvHeightMalformed` for a value it can't verify; never waits or syncs. |
 | `chelonia/kv/setFilter` | `src/chelonia.ts` | Restrict the set of KV keys subscribed to over pubsub. |
-| `chelonia/kv/queuedSet` | `src/chelonia-utils.ts` | Wrapper around `chelonia/kv/set` that serializes concurrent updates via `okTurtles.eventQueue` and recovers from height errors ([options](./kv.md#options-and-timings), plus `allowUnverifiedConflict`). Conflicts reject with `ChelErrorKvConflict`. Prefer this over `kv/set` for typical writes. |
+| `chelonia/kv/queuedSet` | `src/chelonia-utils.ts` | Wrapper around `chelonia/kv/set` that serializes concurrent updates via `okTurtles.eventQueue` and recovers from height errors ([options](./kv.md#options-and-timings), plus `allowUnverifiedConflict`). Keys come from `encryptionKeyName` (default `'cek'`; `null` writes plaintext) and `signingKeyName` (default `'csk'`); a missing one rejects with `ChelErrorKvUpdateInvalid`. Conflicts reject with `ChelErrorKvConflict`. Prefer this over `kv/set` for typical writes. |
 | `chelonia/kv/withHeightRecovery` | `src/kv.ts` | `(contractID, attempt, options?)`. Runs `attempt({ recoveries, heightWaitMs, queue })`, syncing the contract and retrying when it throws `ChelErrorKvHeightAhead`. Wraps raw `kv/get` / `kv/set`: see [Raw `kv/get` and `kv/set`](./kv.md#raw-kvget-and-kvset). |
 
 ## KV slots
@@ -224,7 +224,7 @@ All slot selectors live in `src/kv.ts`.
 | `chelonia/kv/clear` | `(contractID, key, options?)`. Reset a slot to its declared `defaultValue` by writing the internal clear sentinel (`null`), even over a value it can't verify; the mirror value becomes `undefined` (`read` gives the default) and status returns to `'non-init'`. Options as for `update` (`maxAttempts`, `signal`, `onHeightAhead`, `maxHeightRecoveries`). |
 | `chelonia/kv/status` | Report the `KvLoadStatus` of a single slot (`'non-init' | 'loading' | 'loaded' | 'error'`) or the aggregate status of all slots for a contract. |
 | `chelonia/kv/settledStatus` | `(contractID, key)`. The active slot's status once it has [settled](./kv.md#pending-vs-settled) (`'loaded'`, `'non-init'` or `'error'`), else `undefined`. |
-| `chelonia/kv/whenSettled` | `(contractID, key, { signal? })`. Resolves with `settledStatus` once it is defined; rejects with `ChelErrorKvSlotUnknown` when the slot can't become active. |
+| `chelonia/kv/whenSettled` | `(contractID, key, { signal? })`. Resolves with `settledStatus` once it is defined; rejects with `ChelErrorKvSlotUnknown` when the slot can't become active. Never resolves for a slot that is never loaded: pass a `signal` ([details](./kv.md#pending-vs-settled)). |
 | `chelonia/kv/refreshFilters` | Re-evaluate every slot's `match` predicate against the current root state. Call after login / logout transitions. |
 
 Never await `update`, `clear`, `queuedSet`, `sync`,

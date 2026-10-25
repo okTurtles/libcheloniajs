@@ -495,6 +495,7 @@ if it is active, settled and not `loading`, else `undefined`.
 | `ChelErrorKvSlotUnknown`, at once | No slot is defined for the key (for the contract's type, or for any type while it is unknown), or the contract is reconciled and the slot inactive. |
 | `ChelErrorKvSlotUnknown`, later | The slot is deactivated or unregistered; the contract is removed (also if it never activated, e.g. its first sync failed and it was released); its type becomes known without the slot; its first reconcile leaves the slot inactive. |
 | `signal.reason` | `signal` aborts (also if already settled). |
+| Never settles | The slot is never loaded (`autoLoad: 'never'`, or `'on-demand'` without a `sync`, `update`, `clear` or applied frame): pass a `signal`. |
 | `AbortError` | `chelonia/reset`'s teardown. |
 
 **Resync.** A contract resync keeps `_kv[contractID]` (values and
@@ -889,7 +890,7 @@ same events; the only difference is who authors the reducer.
 | `ChelErrorKvValidation` | The reducer's output failed `schema.parse`, or the server's `currentData` on a conflict retry failed `schema.parse`. The underlying issue is attached as `.cause`. |
 | `ChelErrorKvConflict` | All `maxAttempts` attempts hit a `412` and the reducer kept producing a new value (i.e. real contention, not malformed data). `.cause` (`KvConflictCause`) describes the last `412` only (§3.4). |
 | `ChelErrorKvHeightAhead` / `ChelErrorKvHeightMalformed` | The server value can't be verified (§3.4): height recovery didn't reach its height, or its stamp is malformed (`clear` overwrites it). |
-| `AbortError` | `signal` (or `chelonia/reset`) aborted before the server accepted the write. The mirror value is unchanged and no `CHELONIA_KV_UPDATED` fires; an abort after that is ignored. |
+| `AbortError` | `signal` (or `chelonia/reset`) aborted before `kv/set` resolved. The call leaves the mirror unchanged, but a write aborted mid-POST may still be stored (its echo or the next load applies it); an abort after that is ignored. |
 | underlying network / HTTP errors | Propagated verbatim from `chelonia/kv/set` for non-409/412 failures (e.g. 5xx, offline). The mirror is not updated by the rejected call and `status` is **not** flipped to `'error'` (that state is reserved for *load* failures). If the server committed an ambiguous write before the failure surfaced, the later pubsub notification can still reconcile the mirror as a `reason: 'remote'` update. |
 
 Returning `KV_NOOP` from the reducer resolves with `undefined` and is
@@ -2655,7 +2656,7 @@ Mirror the structure of `src/journal.test.ts`:
     of `maxAttempts` rejects with `ChelErrorKvConflict` (`.cause`
     describing the last `412`); a synthesised
     5xx rejects with the underlying error and leaves `status`
-    unchanged; `signal.abort()` before the write is accepted rejects
+    unchanged; `signal.abort()` before `kv/set` resolves rejects
     with `AbortError` and the mirror is unchanged; after it, `update`
     resolves.
 20. **Index invariant.** A scenario that exercises
