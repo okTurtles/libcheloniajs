@@ -2,7 +2,7 @@ import sbp from '@sbp/sbp'
 import assert from 'node:assert'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 
-import { kvHeightAheadCause } from './errors.js'
+import { ChelErrorKvHeightAhead, kvHeightAheadCause } from './errors.js'
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import {
   activate, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes, gateLane, holdSyncs,
@@ -349,5 +349,42 @@ describe('chelonia/reset', () => {
     setLocalHeight(AHEAD)
     await drainLanes()
     assert.strictEqual(gets('prefs'), loads)
+  })
+})
+
+describe('A contract removal', () => {
+  installKvHarness()
+
+  it('keeps a recovery sync queued behind it from subscribing the contract again', async () => {
+    kvHeightTimings.pendingFallbackMs = 20
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    for (const via of ['a write', 'a deferred load']) {
+      setupContract()
+      await activate()
+      const before = syncs.count
+      const open = gateLane('internal')
+      const removing = within(sbp('chelonia/contract/remove', CONTRACT_ID), 'the removal')
+      let recovering: Promise<unknown> | undefined
+      if (via === 'a write') {
+        const error = new ChelErrorKvHeightAhead('ahead', {
+          cause: { requiredHeight: AHEAD, exact: true, localHeight: 0, etag: null, httpStatus: 412 }
+        })
+        const attempt = () => { throw error }
+        recovering = assert.rejects(within(
+          sbp('chelonia/kv/withHeightRecovery', CONTRACT_ID, attempt), 'the recovery'
+        ), (e) => e === error)
+        await waitMicrotasks()
+      } else {
+        sbp('chelonia/kv/_onUnverifiableFrame', CONTRACT_ID, 'prefs', AHEAD)
+        // Its fallback falls due
+        await sleep(100)
+      }
+      open()
+      await removing
+      await recovering
+      await drainLanes()
+      assert.strictEqual(syncs.count, before, via)
+      assert.strictEqual(rootState().contracts[CONTRACT_ID], undefined, via)
+    }
   })
 })

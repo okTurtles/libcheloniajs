@@ -183,6 +183,33 @@ describe('Pubsub KV frames the contract can not verify yet', () => {
   })
 })
 
+describe('A pubsub KV frame after a clear that recovered', () => {
+  installKvHarness()
+
+  it("applies without a GET: the clear's first conflict isn't kept", async () => {
+    kvHeightTimings.pendingFallbackMs = 60_000
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    connectPubsub()
+    await activate()
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    deliverFrame('prefs')
+    await drainLanes()
+    syncs.catchUp = true
+    await within(sbp('chelonia/kv/clear', CONTRACT_ID, 'prefs') as Promise<void>, 'the clear')
+    await drainLanes()
+    // A conflict, a stale stamp, then a commit after the recovery sync
+    assert.deepStrictEqual(server.posts().map(({ status, height }) => [status, height]), [
+      [412, String(START_HEIGHT)], [409, String(START_HEIGHT)], [204, String(AHEAD)]
+    ])
+    writeAsDeviceB('prefs', { theme: 'light' })
+    const before = gets('prefs')
+    deliverFrame('prefs')
+    await drainLanes()
+    assert.deepStrictEqual(read('prefs'), { theme: 'light' })
+    assert.strictEqual(gets('prefs'), before)
+  })
+})
+
 describe('Vetoed pubsub KV frame work', () => {
   installKvHarness()
 
