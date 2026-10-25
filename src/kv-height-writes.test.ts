@@ -765,6 +765,8 @@ const breakSlot = async (key: string, value: JSONType) => {
   await assert.rejects(within(sbp('chelonia/kv/sync', CONTRACT_ID, key), `reload of ${key}`))
   assert.deepStrictEqual([mirror(key)?.status, mirror(key)?.value], ['error', value])
 }
+let vetoLoads = false
+sbp('sbp/filters/selector/add', 'chelonia/kv/_loadSlotNow', () => !vetoLoads)
 
 describe('update\'s reducer basis', () => {
   installKvHarness()
@@ -858,6 +860,16 @@ describe('update\'s reducer basis', () => {
     assert.strictEqual(gets('names'), 1)
     assert.deepStrictEqual(writes('names'), [[etag, 204]])
 
+    // A reload that a filter vetoes fails like any other
+    vetoLoads = true
+    try {
+      const vetoed = counted(names)
+      await assert.rejects(updateWith('other', { ifMatch: '*', updater: vetoed.updater }),
+        { name: 'ChelErrorUnexpected', message: /vetoed/ })
+      assert.deepStrictEqual(vetoed.calls, [])
+    } finally {
+      vetoLoads = false
+    }
     await breakSlot('guarded', ['a'])
     failGets('guarded')
     failGets('other')

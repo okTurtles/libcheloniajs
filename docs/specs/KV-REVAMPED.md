@@ -388,8 +388,9 @@ value `ahead`:
   verified empty outcome while a wait remains settles as `loading`
   (not `non-init`) and re-arms the 10 s period.
 - Waits end on slot deactivation, contract release or resync, and
-  `chelonia/reset`. A deferred reload that can't start (vetoed lane)
-  settles the slot (`error` without a value) and keeps `heightAhead`.
+  `chelonia/reset`. A deferred reload that can't start (an SBP filter
+  vetoed it) settles the slot (`error` without a value) and keeps
+  `heightAhead`.
 - An `ahead` pubsub frame registers a wait with reason `'remote'` and
   is applied neither to the slot nor to a raw KV handler (a configured
   raw handler logs a warning). A `malformed` frame is logged, reaches

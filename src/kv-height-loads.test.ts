@@ -144,10 +144,15 @@ describe('waitForHeight', () => {
   })
 })
 
-let vetoedQueue: string | undefined
+// What the filters below veto: a lane (by queue name) or a private load selector
+let vetoed: string | undefined
 sbp('sbp/filters/selector/add', 'chelonia/private/queueEvent',
-  (_domain: string, _selector: string, [queueName]: unknown[]) => queueName !== vetoedQueue
+  (_domain: string, _selector: string, [queueName]: unknown[]) => queueName !== vetoed
 )
+const LOAD_SELECTORS = ['chelonia/kv/_loadSlot', 'chelonia/kv/_loadSlotNow']
+for (const selector of LOAD_SELECTORS) {
+  sbp('sbp/filters/selector/add', selector, (_domain: string, name: string) => name !== vetoed)
+}
 
 const AHEAD = START_HEIGHT + 2
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -211,22 +216,55 @@ describe('Slot loads of values from a newer contract height', () => {
     defineSlot({ key: 'prefs', defaultValue: {} })
     await activate()
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
-    await findAhead('prefs')
-    assert.strictEqual(settledStatus('prefs'), 'loaded')
-    assert.deepStrictEqual(read('prefs'), { theme: 'light' })
-    assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
-
-    const statuses: KvLoadStatus[] = []
-    const listener = ({ status }: { status: KvLoadStatus }) => { statuses.push(status) }
+    const events: Array<[KvLoadStatus, unknown]> = []
+    const listener = ({ status, heightAhead }: { status: KvLoadStatus; heightAhead: unknown }) => {
+      events.push([status, heightAhead])
+    }
     sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, listener)
     try {
+      await findAhead('prefs')
+      // Marked before it shows `loaded` again
+      assert.deepStrictEqual(events.filter(([status]) => status !== 'loading'),
+        [['loaded', { requiredHeight: AHEAD }]])
+      assert.strictEqual(settledStatus('prefs'), 'loaded')
+      assert.deepStrictEqual(read('prefs'), { theme: 'light' })
+      assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
+
+      events.length = 0
       setLocalHeight(AHEAD)
       await until(() => mirror('prefs')?.heightAhead === undefined, 'the reload')
     } finally {
       sbp('okTurtles.events/off', CHELONIA_KV_STATUS_CHANGED, listener)
     }
     assert.deepStrictEqual(read('prefs'), { theme: 'dark' })
-    assert.deepStrictEqual(statuses, ['loaded'])
+    assert.deepStrictEqual(events.map(([status]) => status), ['loaded'])
+  })
+
+  it("doesn't give a slot re-activated during its load the old status back", async () => {
+    writeAsDeviceB('prefs', { theme: 'light' })
+    let active = true
+    defineSlot({ key: 'prefs', defaultValue: {}, match: () => active })
+    await activate()
+    let answer!: () => void
+    let held = false
+    server.onGet = () => {
+      held = true
+      return new Promise<void>((resolve) => { answer = resolve })
+    }
+    const refreshing = within(sbp('chelonia/kv/sync', CONTRACT_ID) as Promise<void>, 'the refresh')
+    await until(() => held, 'the GET')
+    server.onGet = undefined
+    // Its entry is seeded again, `non-init`, while the GET is out
+    for (const match of [false, true]) {
+      active = match
+      sbp('chelonia/kv/refreshFilters', CONTRACT_ID)
+    }
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    answer()
+    await refreshing
+    await drainLanes()
+    assert.deepStrictEqual([mirror('prefs')?.status, read('prefs')], ['loading', {}])
+    assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
   })
 
   it('syncs once after the fallback period, then settles an empty slot as an error', async () => {
@@ -398,29 +436,33 @@ describe('Slot loads of values from a newer contract height', () => {
     }
   })
 
-  it("settles the slot and keeps the marker when the reload can't start", async () => {
-    await deferEmptySlot()
-    vetoedQueue = `public:${CONTRACT_ID}`
-    try {
-      setLocalHeight(AHEAD)
-      await until(() => settledStatus('prefs') === 'error', 'the vetoed reload to settle')
-    } finally {
-      vetoedQueue = undefined
-    }
-    assert.strictEqual(mirror('prefs')?.lastError?.name, 'ChelErrorUnexpected')
-    assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
-    assert.ok(logs.logged.some(({ method, args }) =>
-      method === 'error' && String(args[0]).includes('deferred reload')))
-  })
+  for (const target of [`public:${CONTRACT_ID}`, ...LOAD_SELECTORS]) {
+    it(`settles the slot and keeps the marker when the reload can't start (${target})`, async () => {
+      await deferEmptySlot()
+      vetoed = target
+      try {
+        setLocalHeight(AHEAD)
+        await until(() => settledStatus('prefs') === 'error', 'the vetoed reload to settle')
+      } finally {
+        vetoed = undefined
+      }
+      assert.strictEqual(mirror('prefs')?.lastError?.name, 'ChelErrorUnexpected')
+      assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
+      assert.ok(logs.logged.some(({ method, args }) =>
+        method === 'error' && String(args[0]).includes('deferred reload')))
+    })
+  }
 })
 
 describe('Single-key kv/sync of a value from a newer contract height', () => {
   installKvHarness()
 
+  // The statuses the key changes to
   const statusesOf = async (key: string, body: () => Promise<void>) => {
     const statuses: KvLoadStatus[] = []
-    const listener = (event: { key: string; status: KvLoadStatus }) => {
-      if (event.key === key) statuses.push(event.status)
+    type Change = { key: string; status: KvLoadStatus; previousStatus: KvLoadStatus }
+    const listener = ({ key: changed, status, previousStatus }: Change) => {
+      if (changed === key && status !== previousStatus) statuses.push(status)
     }
     sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, listener)
     try {
@@ -587,4 +629,22 @@ describe('Single-key kv/sync of a value from a newer contract height', () => {
     }
     assert.strictEqual(server.log.length, before)
   })
+
+  for (const target of LOAD_SELECTORS) {
+    it(`rejects, and settles the slot, when its load can't start (${target})`, async () => {
+      defineSlot({ key: 'prefs', defaultValue: {}, autoLoad: 'never' })
+      defineSlot({ key: 'other', defaultValue: {}, autoLoad: 'never' })
+      await activate()
+      vetoed = target
+      try {
+        await assert.rejects(sync('prefs'), { name: 'ChelErrorUnexpected', message: /vetoed/ })
+        // The aggregate form still never rejects
+        await within(sbp('chelonia/kv/sync', CONTRACT_ID) as Promise<void>, 'the aggregate sync')
+      } finally {
+        vetoed = undefined
+      }
+      assert.deepStrictEqual([await whenSettled('prefs'), await whenSettled('other')], ['error', 'error'])
+      assert.strictEqual(gets('prefs') + gets('other'), 0)
+    })
+  }
 })

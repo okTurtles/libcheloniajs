@@ -2959,10 +2959,13 @@ describe('KV slot API', () => {
     await setupContract(c, contractType)
     sbp('chelonia/test/seedEchoCID', `${c}::removed`)
     sbp('chelonia/test/seedEchoCID', 'other::removed')
+    assert.ok(rootState()._kv?.[c]?.removed)
 
     sbp('chelonia/kv/_cleanupContractSlots', contractType, manifest, { removed: {} }, {})
     assert.strictEqual(sbp('chelonia/test/hasEchoCID', `${c}::removed`), false)
     assert.strictEqual(sbp('chelonia/test/hasEchoCID', 'other::removed'), true)
+    // Its only key gone, the contract's record goes too
+    assert.strictEqual(rootState()._kv?.[c], undefined)
   })
 
   it('54b: manifest ownership mismatch does not remove inline slots', async () => {
