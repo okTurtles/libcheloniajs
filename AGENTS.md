@@ -84,9 +84,10 @@ src/
 ├── persistent-actions.ts # PersistentAction queue with retry
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
+├── kv-constants.ts       # KV constants (`KV_NOOP`, statuses, reasons, key-name defaults), re-exported from the root
 ├── kv-runtime.ts         # KV runtime maps: created by _init, replaced by reset (internal)
 ├── kv-height.ts          # KV height stamps, height waits and recovery syncs (internal)
-├── kv-checks.ts          # Option, key-name and re-entrancy checks of the KV writers (internal)
+├── kv-checks.ts          # Re-entrancy, `maxAttempts` and signing/encryption key checks of the KV selectors (internal)
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time synchronization via monotonic offsets
 ├── chelonia-utils.ts     # Optional utility selectors (e.g., chelonia/kv/queuedSet)
@@ -355,7 +356,8 @@ test must fail rather than hang when the behaviour it checks regresses: poll wit
 `until(cond, label)` and bound a promise that might never settle with `within(promise, label)`.
 `makeKvServer` there simulates the server's KV store (`if-match` and height checks).
 `src/kv-height-harness.ts` (imports `chelonia.ts`, excluded from the CJS build) runs the real
-KV slot layer against it for the `kv-height*.test.ts` files; test files may import these two
+KV slot layer against it for the `kv-height*.test.ts` files, and holds the helpers they share
+(`gets`, `read`, `sync`, `update`, `findAhead`, …); test files may import these two
 modules, never each other.
 
 `npm test` passes `--test-timeout=60000`. On Node 22, which CI uses, that bounds a whole

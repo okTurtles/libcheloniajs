@@ -70,11 +70,11 @@ loaded yet: both are `'non-init'`. Each entry therefore also carries:
 
 - `settled`: `true` once the slot has reached a final outcome since it
   last became active: a load found a value or none, a pubsub frame or a
-  local write was applied, a load failed, or the library gave up
-  waiting for a contract height. It turns `false` whenever the slot
-  becomes active (after a contract sync or resync, also for entries
-  restored from persistence or by `chelonia/reset(newState)`), then
-  stays `true` through later reloads.
+  local write was applied, a load failed (or an SBP filter vetoed it),
+  or the library gave up waiting for a contract height. It turns
+  `false` whenever the slot becomes active (after a contract sync or
+  resync, also for entries restored from persistence or by
+  `chelonia/reset(newState)`), then stays `true` through later reloads.
 - `heightAhead: { requiredHeight }`: the server holds a value for the
   key that this client can't verify yet (see
   [Contract heights](#contract-heights)). It is removed once a load or
@@ -93,10 +93,11 @@ Read them through the selectors rather than the raw entry:
   (none is defined for it, or the contract's slots were reconciled
   without it) or stops being able to (slot deactivated or unregistered,
   contract removed); with `signal.reason` on abort; and with an
-  `AbortError` on `chelonia/reset`. A resync doesn't end the wait
+  `AbortError` on `chelonia/reset` or `chelonia/_init`. A resync
+  doesn't end the wait
   ([full rules](specs/KV-REVAMPED.md#35-settled-status)). It never
-  resolves for a slot that is never loaded (`autoLoad: 'never'`, or
-  `'on-demand'` until a `sync`, `update`, `clear` or applied pubsub
+  resolves for a slot that is never loaded (`autoLoad: 'never'` or
+  `'on-demand'`, until a `sync`, `update`, `clear` or applied pubsub
   frame): pass a `signal` when that can happen.
 
 `CHELONIA_KV_STATUS_CHANGED` also carries `settled`, `previousSettled`
@@ -150,7 +151,9 @@ still holds), but have their own names.
   `ChelErrorKvHeightAhead`: they sync the contract and retry. A write
   gives up its place in the contract's queue while the sync runs, and
   concurrent callers share one sync. A slot write that still fails on a
-  value ahead defers a reload, like a load.
+  value ahead defers a reload, like a load. A recovery sync that fails,
+  or that an SBP filter vetoes, ends the recovery after one short wait
+  for incoming events.
 - **`chelonia/kv/set`** waits briefly for incoming events to bring the
   contract to a conflicting value's height before giving up. After a
   `409` it re-signs the same data once the contract catches up (waiting
@@ -163,9 +166,10 @@ still holds), but have their own names.
 ### Options and timings
 
 `update`, `clear`, `queuedSet`, single-key `sync` and
-`withHeightRecovery` accept these options (`null` means the default;
-invalid values reject with `ChelErrorKvUpdateInvalid` before any
-request):
+`withHeightRecovery` accept these options (`null` means the default,
+for each option and for the whole options argument of `clear`, `sync`
+and `withHeightRecovery`; invalid values reject with
+`ChelErrorKvUpdateInvalid` before any request):
 
 | Option | Default | Effect |
 |---|---|---|

@@ -13,6 +13,7 @@ import type {
   CheloniaContext,
   KvHeightAheadCause,
   KvHeightAheadMode,
+  KvHeightListener,
   KvHeightRecoveryAttempt,
   KvHeightRecoveryOptions
 } from './types.js'
@@ -102,7 +103,16 @@ export function composeSignals (signals: AbortSignal[]): ComposedAbortSignal {
   return composed
 }
 
-type HeightListeners = Set<{ minHeight: number; fire: () => void }>
+// Aborted by `signal` or by `chelonia/reset`. Captured now, as a reset replaces
+// the controller it aborts.
+export const sessionSignal = (
+  ctx: CheloniaContext,
+  signal?: AbortSignal | null
+): ComposedAbortSignal => signal
+  ? composeSignals([ctx.abortController.signal, signal])
+  : ctx.abortController.signal
+
+type HeightListeners = Set<KvHeightListener>
 
 const dropIfEmpty = (ctx: CheloniaContext, contractID: string, listeners: HeightListeners) => {
   if (!listeners.size && ctx.kvHeightListeners.get(contractID) === listeners) {
@@ -110,7 +120,8 @@ const dropIfEmpty = (ctx: CheloniaContext, contractID: string, listeners: Height
   }
 }
 
-// Calls `fire` once, when the local contract commits `minHeight` or later
+// Calls `fire` once, when the local contract commits `minHeight` or later. A
+// height already reached doesn't fire it: callers check that first.
 export function onHeight (
   ctx: CheloniaContext,
   contractID: string,
@@ -294,13 +305,17 @@ function recoverySync (ctx: CheloniaContext, contractID: string): Promise<void> 
   if (running) return running
   const recoveries = ctx.kvRecoveries
   const sync = (async () => {
+    let ran = false
     await sbp('chelonia/private/queueEvent', contractID, async () => {
+      ran = true
       // Syncing a released contract would subscribe it again
       if (!ctx.subscriptionSet.has(contractID)) {
         throw new ChelErrorUnexpected(`[chelonia/kv] ${contractID} is no longer subscribed`)
       }
       await sbp('chelonia/private/in/syncContract', contractID)
     })
+    // An SBP filter vetoed it
+    if (!ran) throw new ChelErrorUnexpected(`[chelonia/kv] The recovery sync of ${contractID} never ran`)
   })()
   const forget = () => {
     if (recoveries.get(contractID) === sync) recoveries.delete(contractID)
@@ -349,11 +364,12 @@ export async function recoverContractHeight (
     })
   }
   const why = outcome.failed ? 'its sync failed' : 'its sync is taking too long'
+  const details = outcome.failed ? [outcome.error] : []
   if (!reached()) {
-    console.warn(`[chelonia/kv] Height recovery for ${contractID} gave up: ${why}`, outcome.error)
+    console.warn(`[chelonia/kv] Height recovery for ${contractID} gave up: ${why}`, ...details)
     throw error
   }
-  console.warn(`[chelonia/kv] ${contractID} reached the height, though ${why}`, outcome.error)
+  console.warn(`[chelonia/kv] ${contractID} reached the height, though ${why}`, ...details)
 }
 
 export async function withHeightRecovery<T> (
@@ -364,9 +380,7 @@ export async function withHeightRecovery<T> (
   operation = 'withHeightRecovery'
 ): Promise<T> {
   const { onHeightAhead, maxHeightRecoveries } = resolveRecoveryOptions(options, operation)
-  const signal: ComposedAbortSignal = options?.signal
-    ? composeSignals([ctx.abortController.signal, options.signal])
-    : ctx.abortController.signal
+  const signal = sessionSignal(ctx, options?.signal)
   const queue = <R>(body: () => Promise<R>) => queueOnLane(contractID, signal, body)
   try {
     for (let recoveries = 0; ; recoveries++) {

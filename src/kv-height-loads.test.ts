@@ -1,17 +1,20 @@
 import sbp from '@sbp/sbp'
 import assert from 'node:assert'
-import { beforeEach, describe, it } from 'node:test'
+import { afterEach, beforeEach, describe, it } from 'node:test'
 
-import { isKvHeightAhead, kvHeightAheadCause } from './errors.js'
-import { CHELONIA_KV_STATUS_CHANGED, CONTRACT_IS_SYNCING, CONTRACTS_MODIFIED } from './events.js'
+import { isKvHeightAhead } from './errors.js'
 import {
-  activate, CONTRACT_ID, defineSlot, drainLanes, gateLane, holdSyncs, installKvHarness, logs,
-  mirror, rootState, server, setLocalHeight, START_HEIGHT, syncs, writeAsDeviceB
+  CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED, CONTRACT_IS_SYNCING, CONTRACTS_MODIFIED
+} from './events.js'
+import {
+  activate, aheadAt, CONTRACT_ID, defineSlot, drainLanes, findAhead, gateLane, gets, holdSyncs,
+  installKvHarness, logs, mirror, read, rootState, server, setLocalHeight, settledStatus, sleep,
+  START_HEIGHT, sync, syncs, whenSettled, writeAsDeviceB
 } from './kv-height-harness.js'
 import {
   kvHeightTimings, notifyContractHeight, onHeight, waitForHeight, waitForHeightAfterSync
 } from './kv-height.js'
-import { captureConsole, until, within } from './test-utils.js'
+import { captureConsole, until, waitMicrotasks, within } from './test-utils.js'
 import type { CheloniaContext, KvHeightRecoveryOptions, KvLoadStatus } from './types.js'
 
 const CID = 'zHeightContract'
@@ -24,6 +27,10 @@ const settledSoon = (promise: Promise<unknown>) =>
 
 describe('waitForHeight', () => {
   let ctx: CheloniaContext
+  // Ends the waits a test leaves pending, so that none outlives the file
+  let waits = new AbortController()
+  beforeEach(() => { waits = new AbortController() })
+  afterEach(() => waits.abort())
   // What committing an event does
   const commit = (height: number, contractID = CID) => {
     contracts[contractID] = { height }
@@ -47,7 +54,7 @@ describe('waitForHeight', () => {
   })
 
   it('wakes when the contract commits the height, not before', async () => {
-    const wait = waitForHeight(ctx, CID, 12, { timeoutMs: 60_000 })
+    const wait = waitForHeight(ctx, CID, 12, { timeoutMs: 60_000, signal: waits.signal })
     commit(11)
     commit(12, 'zOtherContract')
     assert.strictEqual(await settledSoon(wait), PENDING)
@@ -72,7 +79,7 @@ describe('waitForHeight', () => {
   it("doesn't wait while the pubsub socket isn't open", async () => {
     for (const readyState of [null, WebSocket.CONNECTING, WebSocket.CLOSING, WebSocket.CLOSED]) {
       ctx.pubsub = pubsubWith(readyState)
-      const wait = waitForHeight(ctx, CID, 11, { timeoutMs: 60_000 })
+      const wait = waitForHeight(ctx, CID, 11, { timeoutMs: 60_000, signal: waits.signal })
       assert.strictEqual(await within(wait, `wait (socket ${readyState})`), false)
     }
   })
@@ -81,7 +88,7 @@ describe('waitForHeight', () => {
     for (const pubsub of [pubsubWith(WebSocket.OPEN), undefined]) {
       ctx.pubsub = pubsub as CheloniaContext['pubsub']
       const height = contracts[CID].height + 1
-      const wait = waitForHeight(ctx, CID, height, { timeoutMs: 60_000 })
+      const wait = waitForHeight(ctx, CID, height, { timeoutMs: 60_000, signal: waits.signal })
       assert.strictEqual(await settledSoon(wait), PENDING)
       commit(height)
       assert.strictEqual(await within(wait, 'the wait'), true)
@@ -89,22 +96,22 @@ describe('waitForHeight', () => {
   })
 
   it("doesn't time out at once when asked to wait 2^31 ms or more", async () => {
-    const wait = waitForHeight(ctx, CID, 11, { timeoutMs: 2 ** 31 })
+    const wait = waitForHeight(ctx, CID, 11, { timeoutMs: 2 ** 31, signal: waits.signal })
     assert.strictEqual(await settledSoon(wait), PENDING)
     commit(11)
     assert.strictEqual(await within(wait, 'the wait'), true)
   })
 
   it('still wakes the other waits when a height listener throws', async () => {
-    const logs = captureConsole(['error'])
+    const errors = captureConsole(['error'])
     try {
       onHeight(ctx, CID, 11, () => { throw new Error('listener failed') })
-      const wait = waitForHeight(ctx, CID, 11, { timeoutMs: 60_000 })
+      const wait = waitForHeight(ctx, CID, 11, { timeoutMs: 60_000, signal: waits.signal })
       commit(11)
       assert.strictEqual(await within(wait, 'the wait'), true)
-      assert.strictEqual(logs.logged.length, 1)
+      assert.strictEqual(errors.logged.length, 1)
     } finally {
-      logs.restore()
+      errors.restore()
     }
   })
 
@@ -121,7 +128,7 @@ describe('waitForHeight', () => {
     })
 
     it('waits for the sync to end first, even with the socket closed', async () => {
-      const wait = waitForHeightAfterSync(ctx, CID, 11, { timeoutMs: 60_000 })
+      const wait = waitForHeightAfterSync(ctx, CID, 11, { timeoutMs: 60_000, signal: waits.signal })
       commit(11)
       endSync('zOtherContract')
       assert.strictEqual(await settledSoon(wait), PENDING)
@@ -137,7 +144,7 @@ describe('waitForHeight', () => {
     })
 
     it("doesn't wait for the height once the sync ended while the socket is closed", async () => {
-      const wait = waitForHeightAfterSync(ctx, CID, 11, { timeoutMs: 60_000 })
+      const wait = waitForHeightAfterSync(ctx, CID, 11, { timeoutMs: 60_000, signal: waits.signal })
       endSync()
       assert.strictEqual(await within(wait, 'the wait'), false)
     })
@@ -155,20 +162,6 @@ for (const selector of LOAD_SELECTORS) {
 }
 
 const AHEAD = START_HEIGHT + 2
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-const gets = (key: string) =>
-  server.log.filter((request) => request.method === 'GET' && request.key === key).length
-const read = (key: string) => sbp('chelonia/kv/read', CONTRACT_ID, key)
-const sync = (key: string, options?: KvHeightRecoveryOptions) =>
-  within(sbp('chelonia/kv/sync', CONTRACT_ID, key, options) as Promise<void>, `kv/sync of ${key}`)
-const settledStatus = (key: string) => sbp('chelonia/kv/settledStatus', CONTRACT_ID, key)
-const whenSettled = (key: string) =>
-  within(sbp('chelonia/kv/whenSettled', CONTRACT_ID, key) as Promise<string>, `${key} to settle`)
-const aheadAt = (height: number) => (e: unknown) =>
-  kvHeightAheadCause(e)?.requiredHeight === height
-// A load that finds the value ahead, without recovering
-const findAhead = (key: string, height = AHEAD) =>
-  assert.rejects(sync(key, { onHeightAhead: 'reject' }), aheadAt(height))
 // What a pubsub frame for `prefs` from contract height `height` does
 const frameAhead = (height: number) =>
   sbp('chelonia/kv/_onUnverifiableFrame', CONTRACT_ID, 'prefs', height)
@@ -179,7 +172,7 @@ const deferEmptySlot = async (match?: () => boolean) => {
   defineSlot({ key: 'prefs', defaultValue: {}, match })
   await activate()
   writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
-  await findAhead('prefs')
+  await findAhead('prefs', AHEAD)
 }
 
 describe('Slot loads of values from a newer contract height', () => {
@@ -199,7 +192,7 @@ describe('Slot loads of values from a newer contract height', () => {
       logs.logged.some((entry) => entry.method === method && isKvHeightAhead(entry.args[1]))
     assert.ok(logged('debug') && !logged('error'), 'a deferral is logged at debug level')
     // Another finding of the same value doesn't add a reload
-    await findAhead('prefs')
+    await findAhead('prefs', AHEAD)
     const before = gets('prefs')
 
     setLocalHeight(AHEAD)
@@ -222,7 +215,7 @@ describe('Slot loads of values from a newer contract height', () => {
     }
     sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, listener)
     try {
-      await findAhead('prefs')
+      await findAhead('prefs', AHEAD)
       // Marked before it shows `loaded` again
       assert.deepStrictEqual(events.filter(([status]) => status !== 'loading'),
         [['loaded', { requiredHeight: AHEAD }]])
@@ -274,7 +267,7 @@ describe('Slot loads of values from a newer contract height', () => {
     assert.strictEqual(settledStatus('prefs'), 'non-init')
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
     const before = syncs.count
-    await findAhead('prefs')
+    await findAhead('prefs', AHEAD)
     // No longer known to be empty
     assert.strictEqual(mirror('prefs')?.status, 'loading')
 
@@ -283,7 +276,7 @@ describe('Slot loads of values from a newer contract height', () => {
     assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
     assert.strictEqual(syncs.count, before + 1)
     // The next finding arms a new fallback
-    await findAhead('prefs')
+    await findAhead('prefs', AHEAD)
     await until(() => syncs.count === before + 2, 'the second fallback sync')
     // Catching up later still reloads the key
     setLocalHeight(AHEAD)
@@ -348,7 +341,7 @@ describe('Slot loads of values from a newer contract height', () => {
     assert.notStrictEqual(mirror('prefs')?.lastError?.name, 'ChelErrorKvHeightAhead')
     kvHeightTimings.pendingFallbackMs = 20
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
-    await findAhead('prefs')
+    await findAhead('prefs', AHEAD)
     await until(() => mirror('prefs')?.lastError?.name === 'ChelErrorKvHeightAhead', 'the give-up')
     assert.strictEqual(settledStatus('prefs'), 'error')
   })
@@ -393,12 +386,33 @@ describe('Slot loads of values from a newer contract height', () => {
     assert.strictEqual(await whenSettled('prefs'), 'error')
   })
 
+  // A load or write that classified the value before the height arrived
+  // reports its finding while the reload's GET runs
+  for (const stored of ['value', 'nothing']) {
+    it(`reloads again at once after a finding at the height it reloads (${stored} stored)`, async () => {
+      kvHeightTimings.pendingFallbackMs = 60_000
+      writeAsDeviceB('prefs', { v: 0 })
+      defineSlot({ key: 'prefs', defaultValue: {} })
+      await activate()
+      writeAsDeviceB('prefs', { v: 1 }, AHEAD)
+      await findAhead('prefs', AHEAD)
+      if (stored === 'nothing') server.store.delete('prefs')
+      server.onGet = () => {
+        server.onGet = undefined
+        frameAhead(AHEAD)
+      }
+      setLocalHeight(AHEAD)
+      await until(() => !mirror('prefs')?.heightAhead && settledStatus('prefs'), 'the marker to clear')
+      assert.deepStrictEqual(read('prefs'), stored === 'value' ? { v: 1 } : {})
+    })
+  }
+
   it('reloads nothing more once a load queued earlier verified the value', async () => {
     const reasons: string[] = []
     defineSlot({ key: 'prefs', defaultValue: {}, onUpdate: (_value, { reason }) => { reasons.push(reason) } })
     await activate()
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
-    await findAhead('prefs')
+    await findAhead('prefs', AHEAD)
     const before = gets('prefs')
     const openLane = gateLane()
     const explicit = sync('prefs')
@@ -492,7 +506,7 @@ describe('Single-key kv/sync of a value from a newer contract height', () => {
     assert.deepStrictEqual(reasons, ['load'])
   })
 
-  it('loads once, without syncing, when the height arrives during its wait', async () => {
+  it('reloads once, without syncing, when the height arrives during its wait', async () => {
     kvHeightTimings.waitMs = 60_000
     defineSlot({ key: 'prefs', defaultValue: {} })
     await activate()
@@ -510,6 +524,82 @@ describe('Single-key kv/sync of a value from a newer contract height', () => {
       assert.strictEqual(gets('prefs'), getsBefore + 2)
     }
     assert.strictEqual(syncs.count, before)
+  })
+
+  // The deferred reload it reused is replaced before its turn; that one, now
+  // stale, loads nothing
+  it('reads the value of the reload that replaced the one it waited for', async () => {
+    kvHeightTimings.waitMs = 60_000
+    writeAsDeviceB('prefs', { v: 0 })
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    writeAsDeviceB('prefs', { v: 1 }, AHEAD)
+    let atResolve: unknown
+    const explicit = sync('prefs').then(() => { atResolve = read('prefs') })
+    await until(() => mirror('prefs')?.heightAhead?.requiredHeight === AHEAD, 'the first finding')
+    await waitMicrotasks()
+    const openFirst = gateLane()
+    // An aggregate sync loads the key before the reload
+    sbp('chelonia/kv/sync', CONTRACT_ID)
+    await waitMicrotasks()
+    const openSecond = gateLane()
+    writeAsDeviceB('prefs', { v: 2 }, AHEAD + 1)
+    // Fires the reload the explicit sync reuses
+    setLocalHeight(AHEAD)
+    await waitMicrotasks()
+    const openThird = gateLane()
+    openFirst()
+    await until(() => mirror('prefs')?.heightAhead?.requiredHeight === AHEAD + 1, 'the next finding')
+    // Fires the replacement, queued behind the third gate
+    setLocalHeight(AHEAD + 1)
+    await waitMicrotasks()
+    openSecond()
+    await waitMicrotasks()
+    openThird()
+    await explicit
+    assert.deepStrictEqual(atResolve, { v: 2 })
+  })
+
+  it('reads the value of a reload a frame replaced while the first one queued', async () => {
+    kvHeightTimings.waitMs = 60_000
+    writeAsDeviceB('prefs', { v: 0 })
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    writeAsDeviceB('prefs', { v: 1 }, AHEAD)
+    let atResolve: unknown
+    const explicit = sync('prefs').then(() => { atResolve = read('prefs') })
+    await until(() => mirror('prefs')?.heightAhead?.requiredHeight === AHEAD, 'the first finding')
+    // Over a network, a GET takes a while
+    server.onGet = () => sleep(20)
+    const busy = gateLane()
+    setLocalHeight(AHEAD)
+    await waitMicrotasks()
+    writeAsDeviceB('prefs', { v: 2 }, AHEAD + 1)
+    frameAhead(AHEAD + 1)
+    setLocalHeight(AHEAD + 1)
+    await waitMicrotasks()
+    busy()
+    await explicit
+    assert.deepStrictEqual(atResolve, { v: 2 })
+  })
+
+  it("resolves when a listener drops the slot's entry as its load applies", async () => {
+    writeAsDeviceB('prefs', { theme: 'dark' })
+    let matching = true
+    defineSlot({ key: 'prefs', defaultValue: {}, autoLoad: 'never', match: () => matching })
+    await activate()
+    const drop = ({ key, reason }: { key: string; reason: string }) => {
+      if (key !== 'prefs' || reason !== 'load') return
+      matching = false
+      sbp('chelonia/kv/refreshFilters', CONTRACT_ID)
+    }
+    sbp('okTurtles.events/on', CHELONIA_KV_UPDATED, drop)
+    try {
+      await sync('prefs')
+    } finally {
+      sbp('okTurtles.events/off', CHELONIA_KV_UPDATED, drop)
+    }
+    assert.strictEqual(mirror('prefs'), undefined)
   })
 
   it("settles the slot once its recoveries don't bring the height, and reloads it later", async () => {
@@ -545,7 +635,7 @@ describe('Single-key kv/sync of a value from a newer contract height', () => {
     await activate()
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
     const before = syncs.count
-    await findAhead('prefs')
+    await findAhead('prefs', AHEAD)
     kvHeightTimings.waitMs = 10
     await assert.rejects(sync('prefs', { maxHeightRecoveries: 0 }), aheadAt(AHEAD))
     assert.strictEqual(syncs.count, before)

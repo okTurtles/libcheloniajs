@@ -352,11 +352,12 @@ single-key `sync` run the same one, with the same options.
    error's `requiredHeight`. Otherwise it syncs the contract on its
    internal lane (the caller holds no lane meanwhile); concurrent
    callers share the sync, and a joined sync that ended below the
-   height is followed by one fresh sync. A failed sync gets one short
-   passive wait. The recovery rejects with the original error if the
-   height still isn't reached, if the contract is no longer subscribed
-   (it never re-subscribes), or after 30 s (unless the height was
-   reached). A recovery that races a re-sync waits for it.
+   height is followed by one fresh sync. A failed sync (also one that an
+   SBP filter vetoes) gets one short passive wait. The recovery rejects
+   with the original error if the height still isn't reached, if the
+   contract is no longer subscribed (it never re-subscribes), or after
+   30 s (unless the height was reached). A recovery that races a re-sync
+   waits for it.
 5. No recovery sync starts from `chelonia/reset`'s abort until the reset
    ends (`AbortError`), and the reset waits for running ones. `signal`
    and a reset end only the caller's wait, never a shared sync.
@@ -373,8 +374,8 @@ value `ahead`:
   highest required height known; `settled` doesn't change. An explicit
   caller gets the error.
 - The key gets one wait. Once the contract reaches the height, the key
-  reloads with the reason that registered the wait (`'load'` or
-  `'remote'`), without showing `loading` if the slot is `loaded`: one
+  reloads with the reason that registered the wait (`'load'`,
+  `'remote'` or `'reconnect'`), without showing `loading` if the slot is `loaded`: one
   GET, one event and one `onUpdate` per recovered value.
 - 10 s after the wait was armed without the height, the library syncs
   the contract once (shared with recoveries); findings meanwhile don't
@@ -496,8 +497,8 @@ if it is active, settled and not `loading`, else `undefined`.
 | `ChelErrorKvSlotUnknown`, at once | No slot is defined for the key (for the contract's type, or for any type while it is unknown), or the contract is reconciled and the slot inactive. |
 | `ChelErrorKvSlotUnknown`, later | The slot is deactivated or unregistered; the contract is removed (also if it never activated, e.g. its first sync failed and it was released); its type becomes known without the slot; its first reconcile leaves the slot inactive. |
 | `signal.reason` | `signal` aborts (also if already settled). |
-| Never settles | The slot is never loaded (`autoLoad: 'never'`, or `'on-demand'` without a `sync`, `update`, `clear` or applied frame): pass a `signal`. |
-| `AbortError` | `chelonia/reset`'s teardown. |
+| Never settles | The slot is never loaded (`autoLoad: 'never'` or `'on-demand'`, without a `sync`, `update`, `clear` or applied frame): pass a `signal`. |
+| `AbortError` | `chelonia/reset`'s teardown, or `chelonia/_init`. |
 
 **Resync.** A contract resync keeps `_kv[contractID]` (values and
 statuses), cancels the contract's waits and clears its active slots'
@@ -869,7 +870,7 @@ sbp('chelonia/kv/update', {
   maxAttempts?: number | null,  // default 3 (matches chelonia/kv/set)
   signal?: AbortSignal,
   ifMatch?: string,             // bypass the mirror-based optimistic etag
-  onHeightAhead?: 'sync' | 'reject',   // §3.4, default 'sync'
+  onHeightAhead?: 'sync' | 'reject' | null,   // §3.4, default 'sync'
   maxHeightRecoveries?: number | null  // §3.4, default 2
 }): Promise<T | undefined>
 ```
@@ -1047,9 +1048,9 @@ key or queries before sync fails loudly instead of silently getting
 ```ts
 sbp('chelonia/kv/sync', contractID: string, key?: string, options?: {
   signal?: AbortSignal,
-  onHeightAhead?: 'sync' | 'reject',   // §3.4, single-key form only
+  onHeightAhead?: 'sync' | 'reject' | null,   // §3.4, single-key form only
   maxHeightRecoveries?: number | null
-}): Promise<void>
+} | null): Promise<void>
 ```
 
 Forces a fetch (over `chelonia/kv/get`) and refreshes the mirror.
@@ -1078,9 +1079,9 @@ you need rejection-based error handling for a specific slot.
 sbp('chelonia/kv/clear', contractID: string, key: string, options?: {
   maxAttempts?: number | null,  // default 3 (matches chelonia/kv/set)
   signal?: AbortSignal,         // abort the clear attempt
-  onHeightAhead?: 'sync' | 'reject',   // §3.4
+  onHeightAhead?: 'sync' | 'reject' | null,   // §3.4
   maxHeightRecoveries?: number | null
-}): Promise<void>
+} | null): Promise<void>
 ```
 
 Resets a key to its declared default. It is a blind write: it
@@ -1235,7 +1236,7 @@ default for that transition.
 | Event | When | Payload notes |
 |---|---|---|
 | `CHELONIA_KV_UPDATED` | Any change to a registered slot — `reason` is one of `'load'` (initial fetch after sync), `'remote'` (pubsub notification *not* originating from this client's own write), `'local'` (our own successful write), `'reconnect'` (refetch on websocket reconnect). The canonical replacement for Group Income's `KV_EVENT` plus all `NEW_*` constants. | `{ contractID, contractType, key, value, previousValue, reason, etag }`. On `reason: 'remote'` the `etag` is the data CID carried in the pubsub frame's `cid` field (see "Self-echo suppression" below), so the mirror etag stays authoritative across pubsub updates and a subsequent local write can use it as the default `if-match` without a guaranteed `412`. |
-| `CHELONIA_KV_STATUS_CHANGED` | Slot transitions between `non-init`/`loading`/`loaded`/`error`, **or** `lastError` changes while the status remains the same (e.g. repeated validation failures produce different error details). On a load path the sequence is `CHELONIA_KV_STATUS_CHANGED('loading')` → mirror write → `CHELONIA_KV_UPDATED` → `CHELONIA_KV_STATUS_CHANGED('loaded')`, so a consumer can rely on "about to populate" / "populated" being observable without races. | `{ contractID, contractType, key, status, previousStatus, lastError, settled, previousSettled, heightAhead }`. `lastError` is `{ name, message }` when transitioning into `'error'` or when the error details change while already in `'error'`, and `null` otherwise. When `previousStatus === status` and only `lastError` changed, `status` and `previousStatus` are identical — consumers that only care about status transitions can skip these events by checking `previousStatus !== status`. `settled` / `heightAhead`: §3.5 (the event also fires when only they change). |
+| `CHELONIA_KV_STATUS_CHANGED` | Slot transitions between `non-init`/`loading`/`loaded`/`error`, **or** `lastError` changes while the status remains the same (e.g. repeated validation failures produce different error details). On a load path the sequence is `CHELONIA_KV_STATUS_CHANGED('loading')` → mirror write → `CHELONIA_KV_UPDATED` → `CHELONIA_KV_STATUS_CHANGED('loaded')`, so a consumer can rely on "about to populate" / "populated" being observable without races. | `{ contractID, contractType, key, status, previousStatus, lastError, settled, previousSettled, heightAhead }`. `lastError` is `{ name, message }` whenever `status` is `'error'`, and `null` otherwise. When `previousStatus === status` and only `lastError` changed, `status` and `previousStatus` are identical — consumers that only care about status transitions can skip these events by checking `previousStatus !== status`. `settled` / `heightAhead`: §3.5 (the event also fires when only they change). |
 | `CHELONIA_KV_VALIDATION_ERROR` | `schema.parse` rejected a remote or load-path value. Carries the Zod error on `.cause`. Reducer-side validation rejects the `chelonia/kv/update` promise instead; no event fires in that case to avoid double-reporting. | `{ contractID, contractType, key, error, reason: 'load' \| 'remote' \| 'reconnect' \| 're-validate' }`. The `'re-validate'` reason fires when a `defineSlot` replacement re-runs the new schema against persisted entries (§4.1). |
 
 **Load-path failure sequence.** On the load path, the equivalent
@@ -2199,17 +2200,22 @@ this.kvLocalEchoCIDs = new Map<string, Map<string, { expiry: number; fromConflic
 ```
 
 Mirror state lives in `rootState._kv` (see §5). Initialise this in
-`chelonia/_init` and clear it in `chelonia/reset`. `chelonia/reset`
-first drains in-flight `chelonia/kv/update` / `chelonia/kv/clear` writes
-via `chelonia/kv/_waitInFlight` (noop enqueued behind each active
-per-contract `chelonia/queueInvocation` lane; once it aborts, writes
-still queued reject, §3.5), then clears
-`kvSlotsByContractID`, `kvActiveFilters`, `kvFilterDirty`, and
-`kvLocalEchoCIDs` — these are per-subscription state, not code-level
-state — but **leaves `kvSlots` (and `defContractKvByManifest`) intact**
-because slot definitions are application code, not runtime state. After a
-`chelonia/reset`, the next contract sync replays the `_reconcileForSlot`
-pass against the surviving definitions.
+`chelonia/_init` and clear it in `chelonia/reset`, which:
+
+1. drains the contracts' lanes (`chelonia/contract/wait`);
+2. counts itself in `kvResetsInProgress` (no recovery sync starts until
+   it ends) and aborts, so that writes still queued reject (§3.5);
+3. waits, via `chelonia/kv/_waitInFlight`, for in-flight
+   `chelonia/kv/update` / `chelonia/kv/clear` writes (a noop enqueued
+   behind each active per-contract `chelonia/queueInvocation` lane) and
+   for running recovery syncs;
+4. empties `rootState._kv` and calls `resetKvRuntime`, which replaces
+   every per-session map of this section, but **leaves `kvSlots` (and
+   `defContractKvByManifest`) intact** because slot definitions are
+   application code, not runtime state.
+
+After a `chelonia/reset`, the next contract sync replays the
+`_reconcileForSlot` pass against the surviving definitions.
 
 `kvLocalEchoCIDs` is **runtime-only** and never persisted. A tab
 reload drops both the in-flight `chelonia/kv/update` call and the
@@ -2600,16 +2606,13 @@ Mirror the structure of `src/journal.test.ts`:
    `undefined`, which the underlying primitive treats as a fetch-first
    sentinel), transitions `status` to `'non-init'`, and fires
    `CHELONIA_KV_UPDATED` with `reason: 'local'` and `value: undefined`.
-9. `chelonia/reset` first **drains** in-flight `chelonia/kv/update` /
-   `chelonia/kv/clear` writes via `chelonia/kv/_waitInFlight` (which
-   enqueues a noop behind each active per-contract
-   `chelonia/queueInvocation` lane — symmetric with
-   `chelonia/contract/wait`); `abortController.abort()` remains the
-   backstop for genuinely stuck/offline writes, and writes still queued
-   then reject with `AbortError` without posting (§3.5). Only then does
-   it empty
-   `rootState._kv`, clear `kvSlotsByContractID`, `kvActiveFilters`,
-   `kvFilterDirty`, and `kvLocalEchoCIDs`, but leave `kvSlots` (the
+9. `chelonia/reset` drains the lanes with `chelonia/contract/wait`,
+   counts itself in `kvResetsInProgress` and aborts (writes still queued
+   reject with `AbortError` without posting, §3.5), then **drains**
+   in-flight `chelonia/kv/update` / `chelonia/kv/clear` writes and
+   running recovery syncs via `chelonia/kv/_waitInFlight`. Only then
+   does it empty `rootState._kv` and replace the per-session maps
+   ([§11.2](#112-internal-data-structures)), but leave `kvSlots` (the
    code-level definitions) intact; the next contract sync replays the
    reconcile pass and rebuilds the per-contract indices. Draining before
    the synchronous teardown guarantees no continuation runs against a

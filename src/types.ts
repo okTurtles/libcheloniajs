@@ -263,6 +263,9 @@ export type KvUpdater<T> = (prev: T | undefined) => T | KvNoop;
 // Status of a KV slot's mirror entry. See KV-REVAMPED.md §5.
 export type KvLoadStatus = typeof KV_LOAD_STATUS[keyof typeof KV_LOAD_STATUS];
 
+// What `chelonia/kv/settledStatus` and `chelonia/kv/whenSettled` report
+export type KvSettledStatus = Exclude<KvLoadStatus, typeof KV_LOAD_STATUS.LOADING>;
+
 // Shape of a single KV mirror entry under `rootState._kv[contractID][key]`.
 // See KV-REVAMPED.md §5.
 export type KvMirrorEntry = {
@@ -281,7 +284,7 @@ export type KvMirrorEntry = {
 export type KvHeightWait = {
   contractID: string;
   key: string;
-  reason: Exclude<KvUpdateCtx['reason'], 'local'>;
+  reason: KvLoadReason;
   requiredHeight: number;
   // Bumped by every finding, so that a load only drops the wait it saw
   gen: number;
@@ -306,6 +309,12 @@ export type KvUpdateCtx = {
   // Mirror value before this update; `undefined` on first load.
   previousValue: JSONType | undefined;
 };
+
+// Why a slot loads: every update reason but a local write
+export type KvLoadReason = Exclude<KvUpdateCtx['reason'], typeof KV_UPDATE_REASON.LOCAL>;
+
+// Called once the local contract commits `minHeight` or later
+export type KvHeightListener = { minHeight: number; fire: () => void };
 
 // Public subset of the internal `SlotDefinition`. Accepted by
 // `chelonia/kv/defineSlot`. See KV-REVAMPED.md §4.1.
@@ -555,23 +564,24 @@ export type CheloniaContext = {
   // — which would otherwise leave the mirror silently stale.
   kvPendingLoads: Map<string, number>;
   // Per-contract count of `onUpdate` callbacks currently executing
-  // inside the contract's `chelonia/queueInvocation` lane. A KV write
-  // selector (`update`/`clear`/`sync`) invoked while this is non-zero
-  // for the same contract would enqueue behind the lane that is blocked
-  // awaiting the callback → permanent deadlock, so those selectors
-  // reject with `ChelErrorKvReentrant` instead. Keyed by `contractID`
-  // to match the lane granularity exactly (cross-contract writes from
-  // `onUpdate` are safe and not rejected).
+  // inside the contract's `chelonia/queueInvocation` lane. A KV selector
+  // that queues on or waits for that lane (`update`, `clear`, `sync`,
+  // `withHeightRecovery`, `queuedSet`, `whenSettled`) invoked while this
+  // is non-zero for the same contract would enqueue behind the lane that
+  // is blocked awaiting the callback → permanent deadlock, so those
+  // selectors reject with `ChelErrorKvReentrant` instead. Keyed by
+  // `contractID` to match the lane granularity exactly (cross-contract
+  // writes from `onUpdate` are safe and not rejected).
   kvOnUpdateActive: Map<string, number>;
   // Callbacks waiting for a contract to commit a height (`kv-height.ts`)
-  kvHeightListeners: Map<string, Set<{ minHeight: number; fire: () => void }>>;
+  kvHeightListeners: Map<string, Set<KvHeightListener>>;
   // Running height-recovery syncs, each shared by all its callers
   kvRecoveries: Map<string, Promise<void>>;
   // Slot keys to reload once the contract reaches a height, by `contractID::key`
   kvHeightWaits: Map<string, KvHeightWait>;
   // Pending `chelonia/kv/whenSettled` calls, keyed by `contractID::key`
   kvSettleWaiters: Map<string, Set<{
-    resolve: (status: Exclude<KvLoadStatus, 'loading'>) => void;
+    resolve: (status: KvSettledStatus) => void;
     reject: (e: unknown) => void;
   }>>;
   // Contracts whose slots were matched since they were last added

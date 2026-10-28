@@ -2,29 +2,20 @@ import sbp from '@sbp/sbp'
 import assert from 'node:assert'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 
-import { ChelErrorKvHeightAhead, kvHeightAheadCause } from './errors.js'
+import { ChelErrorKvHeightAhead } from './errors.js'
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import {
-  activate, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes, gateLane, holdSyncs,
-  installKvHarness, mirror, resync, rootState, server, setLocalHeight, setupContract, START_HEIGHT,
-  syncs, writeAsDeviceB
+  activate, aheadAt, configure, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes, findAhead,
+  gateLane, gets, holdSyncs, installKvHarness, logs, mirror, read, resync, rootState, server,
+  setLocalHeight, settledStatus, setupContract, sleep, START_HEIGHT, sync, syncs, update,
+  whenSettled, writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
 import { isPending, until, waitMicrotasks, within } from './test-utils.js'
-import type { JSONType, KvHeightRecoveryOptions } from './types.js'
+import type { JSONType } from './types.js'
 
 const AHEAD = START_HEIGHT + 1
 const slotUnknown = { name: 'ChelErrorKvSlotUnknown' }
-const gets = (key: string) =>
-  server.log.filter((request) => request.method === 'GET' && request.key === key).length
-const read = (key: string) => sbp('chelonia/kv/read', CONTRACT_ID, key)
-const sync = (key: string, options?: KvHeightRecoveryOptions) =>
-  within(sbp('chelonia/kv/sync', CONTRACT_ID, key, options) as Promise<void>, `kv/sync of ${key}`)
-const settledStatus = (key: string) => sbp('chelonia/kv/settledStatus', CONTRACT_ID, key)
-const whenSettled = (key: string) =>
-  within(sbp('chelonia/kv/whenSettled', CONTRACT_ID, key) as Promise<string>, `${key} to settle`)
-const aheadAt = (height: number) => (e: unknown) =>
-  kvHeightAheadCause(e)?.requiredHeight === height
 
 // Starts a resync and holds it once its teardown has removed the contract;
 // the returned function lets it finish
@@ -110,7 +101,7 @@ describe('A contract resync', () => {
     defineSlot({ key: 'prefs', defaultValue: {}, autoLoad: 'never' })
     await activate()
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
-    await assert.rejects(sync('prefs', { onHeightAhead: 'reject' }), aheadAt(AHEAD))
+    await findAhead('prefs', AHEAD)
     assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
     statuses.length = 0
 
@@ -178,8 +169,7 @@ describe('A contract resync', () => {
       seen.push(value)
       return { n: (value as { n: number }).n + 1 }
     }
-    await within(sbp('chelonia/kv/update', { contractID: CONTRACT_ID, key: 'count', updater }),
-      'the update')
+    await update('count', updater)
     assert.deepStrictEqual(seen, [{ n: 1 }])
     assert.deepStrictEqual(
       server.log.slice(requests).map(({ method, status }) => [method, status]),
@@ -190,15 +180,7 @@ describe('A contract resync', () => {
 })
 
 const OTHER_ID = 'zKvOtherContract'
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const increment = (value: JSONType) => ({ n: (value as { n: number }).n + 1 })
-const update = (key: string, updater: (value: JSONType) => JSONType, options = {}) => within(
-  sbp('chelonia/kv/update', { contractID: CONTRACT_ID, key, updater, ...options }) as
-    Promise<JSONType | undefined>,
-  `update of ${key}`
-)
-const findAhead = (key: string) =>
-  assert.rejects(sync(key, { onHeightAhead: 'reject' }), aheadAt(AHEAD))
 
 // `chelonia/reset` drains the lanes twice, then aborts and calls
 // `chelonia/kv/_waitInFlight`
@@ -286,7 +268,7 @@ describe('chelonia/reset', () => {
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
     const before = syncs.count
     const persist = async () => {
-      await findAhead('prefs')
+      await findAhead('prefs', AHEAD)
       // Its fallback falls due meanwhile
       await sleep(100)
       throw new Error('persist failed')
@@ -318,7 +300,7 @@ describe('chelonia/reset', () => {
     await activate()
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
     syncs.catchUp = true
-    await findAhead('prefs')
+    await findAhead('prefs', AHEAD)
     // The fallback syncs and reloads
     assert.strictEqual(await whenSettled('prefs'), 'loaded')
     assert.deepStrictEqual(read('prefs'), { theme: 'dark' })
@@ -331,24 +313,68 @@ describe('chelonia/reset', () => {
   })
 
   it('cancels the deferred loads of the session it ends', async () => {
-    kvHeightTimings.pendingFallbackMs = 50
+    kvHeightTimings.pendingFallbackMs = 500
     defineSlot({ key: 'prefs', defaultValue: {} })
     await activate()
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
-    await findAhead('prefs')
+    const due = Date.now() + kvHeightTimings.pendingFallbackMs
+    await findAhead('prefs', AHEAD)
     await within(sbp('chelonia/reset'), 'the reset')
 
     server.store.delete('prefs')
     setupContract()
     await activate()
     const synced = syncs.count
-    // Past the old fallback
-    await sleep(100)
+    // An old fallback due before the re-activation would find nothing to sync
+    assert.ok(Date.now() < due, 'the re-activation ends before the old fallback is due')
+    await sleep(due + 50 - Date.now())
     assert.strictEqual(syncs.count, synced)
     const loads = gets('prefs')
     setLocalHeight(AHEAD)
     await drainLanes()
     assert.strictEqual(gets('prefs'), loads)
+  })
+
+  it('stays counted while it drains across a chelonia/_init', async () => {
+    await activate()
+    let persisting = false
+    let open!: () => void
+    const persisted = new Promise<void>((resolve) => { open = resolve })
+    const reset = within(sbp('chelonia/reset', () => {
+      persisting = true
+      return persisted
+    }), 'the reset')
+    await until(() => persisting, 'the reset to drain')
+    sbp('chelonia/_init')
+    await configure()
+    open()
+    await reset
+
+    // A value that never becomes verifiable: the fallback syncs once, then settles
+    kvHeightTimings.pendingFallbackMs = 20
+    setupContract()
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
+    const before = syncs.count
+    await activate()
+    assert.strictEqual(await whenSettled('prefs'), 'error')
+    await sleep(100)
+    assert.strictEqual(syncs.count, before + 2)
+  })
+})
+
+describe('chelonia/_init', () => {
+  installKvHarness()
+
+  it('ends the whenSettled waits of the session it replaces', async () => {
+    defineSlot({ key: 'prefs', defaultValue: {}, autoLoad: 'never' })
+    await activate()
+    const waiting = assert.rejects(whenSettled('prefs'), {
+      name: 'AbortError', message: /chelonia\/_init ended the wait/
+    })
+    sbp('chelonia/_init')
+    await configure()
+    await waiting
   })
 })
 
@@ -362,6 +388,9 @@ describe('A contract removal', () => {
       setupContract()
       await activate()
       const before = syncs.count
+      const refusals = () => logs.logged.filter(({ method, args }) => method === 'warn' &&
+        /gave up: its sync failed/.test(String(args[0]))).length
+      const refusedBefore = refusals()
       const open = gateLane('internal')
       const removing = within(sbp('chelonia/contract/remove', CONTRACT_ID), 'the removal')
       let recovering: Promise<unknown> | undefined
@@ -384,6 +413,7 @@ describe('A contract removal', () => {
       await recovering
       await drainLanes()
       assert.strictEqual(syncs.count, before, via)
+      assert.strictEqual(refusals(), refusedBefore + 1, via)
       assert.strictEqual(rootState().contracts[CONTRACT_ID], undefined, via)
     }
   })

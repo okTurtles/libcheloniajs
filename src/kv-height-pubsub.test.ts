@@ -5,8 +5,9 @@ import { describe, it } from 'node:test'
 import { isKvHeightMalformed, kvHeightAheadCause } from './errors.js'
 import { CHELONIA_KV_STATUS_CHANGED } from './events.js'
 import {
-  activate, CONTRACT_ID, connectPubsub, defineSlot, deliverFrame, drainLanes, holdSyncs,
-  installKvHarness, logs, mirror, server, setLocalHeight, START_HEIGHT, syncs, writeAsDeviceB
+  activate, CONTRACT_ID, connectPubsub, defineSlot, deliverFrame, drainLanes, frameOf, gets,
+  holdSyncs, installKvHarness, logs, mirror, read, restamped, server, setLocalHeight,
+  settledStatus, START_HEIGHT, syncs, whenSettled, writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
 import { until, within } from './test-utils.js'
@@ -18,19 +19,9 @@ sbp('sbp/filters/selector/add', 'chelonia/private/queueEvent',
 )
 
 const AHEAD = START_HEIGHT + 2
-const gets = (key: string) =>
-  server.log.filter((request) => request.method === 'GET' && request.key === key).length
-const read = (key: string) => sbp('chelonia/kv/read', CONTRACT_ID, key)
-const settledStatus = (key: string) => sbp('chelonia/kv/settledStatus', CONTRACT_ID, key)
-const whenSettled = (key: string) =>
-  within(sbp('chelonia/kv/whenSettled', CONTRACT_ID, key) as Promise<string>, `${key} to settle`)
 const logged = (method: string, text: string) => logs.logged.filter((entry) =>
   entry.method === method && String(entry.args[0]).includes(text))
 const frameErrors = () => logged('error', 'Error processing kv event')
-// The stored value with another (unsigned) height stamp
-const restamped = (key: string, stamp: unknown) =>
-  ({ body: JSON.stringify({ ...JSON.parse(server.store.get(key)!.body), height: stamp }) })
-const frameOf = (key: string) => ({ body: server.store.get(key)!.body, cid: server.etagOf(key) })
 const statusesDuring = async (body: () => Promise<void>) => {
   const statuses: KvLoadStatus[] = []
   const listener = ({ status }: { status: KvLoadStatus }) => { statuses.push(status) }
@@ -43,7 +34,7 @@ const statusesDuring = async (body: () => Promise<void>) => {
   return statuses
 }
 
-describe('Pubsub KV frames the contract can not verify yet', () => {
+describe('Pubsub KV frames the contract cannot verify yet', () => {
   installKvHarness()
 
   it('keep a loaded value, and reload the key once the height arrives', async () => {
@@ -153,7 +144,21 @@ describe('Pubsub KV frames the contract can not verify yet', () => {
     })
   }
 
-  it("aren't passed to the raw KV handler, which a warning says", async () => {
+  it('that are not JSON are logged and reload the slot', async () => {
+    writeAsDeviceB('prefs', { theme: 'light' })
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    connectPubsub()
+    await activate()
+    writeAsDeviceB('prefs', { theme: 'dark' })
+    const before = gets('prefs')
+    deliverFrame('prefs', { body: 'not JSON', cid: '"frame"' })
+    await drainLanes()
+    assert.strictEqual(gets('prefs'), before + 1)
+    assert.deepStrictEqual(read('prefs'), { theme: 'dark' })
+    assert.strictEqual(frameErrors().length, 1)
+  })
+
+  it('are not passed to the raw KV handler, and a warning says so', async () => {
     writeAsDeviceB('prefs', { theme: 'light' })
     defineSlot({ key: 'prefs', defaultValue: {} })
     const rawFrames = connectPubsub({ rawHandler: true })
@@ -253,7 +258,7 @@ describe('Vetoed pubsub KV frame work', () => {
 describe('Single-key kv/sync with the pubsub socket down', () => {
   installKvHarness()
 
-  it('syncs without waiting, and leaves a slot a newer frame waits on unsettled', async () => {
+  it('syncs without waiting; a slot waiting for a newer frame stays unsettled', async () => {
     kvHeightTimings.waitMs = 60_000
     defineSlot({ key: 'prefs', defaultValue: {} })
     connectPubsub()

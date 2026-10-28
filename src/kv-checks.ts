@@ -1,4 +1,4 @@
-// Checks shared by the KV writers. Internal: not exported from the package root.
+// Checks shared by the KV selectors. Internal: not exported from the package root.
 import sbp from '@sbp/sbp'
 import { ChelErrorKvReentrant, ChelErrorKvUpdateInvalid } from './errors.js'
 import type { CheloniaContext } from './types.js'
@@ -23,9 +23,13 @@ export function assertNotReentrant (
   }
 }
 
-export function assertMaxAttempts (maxAttempts: unknown, label: string): void {
+export function assertMaxAttempts (
+  maxAttempts: unknown,
+  label: string,
+  ErrorClass: new (message: string) => Error = ChelErrorKvUpdateInvalid
+): void {
   if (maxAttempts != null && !(Number.isSafeInteger(maxAttempts) && (maxAttempts as number) >= 1)) {
-    throw new ChelErrorKvUpdateInvalid(`[chelonia/kv] ${label}: \`maxAttempts\` must be an integer >= 1`)
+    throw new ErrorClass(`[chelonia/kv] ${label}: \`maxAttempts\` must be an integer >= 1`)
   }
 }
 
@@ -36,8 +40,12 @@ export function resolveKvKeyIds (
   label: string
 ): { encryptionKeyId: string | null; signingKeyId: string } {
   const { encryptionKeyName, signingKeyName } = names
+  const state = sbp('chelonia/rootState')?.[contractID]
+  if (!state?._vm) {
+    throw new ChelErrorKvUpdateInvalid(`[chelonia/kv] ${label}: ${contractID} is not in local state`)
+  }
   const keyId = (name: string): string | null | undefined =>
-    sbp('chelonia/contract/currentKeyIdByName', contractID, name)
+    sbp('chelonia/contract/currentKeyIdByName', state, name)
   const encryptionKeyId = encryptionKeyName === null ? null : keyId(encryptionKeyName)
   if (encryptionKeyName !== null && !encryptionKeyId) {
     throw new ChelErrorKvUpdateInvalid(

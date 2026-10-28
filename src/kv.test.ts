@@ -103,6 +103,8 @@ const setupContract = async (contractID: string, contractType = CTYPE): Promise<
   ;(s.contracts as Record<string, unknown>)[contractID] = {
     HEAD: '', height: 0, type: contractType
   }
+  // The KV key checks resolve key names against the contract's state
+  ;(s as unknown as Record<string, unknown>)[contractID] ??= { _vm: { authorizedKeys: {} } }
   // Add to subscriptionSet (normally done by chelonia.ts sync path).
   sbp('chelonia/test/addSubscription', contractID)
   sbp('chelonia/kv/_onContractsModified', { added: [contractID], removed: [] })
@@ -221,6 +223,8 @@ sbp('sbp/selectors/register', {
   ) {
     return stubSet(contractID, key, data, opts)
   },
+
+  'chelonia/rootState': () => rootState(),
 
   'chelonia/contract/currentKeyIdByName': function (
     _contractID: string,
@@ -4576,10 +4580,13 @@ describe('KV slot API', () => {
     stubGet = async () => served === null ? null : fakeParsed(served)
     const { log, offs } = collectEvents()
     onUpdateCalls.length = 0
-    await sbp('chelonia/kv/update', {
-      contractID, key, updater: (prev: { x: number }) => ({ x: prev.x + 1 })
-    })
-    offs.forEach((off) => off())
+    try {
+      await within(sbp('chelonia/kv/update', {
+        contractID, key, updater: (prev: { x: number }) => ({ x: prev.x + 1 })
+      }), 'update')
+    } finally {
+      offs.forEach((off) => off())
+    }
     const payloads = (type: string) => log.filter((e) => e.type === type)
       .map((e) => e.payload as { reason?: string; status?: string })
     return {
@@ -4644,8 +4651,8 @@ describe('KV slot API', () => {
   // 89: issue #1 — when reconcile drops a mirror entry (match→false) while
   // a `_loadSlot` is queued behind other lane work, the deferred
   // `_loadSlotNow` must NOT re-create an orphaned empty `_kv[contractID]`
-  // record via `ensureContractKv`. The non-destructive existence check
-  // (matching `setSlotStatus`'s pattern) bails before the destructive call.
+  // record via `ensureContractKv`. It reads the entry without creating the
+  // record (as `patchEntry` does) and bails.
   // -----------------------------------------------------------------------
   it('89: _loadSlotNow does not re-create an orphaned empty _kv record', async () => {
     const savedQI = stubQueueInvocation
@@ -5861,14 +5868,17 @@ describe('KV slot API', () => {
       sbp('chelonia/kv/defineSlot', { key: 'ws-other', contractType: OTHER_TYPE, defaultValue: 0 })
       const c = 'cid-ws-at-once'
       for (const cID of [c, unmatched]) await setupContract(cID, TYPE)
-      const rejectsAtOnce = (wait: Promise<unknown>) =>
-        assert.rejects(within(wait, 'rejection'), slotUnknown)
+      const rejectsAtOnce = async (wait: Promise<unknown>) => {
+        wait.catch(() => {})
+        assert.strictEqual(await isPending(wait), false)
+        await assert.rejects(wait, slotUnknown)
+      }
       await rejectsAtOnce(whenSettled('cid-ws-unknown', 'ws-never-defined'))
       await rejectsAtOnce(whenSettled(c, 'ws-other'))
       await rejectsAtOnce(whenSettled(unmatched))
 
       await sbp('chelonia/kv/clear', c, KEY)
-      assert.strictEqual(await whenSettled(c), 'non-init')
+      assert.strictEqual(await within(whenSettled(c), 'settled after the clear'), 'non-init')
       const controller = new AbortController()
       controller.abort('stop')
       await assert.rejects(
@@ -5947,7 +5957,7 @@ describe('KV slot API', () => {
       await setupContract(c, TYPE)
       await sbp('chelonia/kv/update', { contractID: c, key: KEY, updater: () => ({ x: 1 }) })
       assert.strictEqual(await within(settledAtOnce!, 'settled key'), 'loaded')
-      await reentrant
+      await within(reentrant!, 'reentrant rejection')
       await until(() => deferred, 'deferred call')
       await sbp('chelonia/kv/clear', c, 'ws-unsettled')
       assert.strictEqual(await within(deferred!, 'deferred call'), 'non-init')

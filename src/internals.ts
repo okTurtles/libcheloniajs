@@ -632,9 +632,10 @@ export default sbp('sbp/selectors/register', {
     // against a contract we've already given up on.
     clearReingestTrackerForContract(contractID)
     clearReprocessDebounceForContract(contractID)
-    // Drop per-contract KV runtime state on every removal; the
-    // `CONTRACTS_MODIFIED` listener also performs this cleanup via
-    // `_onContractsModified`, so the direct call is an idempotent fast path.
+    // Drop per-contract KV runtime state on every removal. When the removal
+    // is announced, the `CONTRACTS_MODIFIED` listener (`_onContractsModified`)
+    // cleans up too; on the early returns and an unannounced removal, this is
+    // the only cleanup.
     const cleanupKvRuntime = () => {
       try {
         sbp('chelonia/kv/_cleanupContractRuntime', contractID, { resync: params?.resync })
@@ -645,14 +646,15 @@ export default sbp('sbp/selectors/register', {
     const entry = state.contracts[contractID]
     const contractName = entry?.type
     // Applying the first message sets the type and subscribes, so this
-    // contract never finished its first sync (or was never retained here)
-    const neverSynced = !contractName && !this.subscriptionSet.has(contractID)
+    // contract never finished its first sync (or was never retained here),
+    // or a re-sync of it failed
+    const unsubscribed = !contractName && !this.subscriptionSet.has(contractID)
     // Already removed for good, or nothing to clear before a re-sync
-    if (entry === null || (neverSynced && params?.resync)) {
+    if (entry === null || (unsubscribed && params?.resync)) {
       cleanupKvRuntime()
       return
     }
-    if (!contractName && !neverSynced) {
+    if (!contractName && !unsubscribed) {
       console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
         contractID
       })
@@ -662,7 +664,8 @@ export default sbp('sbp/selectors/register', {
 
     // A failed re-sync leaves no type, but its final removal still owes the
     // destructor call (memory only: after a restart, there is none)
-    const type = contractName || this.contractTypesBeforeResync[contractID]
+    const typeBeforeResync = this.contractTypesBeforeResync[contractID]
+    const type = contractName || typeBeforeResync
     if (params?.resync) this.contractTypesBeforeResync[contractID] = type
     else delete this.contractTypesBeforeResync[contractID]
     const manifestHash = type && this.config.contracts.manifests[type]
@@ -710,9 +713,10 @@ export default sbp('sbp/selectors/register', {
 
     cleanupKvRuntime()
 
-    // It was never announced as added. A permanent removal is, so that
-    // copies of `state.contracts` also record `null`.
-    if (neverSynced && !params?.permanent) return
+    // It was never announced as added. A permanent removal is, so that copies
+    // of `state.contracts` also record `null`, and so is the final removal
+    // after a failed re-sync (listeners may have deferred cleanup until then).
+    if (unsubscribed && !typeBeforeResync && !params?.permanent) return
     this.subscriptionSet.delete(contractID)
     // (Tracker + debounce cancellation moved to the top of this selector
     // so the early-return path on a missing contract row also clears.
@@ -3479,14 +3483,6 @@ const handleEvent = {
     }
 
     if (!this.subscriptionSet.has(contractID)) {
-      const entry = this.pending.find((entry) => entry?.contractID === contractID)
-      // we've successfully received it back, so remove it from expectation pending
-      if (entry) {
-        const index = this.pending.indexOf(entry)
-        if (index !== -1) {
-          this.pending.splice(index, 1)
-        }
-      }
       this.subscriptionSet.add(contractID)
       sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {
         added: [contractID],

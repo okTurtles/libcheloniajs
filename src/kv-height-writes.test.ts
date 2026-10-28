@@ -3,15 +3,14 @@ import assert from 'node:assert'
 import { describe, it } from 'node:test'
 
 import {
-  ChelErrorKvHeightAhead, ChelErrorKvReentrant, isKvConflict, isKvHeightAhead, isKvHeightMalformed,
-  kvHeightAheadCause
+  ChelErrorKvHeightAhead, ChelErrorKvReentrant, isKvConflict, isKvHeightAhead, isKvHeightMalformed
 } from './errors.js'
 import {
-  activate, CONTRACT_ID, defineSlot, drainLanes, gateLane, holdSyncs, installKvHarness, keys,
-  mirror, restamp, rootState, server, serverValue, setLocalHeight, START_HEIGHT, syncs,
-  writeAsDeviceB
+  activate, aheadAt, CONTRACT_ID, defineSlot, drainLanes, gateLane, gets, holdSyncs,
+  installKvHarness, keys, logs, mirror, restamp, rootState, server, serverValue, setLocalHeight,
+  sleep, START_HEIGHT, syncs, update, writeAsDeviceB
 } from './kv-height-harness.js'
-import { CHELONIA_KV_STATUS_CHANGED } from './events.js'
+import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import { KV_NOOP } from './kv-constants.js'
 import { kvHeightTimings } from './kv-height.js'
 import { until, waitMicrotasks, within } from './test-utils.js'
@@ -19,12 +18,6 @@ import type {
   ChelContractState, ChelKvGetResult, ChelKvOnConflictCallback, JSONType, KvHeightRecoveryAttempt,
   KvHeightRecoveryOptions, KvMirrorEntry
 } from './types.js'
-
-const update = (key: string, updater: (value: JSONType) => JSONType) =>
-  within(
-    sbp('chelonia/kv/update', { contractID: CONTRACT_ID, key, updater }) as Promise<JSONType>,
-    `update of ${key}`
-  )
 
 describe('KV slot writes against the server', () => {
   installKvHarness()
@@ -76,7 +69,7 @@ describe('KV slot writes against the server', () => {
       signingKeyId: keys.cskId, encryptionKeyId: keys.cekId
     }) as Promise<unknown>
     await until(() => server.posts().length === 1, 'the first POST')
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await sleep(20)
     assert.strictEqual(server.posts().length, 1)
     release()
     await within(write, 'kv/set')
@@ -115,6 +108,12 @@ const needs = (height: number) => {
 
 const syncEnded = (count: number) => () =>
   syncs.count === count && !sbp('chelonia/contract/isSyncing', CONTRACT_ID)
+
+// The lane whose work the filter below vetoes
+let vetoedLane: string | undefined
+sbp('sbp/filters/selector/add', 'chelonia/private/queueEvent',
+  (_domain: string, _selector: string, [queueName]: unknown[]) => queueName !== vetoedLane
+)
 
 describe('chelonia/kv/withHeightRecovery', () => {
   installKvHarness()
@@ -195,13 +194,14 @@ describe('chelonia/kv/withHeightRecovery', () => {
 
     // Recognised by name, as for a copy from another build of the library
     const copy = { name: 'ChelErrorKvHeightAhead', cause: { requiredHeight: START_HEIGHT + 1 } }
+    let attempts = 0
     const result = await within(recover(() => {
-      if (calls++ > 1) return 'done'
+      if (attempts++ > 0) return 'done'
       setLocalHeight(START_HEIGHT + 1)
       throw copy
     }), 'a height error that is no longer ahead')
     assert.strictEqual(result, 'done')
-    assert.strictEqual(calls, 3)
+    assert.strictEqual(attempts, 2)
     assert.strictEqual(syncs.count, before)
   })
 
@@ -250,6 +250,45 @@ describe('chelonia/kv/withHeightRecovery', () => {
     assert.strictEqual(await within(pending, 'the height during a slow sync'), 'done')
     assert.strictEqual(second.calls.length, 2)
     assert.strictEqual(syncs.count, before + 1)
+    // No sync error to print after either warning
+    const warnings = logs.logged.filter(({ method, args }) => method === 'warn' &&
+      /gave up|reached the height/.test(String(args[0])))
+    assert.deepStrictEqual(warnings.map(({ args }) => args.length), [1, 1])
+  })
+
+  it('counts a recovery sync that a filter vetoes as a failed one', async () => {
+    await activate()
+    kvHeightTimings.waitMs = 20
+    writeAsDeviceB('prefs', { v: 1 }, START_HEIGHT + 2)
+    const before = syncs.count
+    const gaveUp = () => logs.logged.filter(({ method, args }) => method === 'warn' &&
+      /gave up: its sync failed/.test(String(args[0]))).length
+    const attempts = {
+      'kv/get': () => sbp('chelonia/kv/get', CONTRACT_ID, 'prefs'),
+      'kv/set': ({ heightWaitMs }: KvHeightRecoveryAttempt) =>
+        sbp('chelonia/kv/set', CONTRACT_ID, 'prefs', { v: 2 }, {
+          ifMatch: '"stale"',
+          heightWaitMs,
+          onconflict: async () => [{ v: 2 }, server.etagOf('prefs')],
+          signingKeyId: keys.cskId,
+          encryptionKeyId: keys.cekId
+        })
+    }
+    for (const [via, attempt] of Object.entries(attempts)) {
+      let calls = 0
+      const warned = gaveUp()
+      vetoedLane = CONTRACT_ID
+      try {
+        await assert.rejects(within(recover((args) => {
+          calls++
+          return attempt(args)
+        }), via), (e) => isKvHeightAhead(e))
+      } finally {
+        vetoedLane = undefined
+      }
+      assert.deepStrictEqual([calls, gaveUp() - warned], [1, 1], via)
+    }
+    assert.strictEqual(syncs.count, before)
   })
 
   it('syncs once more for a caller whose joined sync stopped short of its height', async () => {
@@ -403,6 +442,22 @@ describe('chelonia/kv/queuedSet', () => {
     assert.strictEqual(serverValue('note'), 'in the clear')
   })
 
+  it('rejects a contract that is not in local state, also one removed while queued', async () => {
+    const notLoaded = { name: 'ChelErrorKvUpdateInvalid', message: /is not in local state/ }
+    await assert.rejects(
+      within(queuedSet({ contractID: 'zKvOtherContract', key: 'note', data: 1 }), 'not loaded'),
+      notLoaded
+    )
+    await activate()
+    const open = gateLane('public')
+    const removed = assert.rejects(within(queuedSet({ key: 'note', data: 1 }), 'removed'), notLoaded)
+    await waitMicrotasks()
+    sbp('chelonia/private/removeImmediately', CONTRACT_ID)
+    open()
+    await removed
+    assert.deepStrictEqual(server.posts(), [])
+  })
+
   it('resolves key names when its turn comes; an abort while queued writes nothing', async () => {
     renameKey(keys.cekId, 'old-cek')
     const open = gateLane('public')
@@ -523,17 +578,11 @@ describe('chelonia/kv/queuedSet', () => {
 })
 
 const AHEAD = START_HEIGHT + 2
-const names = (value: JSONType) => [...(value as string[]), 'x']
-const updateWith = (key: string, options: Record<string, unknown> = {}) => within(
-  sbp('chelonia/kv/update', { contractID: CONTRACT_ID, key, updater: names, ...options }) as
-    Promise<JSONType | undefined>,
-  `update of ${key}`
-)
+const appendX = (value: JSONType) => [...(value as string[]), 'x']
+const updateWith = (key: string, options: Record<string, unknown> = {}) =>
+  update(key, appendX, options)
 const clear = (key: string, options?: Record<string, unknown>) =>
   within(sbp('chelonia/kv/clear', CONTRACT_ID, key, options) as Promise<void>, `clear of ${key}`)
-const aheadAt = (height: number) => (e: unknown) => kvHeightAheadCause(e)?.requiredHeight === height
-const gets = (key: string) =>
-  server.log.filter((request) => request.method === 'GET' && request.key === key).length
 const slotState = (key: string) => {
   const entry = mirror(key)
   return [entry?.status, entry?.heightAhead?.requiredHeight, entry?.settled]
@@ -548,16 +597,17 @@ describe('Slot writes and contract heights', () => {
     writeAsDeviceB('names', ['a'], AHEAD)
     syncs.catchUp = true
     kvHeightTimings.waitMs = 60_000
+    const before = syncs.count
     const release = holdSyncs()
     const write = updateWith('names')
-    await until(() => syncs.count === 2, 'the recovery sync')
+    await until(() => syncs.count === before + 1, 'the recovery sync')
     const probe = sbp('chelonia/private/queueEvent', `public:${CONTRACT_ID}`, () => 'free')
     assert.strictEqual(await within(probe, 'the public lane'), 'free')
     release()
     assert.deepStrictEqual(await write, ['a', 'x'])
     // The retry reloads the slot first, so it writes under the value's etag
     assert.deepStrictEqual(server.posts().map(({ status }) => status), [412, 204])
-    assert.strictEqual(syncs.count, 2)
+    assert.strictEqual(syncs.count, before + 1)
     assert.deepStrictEqual(slotState('names'), ['loaded', undefined, true])
   })
 
@@ -565,19 +615,20 @@ describe('Slot writes and contract heights', () => {
     defineSlot({ key: 'names', defaultValue: [] })
     await activate()
     syncs.catchUp = true
+    const before = syncs.count
     const release = holdSyncs()
     let sync: Promise<unknown> | undefined
     server.onPost = async () => {
       server.onPost = undefined
       server.height = AHEAD
       sync = sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true })
-      await until(() => syncs.count === 2, 'the catch-up sync')
+      await until(() => syncs.count === before + 1, 'the catch-up sync')
       // Partway through its replay
       setLocalHeight(START_HEIGHT + 1)
     }
     const write = updateWith('names')
     await until(() => server.posts()[0]?.status === 409, 'the 409')
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await sleep(20)
     assert.strictEqual(server.posts().length, 1)
     release()
     assert.deepStrictEqual(await write, ['x'])
@@ -585,7 +636,7 @@ describe('Slot writes and contract heights', () => {
     assert.deepStrictEqual(server.posts().map(({ status, height }) => [status, height]), [
       [409, String(START_HEIGHT)], [204, String(AHEAD)]
     ])
-    assert.strictEqual(syncs.count, 2)
+    assert.strictEqual(syncs.count, before + 1)
   })
 
   it("a recovering write awaited on another contract's lane completes", async () => {
@@ -610,24 +661,27 @@ describe('Slot writes and contract heights', () => {
   })
 
   it('gives up on a value from a newer height and reloads the key once the height arrives', async () => {
-    const keys = ['reject', 'passive', 'failed', 'aborted']
-    for (const key of keys) defineSlot({ key, defaultValue: [] })
+    const slotKeys = ['reject', 'passive', 'failed', 'aborted']
+    for (const key of slotKeys) defineSlot({ key, defaultValue: [] })
     await activate()
-    for (const key of keys) writeAsDeviceB(key, [key], AHEAD)
+    for (const key of slotKeys) writeAsDeviceB(key, [key], AHEAD)
     kvHeightTimings.waitMs = 20
+    const before = syncs.count
     await assert.rejects(updateWith('reject', { onHeightAhead: 'reject' }), aheadAt(AHEAD))
     await assert.rejects(updateWith('passive', { maxHeightRecoveries: 0 }), aheadAt(AHEAD))
-    assert.strictEqual(syncs.count, 1)
+    assert.strictEqual(syncs.count, before)
     syncs.fail = true
     await assert.rejects(updateWith('failed'), aheadAt(AHEAD))
     syncs.fail = false
     const release = holdSyncs()
     const controller = new AbortController()
     const aborted = updateWith('aborted', { signal: controller.signal })
-    await until(() => syncs.count === 3, 'the recovery sync')
+    await until(() => syncs.count === before + 2, 'the recovery sync')
     controller.abort('stop')
     await assert.rejects(aborted, (e) => e === 'stop')
-    for (const key of keys) assert.deepStrictEqual(slotState(key), ['loading', AHEAD, true], key)
+    for (const key of slotKeys) {
+      assert.deepStrictEqual(slotState(key), ['loading', AHEAD, true], key)
+    }
     release()
     // A stale stamp (409) reveals no value
     defineSlot({ key: 'stale', defaultValue: [] })
@@ -637,8 +691,8 @@ describe('Slot writes and contract heights', () => {
     assert.deepStrictEqual(slotState('stale'), ['non-init', undefined, true])
 
     setLocalHeight(AHEAD)
-    await until(() => keys.every((key) => mirror(key)?.status === 'loaded'), 'the reloads')
-    for (const key of keys) {
+    await until(() => slotKeys.every((key) => mirror(key)?.status === 'loaded'), 'the reloads')
+    for (const key of slotKeys) {
       assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, key), [key])
       assert.deepStrictEqual(slotState(key), ['loaded', undefined, true], key)
     }
@@ -649,6 +703,7 @@ describe('Slot writes and contract heights', () => {
     defineSlot({ key: 'names', defaultValue: [] })
     await activate()
     kvHeightTimings.waitMs = 60_000
+    const before = syncs.count
     writeAsDeviceB('names', ['a'])
     restamp('names', 'not a height')
     await assert.rejects(updateWith('names'), (e) => isKvHeightMalformed(e))
@@ -663,7 +718,7 @@ describe('Slot writes and contract heights', () => {
       return true
     })
     assert.deepStrictEqual(slotState('names'), ['loading', AHEAD, true])
-    assert.strictEqual(syncs.count, 1)
+    assert.strictEqual(syncs.count, before)
   })
 
   it('reports the final conflict\'s value, as the slot reads it', async () => {
@@ -685,8 +740,9 @@ describe('Slot writes and contract heights', () => {
       currentStatus: 'present', currentData: ['1'], etag
     }))
     // An invalid final value is left out, even after a valid one
+    const posted = server.posts().length
     server.onPost = () => {
-      if (server.posts().length === 3) etag = writeAsDeviceB('names', 'oops')
+      if (server.posts().length === posted + 2) etag = writeAsDeviceB('names', 'oops')
     }
     await assert.rejects(updateWith('names', { maxAttempts: 2 }), (e: Error) =>
       conflict({ currentStatus: 'present', etag })(e))
@@ -697,6 +753,7 @@ describe('Slot writes and contract heights', () => {
     await activate()
     writeAsDeviceB('names', ['a'], AHEAD)
     kvHeightTimings.waitMs = 60_000
+    const synced = syncs.count
     await assert.rejects(updateWith('names', { onHeightAhead: 'reject' }), aheadAt(AHEAD))
     // The clear waits for the height after a stale stamp (409); the height
     // arriving then also fires the key's reload, behind the clear
@@ -715,7 +772,7 @@ describe('Slot writes and contract heights', () => {
     const controller = new AbortController()
     const stopped = updateWith('names', { signal: controller.signal })
     // Waiting for the height after its sync failed: the lanes are free
-    await until(syncEnded(2), 'the failed recovery sync')
+    await until(syncEnded(synced + 1), 'the failed recovery sync')
     const clearing = clear('names', { maxHeightRecoveries: 0 })
     await until(() => server.posts().filter(({ status }) => status === 409).length === 2, '409')
     controller.abort('stop')
@@ -772,7 +829,61 @@ describe('Slot writes and contract heights', () => {
     await updateWith('names', defaults)
     await clear('names', defaults)
     assert.deepStrictEqual(server.posts().map(({ status }) => status), [204, 204])
+    // And so does `null` for the options themselves
+    await within(sbp('chelonia/kv/sync', CONTRACT_ID, 'names', null), 'sync, null options')
+    await within(sbp('chelonia/kv/clear', CONTRACT_ID, 'names', null), 'clear, null options')
+    assert.strictEqual(await within(sbp('chelonia/kv/whenSettled', CONTRACT_ID, 'names', null),
+      'whenSettled, null options'), 'non-init')
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [204, 204, 204])
   })
+
+  it("resolves when a listener drops the slot's entry as the write applies", async () => {
+    let matching = true
+    defineSlot({ key: 'prefs', defaultValue: {}, match: () => matching })
+    await activate()
+    const drop = ({ key, reason }: { key: string; reason: string }) => {
+      if (key !== 'prefs' || reason !== 'local') return
+      matching = false
+      sbp('chelonia/kv/refreshFilters', CONTRACT_ID)
+    }
+    sbp('okTurtles.events/on', CHELONIA_KV_UPDATED, drop)
+    try {
+      assert.deepStrictEqual(await update('prefs', () => ({ v: 1 })), { v: 1 })
+    } finally {
+      sbp('okTurtles.events/off', CHELONIA_KV_UPDATED, drop)
+    }
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [204])
+    assert.strictEqual(mirror('prefs'), undefined)
+  })
+
+  for (const autoLoad of ['on-sync', 'never'] as const) {
+    it(`settles a slot a listener replaces as the write applies (${autoLoad})`, async () => {
+      defineSlot({ key: 'prefs', defaultValue: {}, autoLoad })
+      await activate()
+      // The replacement rejects the value written
+      const schema = {
+        parse: (value: unknown) => {
+          if (value == null || (value as { v?: number }).v === 1) throw new Error('v 1 is rejected')
+          return value as JSONType
+        }
+      }
+      let replaced = false
+      const replace = ({ key, reason }: { key: string; reason: string }) => {
+        if (key !== 'prefs' || reason !== 'local' || replaced) return
+        replaced = true
+        defineSlot({ key: 'prefs', defaultValue: {}, autoLoad, schema })
+      }
+      sbp('okTurtles.events/on', CHELONIA_KV_UPDATED, replace)
+      try {
+        await update('prefs', () => ({ v: 1 }))
+      } finally {
+        sbp('okTurtles.events/off', CHELONIA_KV_UPDATED, replace)
+      }
+      await drainLanes()
+      assert.ok(replaced)
+      assert.deepStrictEqual(slotState('prefs'), ['error', undefined, true])
+    })
+  }
 })
 
 // GETs of `key` answer 500 until the returned function is called
@@ -804,7 +915,7 @@ const counted = (updater: (value: JSONType) => JSONType | typeof KV_NOOP) => {
     }
   }
 }
-const noopOnEmpty = (value: JSONType) => (value as string[]).length ? names(value) : KV_NOOP
+const noopOnEmpty = (value: JSONType) => (value as string[]).length ? appendX(value) : KV_NOOP
 // A KV_NOOP on a list without 'b'
 const dropB = (value: JSONType) => (value as string[]).includes('b')
   ? (value as string[]).filter((name) => name !== 'b')
@@ -814,7 +925,8 @@ const breakSlot = async (key: string, value: JSONType) => {
   writeAsDeviceB(key, value)
   await within(sbp('chelonia/kv/sync', CONTRACT_ID, key), `load of ${key}`)
   writeAsDeviceB(key, 'not a list')
-  await assert.rejects(within(sbp('chelonia/kv/sync', CONTRACT_ID, key), `reload of ${key}`))
+  await assert.rejects(within(sbp('chelonia/kv/sync', CONTRACT_ID, key), `reload of ${key}`),
+    { name: 'ChelErrorKvValidation' })
   assert.deepStrictEqual([mirror(key)?.status, mirror(key)?.value], ['error', value])
 }
 let vetoLoads = false
@@ -858,7 +970,7 @@ describe('update\'s reducer basis', () => {
     const etag = writeAsDeviceB('names', ['a'], AHEAD)
     await assert.rejects(updateWith('names', { onHeightAhead: 'reject' }), aheadAt(AHEAD))
     const restore = failGets('names')
-    const failing = counted(names)
+    const failing = counted(appendX)
     await assert.rejects(updateWith('names', { updater: failing.updater }), httpError)
     assert.deepStrictEqual(failing.calls, [])
     assert.deepStrictEqual(slotState('names'), ['loading', AHEAD, true])
@@ -868,7 +980,7 @@ describe('update\'s reducer basis', () => {
     syncs.catchUp = true
     kvHeightTimings.waitMs = 60_000
     const before = gets('names')
-    const retried = counted(names)
+    const retried = counted(appendX)
     assert.deepStrictEqual(await updateWith('names', { updater: retried.updater }), ['a', 'x'])
     assert.deepStrictEqual(retried.calls, [['a']])
     assert.strictEqual(gets('names'), before + 2)
@@ -877,10 +989,10 @@ describe('update\'s reducer basis', () => {
   })
 
   it('writes a never-loaded slot under if-match "", reloading only for a KV_NOOP', async () => {
-    const keys = ['lazy', 'noop', 'failing']
-    for (const key of keys) defineSlot({ key, defaultValue: [], autoLoad: 'never' })
+    const slotKeys = ['lazy', 'noop', 'failing']
+    for (const key of slotKeys) defineSlot({ key, defaultValue: [], autoLoad: 'never' })
     await activate()
-    const etags = keys.map((key) => writeAsDeviceB(key, ['a']))
+    const etags = slotKeys.map((key) => writeAsDeviceB(key, ['a']))
     assert.deepStrictEqual(await updateWith('lazy'), ['a', 'x'])
     assert.strictEqual(gets('lazy'), 0)
     assert.deepStrictEqual(writes('lazy'), [['""', 412], [etags[0], 204]])
@@ -896,10 +1008,10 @@ describe('update\'s reducer basis', () => {
     await assert.rejects(updateWith('failing', { updater: noopOnEmpty }), httpError)
     assert.deepStrictEqual(slotState('failing'), ['non-init', undefined, false])
     let first = true
-    const noopOnce = (value: JSONType) => first ? ((first = false), KV_NOOP) : names(value)
+    const noopOnce = (value: JSONType) => first ? ((first = false), KV_NOOP) : appendX(value)
     assert.deepStrictEqual(await updateWith('failing', { updater: noopOnce }), ['a', 'x'])
     assert.deepStrictEqual(writes('failing'), [['""', 412], [etags[2], 204]])
-    for (const key of keys) assert.deepStrictEqual(slotState(key), ['loaded', undefined, true])
+    for (const key of slotKeys) assert.deepStrictEqual(slotState(key), ['loaded', undefined, true])
   })
 
   it('with the caller\'s ifMatch, reloads an unsettled slot first; any failed reload rejects', async () => {
@@ -915,7 +1027,7 @@ describe('update\'s reducer basis', () => {
     // A reload that a filter vetoes fails like any other
     vetoLoads = true
     try {
-      const vetoed = counted(names)
+      const vetoed = counted(appendX)
       await assert.rejects(updateWith('other', { ifMatch: '*', updater: vetoed.updater }),
         { name: 'ChelErrorUnexpected', message: /vetoed/ })
       assert.deepStrictEqual(vetoed.calls, [])
@@ -926,7 +1038,7 @@ describe('update\'s reducer basis', () => {
     failGets('guarded')
     failGets('other')
     for (const key of ['other', 'guarded']) {
-      const rejected = counted(names)
+      const rejected = counted(appendX)
       await assert.rejects(updateWith(key, { ifMatch: '*', updater: rejected.updater }), httpError)
       assert.deepStrictEqual(rejected.calls, [])
     }
@@ -942,9 +1054,10 @@ describe('update\'s reducer basis', () => {
     defineSlot({ key: 'other', defaultValue: [], schema: listSchema })
     await activate()
     kvHeightTimings.waitMs = 60_000
+    const before = syncs.count
     await breakSlot('names', ['a'])
     const etag = writeAsDeviceB('names', ['b'], AHEAD)
-    const waiting = counted(names)
+    const waiting = counted(appendX)
     const writing = updateWith('names', { maxHeightRecoveries: 0, updater: waiting.updater })
     await until(() => mirror('names')?.heightAhead, 'the reload finding the value ahead')
     assert.deepStrictEqual(waiting.calls, [])
@@ -963,13 +1076,13 @@ describe('update\'s reducer basis', () => {
     setLocalHeight(AHEAD + 1)
     await assert.rejects(noop, httpError)
     assert.deepStrictEqual(writes('other'), [])
-    assert.strictEqual(syncs.count, 1)
+    assert.strictEqual(syncs.count, before)
   })
 
   it('writes entries an earlier session persisted under their etags; some reload first', async () => {
-    const keys = ['merged', 'noop', 'ifMatch', 'failing', 'marked', 'cleared']
+    const slotKeys = ['merged', 'noop', 'ifMatch', 'failing', 'marked', 'cleared']
     const persisted: Record<string, KvMirrorEntry> = {}
-    for (const key of keys) {
+    for (const key of slotKeys) {
       persisted[key] = { value: ['a'], etag: writeAsDeviceB(key, ['a']), status: 'loaded', settled: true }
       defineSlot({ key, defaultValue: [], autoLoad: 'never' })
     }
@@ -977,33 +1090,34 @@ describe('update\'s reducer basis', () => {
     persisted.marked.heightAhead = { requiredHeight: AHEAD }
     persisted.cleared = { value: undefined, etag: writeAsDeviceB('cleared', null), status: 'non-init' }
     rootState()._kv = { [CONTRACT_ID]: structuredClone(persisted) }
-    const etags = keys.slice(0, -1).map((key) => writeAsDeviceB(key, ['a', 'b'], AHEAD))
+    const etags: Record<string, string> = {}
+    for (const key of slotKeys.slice(0, -1)) etags[key] = writeAsDeviceB(key, ['a', 'b'], AHEAD)
     setLocalHeight(AHEAD)
     await activate()
-    assert.deepStrictEqual(keys.map((key) => mirror(key)?.settled), keys.map(() => false))
+    assert.deepStrictEqual(slotKeys.map((key) => mirror(key)?.settled), slotKeys.map(() => false))
     const run = async (key: string, updater: typeof dropB, options = {}) => {
       const counter = counted(updater)
       const result = await updateWith(key, { updater: counter.updater, ...options })
       return [result, counter.calls, gets(key), writes(key)]
     }
     // A server value written since comes back as a 412, and merges
-    assert.deepStrictEqual(await run('merged', names), [
-      ['a', 'b', 'x'], [['a'], ['a', 'b']], 0, [[persisted.merged.etag, 412], [etags[0], 204]]
+    assert.deepStrictEqual(await run('merged', appendX), [
+      ['a', 'b', 'x'], [['a'], ['a', 'b']], 0, [[persisted.merged.etag, 412], [etags.merged, 204]]
     ])
-    assert.deepStrictEqual(await run('noop', dropB), [['a'], [['a'], ['a', 'b']], 1, [[etags[1], 204]]])
-    assert.deepStrictEqual(await run('ifMatch', names, { ifMatch: '*' }), [
+    assert.deepStrictEqual(await run('noop', dropB), [['a'], [['a'], ['a', 'b']], 1, [[etags.noop, 204]]])
+    assert.deepStrictEqual(await run('ifMatch', appendX, { ifMatch: '*' }), [
       ['a', 'b', 'x'], [['a', 'b']], 1, [['*', 204]]
     ])
-    assert.deepStrictEqual(await run('marked', dropB), [['a'], [['a', 'b']], 1, [[etags[4], 204]]])
+    assert.deepStrictEqual(await run('marked', dropB), [['a'], [['a', 'b']], 1, [[etags.marked, 204]]])
     assert.strictEqual(mirror('marked')?.heightAhead, undefined)
     failGets('failing')
     failGets('cleared')
-    const failing = counted(names)
+    const failing = counted(appendX)
     await assert.rejects(updateWith('failing', { updater: failing.updater, ifMatch: '*' }), httpError)
     assert.deepStrictEqual([failing.calls, writes('failing')], [[], []])
     // A KV_NOOP whose reload fails runs again on the mirror, written under its etag
     let first = true
-    const noopOnce = (value: JSONType) => first ? ((first = false), KV_NOOP) : names(value)
+    const noopOnce = (value: JSONType) => first ? ((first = false), KV_NOOP) : appendX(value)
     assert.deepStrictEqual(await updateWith('cleared', { updater: noopOnce }), ['x'])
     assert.deepStrictEqual(writes('cleared'), [[persisted.cleared.etag, 204]])
   })
@@ -1032,7 +1146,7 @@ describe('update\'s reducer basis', () => {
     writeAsDeviceB('noop', ['a'], AHEAD)
     failGets('noop')
     let first = true
-    const noopOnRetry = (value: JSONType) => first ? ((first = false), names(value)) : KV_NOOP
+    const noopOnRetry = (value: JSONType) => first ? ((first = false), appendX(value)) : KV_NOOP
     await assert.rejects(updateWith('noop', { updater: noopOnRetry }), httpError)
     assert.deepStrictEqual(writes('noop').map(([, status]) => status), [412])
     const etag = writeAsDeviceB('write', ['a'], AHEAD + 1)

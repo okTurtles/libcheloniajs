@@ -5,20 +5,23 @@ import {
   CURVE25519XSALSA20POLY1305, EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey
 } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
+import assert from 'node:assert'
 import { afterEach, beforeEach } from 'node:test'
 
 import './chelonia.js'
 import { encryptedOutgoingData } from './encryptedData.js'
+import { kvHeightAheadCause } from './errors.js'
 import { CONTRACTS_MODIFIED } from './events.js'
-import { kvHeightTimings } from './kv-height.js'
+import type { KV_NOOP } from './kv-constants.js'
+import { abortable, kvHeightTimings } from './kv-height.js'
 import { NOTIFICATION_TYPE, type PubSubClient } from './pubsub/index.js'
 import { signedOutgoingData } from './signedData.js'
 import {
   captureConsole, makeKvServer, waitMicrotasks, within, type FetchInit, type KvServer
 } from './test-utils.js'
 import type {
-  ChelContractKey, ChelKvGetResult, ChelRootState, CheloniaConfig, JSONType, KvMirrorEntry,
-  KvSlotDefinition
+  ChelContractKey, ChelKvGetResult, ChelRootState, CheloniaConfig, JSONType,
+  KvHeightRecoveryOptions, KvMirrorEntry, KvSlotDefinition
 } from './types.js'
 
 export const CONTRACT_ID = 'zKvHarnessContract'
@@ -55,13 +58,40 @@ export const setLocalHeight = (height: number): void => {
   sbp('chelonia/kv/_notifyHeight', CONTRACT_ID, height)
 }
 
-const abortable = (promise: Promise<void>, signal?: AbortSignal | null) =>
-  new Promise<void>((resolve, reject) => {
-    signal?.throwIfAborted()
-    const onAbort = () => reject(signal!.reason)
-    signal?.addEventListener('abort', onAbort, { once: true })
-    promise.then(resolve, reject).finally(() => signal?.removeEventListener('abort', onAbort))
-  })
+export const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms))
+
+// GET requests for `key` the server answered
+export const gets = (key: string): number =>
+  server.log.filter((request) => request.method === 'GET' && request.key === key).length
+
+// The slot's value (any: the tests read the fields of the values they wrote)
+export const read = (key: string) => sbp('chelonia/kv/read', CONTRACT_ID, key)
+
+export const settledStatus = (key: string): string | undefined =>
+  sbp('chelonia/kv/settledStatus', CONTRACT_ID, key)
+
+export const whenSettled = (key: string): Promise<string> =>
+  within(sbp('chelonia/kv/whenSettled', CONTRACT_ID, key), `${key} to settle`)
+
+export const sync = (key: string, options?: KvHeightRecoveryOptions): Promise<void> =>
+  within(sbp('chelonia/kv/sync', CONTRACT_ID, key, options), `kv/sync of ${key}`)
+
+export const update = (
+  key: string,
+  updater: (value: JSONType) => JSONType | typeof KV_NOOP,
+  options: object = {}
+): Promise<JSONType | undefined> => within(
+  sbp('chelonia/kv/update', { contractID: CONTRACT_ID, key, updater, ...options }),
+  `update of ${key}`
+)
+
+export const aheadAt = (height: number) => (e: unknown): boolean =>
+  kvHeightAheadCause(e)?.requiredHeight === height
+
+// A load that finds the value ahead at `height`, without recovering
+export const findAhead = (key: string, height: number): Promise<void> =>
+  assert.rejects(sync(key, { onHeightAhead: 'reject' }), aheadAt(height))
 
 const route = async (url: string, init?: FetchInit): Promise<Response> => {
   init?.signal?.throwIfAborted()
@@ -74,7 +104,7 @@ const route = async (url: string, init?: FetchInit): Promise<Response> => {
     return new Response(null, { status: 404 })
   }
   syncs.count++
-  if (syncs.hold) await abortable(syncs.hold, init?.signal)
+  if (syncs.hold) await (init?.signal ? abortable(syncs.hold, init.signal) : syncs.hold)
   const meta = rootState().contracts[CONTRACT_ID]
   if (syncs.fail || !meta) return new Response(null, { status: 500 })
   replay?.()
@@ -87,9 +117,10 @@ const route = async (url: string, init?: FetchInit): Promise<Response> => {
 // Syncs wait until the returned function is called
 export const holdSyncs = (): (() => void) => {
   let release!: () => void
-  syncs.hold = new Promise<void>((resolve) => { release = resolve })
+  const hold = new Promise<void>((resolve) => { release = resolve })
+  syncs.hold = hold
   const open = () => {
-    syncs.hold = undefined
+    if (syncs.hold === hold) syncs.hold = undefined
     release()
   }
   teardowns.push(open)
@@ -189,11 +220,17 @@ export const writeAsDeviceB = (key: string, data: JSONType, height = server.heig
   return server.put(key, sealValue(key, data, String(height)))
 }
 
+// The stored value as a frame
+export const frameOf = (key: string): { body: string; cid: string } =>
+  ({ body: server.store.get(key)!.body, cid: server.etagOf(key) })
+
+// The stored value with another (unsigned) stamp, as a frame
+export const restamped = (key: string, stamp: unknown): { body: string } =>
+  ({ body: JSON.stringify({ ...JSON.parse(server.store.get(key)!.body), height: stamp }) })
+
 // Changes the stored value's stamp without re-signing it
-export const restamp = (key: string, stamp: unknown): string => {
-  const body = JSON.parse(server.store.get(key)!.body)
-  return server.put(key, { ...body, height: stamp })
-}
+export const restamp = (key: string, stamp: unknown): string =>
+  server.put(key, restamped(key, stamp).body)
 
 // The stored value, decoded as this device would (needs the local height)
 export const serverValue = (key: string): JSONType | undefined => {
@@ -232,6 +269,13 @@ const reconcile = (_ids: string[], change: { added: string[]; removed: string[] 
   sbp('chelonia/kv/_onContractsModified', change)
 }
 
+// Points Chelonia at the simulated server (again after a `chelonia/_init`)
+export const configure = (): Promise<unknown> => sbp('chelonia/configure', {
+  connectionURL: 'https://example.test',
+  connectionOptions: { manual: true },
+  fetch: route
+} as unknown as Partial<CheloniaConfig>)
+
 export const installKvHarness = (): void => {
   const random = Math.random
   const timings = { ...kvHeightTimings }
@@ -240,11 +284,7 @@ export const installKvHarness = (): void => {
     server = makeKvServer(CONTRACT_ID, { height: START_HEIGHT })
     Object.assign(syncs, { count: 0, catchUp: false, fail: false, hold: undefined })
     replay = undefined
-    await sbp('chelonia/configure', {
-      connectionURL: 'https://example.test',
-      connectionOptions: { manual: true },
-      fetch: route
-    } as unknown as Partial<CheloniaConfig>)
+    await configure()
     setupContract()
     // What `chelonia/connect` installs: slots activate when a contract is added
     sbp('okTurtles.events/on', CONTRACTS_MODIFIED, reconcile)
@@ -255,8 +295,12 @@ export const installKvHarness = (): void => {
 
   afterEach(async () => {
     try {
-      for (const teardown of teardowns.splice(0)) teardown()
+      const errors: unknown[] = []
+      for (const teardown of teardowns.splice(0)) {
+        try { teardown() } catch (e) { errors.push(e) }
+      }
       await drainLanes()
+      if (errors.length) throw errors[0]
     } finally {
       sbp('okTurtles.events/off', CONTRACTS_MODIFIED, reconcile)
       Math.random = random

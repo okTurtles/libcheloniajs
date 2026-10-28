@@ -338,17 +338,27 @@ describe('Contract sync and removal', () => {
       assert.deepStrictEqual(resyncFlags(), [true])
     }
 
-    it('runs again at the final removal after a failed re-sync', async () => {
+    it('runs again at the final removal after a failed re-sync, which is announced', async () => {
       const cid = server.contract!.hash()
       await failResync(cid)
       const left = structuredClone(rootState()[cid])
-      await within(sbp('chelonia/contract/release', cid), 'release')
+      const resyncs: unknown[] = []
+      const onRemoval = (_ids: string[], change: { resync?: boolean }) => {
+        resyncs.push(change.resync)
+      }
+      sbp('okTurtles.events/on', CONTRACTS_MODIFIED, onRemoval)
+      try {
+        await within(sbp('chelonia/contract/release', cid), 'release')
+      } finally {
+        sbp('okTurtles.events/off', CONTRACTS_MODIFIED, onRemoval)
+      }
       assert.deepStrictEqual(resyncFlags(), [true, false])
       assert.deepStrictEqual(calls[1].state, left)
       assert.strictEqual(rootState().contracts[cid], undefined)
       assert.strictEqual(rootState()[cid], undefined)
-      // Only the re-sync's teardown announced the removal
-      assert.deepStrictEqual(removed, [cid])
+      // The re-sync's teardown, then the final removal, which isn't a re-sync's
+      assert.deepStrictEqual(removed, [cid, cid])
+      assert.deepStrictEqual(resyncs, [undefined])
     })
 
     it('runs again at a permanent removal after a failed re-sync, which is announced', async () => {
@@ -439,7 +449,7 @@ describe('Contract sync and removal', () => {
       const settled = whenSettled(cid)
       await within(sbp('chelonia/contract/sync', cid, { resync: true }), 'resync')
       assert.ok(await isPending(settled))
-      await sbp('chelonia/kv/sync', cid, KEY).catch(() => {})
+      await assert.rejects(within(sbp('chelonia/kv/sync', cid, KEY), 'kv sync'), /Missing #sak/)
       assert.strictEqual(await within(settled, 'whenSettled'), 'error')
     })
 

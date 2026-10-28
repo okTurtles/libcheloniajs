@@ -3,6 +3,7 @@
 // package-root `export *`) so that adding new internal error types
 // does not widen the public taxonomy.
 import { ChelErrorGenerator, isKvConflict } from './errors.js'
+import type { KvConflictCause } from './types.js'
 
 // Thrown by the low-level `chelonia/kv/set` primitive when the
 // conflict-retry loop exhausts `maxAttempts`, or on a 412 without
@@ -18,6 +19,8 @@ import { ChelErrorGenerator, isKvConflict } from './errors.js'
 // use `isKvConflict`, which matches both.
 export const ChelErrorKvMaxAttempts = ChelErrorGenerator('ChelErrorKvMaxAttempts')
 
-export function isKvMaxAttempts (e: unknown): e is Error & { name: 'ChelErrorKvMaxAttempts' } {
+export function isKvMaxAttempts (e: unknown): e is Error & {
+  name: 'ChelErrorKvMaxAttempts'; cause?: KvConflictCause
+} {
   return isKvConflict(e) && e.name === 'ChelErrorKvMaxAttempts'
 }

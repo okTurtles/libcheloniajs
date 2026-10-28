@@ -2,7 +2,9 @@ import type { CheloniaContext } from './types.js'
 
 // Slot definitions (`kvSlots`, `defContractKvByManifest`) are application
 // code, so only `chelonia/_init` creates them; everything else is per session.
-const startKvSession = (ctx: CheloniaContext): void => {
+// The old session's `whenSettled` waits end with an `AbortError`.
+const startKvSession = (ctx: CheloniaContext, endedBy: string): void => {
+  const settleWaiters = ctx.kvSettleWaiters
   clearTimeout(ctx.kvFilterRetryTimer)
   ctx.kvFilterRetryTimer = undefined
   ctx.kvHeightWaits?.forEach((wait) => clearTimeout(wait.timer))
@@ -22,22 +24,22 @@ const startKvSession = (ctx: CheloniaContext): void => {
   ctx.kvSettleWaiters = new Map()
   ctx.kvReconciledContracts = new Set()
   ctx.kvResyncedContracts = new Set()
+  settleWaiters?.forEach((waiters, waitKey) => {
+    const error = new DOMException(
+      `[chelonia/kv] whenSettled: ${endedBy} ended the wait for ${waitKey}`, 'AbortError'
+    )
+    for (const waiter of waiters) waiter.reject(error)
+  })
 }
 
 export const initKvRuntime = (ctx: CheloniaContext): void => {
   ctx.kvSlots = new Map()
   ctx.defContractKvByManifest = new Map()
-  ctx.kvResetsInProgress = 0
-  startKvSession(ctx)
+  // A reset still draining counts until its `finally`
+  ctx.kvResetsInProgress ??= 0
+  startKvSession(ctx, 'chelonia/_init')
 }
 
 export const resetKvRuntime = (ctx: CheloniaContext): void => {
-  const settleWaiters = ctx.kvSettleWaiters
-  startKvSession(ctx)
-  for (const [waitKey, waiters] of settleWaiters) {
-    const error = new DOMException(
-      `[chelonia/kv] whenSettled: chelonia/reset ended the wait for ${waitKey}`, 'AbortError'
-    )
-    for (const waiter of waiters) waiter.reject(error)
-  }
+  startKvSession(ctx, 'chelonia/reset')
 }

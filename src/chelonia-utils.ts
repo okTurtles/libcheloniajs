@@ -9,9 +9,8 @@ import type {
 } from './types.js'
 
 // This file contains non-core parts of Chelonia, i.e., functionality that is
-// useful but optional. The threshold for something being 'optional' generally
-// is something that can be implemented externally using only public Chelonia
-// selectors.
+// useful but optional, built on the public Chelonia selectors and the KV
+// helpers the slot selectors use.
 // Optional functionality can make certain assumptions about contracts or
 // actions to make things simpler or easier to implement.
 // Currently, a single selector is defined: 'chelonia/kv/queuedSet'.

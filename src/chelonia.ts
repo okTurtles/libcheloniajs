@@ -60,17 +60,17 @@ import {
 import './files.js'
 import { clearReprocessDebounceAll, type PublishOptions } from './internals.js'
 import './kv.js'
+import { assertMaxAttempts } from './kv-checks.js'
 import {
   abortReason,
-  composeSignals,
   heightAheadError,
   localHeight,
   MAX_STALE_STAMP_RETRIES,
   readHeightStamp,
+  sessionSignal,
   sleep,
   waitForHeight,
-  waitForHeightAfterSync,
-  type ComposedAbortSignal
+  waitForHeightAfterSync
 } from './kv-height.js'
 import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import { queueEventOrReject } from './queue-event.js'
@@ -287,12 +287,12 @@ export type ChelAtomicParams = {
 
 export { SPMessage }
 
-type KvValueClass<T> =
+type ClassifiedKvValue<T> =
   | { status: 'present'; parsed: ParsedEncryptedOrUnencryptedMessage<T> }
   | { status: 'ahead'; requiredHeight: number }
   | { status: 'malformed'; error: Error }
 
-type KvServerValue = (KvValueClass<JSONType> | { status: 'absent' }) & {
+type KvServerValue = (ClassifiedKvValue<JSONType> | { status: 'absent' }) & {
   etag: string | null;
   httpStatus: number;
 }
@@ -751,7 +751,8 @@ export default sbp('sbp/selectors/register', {
     if (this.pubsub) {
       sbp('chelonia/private/stopClockSync')
     }
-    let drainingKv = false
+    // Whether this reset is counted in `kvResetsInProgress`
+    let counted = false
     try {
       // wait for any pending sync operations to finish before saving
       Object.keys(this.postSyncOperations).forEach((cID) => {
@@ -771,7 +772,7 @@ export default sbp('sbp/selectors/register', {
       // the per-contract `chelonia/queueInvocation` lane, so `_waitInFlight`
       // resolves only once they settle. The trailing `wait` drains follow-up
       // work a KV continuation enqueued. No height-recovery syncs start meanwhile.
-      drainingKv = true
+      counted = true
       this.kvResetsInProgress++
       this.abortController.abort()
       this.abortController = new AbortController()
@@ -829,7 +830,7 @@ export default sbp('sbp/selectors/register', {
       }
       return result
     } finally {
-      if (drainingKv) this.kvResetsInProgress--
+      if (counted) this.kvResetsInProgress--
       // Stop first: an overlapping reset may have restarted it already
       if (this.pubsub) {
         sbp('chelonia/private/stopClockSync')
@@ -1235,9 +1236,15 @@ export default sbp('sbp/selectors/register', {
           // matches `_handleRemote`'s own no-op-on-miss semantics.
           if (!rawKvHandler && !this.kvSlotsByContractID.get(msg.channelID)?.size) return
           sbp('chelonia/queueInvocation', msg.channelID, async () => {
-            const frame = classifyKvValue<object>(
-              this, msg.channelID, msg.key, JSON.parse(Buffer.from(msg.data).toString())
-            )
+            let body: unknown
+            try {
+              body = JSON.parse(Buffer.from(msg.data).toString())
+            } catch (e) {
+              // Unreadable, like a malformed frame: a slot for the key reloads it
+              sbp('chelonia/kv/_onUnverifiableFrame', msg.channelID, msg.key, undefined)
+              throw e
+            }
+            const frame = classifyKvValue<object>(this, msg.channelID, msg.key, body)
             // Unverifiable: a slot for the key reloads it (now, or once the
             // contract reaches the frame's height); the raw handler misses it
             if (frame.status !== 'present') {
@@ -2917,7 +2924,8 @@ export default sbp('sbp/selectors/register', {
       signingKeyId: string;
       maxAttempts?: number | null | undefined;
       // How long a conflict value stamped ahead of the local contract may
-      // wait for the contract to reach its height
+      // wait for the contract to reach its height; also bounds the wait
+      // after a `409` (stale height stamp)
       heightWaitMs?: number | null | undefined;
       // Give `onconflict` values that can't be verified instead of failing
       allowUnverifiedConflict?: boolean;
@@ -2925,9 +2933,7 @@ export default sbp('sbp/selectors/register', {
       signal?: AbortSignal;
     }
   ) {
-    if (maxAttempts != null && !(Number.isSafeInteger(maxAttempts) && maxAttempts >= 1)) {
-      throw new TypeError('[chelonia/kv] set: `maxAttempts` must be an integer >= 1')
-    }
+    assertMaxAttempts(maxAttempts, 'set', TypeError)
     if (heightWaitMs != null && !(Number.isFinite(heightWaitMs) && heightWaitMs >= 0)) {
       throw new TypeError('[chelonia/kv] set: `heightWaitMs` must be a finite number >= 0')
     }
@@ -2936,17 +2942,9 @@ export default sbp('sbp/selectors/register', {
     }
     let attemptsLeft = maxAttempts ?? 3
     let staleStampRetries = 0
-    const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`
-    const signal: ComposedAbortSignal = callerSignal
-      ? composeSignals([this.abortController.signal, callerSignal])
-      : this.abortController.signal
-    const get = () => this.config.fetch(url, {
-      headers: new Headers([
-        ['authorization', buildShelterAuthorizationHeader.call(this, contractID)]
-      ]),
-      signal
-    })
-    const isConflict = (response: Response) => response.status === 412
+    const signal = sessionSignal(this, callerSignal)
+    const get = () => fetchKv(this, contractID, key, signal)
+    const isPreconditionFailed = (response: Response) => response.status === 412
     const unexpected = (response: Response) => new ChelErrorUnexpectedHttpResponseCode(
       `[kv/set] ${httpErrorMessage(response)}`, { cause: response.status }
     )
@@ -2958,12 +2956,12 @@ export default sbp('sbp/selectors/register', {
       { recover = false, wait = false } = {}
     ): Promise<KvServerValue> => {
       const etag = responseEtag(response)
-      const text = response.ok || isConflict(response) ? await response.text() : ''
-      if (recover && !text && !etag && !recoveryGetDone && isConflict(response)) {
+      const text = response.ok || isPreconditionFailed(response) ? await response.text() : ''
+      if (recover && !text && !etag && !recoveryGetDone && isPreconditionFailed(response)) {
         recoveryGetDone = true
         const recovered = await get()
         if (recovered.ok) return readServerValue(recovered, { wait })
-        console.warn(`[kv/set] recovery GET for ${contractID}/${key} returned ${recovered.status}`)
+        console.warn(`[chelonia/kv] set: recovery GET for ${contractID}::${key} returned ${recovered.status}`)
       }
       if (!text) return { status: 'absent', etag, httpStatus: response.status }
       const body = JSON.parse(text)
@@ -2976,30 +2974,27 @@ export default sbp('sbp/selectors/register', {
       }
       return { ...value, etag, httpStatus: response.status }
     }
-    // An unreadable final conflict only leaves its value unknown
-    const readFinal = async (response: Response, recover: boolean) => {
+    // A conflict value that can't be read is unknown (`undefined`); a final
+    // conflict's is also unknown when reading it fails otherwise
+    const readConflict = async (
+      response: Response,
+      { recover = false, wait = false, final = false } = {}
+    ) => {
       try {
-        return await readServerValue(response, { recover })
-      } catch {
+        return await readServerValue(response, { recover, wait })
+      } catch (e) {
         if (signal.aborted) throw abortReason(signal)
+        if (!final && !(e instanceof SyntaxError)) throw e
         return undefined
       }
     }
-    // For values that can't be verified yet (ahead) or ever (malformed)
-    const unverifiedError = (value: KvServerValue | undefined) => {
-      if (value?.status === 'malformed') return value.error
-      if (value?.status !== 'ahead') return null
-      const { requiredHeight, etag, httpStatus } = value
-      return heightAheadError(this, contractID, key, {
-        requiredHeight, exact: true, etag, httpStatus
-      })
-    }
     const verified = <T extends KvServerValue | undefined>(value: T): T => {
-      const error = allowUnverifiedConflict ? null : unverifiedError(value)
+      const error = allowUnverifiedConflict ? null : unverifiedError(this, contractID, key, value)
       if (error) throw error
       return value
     }
     const resolveConflict = async (value: KvServerValue, status: number) => {
+      const unverified = () => unverifiedError(this, contractID, key, value)
       const serverValue: KvConflictServerValue = value.status === 'present'
         ? { currentStatus: 'present', currentValue: value.parsed }
         : value.status === 'ahead'
@@ -3013,7 +3008,7 @@ export default sbp('sbp/selectors/register', {
         etag: value.etag,
         ...serverValue,
         get currentData () {
-          const error = unverifiedError(value)
+          const error = unverified()
           if (error) throw error
           return serverValue.currentValue?.data
         }
@@ -3045,7 +3040,7 @@ export default sbp('sbp/selectors/register', {
         const message = outputEncryptedOrUnencryptedMessage.call(this, {
           contractID, innerSigningKeyId, encryptionKeyId, signingKeyId, data, meta: key
         })
-        const response = await this.config.fetch(url, {
+        const response = await this.config.fetch(kvUrl(this, contractID, key), {
           headers: new Headers([
             ['authorization', buildShelterAuthorizationHeader.call(this, contractID)],
             ['if-match', ifMatch || '""']
@@ -3070,20 +3065,21 @@ export default sbp('sbp/selectors/register', {
           }
           continue
         }
-        if (!isConflict(response)) throw unexpected(response)
+        if (!isPreconditionFailed(response)) throw unexpected(response)
         if (typeof onconflict !== 'function') {
           throw new ChelErrorKvMaxAttempts(
             `kv/set failed with status ${response.status} and no onconflict handler was provided`,
-            { cause: conflictCause(await readFinal(response, false), response) }
+            { cause: conflictCause(await readConflict(response, { final: true }), response) }
           )
         }
-        if (--attemptsLeft <= 0) {
-          const value = verified(await readFinal(response, true))
+        const final = --attemptsLeft <= 0
+        const value = verified(await readConflict(response, { recover: true, wait: !final, final }))
+        // Nothing to merge with a value that can't be read
+        if (final || !value) {
           throw new ChelErrorKvMaxAttempts('kv/set conflict setting KV value', {
             cause: conflictCause(value, response)
           })
         }
-        const value = verified(await readServerValue(response, { recover: true, wait: true }))
         await sleep(randomIntFromRange(0, 1500), signal)
         if (!(await resolveConflict(value, response.status))) return { etag: null }
       }
@@ -3092,15 +3088,7 @@ export default sbp('sbp/selectors/register', {
     }
   },
   'chelonia/kv/get': async function (this: CheloniaContext, contractID: string, key: string): Promise<ChelKvGetResult | null> {
-    const response = await this.config.fetch(
-      `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`,
-      {
-        headers: new Headers([
-          ['authorization', buildShelterAuthorizationHeader.call(this, contractID)]
-        ]),
-        signal: this.abortController.signal
-      }
-    )
+    const response = await fetchKv(this, contractID, key, this.abortController.signal)
     if (response.status === 404) {
       return null
     }
@@ -3110,13 +3098,12 @@ export default sbp('sbp/selectors/register', {
       )
     }
     const etag = responseEtag(response)
-    const value = classifyKvValue<JSONType>(this, contractID, key, await response.json())
-    if (value.status === 'malformed') throw value.error
-    if (value.status === 'ahead') {
-      throw heightAheadError(this, contractID, key, {
-        requiredHeight: value.requiredHeight, exact: true, etag, httpStatus: response.status
-      })
+    const value: KvServerValue = {
+      ...classifyKvValue<JSONType>(this, contractID, key, await response.json()),
+      etag,
+      httpStatus: response.status
     }
+    if (value.status !== 'present') throw unverifiedError(this, contractID, key, value)
     const parsed = value.parsed
     // Attach `etag` in place rather than spreading: `parsed` exposes
     // `data` / `encryptionKeyId` / `innerSigningKeyId` / etc. as
@@ -3210,6 +3197,25 @@ function outputEncryptedOrUnencryptedMessage (
 const responseEtag = (response: Response): string | null =>
   response.headers.get('x-cid') || response.headers.get('etag')
 
+const kvUrl = (ctx: CheloniaContext, contractID: string, key: string) =>
+  `${ctx.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`
+
+const fetchKv = (ctx: CheloniaContext, contractID: string, key: string, signal: AbortSignal) =>
+  ctx.config.fetch(kvUrl(ctx, contractID, key), {
+    headers: new Headers([['authorization', buildShelterAuthorizationHeader.call(ctx, contractID)]]),
+    signal
+  })
+
+// For values that can't be verified yet (ahead) or ever (malformed)
+function unverifiedError (
+  ctx: CheloniaContext, contractID: string, key: string, value: KvServerValue | undefined
+): Error | null {
+  if (value?.status === 'malformed') return value.error
+  if (value?.status !== 'ahead') return null
+  const { requiredHeight, etag, httpStatus } = value
+  return heightAheadError(ctx, contractID, key, { requiredHeight, exact: true, etag, httpStatus })
+}
+
 // Only what the final conflict revealed; fields that couldn't be read are omitted
 function conflictCause (value: KvServerValue | undefined, response: Response): KvConflictCause {
   if (!value) return { etag: responseEtag(response) }
@@ -3219,11 +3225,9 @@ function conflictCause (value: KvServerValue | undefined, response: Response): K
     return { currentStatus: 'ahead', requiredHeight: value.requiredHeight, etag }
   }
   if (value.status === 'malformed') return { currentStatus: 'malformed', etag }
-  if (value.status === 'present') {
-    try {
-      return { currentStatus: 'present', currentData: value.parsed.data, etag }
-    } catch {}
-  }
+  try {
+    return { currentStatus: 'present', currentData: value.parsed.data, etag }
+  } catch {}
   return { etag }
 }
 
@@ -3233,9 +3237,11 @@ function classifyKvValue<T> (
   contractID: string,
   key: string,
   serializedData: unknown
-): KvValueClass<T> {
+): ClassifiedKvValue<T> {
   let height: number
   try {
+    // Keeps the cause a malformed-stamp error: older guards that walk `.cause`
+    // would read `ChelErrorInvalidMessageHeight` as "sync and retry"
     height = readHeightStamp(serializedData, ChelErrorKvHeightMalformed)
   } catch (e) {
     return {
