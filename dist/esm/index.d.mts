@@ -10,6 +10,7 @@ export * from './files.mjs';
 export * from './journal.mjs';
 export * from './kv-constants.mjs';
 export * from './kv.mjs';
+export * from './names.mjs';
 export * from './persistent-actions.mjs';
 export * from './presets.mjs';
 export * from './pubsub/index.mjs';
