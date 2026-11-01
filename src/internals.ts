@@ -49,6 +49,7 @@ import {
   EVENT_PUBLISHING_ERROR
 } from './events.js'
 import { multicodes } from './functions.js'
+import { queueEventOrReject } from './queue-event.js'
 import {
   clearReingestTrackerForContract,
   noteFutureEvent,
@@ -743,7 +744,7 @@ export default sbp('sbp/selectors/register', {
           // could be wrong due to newly received encryption keys), sync it anyhow
           // (i.e., disregard the force flag and proceed to sync the contract)
           if (!rootState[contractID]?._volatile?.dirty) {
-            return sbp('chelonia/private/queueEvent', contractID, ['chelonia/private/noop'])
+            return queueEventOrReject(contractID, ['chelonia/private/noop'])
           }
         }
         // enqueue this invocation in a serial queue to ensure
@@ -751,7 +752,7 @@ export default sbp('sbp/selectors/register', {
         // but after it's finished. This is used in tandem with
         // queuing the 'chelonia/private/in/handleEvent' selector, defined below.
         // This prevents handleEvent getting called with the wrong previousHEAD for an event.
-        return sbp('chelonia/private/queueEvent', contractID, [
+        return queueEventOrReject(contractID, [
           'chelonia/private/in/syncContract',
           contractID,
           params
@@ -771,7 +772,7 @@ export default sbp('sbp/selectors/register', {
     const contractID = entry.contractID()
     const originalEntry = entry
 
-    return sbp('chelonia/private/queueEvent', `publish:${contractID}`, async () => {
+    return queueEventOrReject(`publish:${contractID}`, async () => {
       let attempt = 1
       let lastAttemptedHeight
       // prepublish is asynchronous to allow for cleanly sending messages to
@@ -797,7 +798,7 @@ export default sbp('sbp/selectors/register', {
         // something over the web socket)
         // This also ensures that the state doesn't change while reading it
         lastAttemptedHeight = entry.height()
-        const newEntry = await sbp('chelonia/private/queueEvent', contractID, async () => {
+        const newEntry = await queueEventOrReject(contractID, async () => {
           const rootState = sbp(this.config.stateSelector)
           const state = rootState[contractID]
           const isFirstMessage = entry.isFirstMessage()
@@ -1418,7 +1419,7 @@ export default sbp('sbp/selectors/register', {
             // sharing the same state. This is more of a general issue in this
             // situation, not limited to the following sequence of events
             if (self.subscriptionSet.has(v.contractID)) {
-              const resync = sbp('chelonia/private/queueEvent', v.contractID, [
+              const resync = queueEventOrReject(v.contractID, [
                 'chelonia/private/in/syncContract',
                 v.contractID
               ])
@@ -1460,7 +1461,7 @@ export default sbp('sbp/selectors/register', {
           }
 
           const previousVolatileState = targetState?._volatile
-          sbp('chelonia/private/queueEvent', v.contractID, [
+          queueEventOrReject(v.contractID, [
             'chelonia/private/postKeyShare',
             v.contractID,
             mustResync ? previousVolatileState : null,
@@ -1470,7 +1471,7 @@ export default sbp('sbp/selectors/register', {
             // the current contract so that calling
             // 'chelonia/contract/waitingForKeyShareTo' will give correct results
             // (i.e., the event is processed after the state is written)
-            sbp('chelonia/private/queueEvent', contractID, () => {
+            queueEventOrReject(contractID, () => {
               sbp('okTurtles.events/emit', CONTRACT_HAS_RECEIVED_KEYS, {
                 contractID: v.contractID,
                 sharedWithContractID: contractID,
@@ -1750,7 +1751,7 @@ export default sbp('sbp/selectors/register', {
             if (!foreignContract || !foreignKeyName) { throw new Error('Invalid foreign key: missing contract or key name') }
 
             internalSideEffectStack?.push(() => {
-              sbp('chelonia/private/queueEvent', foreignContract, () => {
+              queueEventOrReject(foreignContract, () => {
                 const rootState = sbp(config.stateSelector) as ChelRootState
                 if (Array.isArray(rootState[foreignContract]?._volatile?.watch)) {
                   // Stop watching events for this key
@@ -1895,7 +1896,7 @@ export default sbp('sbp/selectors/register', {
         // If we're able to rotate foreign keys and we need to, do so
         if (Number.isFinite(canMirrorOperationsUpToRingLevel) && hasOutOfSyncKeys) {
           internalSideEffectStack?.push(() => {
-            sbp('chelonia/private/queueEvent', contractID, [
+            queueEventOrReject(contractID, [
               'chelonia/private/deleteOrRotateRevokedKeys',
               contractID
             ]).catch((e: unknown) => {
@@ -2011,7 +2012,7 @@ export default sbp('sbp/selectors/register', {
     // make sure handleEvent is called AFTER any currently-running invocations
     // to 'chelonia/private/in/sync', to prevent gi.db from throwing
     // "bad previousHEAD" errors
-    return sbp('chelonia/private/queueEvent', contractID, async () => {
+    return queueEventOrReject(contractID, async () => {
       await sbp('chelonia/private/in/handleEvent', contractID, event)
       // Before the next operation is enqueued, enqueue post sync ops. This
       // makes calling `/wait` more reliable
@@ -2137,7 +2138,7 @@ export default sbp('sbp/selectors/register', {
       // Queue the current operation for execution.
       // Note that we do _not_ await because it could be unsafe to do so.
       // If the operation fails for some reason, just log the error.
-      sbp('chelonia/private/queueEvent', contractID, op).catch((e: unknown) => {
+      queueEventOrReject(contractID, op).catch((e: unknown) => {
         console.error(`Post-sync operation for ${contractID} failed`, { contractID, op, error: e })
       })
     })
@@ -2195,7 +2196,7 @@ export default sbp('sbp/selectors/register', {
         return
       }
 
-      sbp('chelonia/private/queueEvent', contractID, [
+      queueEventOrReject(contractID, [
         'chelonia/private/in/syncContractAndWatchKeys',
         contractID,
         externalContractID
@@ -2315,7 +2316,7 @@ export default sbp('sbp/selectors/register', {
         this.config.reactiveSet(externalContractState._volatile!.pendingKeyRevocations!, id, true)
       )
 
-      sbp('chelonia/private/queueEvent', externalContractID, [
+      queueEventOrReject(externalContractID, [
         'chelonia/private/deleteOrRotateRevokedKeys',
         externalContractID
       ]).catch((e: unknown) => {
@@ -2535,7 +2536,7 @@ export default sbp('sbp/selectors/register', {
 
       const [, , , [originatingContractID]] = entry
 
-      return sbp('chelonia/private/queueEvent', originatingContractID, [
+      return queueEventOrReject(originatingContractID, [
         'chelonia/private/respondToKeyRequest',
         contractID,
         signingKeyId,

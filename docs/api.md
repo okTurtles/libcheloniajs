@@ -74,6 +74,14 @@ For the authoritative signatures, follow the source links.
 | `chelonia/contract/disconnect` | `src/chelonia.ts` | Publish an `OP_KEY_DEL` to detach the foreign keys we hold for another contract. |
 | `chelonia/latestContractState` | `src/chelonia.ts` | Return a cloned, possibly freshly-synced contract state. Accepts `{ forceSync }`. |
 
+If an SBP filter vetoes a contract's queue (`chelonia/private/queueEvent`),
+the selectors that needed it reject with `ChelErrorUnexpected` (`/vetoed/`)
+instead of resolving as if the work had run: `retain`, `release`, `sync`,
+`remove`, `wait`, `waitPublish`, `chelonia/handleEvent`,
+`chelonia/queueInvocation` and the `chelonia/out/*` selectors that publish
+an event. The work didn't run: after a vetoed last `release`, for example,
+the contract is still subscribed.
+
 `chelonia/contract/fullState` returns `{ contractState, cheloniaState,
 kvState, kvEntry }` — one tuple per id, or a map of tuples keyed by id
 when given an array. `cheloniaState` is a **shallow** copy of

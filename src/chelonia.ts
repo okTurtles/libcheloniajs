@@ -60,6 +60,7 @@ import {
 import './files.js'
 import { clearReprocessDebounceAll, type PublishOptions } from './internals.js'
 import './kv.js'
+import { queueEventOrReject } from './queue-event.js'
 import {
   isSignedData,
   type RawSignedData,
@@ -1525,18 +1526,8 @@ export default sbp('sbp/selectors/register', {
     //        return this.config.fetch(profilePictureUrl).then(doSomeWorkWithTheFile)
     //      })
     //    }
-    // An SBP filter veto makes `queueEvent` return `undefined`; reject so that
-    // callers can't mistake a body that never ran for one that did.
-    const queue = (name: string, invocation: Parameters<typeof sbp>) => {
-      const queued = sbp('chelonia/private/queueEvent', name, invocation)
-      return queued === undefined
-        ? Promise.reject(
-          new ChelErrorUnexpected(`[chelonia] queueInvocation: queueing on ${name} was vetoed`)
-        )
-        : queued
-    }
-    return queue(contractID, ['chelonia/private/noop']).then(() =>
-      queue('public:' + contractID, sbpInvocation)
+    return queueEventOrReject(contractID, ['chelonia/private/noop']).then(() =>
+      queueEventOrReject('public:' + contractID, sbpInvocation)
     )
   },
   'chelonia/begin': async (...invocations: Parameters<typeof sbp>[]) => {
@@ -1598,7 +1589,7 @@ export default sbp('sbp/selectors/register', {
       : Object.keys(sbp(this.config.stateSelector).contracts)
     return Promise.all(
       listOfIds.flatMap((cID) => {
-        return sbp('chelonia/private/queueEvent', `publish:${cID}`, ['chelonia/private/noop'])
+        return queueEventOrReject(`publish:${cID}`, ['chelonia/private/noop'])
       })
     )
   },
@@ -1666,7 +1657,7 @@ export default sbp('sbp/selectors/register', {
           return undefined
         }
 
-        return sbp('chelonia/private/queueEvent', contractID, () => {
+        return queueEventOrReject(contractID, () => {
           // This allows us to double-check that the contract is meant to be
           // removed, as circumstances could have changed from the time remove
           // was called and this function is executed. For example, `/release`

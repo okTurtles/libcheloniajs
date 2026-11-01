@@ -253,6 +253,36 @@ describe('Contract sync and removal', () => {
     assert.deepStrictEqual(errorsLogged(), [])
   })
 
+  describe('when a filter vetoes the contract queue', () => {
+    afterEach(() => { vetoedQueue = undefined })
+
+    // Each of these used to resolve (or throw a TypeError) without the work
+    const vetoedCalls: Array<[string, string, (cid: string) => Promise<unknown>]> = [
+      ['retain of a subscribed contract', '', (cid) => sbp('chelonia/contract/retain', cid, { ephemeral: true })],
+      ['a forced sync', '', (cid) => sbp('chelonia/contract/sync', cid)],
+      ['the last release', '', (cid) => sbp('chelonia/contract/release', cid)],
+      ['an incoming event', '', () => sbp('chelonia/handleEvent', server.contract!.serialize())],
+      ['waitPublish', 'publish:', (cid) => sbp('chelonia/contract/waitPublish', cid)]
+    ]
+    for (const [name, lane, call] of vetoedCalls) {
+      it(`${name} rejects`, async () => {
+        const cid = server.contract!.hash()
+        await within(sbp('chelonia/contract/retain', cid), 'retain')
+        vetoedQueue = lane + cid
+        await assert.rejects(within(call(cid), name), vetoError)
+      })
+    }
+
+    it('publishing rejects', async () => {
+      const entry = makeContract()
+      vetoedQueue = entry.hash()
+      await assert.rejects(
+        within(sbp('chelonia/private/out/publishEvent', entry, {}, {}), 'publish'),
+        vetoError
+      )
+    })
+  })
+
   describe("the contract type's destructor", () => {
     const calls: Array<{ resync: boolean; state: unknown }> = []
     const resyncFlags = () => calls.map(({ resync }) => resync)
