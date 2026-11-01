@@ -31,7 +31,7 @@ For the authoritative signatures, follow the source links.
 | `chelonia/pubsub/update` | `src/chelonia.ts` | Reconcile pubsub subscriptions against the current subscription set. Auto-called after subscription changes; call manually if you swap `stateSelector` at runtime. |
 | `chelonia/handleEvent` | `src/chelonia.ts` | Hand a raw incoming event string to Chelonia's processing queue. Used by the pubsub client; rarely called directly. |
 | `chelonia/in/processMessage` | `src/chelonia.ts` | Try-applying an `SPMessage`: deep-clones the supplied per-contract `state`, runs `chelonia/private/in/processMessage` against the clone, and returns the mutated copy on success or the original `state` unchanged on failure (errors are caught and logged via `console.warn`). Useful in tests / dry-runs; root state is never touched. (The outgoing-validation path in `publishEvent` calls the private `chelonia/private/in/processMessage` directly.) |
-| `chelonia/queueInvocation` | `src/chelonia.ts` | Queue an SBP invocation on a contract's event queue. Use to ensure work runs after the current sync drains. |
+| `chelonia/queueInvocation` | `src/chelonia.ts` | Queue an SBP invocation on a contract's event queue. Use to ensure work runs after the current sync drains. Rejects with `ChelErrorUnexpected` (`/vetoed/`) if an SBP filter blocks either queue. |
 | `chelonia/begin` | `src/chelonia.ts` | Run a sequence of SBP invocations sequentially. |
 | `chelonia/rootState` | `src/chelonia.ts` | Return the root state object (`sbp(stateSelector)`). |
 | `chelonia/shelterAuthorizationHeader` | `src/chelonia.ts` | Build a `Shelter` HTTP Authorization header for a billable contract. |
@@ -52,7 +52,7 @@ For the authoritative signatures, follow the source links.
 | `chelonia/contract/retain` | `src/chelonia.ts` | Increment the (persistent or `ephemeral`) refcount and sync. |
 | `chelonia/contract/release` | `src/chelonia.ts` | Decrement the refcount. At 0 the contract is unsubscribed and removed. |
 | `chelonia/contract/sync` | `src/chelonia.ts` | Force re-sync. Requires a positive refcount. |
-| `chelonia/contract/withRetained` | `src/chelonia.ts` | Retain (`ephemeral: true`) → callback → release. |
+| `chelonia/contract/withRetained` | `src/chelonia.ts` | Retain (`ephemeral: true`) → callback → release. If the retain rejects, gives back the references it took and rethrows without running the callback. |
 | `chelonia/contract/wait` | `src/chelonia.ts` | Wait for the contract's internal event queue to drain. |
 | `chelonia/contract/waitPublish` | `src/chelonia.ts` | Wait for the contract's `publish:` event queue to drain. |
 | `chelonia/contract/isSyncing` | `src/chelonia.ts` | Boolean. Accepts `{ firstSync: true }` to scope. |
@@ -73,6 +73,14 @@ For the authoritative signatures, follow the source links.
 | `chelonia/contract/remove` | `src/chelonia.ts` | Hard-remove a contract from state (refcount-aware via callback). |
 | `chelonia/contract/disconnect` | `src/chelonia.ts` | Publish an `OP_KEY_DEL` to detach the foreign keys we hold for another contract. |
 | `chelonia/latestContractState` | `src/chelonia.ts` | Return a cloned, possibly freshly-synced contract state. Accepts `{ forceSync }`. |
+
+If an SBP filter vetoes a contract's queue (`chelonia/private/queueEvent`),
+the selectors that needed it reject with `ChelErrorUnexpected` (`/vetoed/`)
+instead of resolving as if the work had run: `retain`, `release`, `sync`,
+`remove`, `wait`, `waitPublish`, `chelonia/handleEvent`,
+`chelonia/queueInvocation` and the `chelonia/out/*` selectors that publish
+an event. The work didn't run: after a vetoed last `release`, for example,
+the contract is still subscribed.
 
 `chelonia/contract/fullState` returns `{ contractState, cheloniaState,
 kvState, kvEntry }` — one tuple per id, or a map of tuples keyed by id
@@ -259,7 +267,7 @@ in `src/events.ts`; the most commonly observed:
 |---|---|---|
 | `CHELONIA_RESET` | `src/events.ts` | After `chelonia/reset` has drained and cleared state. |
 | `CONTRACT_IS_SYNCING` | `src/events.ts` | When a contract enters / leaves the syncing state. Payload: `(contractID, isSyncing)`. |
-| `CONTRACTS_MODIFIED` | `src/events.ts` | After any subscription set change. Payload: `(subscriptionSet, { added, removed, permanent?, resync? })`. |
+| `CONTRACTS_MODIFIED` | `src/events.ts` | After any subscription set change. Payload: `(subscriptionSet, { added, removed, permanent?, resync? })`. A contract whose first sync never finished is announced only when removed for good (`permanent: true`). |
 | `CONTRACTS_MODIFIED_READY` | `src/events.ts` | Mirror of the above, fired after subscriptions have actually opened/closed on the wire. |
 | `EVENT_HANDLED` | `src/events.ts` | After an incoming event has been processed and side-effects run. Payload: `(contractID, message)`. |
 | `EVENT_HANDLED_READY` | `src/events.ts` | Drains-only signal for sync-completion observers; fires after the per-contract queue is empty. |

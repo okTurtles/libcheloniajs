@@ -2776,9 +2776,9 @@ export default (sbp('sbp/selectors/register', {
     // Enqueue the body on the per-contract lane while keeping the
     // pending-write counter balanced no matter how `queueInvocation`
     // misbehaves. Two failure shapes are guarded:
-    //   1. It throws *synchronously* (e.g. an SBP filter vetoes the
-    //      underlying `queueEvent`, so `queueInvocation`'s body does
-    //      `undefined.then(...)`): the `try/catch` decrements and rethrows.
+    //   1. It throws *synchronously* (e.g. an SBP filter throws instead of
+    //      returning `false`): the `try/catch` decrements and rethrows. A
+    //      veto of the underlying `queueEvent` makes it reject instead.
     //   2. It returns a non-promise / `undefined` (e.g. a filter vetoes
     //      `queueInvocation` itself, so `sbp(...)` returns `undefined`):
     //      `Promise.resolve(queued)` normalises it so `.finally` always
