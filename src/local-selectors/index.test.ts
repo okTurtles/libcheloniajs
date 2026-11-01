@@ -167,7 +167,9 @@ describe('chelonia/externalStateSetup teardown', () => {
         value: { prev: true },
         status: 'error',
         etag: 'old',
-        lastError: { name: 'Error', message: 'bad' }
+        lastError: { name: 'Error', message: 'bad' },
+        settled: true,
+        heightAhead: { requiredHeight: 3 }
       }
     }
 
@@ -190,7 +192,9 @@ describe('chelonia/externalStateSetup teardown', () => {
       value: { prev: true },
       status: 'error',
       etag: 'old',
-      lastError: { name: 'Error', message: 'bad' }
+      lastError: { name: 'Error', message: 'bad' },
+      settled: true,
+      heightAhead: { requiredHeight: 3 }
     })
     assert.strictEqual('removed' in externalKv['cid-KV'], false)
 

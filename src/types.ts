@@ -263,6 +263,9 @@ export type KvUpdater<T> = (prev: T | undefined) => T | KvNoop;
 // Status of a KV slot's mirror entry. See KV-REVAMPED.md §5.
 export type KvLoadStatus = typeof KV_LOAD_STATUS[keyof typeof KV_LOAD_STATUS];
 
+// What `chelonia/kv/settledStatus` and `chelonia/kv/whenSettled` report
+export type KvSettledStatus = Exclude<KvLoadStatus, typeof KV_LOAD_STATUS.LOADING>;
+
 // Shape of a single KV mirror entry under `rootState._kv[contractID][key]`.
 // See KV-REVAMPED.md §5.
 export type KvMirrorEntry = {
@@ -270,6 +273,27 @@ export type KvMirrorEntry = {
   etag: string | null;
   status: KvLoadStatus;
   lastError?: { name: string; message: string };
+  // Reached a final outcome since the slot was last activated; stays true
+  // through later reloads. Only meaningful while the slot is active.
+  settled?: boolean;
+  // The server holds a value stamped at a contract height not reached yet.
+  heightAhead?: { requiredHeight: number };
+};
+
+// A slot key whose server value needs a contract height not reached yet
+export type KvHeightWait = {
+  contractID: string;
+  key: string;
+  reason: KvLoadReason;
+  requiredHeight: number;
+  // Bumped by every finding, so that a load only drops the wait it saw
+  gen: number;
+  off: () => void;
+  // The fallback; none while reloading, or once it gave up (still listening)
+  timer?: ReturnType<typeof setTimeout>;
+  // The reload started when the height was reached; cleared when it ends with
+  // a newer finding pending
+  reload?: { done?: Promise<void> };
 };
 
 // Context passed to `onUpdate` and embedded in the `CHELONIA_KV_UPDATED`
@@ -285,6 +309,12 @@ export type KvUpdateCtx = {
   // Mirror value before this update; `undefined` on first load.
   previousValue: JSONType | undefined;
 };
+
+// Why a slot loads: every update reason but a local write
+export type KvLoadReason = Exclude<KvUpdateCtx['reason'], typeof KV_UPDATE_REASON.LOCAL>;
+
+// Called once the local contract commits `minHeight` or later
+export type KvHeightListener = { minHeight: number; fire: () => void };
 
 // Public subset of the internal `SlotDefinition`. Accepted by
 // `chelonia/kv/defineSlot`. See KV-REVAMPED.md §4.1.
@@ -462,6 +492,7 @@ export type CheloniaContext = {
   setPostSyncOp: (contractID: string, key: string, op: Parameters<typeof sbp>) => void;
   transientSecretKeys: Record<string, Key>;
   ephemeralReferenceCount: Record<string, number>;
+  contractTypesBeforeResync: Record<string, string>;
   subscriptionSet: Set<string>;
   pending: { contractID: string }[];
   pubsub: import('./pubsub/index.js').PubSubClient;
@@ -533,14 +564,32 @@ export type CheloniaContext = {
   // — which would otherwise leave the mirror silently stale.
   kvPendingLoads: Map<string, number>;
   // Per-contract count of `onUpdate` callbacks currently executing
-  // inside the contract's `chelonia/queueInvocation` lane. A KV write
-  // selector (`update`/`clear`/`sync`) invoked while this is non-zero
-  // for the same contract would enqueue behind the lane that is blocked
-  // awaiting the callback → permanent deadlock, so those selectors
-  // reject with `ChelErrorKvReentrant` instead. Keyed by `contractID`
-  // to match the lane granularity exactly (cross-contract writes from
-  // `onUpdate` are safe and not rejected).
+  // inside the contract's `chelonia/queueInvocation` lane. A KV selector
+  // that queues on or waits for that lane (`update`, `clear`, `sync`,
+  // `withHeightRecovery`, `queuedSet`, `whenSettled`) invoked while this
+  // is non-zero for the same contract would enqueue behind the lane that
+  // is blocked awaiting the callback → permanent deadlock, so those
+  // selectors reject with `ChelErrorKvReentrant` instead. Keyed by
+  // `contractID` to match the lane granularity exactly (cross-contract
+  // writes from `onUpdate` are safe and not rejected).
   kvOnUpdateActive: Map<string, number>;
+  // Callbacks waiting for a contract to commit a height (`kv-height.ts`)
+  kvHeightListeners: Map<string, Set<KvHeightListener>>;
+  // Running height-recovery syncs, each shared by all its callers
+  kvRecoveries: Map<string, Promise<void>>;
+  // Slot keys to reload once the contract reaches a height, by `contractID::key`
+  kvHeightWaits: Map<string, KvHeightWait>;
+  // Pending `chelonia/kv/whenSettled` calls, keyed by `contractID::key`
+  kvSettleWaiters: Map<string, Set<{
+    resolve: (status: KvSettledStatus) => void;
+    reject: (e: unknown) => void;
+  }>>;
+  // Contracts whose slots were matched since they were last added
+  kvReconciledContracts: Set<string>;
+  // Contracts whose mirror entries were kept through a resync teardown
+  kvResyncedContracts: Set<string>;
+  // Survives `chelonia/reset`, which blocks recovery syncs while it drains
+  kvResetsInProgress: number;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
@@ -716,7 +765,7 @@ export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<
 };
 
 /**
- * Callback supplied to `chelonia/kv/set` to resolve a `409` / `412`
+ * Callback supplied to `chelonia/kv/set` to resolve a `412`
  * conflict (or to populate the body when `data` was omitted and the
  * primitive performs a fetch-first GET — see the `data === undefined`
  * branch in `src/chelonia.ts`).
@@ -747,18 +796,56 @@ export type ChelKvOnConflictCallback = (args: {
   status: number;
   etag: string | null | undefined;
   /**
-   * The decrypted/verified server data for the conflicting key.
-   *
-   * **Throws on access.** The runtime value is a lazy getter (see
-   * `resolveData` in `src/chelonia.ts`) that forces decryption and
-   * signature verification the first time it is read, and may reject
-   * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`.
-   * Access it inside a `try`/`catch` (falling back to `undefined` or
-   * re-throwing as appropriate), or read `currentValue.data` directly
-   * with the same precaution. The bundled slot API (`chelonia/kv/update`,
-   * `chelonia/kv/clear`) already guards access; this note applies to
-   * direct `chelonia/kv/set` callers supplying a custom `onconflict`.
+   * The verified server data, decrypted lazily. **Throws on access** if it
+   * can't be decrypted or verified, and for an `'ahead'`
+   * (`ChelErrorKvHeightAhead`) or `'malformed'` (`ChelErrorKvHeightMalformed`)
+   * value, so read it inside a `try`/`catch`.
    */
   currentData: JSONType | undefined;
-  currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string | undefined] | false>;
+} & KvConflictServerValue) => Promise<[JSONType, string | undefined] | false>;
+
+// 'ahead': stamped at a contract height not reached locally, so it can't be
+// verified yet. 'malformed': its height stamp is missing or invalid.
+export type KvServerValueStatus = 'absent' | 'present' | 'ahead' | 'malformed';
+
+export type KvHeightAheadCause = {
+  requiredHeight: number;
+  // false: `requiredHeight` is only a lower bound (inferred from a 409)
+  exact: boolean;
+  localHeight: number | undefined;
+  etag: string | null;
+  httpStatus: number;
+};
+
+export type KvHeightAheadMode = 'sync' | 'reject';
+
+// `null` means the default.
+export type KvHeightRecoveryOptions = {
+  onHeightAhead?: KvHeightAheadMode | null;
+  maxHeightRecoveries?: number | null;
+  signal?: AbortSignal;
+};
+
+export type KvHeightRecoveryAttempt = {
+  recoveries: number;
+  // `undefined`: let `chelonia/kv/set` wait for the height (default wait)
+  heightWaitMs: 0 | undefined;
+  queue: <T>(body: () => Promise<T>) => Promise<T>;
+};
+
+// Describes the server value of the final 412 only.
+export type KvConflictCause = {
+  currentStatus?: KvServerValueStatus;
+  currentData?: JSONType;
+  requiredHeight?: number;
+  etag?: string | null;
+};
+
+export type KvConflictServerValue =
+  | {
+      currentStatus: 'present';
+      currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType>;
+      requiredHeight?: undefined;
+    }
+  | { currentStatus: 'absent' | 'malformed'; currentValue: undefined; requiredHeight?: undefined }
+  | { currentStatus: 'ahead'; currentValue: undefined; requiredHeight: number };

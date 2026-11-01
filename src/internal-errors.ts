@@ -2,12 +2,13 @@
 // intentionally kept out of `src/errors.ts` (and therefore out of the
 // package-root `export *`) so that adding new internal error types
 // does not widen the public taxonomy.
-import { ChelErrorGenerator } from './errors.js'
+import { ChelErrorGenerator, isKvConflict } from './errors.js'
+import type { KvConflictCause } from './types.js'
 
 // Thrown by the low-level `chelonia/kv/set` primitive when the
-// conflict-retry loop exhausts `maxAttempts`. The high-level slot
-// API (`chelonia/kv/update` / `chelonia/kv/clear`) catches this and
-// remaps it to the public `ChelErrorKvConflict`.
+// conflict-retry loop exhausts `maxAttempts`, or on a 412 without
+// `onconflict`. `chelonia/kv/update`, `clear` and `queuedSet` catch this and
+// remap it to the public `ChelErrorKvConflict`.
 //
 // Internal — not part of the published API. The package's
 // `exports` map intentionally does not expose `./internal-errors`,
@@ -15,5 +16,11 @@ import { ChelErrorGenerator } from './errors.js'
 // legitimate external consumer is the `@chelonia/lib` test suite,
 // which needs to simulate the low-level throw without going through
 // the public `ChelErrorKvConflict` mapping. Application code should
-// catch `ChelErrorKvConflict` instead.
+// use `isKvConflict`, which matches both.
 export const ChelErrorKvMaxAttempts = ChelErrorGenerator('ChelErrorKvMaxAttempts')
+
+export function isKvMaxAttempts (e: unknown): e is Error & {
+  name: 'ChelErrorKvMaxAttempts'; cause?: KvConflictCause
+} {
+  return isKvConflict(e) && e.name === 'ChelErrorKvMaxAttempts'
+}
