@@ -158,7 +158,8 @@ const verifySignatureData = function <T, U extends object = object> (
   ) {
     const message = `Key ${sKeyId} is unauthorized or expired for the current contract`
     // These errors are serious and indicate a bug. Make them fatal in the
-    // host app's integration tests (otherwise they're shown as a notification)
+    // CI of Group Income, whose store this is (otherwise they're swallowed
+    // and shown as a notification)
     if (process.env.CI && sbp('sbp/selectors/fn', 'state/vuex/state')) {
       let appState: unknown
       try {
