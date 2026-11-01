@@ -3443,6 +3443,8 @@ const handleEvent = {
         this.config.reactiveSet(state.contracts, contractID, Object.create(null))
       }
       this.config.reactiveSet(state.contracts[contractID], 'type', type)
+      // Back in the state: a removal no longer needs the copy
+      delete this.contractTypesBeforeResync[contractID]
       console.debug(`contract ${type} registered for ${contractID}`)
     }
     if (message.isKeyOp()) {
