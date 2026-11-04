@@ -2,7 +2,7 @@ import type { Key } from '@chelonia/crypto';
 import type sbp from '@sbp/sbp';
 import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.mjs';
 import type { EncryptedData } from './encryptedData.mjs';
-import type { PubSubClient } from './pubsub/index.mjs';
+import type { PubSubClient, PubSubState } from './pubsub/index.mjs';
 import type { SignedDataContext } from './signedData.mjs';
 import type { KV_AUTO_LOAD, KV_LOAD_STATUS, KV_UPDATE_REASON, KvNoop } from './kv-constants.mjs';
 export type JSONType = null | string | number | boolean | JSONObject | JSONArray;
@@ -51,6 +51,7 @@ export type CheloniaConfig = {
         maxRetries: number;
         reconnectOnTimeout: boolean;
     };
+    pubsubReconcileInterval?: number;
     preOp?: (message: SPMessage, state: ChelContractState) => boolean;
     postOp?: (message: SPMessage, state: ChelContractState) => boolean;
     hooks: Partial<{
@@ -289,6 +290,14 @@ export type CheloniaContractCtx = {
     methods: Record<string, (...args: unknown[]) => unknown>;
     kv?: Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>;
 };
+export type ChelPubSubStatus = {
+    state: PubSubState;
+    since: number | null;
+    wanted: number;
+    missing: string[];
+    pending: string[];
+    oldestPendingSince: number | null;
+};
 export type CheloniaContext = {
     config: CheloniaConfig;
     _instance: object;
@@ -327,6 +336,8 @@ export type CheloniaContext = {
         removed: string[];
     }) => void;
     kvReconnectListener?: (client: import('./pubsub/index.mjs').PubSubClient) => void;
+    pubsubReconcileListener?: (client: import('./pubsub/index.mjs').PubSubClient) => void;
+    pubsubReconcileIntervalID?: ReturnType<typeof setInterval>;
     kvContractsModifiedListener?: (contracts: string[], { added, removed }: {
         added: string[];
         removed: string[];

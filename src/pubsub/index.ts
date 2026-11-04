@@ -46,9 +46,48 @@ export type ResponseTypeEnum = (typeof RESPONSE_TYPE)[keyof typeof RESPONSE_TYPE
 // ====== Types ====== //
 
 type TimeoutID = ReturnType<typeof setTimeout>;
+type IntervalID = ReturnType<typeof setInterval>;
+
+// Connection state of a client (`client.state`, `client.getStatus()` and the
+// PUBSUB_STATE_CHANGED event):
+// - `connecting`: a connection attempt is in progress;
+// - `open`: connected;
+// - `reconnecting`: disconnected, and a new connection attempt is scheduled
+//   (or the previous socket is still closing);
+// - `offline`: disconnected while the browser is offline; the client
+//   reconnects once it is back online;
+// - `closed`: not connected and not about to reconnect (destroyed, gave up
+//   reconnecting, or `connect()` not called yet).
+export type PubSubState = 'connecting' | 'open' | 'reconnecting' | 'offline' | 'closed'
+
+// Snapshot returned by `client.getStatus()`. Plain data, so that it can be
+// sent across a service worker boundary.
+export type PubSubStatus = {
+  state: PubSubState;
+  // `Date.now()` when the client entered `state`
+  since: number;
+  // Channels whose subscription the server confirmed
+  subscribed: string[];
+  // Channels with a SUB request that awaits a response or a connection
+  pending: string[];
+  // `Date.now()` when the oldest of the pending SUB requests was sent on
+  // the current connection (requests waiting for a connection don't count),
+  // or `null` if there is none
+  oldestPendingSince: number | null;
+};
+
+// A request that awaits a response. `runWithRetry` uses reference equality
+// with the current entry to determine freshness. `since` is `Date.now()` when
+// it was sent on the current connection; the entries that `close` re-arms
+// for the next connection don't have it.
+type PendingOperation = { since?: number };
 
 export type Options = {
   logPingMessages: boolean;
+  // How long to wait for the next message (the server pings regularly)
+  // before replacing the connection, in ms. Also checked against the wall
+  // clock, so that a connection that died while the device slept is noticed
+  // right after waking up. `0` or `Infinity` disables it.
   pingTimeout: number;
   maxReconnectionDelay: number;
   maxRetries: number;
@@ -58,9 +97,15 @@ export type Options = {
   reconnectOnTimeout: boolean;
   reconnectionDelayGrowFactor: number;
   timeout: number;
-  // Maximum retry attempts after initial send (maxOpRetries + 1 total attempts)
+  // Maximum retry attempts after initial send (maxOpRetries + 1 total attempts).
+  // A request that gets no response to any of them is not dropped: the
+  // connection is considered broken and replaced, and the request is sent
+  // again on the new connection.
   maxOpRetries: number;
-  // Base interval between retries (linear backoff)
+  // Base interval between retries (linear backoff): retry k waits
+  // (k - 1) * opRetryInterval plus up to opRetryInterval of jitter, so the
+  // whole budget is about 10 to 15 * opRetryInterval with the default
+  // maxOpRetries.
   opRetryInterval: number;
   manual?: boolean;
   // eslint-disable-next-line no-use-before-define
@@ -82,6 +127,8 @@ export type PubSubClient = {
   failedConnectionAttempts: number;
   isLocal: boolean;
   isNew: boolean;
+  // `Date.now()` when the current socket opened or last received a message
+  lastMessageAt: number | undefined;
   // eslint-disable-next-line no-use-before-define
   listeners: ClientEventHandlers;
   // eslint-disable-next-line no-use-before-define
@@ -89,17 +136,22 @@ export type PubSubClient = {
   nextConnectionAttemptDelayID: TimeoutID | undefined;
   options: Options;
   // eslint-disable-next-line no-use-before-define
-  pendingOperations: TieredMap<RequestTypeEnum, string, object>;
+  pendingOperations: TieredMap<RequestTypeEnum, string, PendingOperation>;
   pingTimeoutID: TimeoutID | undefined;
   shouldReconnect: boolean;
   socket: WebSocket | null;
+  // Current connection state, and `Date.now()` when the client entered it
+  state: PubSubState;
+  stateSince: number;
   subscriptionSet: Set<string>;
   kvFilter: Map<string, string[]>;
   url: string;
+  wallClockWatchdogID: IntervalID | undefined;
   // Methods
   clearAllTimers(this: PubSubClient): void;
   connect(this: PubSubClient): void;
   destroy(this: PubSubClient): void;
+  getStatus(this: PubSubClient): PubSubStatus;
   pub(this: PubSubClient, channelID: string, data: JSONType): void;
   scheduleConnectionAttempt(this: PubSubClient): void;
   sub(this: PubSubClient, channelID: string): void;
@@ -203,6 +255,12 @@ export const PUBSUB_RECONNECTION_FAILED = 'pubsub-reconnection-failed'
 export const PUBSUB_RECONNECTION_SCHEDULED = 'pubsub-reconnection-scheduled'
 export const PUBSUB_RECONNECTION_SUCCEEDED = 'pubsub-reconnection-succeeded'
 export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded'
+// Emitted as `(client, { state, previous })` whenever `client.state` changes
+export const PUBSUB_STATE_CHANGED = 'pubsub-state-changed'
+// Emitted as `(client, { channelID, reason })` when the server rejects a SUB
+// request. The subscription is no longer pending; Chelonia requests it again
+// the next time it reconciles its subscriptions.
+export const PUBSUB_SUBSCRIPTION_FAILED = 'pubsub-subscription-failed'
 
 // ====== Helpers ====== //
 
@@ -274,6 +332,98 @@ const pubPayloadFactory = (client: PubSubClient, channelID: string) => () => {
   return kvFilter ? { kvFilter, channelID } : { channelID } as JSONObject
 }
 
+// Close code for sockets that we stopped trusting
+const ABANDONED_SOCKET_CLOSE_CODE = 4001
+
+// When each socket was created and opened, for the `close` log line
+const socketTimes = new WeakMap<WebSocket, { createdAt: number; openedAt?: number }>()
+
+// How long the closing socket was open and how long ago it last got a
+// message, e.g. to tell a dead connection from a server-side close
+const describeClosingSocket = (client: PubSubClient): string => {
+  const times = client.socket ? socketTimes.get(client.socket) : undefined
+  if (!times) return 'unknown socket'
+  const now = Date.now()
+  if (times.openedAt === undefined) {
+    return `never opened (connecting for ${now - times.createdAt} ms)`
+  }
+  const { lastMessageAt } = client
+  const lastMessage = lastMessageAt === undefined
+    ? ''
+    : `, last message ${now - lastMessageAt} ms ago`
+  return `open for ${now - times.openedAt} ms${lastMessage}`
+}
+
+const createCloseEvent = (code: number, reason: string): CloseEvent => {
+  if (typeof CloseEvent === 'function') {
+    return new CloseEvent('close', { code, reason, wasClean: false })
+  }
+  return Object.assign(new Event('close'), { code, reason, wasClean: false }) as CloseEvent
+}
+
+// Throws away a socket that we no longer trust, e.g., one on which requests
+// go unanswered, one that stopped receiving pings or one whose network went
+// away. A dead connection (such as a half-open one after the device
+// slept) can still report OPEN, and closing it may not fire `close` for
+// minutes, so instead of waiting for that event, this runs the regular
+// `close` logic right away: it detaches the listeners from the socket,
+// re-arms every wanted subscription, clears the subscription set and
+// schedules a reconnection (unless we are offline).
+function abandonSocket (
+  client: PubSubClient,
+  socket: WebSocket | null | undefined,
+  reason: string
+) {
+  if (!socket || client.socket !== socket) return
+  console.warn(`[pubsub] Abandoning socket: ${reason}`)
+  client.listeners.close?.call(client, createCloseEvent(ABANDONED_SOCKET_CLOSE_CODE, reason))
+  try {
+    // The reason can be at most 123 bytes long
+    socket.close(ABANDONED_SOCKET_CLOSE_CODE, reason.slice(0, 120))
+  } catch {
+    try {
+      socket.close(ABANDONED_SOCKET_CLOSE_CODE)
+    } catch {}
+  }
+}
+
+const isPingTimeoutEnabled = (pingTimeout: number) => pingTimeout > 0 && pingTimeout < Infinity
+
+// (Re)starts the ping timer of the current socket: no message from the
+// server within `pingTimeout` ms means that the connection is dead.
+function armPingTimeout (client: PubSubClient) {
+  const { socket, options: { pingTimeout } } = client
+  clearTimeout(client.pingTimeoutID)
+  client.pingTimeoutID = undefined
+  if (!socket || !isPingTimeoutEnabled(pingTimeout)) return
+  client.pingTimeoutID = setTimeout(() => {
+    abandonSocket(client, socket, 'ping timeout')
+  }, pingTimeout)
+}
+
+// Timers don't run while the device sleeps, so after waking up the ping timer
+// needs up to `pingTimeout` ms of awake time to notice that the connection
+// died in the meantime. `Date.now()` jumps forward on wake-up, so comparing
+// it with the time of the last message notices the silence within seconds.
+function startWallClockWatchdog (client: PubSubClient) {
+  const { socket, options: { pingTimeout } } = client
+  clearInterval(client.wallClockWatchdogID)
+  client.wallClockWatchdogID = undefined
+  if (!socket || !isPingTimeoutEnabled(pingTimeout)) return
+  const watchdogID = setInterval(() => {
+    // `clearAllTimers()` normally stops it before the socket changes
+    if (client.socket !== socket) {
+      clearInterval(watchdogID)
+      return
+    }
+    const { lastMessageAt } = client
+    if (lastMessageAt !== undefined && Date.now() - lastMessageAt > pingTimeout) {
+      abandonSocket(client, socket, 'ping timeout (wall clock)')
+    }
+  }, Math.min(5000, Math.max(1000, pingTimeout / 3)))
+  client.wallClockWatchdogID = watchdogID
+}
+
 function runWithRetry (
   client: PubSubClient,
   channelID: string,
@@ -283,8 +433,7 @@ function runWithRetry (
   let attemptNo = 0
   const { socket, options } = client
   // `runWithRetry` will use reference equality to determine freshness.
-  // An empty object serves this purpose.
-  const instance = {}
+  const instance: PendingOperation = { since: Date.now() }
 
   client.pendingOperations.tSet(type, channelID, instance)
 
@@ -298,8 +447,13 @@ function runWithRetry (
 
     // 2b. Retries check
     if (attemptNo++ > options.maxOpRetries) {
-      console.warn(`[pubsub] Giving up ${type} for channel`, channelID)
-      client.pendingOperations.tDelete(type, channelID)
+      // The request is still wanted, so it stays pending. No response within
+      // the whole retry budget means that this connection doesn't work:
+      // replace it. The `close` logic settles every pending request (SUBs
+      // are sent again on the next connection; UNSUBs are done, since the
+      // server drops the subscriptions of a closed connection; KV filters
+      // are sent along with the SUBs).
+      abandonSocket(client, socket, `no response to ${type} for ${channelID}`)
       return
     }
 
@@ -312,7 +466,7 @@ function runWithRetry (
     // Randomness / jitter to prevent bursts
     const minDelay = (attemptNo - 1) * options.opRetryInterval
     const jitter = randomIntFromRange(0, options.opRetryInterval)
-    const delay = Math.min(200, minDelay) + jitter
+    const delay = minDelay + jitter
     setTimeout(send, delay)
   }
 
@@ -331,7 +485,8 @@ function runWithRetry (
  * {boolean?} manual - Whether the factory should call 'connect()' automatically.
  *   Also named 'autoConnect' or 'startClosed' in other libraries.
  * {object?} messageHandlers - Custom handlers for different message types.
- * {number?} pingTimeout=45_000 - How long to wait for the server to send a ping, in milliseconds.
+ * {number?} pingTimeout=45_000 - How long to wait for a message from the server (it pings
+ *   regularly) before replacing the connection, in milliseconds. 0 or Infinity disables it.
  * {boolean?} reconnectOnDisconnection=true - Whether to reconnect after a server-side disconnection.
  * {boolean?} reconnectOnOnline=true - Whether to reconnect after coming back online.
  * {boolean?} reconnectOnTimeout=false - Whether to reconnect after a connection timeout.
@@ -348,6 +503,7 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
     isLocal: /\/\/(localhost|127\.0\.0\.1)([:?/]|$)/.test(url),
     // True if this client has never been connected yet.
     isNew: true,
+    lastMessageAt: undefined,
     listeners: Object.create(null),
     messageHandlers: { ...defaultMessageHandlers, ...options.messageHandlers },
     nextConnectionAttemptDelayID: undefined,
@@ -358,10 +514,13 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
     // The underlying WebSocket object.
     // A new one is necessary for every connection or reconnection attempt.
     socket: null,
+    state: 'closed',
+    stateSince: Date.now(),
     subscriptionSet: new Set(),
     kvFilter: new Map(),
     connectionTimeoutID: undefined,
     url: url.replace(/^http/, 'ws'),
+    wallClockWatchdogID: undefined,
     ...publicMethods
   }
   // Create and save references to reusable event listeners.
@@ -397,6 +556,8 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
       globalEventMap.set(name, client.listeners[name])
     }
   }
+  // The initial state (no event)
+  client.state = computeState(client)
   if (!client.options.manual) {
     client.connect()
   }
@@ -443,7 +604,10 @@ const defaultClientEventHandlers: ClientEventHandlers = {
   close (event) {
     const client = this
 
-    console.debug('[pubsub] Event: close', event.code, event.reason)
+    console.info(
+      `[pubsub] Event: close (code ${event.code}, reason ${JSON.stringify(event.reason)}), ` +
+        describeClosingSocket(client)
+    )
     client.failedConnectionAttempts++
 
     if (client.socket) {
@@ -506,6 +670,7 @@ const defaultClientEventHandlers: ClientEventHandlers = {
         }
       }
     }
+    updateState(client)
   },
 
   // Emitted when an error has occured.
@@ -525,6 +690,7 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     const client = this
     const { data } = event
 
+    client.lastMessageAt = Date.now()
     if (typeof data !== 'string') {
       sbp('okTurtles.events/emit', PUBSUB_ERROR, client, {
         message: `Wrong data type: ${typeof data}`
@@ -558,7 +724,10 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     // Reset the connection attempt counter so that we'll start a new
     // reconnection loop when we are back online.
     client.failedConnectionAttempts = 0
-    client.socket?.close()
+    // Without a network, the closing handshake may not complete for a long
+    // time; don't wait for it. No reconnection is scheduled while offline.
+    abandonSocket(client, client.socket, 'offline')
+    updateState(client)
   },
 
   online () {
@@ -566,19 +735,33 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     const client = this
 
     if (client.options.reconnectOnOnline && client.shouldReconnect) {
+      // A socket that is neither OPEN nor CONNECTING when the network comes
+      // back is closing, which never finishes if its connection is dead:
+      // replace it now.
+      const readyState = client.socket?.readyState
+      if (
+        readyState !== undefined &&
+        readyState !== WebSocket.OPEN &&
+        readyState !== WebSocket.CONNECTING
+      ) {
+        abandonSocket(client, client.socket, 'online, socket not open')
+      }
       if (!client.socket) {
         client.failedConnectionAttempts = 0
-        client.scheduleConnectionAttempt()
+        // Abandoning the socket may have scheduled the attempt already
+        if (!client.nextConnectionAttemptDelayID) client.scheduleConnectionAttempt()
       }
     }
+    updateState(client)
   },
 
   // Emitted when the connection is established.
   open () {
     console.debug('[pubsub] Event: open')
     const client = this
-    const { options } = this
 
+    const times = client.socket ? socketTimes.get(client.socket) : undefined
+    if (times) times.openedAt = Date.now()
     client.connectionTimeUsed = undefined
     client.clearAllTimers()
     sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SUCCEEDED, client)
@@ -587,17 +770,16 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     client.failedConnectionAttempts = -1
     client.isNew = false
     // Setup a ping timeout if required.
-    // It will close the connection if we don't get any message from the server.
-    if (options.pingTimeout > 0 && options.pingTimeout < Infinity) {
-      client.pingTimeoutID = setTimeout(() => {
-        client.socket?.close()
-      }, options.pingTimeout)
-    }
+    // It will replace the connection if we don't get any message from the server.
+    client.lastMessageAt = Date.now()
+    armPingTimeout(client)
+    startWallClockWatchdog(client)
     // Send any pending subscription request.
     for (const [channelID] of client.pendingOperations.get(REQUEST_TYPE.SUB) || []) {
       runWithRetry(client, channelID, REQUEST_TYPE.SUB, pubPayloadFactory(client, channelID))
     }
     // There should be no pending unsubscription since we just got connected.
+    updateState(client)
   },
 
   'reconnection-attempt' () {
@@ -643,10 +825,7 @@ const defaultMessageHandlers: MessageHandlers = {
     // object type, but the correct TypeScript type hasn't been written.
     client.socket?.send(createMessage(NOTIFICATION_TYPE.PONG, data) as unknown as string)
     // Refresh the ping timer, waiting for the next ping.
-    clearTimeout(client.pingTimeoutID)
-    client.pingTimeoutID = setTimeout(() => {
-      client.socket?.close()
-    }, client.options.pingTimeout)
+    armPingTimeout(client)
   },
 
   [NOTIFICATION_TYPE.PUB] ({ channelID, data }) {
@@ -675,7 +854,9 @@ const defaultMessageHandlers: MessageHandlers = {
     switch (type) {
       case REQUEST_TYPE.SUB: {
         console.warn(`[pubsub] Could not subscribe to ${channelID}: ${reason}`)
-        client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID)
+        if (client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID)) {
+          sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_FAILED, client, { channelID, reason })
+        }
         break
       }
       case REQUEST_TYPE.UNSUB: {
@@ -707,6 +888,11 @@ const defaultMessageHandlers: MessageHandlers = {
     switch (type) {
       case REQUEST_TYPE.SUB: {
         if (client.pendingOperations.tHas(REQUEST_TYPE.SUB, channelID)) {
+          const { since } = client.pendingOperations.tGet(REQUEST_TYPE.SUB, channelID) ?? {}
+          const elapsed = since === undefined ? 0 : Date.now() - since
+          if (elapsed > client.options.opRetryInterval) {
+            console.info(`[pubsub] Late ACK: subscribed to ${channelID} ${elapsed} ms after the request`)
+          }
           client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID)
           client.subscriptionSet.add(channelID)
           sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, client, { channelID })
@@ -716,7 +902,8 @@ const defaultMessageHandlers: MessageHandlers = {
             this.setKvFilter(channelID, ourKvFilter)
           }
         } else {
-          console.debug(`[pubsub] Received unexpected sub for ${channelID}`)
+          const status = client.subscriptionSet.has(channelID) ? 'already subscribed' : 'not requested'
+          console.info(`[pubsub] Received unexpected sub for ${channelID} (${status})`)
         }
         break
       }
@@ -774,6 +961,27 @@ if (typeof self === 'object' && self instanceof EventTarget) {
 // See https://developer.mozilla.org/en-US/docs/Web/API/Navigator/onLine
 const isDefinetelyOffline = () => typeof navigator === 'object' && navigator.onLine === false
 
+const computeState = (client: PubSubClient): PubSubState => {
+  const readyState = client.socket?.readyState
+  if (readyState === WebSocket.OPEN) return 'open'
+  if (readyState === WebSocket.CONNECTING) return 'connecting'
+  if (!client.shouldReconnect) return 'closed'
+  if (isDefinetelyOffline()) return 'offline'
+  if (client.nextConnectionAttemptDelayID !== undefined || client.socket) return 'reconnecting'
+  return 'closed'
+}
+
+// Called at the end of every handler and method that can change the state
+const updateState = (client: PubSubClient) => {
+  const state = computeState(client)
+  if (state === client.state) return
+  const previous = client.state
+  client.state = state
+  client.stateSince = Date.now()
+  console.debug(`[pubsub] State: ${previous} -> ${state}`)
+  sbp('okTurtles.events/emit', PUBSUB_STATE_CHANGED, client, { state, previous })
+}
+
 // Parses and validates a received message.
 export const messageParser = (data: string): Message => {
   const msg = JSON.parse(data)
@@ -793,6 +1001,7 @@ const publicMethods: {
   clearAllTimers(this: PubSubClient): void;
   connect(this: PubSubClient): void;
   destroy(this: PubSubClient): void;
+  getStatus(this: PubSubClient): PubSubStatus;
   pub(this: PubSubClient, channelID: string, data: JSONType): void;
   scheduleConnectionAttempt(this: PubSubClient): void;
   sub(this: PubSubClient, channelID: string): void;
@@ -806,9 +1015,11 @@ const publicMethods: {
     clearTimeout(client.connectionTimeoutID)
     clearTimeout(client.nextConnectionAttemptDelayID)
     clearTimeout(client.pingTimeoutID)
+    clearInterval(client.wallClockWatchdogID)
     client.connectionTimeoutID = undefined
     client.nextConnectionAttemptDelayID = undefined
     client.pingTimeoutID = undefined
+    client.wallClockWatchdogID = undefined
   },
 
   // Performs a connection or reconnection attempt.
@@ -825,6 +1036,7 @@ const publicMethods: {
       throw new Error('connect() should no longer be called on this instance.')
     }
     client.socket = new WebSocket(client.url)
+    socketTimes.set(client.socket, { createdAt: Date.now() })
     // Sometimes (like when using `createMessage`), we want to send objects that
     // are serialized as strings. Native web sockets don't support objects, so
     // we use this workaround.
@@ -844,18 +1056,21 @@ const publicMethods: {
 
     if (client.options.timeout) {
       const start = performance.now()
+      const { socket } = client
       client.connectionTimeoutID = setTimeout(() => {
         client.connectionTimeoutID = undefined
         if (client.options.reconnectOnTimeout) {
           client.connectionTimeUsed = performance.now() - start
         }
-        client.socket?.close(4000, 'timeout')
+        // Aborting a stuck connection attempt may not fire `close` soon either
+        abandonSocket(client, socket, 'connection timeout')
       }, client.options.timeout)
     }
     // Attach WebSocket event listeners.
     for (const name of socketEventNames) {
       client.socket.addEventListener(name, client.listeners[name] as () => void)
     }
+    updateState(client)
   },
 
   /**
@@ -890,6 +1105,30 @@ const publicMethods: {
     client.listeners = Object.create(null)
     client.socket = null
     client.shouldReconnect = false
+    updateState(client)
+  },
+
+  // Snapshot of the connection state and of the subscriptions
+  getStatus () {
+    const client = this
+
+    // In case the state changed without an event that we handle (e.g., a
+    // socket that started closing)
+    updateState(client)
+    const pending = client.pendingOperations.get(REQUEST_TYPE.SUB)
+    let oldestPendingSince: number | null = null
+    for (const { since } of pending?.values() ?? []) {
+      if (since !== undefined && (oldestPendingSince === null || since < oldestPendingSince)) {
+        oldestPendingSince = since
+      }
+    }
+    return {
+      state: client.state,
+      since: client.stateSince,
+      subscribed: [...client.subscriptionSet],
+      pending: pending ? [...pending.keys()] : [],
+      oldestPendingSince
+    }
   },
 
   getNextRandomDelay (): number {
@@ -935,6 +1174,7 @@ const publicMethods: {
       client.connect()
     }, delay)
     sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SCHEDULED, client, { delay, nth })
+    updateState(client)
   },
 
   // Can be used to send ephemeral messages outside of any contract log.

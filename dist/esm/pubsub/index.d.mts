@@ -33,6 +33,18 @@ export type NotificationTypeEnum = (typeof NOTIFICATION_TYPE)[keyof typeof NOTIF
 export type RequestTypeEnum = (typeof REQUEST_TYPE)[keyof typeof REQUEST_TYPE];
 export type ResponseTypeEnum = (typeof RESPONSE_TYPE)[keyof typeof RESPONSE_TYPE];
 type TimeoutID = ReturnType<typeof setTimeout>;
+type IntervalID = ReturnType<typeof setInterval>;
+export type PubSubState = 'connecting' | 'open' | 'reconnecting' | 'offline' | 'closed';
+export type PubSubStatus = {
+    state: PubSubState;
+    since: number;
+    subscribed: string[];
+    pending: string[];
+    oldestPendingSince: number | null;
+};
+type PendingOperation = {
+    since?: number;
+};
 export type Options = {
     logPingMessages: boolean;
     pingTimeout: number;
@@ -61,20 +73,25 @@ export type PubSubClient = {
     failedConnectionAttempts: number;
     isLocal: boolean;
     isNew: boolean;
+    lastMessageAt: number | undefined;
     listeners: ClientEventHandlers;
     messageHandlers: MessageHandlers;
     nextConnectionAttemptDelayID: TimeoutID | undefined;
     options: Options;
-    pendingOperations: TieredMap<RequestTypeEnum, string, object>;
+    pendingOperations: TieredMap<RequestTypeEnum, string, PendingOperation>;
     pingTimeoutID: TimeoutID | undefined;
     shouldReconnect: boolean;
     socket: WebSocket | null;
+    state: PubSubState;
+    stateSince: number;
     subscriptionSet: Set<string>;
     kvFilter: Map<string, string[]>;
     url: string;
+    wallClockWatchdogID: IntervalID | undefined;
     clearAllTimers(this: PubSubClient): void;
     connect(this: PubSubClient): void;
     destroy(this: PubSubClient): void;
+    getStatus(this: PubSubClient): PubSubStatus;
     pub(this: PubSubClient, channelID: string, data: JSONType): void;
     scheduleConnectionAttempt(this: PubSubClient): void;
     sub(this: PubSubClient, channelID: string): void;
@@ -165,6 +182,8 @@ export declare const PUBSUB_RECONNECTION_FAILED = "pubsub-reconnection-failed";
 export declare const PUBSUB_RECONNECTION_SCHEDULED = "pubsub-reconnection-scheduled";
 export declare const PUBSUB_RECONNECTION_SUCCEEDED = "pubsub-reconnection-succeeded";
 export declare const PUBSUB_SUBSCRIPTION_SUCCEEDED = "pubsub-subscription-succeeded";
+export declare const PUBSUB_STATE_CHANGED = "pubsub-state-changed";
+export declare const PUBSUB_SUBSCRIPTION_FAILED = "pubsub-subscription-failed";
 declare class TieredMap<K, L, V> extends Map<K, Map<L, V>> {
     tGet(k1: K, k2: L): V | undefined;
     tHas(k1: K, k2: L): boolean;
@@ -182,7 +201,8 @@ declare class TieredMap<K, L, V> extends Map<K, Map<L, V>> {
  * {boolean?} manual - Whether the factory should call 'connect()' automatically.
  *   Also named 'autoConnect' or 'startClosed' in other libraries.
  * {object?} messageHandlers - Custom handlers for different message types.
- * {number?} pingTimeout=45_000 - How long to wait for the server to send a ping, in milliseconds.
+ * {number?} pingTimeout=45_000 - How long to wait for a message from the server (it pings
+ *   regularly) before replacing the connection, in milliseconds. 0 or Infinity disables it.
  * {boolean?} reconnectOnDisconnection=true - Whether to reconnect after a server-side disconnection.
  * {boolean?} reconnectOnOnline=true - Whether to reconnect after coming back online.
  * {boolean?} reconnectOnTimeout=false - Whether to reconnect after a connection timeout.

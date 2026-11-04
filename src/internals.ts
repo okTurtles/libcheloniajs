@@ -49,6 +49,8 @@ import {
   EVENT_PUBLISHING_ERROR
 } from './events.js'
 import { multicodes } from './functions.js'
+import { REQUEST_TYPE } from './pubsub/index.js'
+import type { PubSubClient } from './pubsub/index.js'
 import {
   clearReingestTrackerForContract,
   noteFutureEvent,
@@ -293,6 +295,59 @@ const keyRotationHelper = <T>(
       })
     })
   })
+}
+
+// A published event normally comes back over pubsub, and is processed then
+// (which is when `onprocessed` fires). That doesn't happen if the pubsub
+// client isn't subscribed to the contract (e.g., the subscription was lost)
+// or if the socket is half-open, and the event would then only be processed
+// with the next sync (e.g., when publishing the next event). So, sync if the
+// event hasn't been processed: right away if the pubsub client is neither
+// subscribed nor subscribing to the contract, or else after
+// `config.publishReceiptTimeout` ms. In the normal case (the event arrives
+// within milliseconds), this costs nothing.
+const ensurePublishedEventReceived = function (
+  this: CheloniaContext,
+  contractID: string,
+  entry: SPMessage
+) {
+  if (entry.isFirstMessage() || !this.subscriptionSet.has(contractID)) return
+  const instance = this._instance
+  const height = entry.height()
+  const check = (reason: string) => {
+    try {
+      // Nothing to do after a reset, if the contract is no longer wanted or
+      // once the event (or a later one) has been processed
+      if (instance !== this._instance || !this.subscriptionSet.has(contractID)) return
+      const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
+      if (localHeight != null && localHeight >= height) return
+      console.warn(
+        `[chelonia] Published ${entry.description()} but did not receive it (${reason}); syncing ${contractID}`
+      )
+      sbp('chelonia/private/in/sync', contractID, { force: true }).catch((e: unknown) => {
+        console.error(`[chelonia] Error syncing ${contractID} after publishing`, e)
+      })
+      // Re-subscribe to the contract if the pubsub client lost it
+      if (this.pubsub) sbp('chelonia/pubsub/update')
+    } catch (e) {
+      console.error(`[chelonia] Error checking that ${entry.description()} was received`, e)
+    }
+  }
+  const client = this.pubsub as PubSubClient | undefined
+  if (
+    !client ||
+    (!client.subscriptionSet.has(contractID) &&
+      !client.pendingOperations.tHas(REQUEST_TYPE.SUB, contractID))
+  ) {
+    check('not subscribed')
+    return
+  }
+  const timeout = this.config.publishReceiptTimeout
+  if (typeof timeout !== 'number' || !(timeout > 0) || !Number.isFinite(timeout)) return
+  const timeoutID = setTimeout(() => check(`not received within ${timeout} ms`), timeout)
+  // Node.js-specific: `.unref()` prevents this timer from keeping the
+  // process alive. The optional chaining makes it a no-op in browsers.
+  ;(timeoutID as unknown as { unref?: () => void }).unref?.()
 }
 
 // export const FERAL_FUNCTION = Function
@@ -752,7 +807,6 @@ export default sbp('sbp/selectors/register', {
 
     return sbp('chelonia/private/queueEvent', `publish:${contractID}`, async () => {
       let attempt = 1
-      let lastAttemptedHeight
       // prepublish is asynchronous to allow for cleanly sending messages to
       // different contracts
       await hooks?.prepublish?.(entry)
@@ -775,7 +829,6 @@ export default sbp('sbp/selectors/register', {
         // 'latest' state may be for that contract (in case we were receiving
         // something over the web socket)
         // This also ensures that the state doesn't change while reading it
-        lastAttemptedHeight = entry.height()
         const newEntry = await sbp('chelonia/private/queueEvent', contractID, async () => {
           const rootState = sbp(this.config.stateSelector)
           const state = rootState[contractID]
@@ -872,6 +925,7 @@ export default sbp('sbp/selectors/register', {
         })
         if (r.ok) {
           await hooks?.postpublish?.(entry)
+          ensurePublishedEventReceived.call(this, contractID, entry)
           return entry
         }
         try {
@@ -896,11 +950,16 @@ export default sbp('sbp/selectors/register', {
             attempt += 1
             await delay(randDelay) // wait randDelay ms before sending it again
 
-            // TODO: The [pubsub] code seems to miss events that happened between
-            // a call to sync and the subscription time. This is a temporary measure
-            // to handle this until [pubsub] is updated.
-            if (!entry.isFirstMessage() && entry.height() === lastAttemptedHeight) {
-              await sbp('chelonia/private/in/sync', contractID, { force: true })
+            // A 409 means that the event wasn't on top of the server's HEAD:
+            // some event (at the height that we attempted) hasn't reached us.
+            // It may still arrive over pubsub during the delay above, but if
+            // it didn't (e.g., the subscription was lost), every further
+            // attempt would fail the same way, so sync.
+            if (!entry.isFirstMessage()) {
+              const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
+              if (localHeight == null || localHeight < entry.height()) {
+                await sbp('chelonia/private/in/sync', contractID, { force: true })
+              }
             }
           } else {
             // The same line the rest of the library raises HTTP errors with,

@@ -515,7 +515,6 @@ export default sbp('sbp/selectors/register', {
         const originalEntry = entry;
         return sbp('chelonia/private/queueEvent', `publish:${contractID}`, async () => {
             let attempt = 1;
-            let lastAttemptedHeight;
             // prepublish is asynchronous to allow for cleanly sending messages to
             // different contracts
             await hooks?.prepublish?.(entry);
@@ -535,7 +534,6 @@ export default sbp('sbp/selectors/register', {
                 // 'latest' state may be for that contract (in case we were receiving
                 // something over the web socket)
                 // This also ensures that the state doesn't change while reading it
-                lastAttemptedHeight = entry.height();
                 const newEntry = await sbp('chelonia/private/queueEvent', contractID, async () => {
                     const rootState = sbp(this.config.stateSelector);
                     const state = rootState[contractID];
@@ -636,11 +634,16 @@ export default sbp('sbp/selectors/register', {
                         console.warn(`[chelonia] publish attempt ${attempt} of ${maxAttempts} failed. Waiting ${randDelay} msec before resending ${entry.description()}`);
                         attempt += 1;
                         await delay(randDelay); // wait randDelay ms before sending it again
-                        // TODO: The [pubsub] code seems to miss events that happened between
-                        // a call to sync and the subscription time. This is a temporary measure
-                        // to handle this until [pubsub] is updated.
-                        if (!entry.isFirstMessage() && entry.height() === lastAttemptedHeight) {
-                            await sbp('chelonia/private/in/sync', contractID, { force: true });
+                        // A 409 means that the event wasn't on top of the server's HEAD:
+                        // some event (at the height that we attempted) hasn't reached us.
+                        // It may still arrive over pubsub during the delay above, but if
+                        // it didn't (e.g., the subscription was lost), every further
+                        // attempt would fail the same way, so sync.
+                        if (!entry.isFirstMessage()) {
+                            const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height;
+                            if (localHeight == null || localHeight < entry.height()) {
+                                await sbp('chelonia/private/in/sync', contractID, { force: true });
+                            }
                         }
                     }
                     else {

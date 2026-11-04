@@ -79,6 +79,9 @@ that needs the context).
 | `connectionURL` | `string` | _(none — required before connecting)_ | Pubsub/HTTP base URL of the relay server. Accessing it before it is set throws. |
 | `connectionOptions.maxRetries` | `number` | `Infinity` | Pubsub reconnection budget. |
 | `connectionOptions.reconnectOnTimeout` | `boolean` | `true` | Reconnect when the server stops answering pings. |
+| `connectionOptions.*` | pubsub client `Options` | see `src/pubsub/index.ts` | Every other field is passed to the pubsub client as is, e.g. `pingTimeout` (`45000` ms without a message before the connection is replaced; also checked against the wall clock, so a connection that died during sleep is replaced within a few seconds of waking up; `0` disables it), `opRetryInterval` (`2000`) and `maxOpRetries` (`4`). A SUB/UNSUB/KV filter request that gets no answer after `maxOpRetries` retries (about 10 to 15 x `opRetryInterval` with the defaults) is never dropped: the client replaces the connection and sends the request again. Read by `chelonia/connect`. |
+| `pubsubReconcileInterval` | `number` | `60000` | How often (in ms) Chelonia checks that the pubsub client is subscribed to every contract Chelonia is subscribed to, and subscribes it again to any it lost (logged at info as `[chelonia] pubsub reconcile (periodic): ...`). Chelonia also checks after every (re)connection (`(reconnected)`), whatever this value. `0`, or anything that isn't a positive finite number, disables the periodic check. Read by `chelonia/connect`, so a change applies from the next `chelonia/connect`. The check also unsubscribes the pubsub client from channels that Chelonia isn't subscribed to (as `chelonia/pubsub/update` always did on subscription changes). |
+| `publishReceiptTimeout` | `number` | `5000` | How long (in ms) to wait, after the relay accepted an event published to a contract Chelonia is subscribed to, for that event to come back over pubsub before syncing the contract to process it (e.g. the socket is half-open). If the pubsub client isn't subscribed to the contract (or there is no pubsub client), Chelonia syncs right away instead. `0`, or anything that isn't a positive finite number, disables the timed check only. See [When a publish fails](./contracts.md#when-a-publish-fails). |
 | `fetch` | `typeof fetch` | global `fetch` | HTTP transport. Override in environments that need a custom fetch (e.g. service workers with credentials). |
 
 ### State integration
@@ -199,6 +202,9 @@ config:
   JSON-clone them away).
 - `hooks` is patched with `Object.assign` (same reason).
 - Setting a hook to `null` disables it.
+- `connectionOptions` and `pubsubReconcileInterval` are read by
+  `chelonia/connect`: a change applies to the next pubsub client, not to
+  the current one.
 - For `journal`, the rules are slightly stricter — see below.
 
 The selector also eagerly preloads any new manifests in
@@ -472,8 +478,9 @@ in the tab), see `chelonia/externalStateSetup` in
   manifests and seeds config. Outgoing publishes use `config.fetch`
   directly so they can succeed without `chelonia/connect`, but
   **incoming pubsub events never arrive** until you call
-  `sbp('chelonia/connect')`. Symptom: actions appear to publish but
-  local state never updates.
+  `sbp('chelonia/connect')`. Symptom: local state only changes when
+  you publish (Chelonia then syncs the contract, as there is no pubsub
+  client), and other participants' events only show up at that point.
 - **`stateSelector` must already exist.** Register it via
   `sbp('sbp/selectors/register', ...)` *before* calling
   `chelonia/configure`, otherwise manifest preloading will fail.
