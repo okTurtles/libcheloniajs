@@ -53,6 +53,11 @@ on:
         description: API key for the kimi provider.
         required: false
 
+env:
+  # Node must use the system CA bundle that fix-ubuntu-ca-roots fixes. See
+  # .github/actions/fix-ubuntu-ca-roots/action.yml.
+  NODE_OPTIONS: --use-openssl-ca
+
 jobs:
   review:
     name: Automated PR Review
@@ -101,6 +106,9 @@ jobs:
       KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
 
     steps:
+      - uses: okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main
+        id: ca-roots
+
       - name: Update comment with status
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
@@ -512,11 +520,12 @@ jobs:
       #
       # The skills CLI is a third-party npx package that needs no secrets (the
       # skill repo is public, so an anonymous clone works). `env -i` passes it
-      # only PATH, HOME and DISABLE_TELEMETRY, so no job env reaches it. The
-      # step env also blanks the secrets in this step's own shell, because a
-      # child process can read its parent's environment from /proc. This
-      # stops packages that harvest environment variables, but it is not a
-      # sandbox: the package still runs unsandboxed as the runner user.
+      # only PATH, HOME, DISABLE_TELEMETRY and NODE_OPTIONS, so no other job
+      # env reaches it. The step env also blanks the secrets in this step's
+      # own shell, because a child process can read its parent's environment
+      # from /proc. This stops packages that harvest environment variables,
+      # but it is not a sandbox: the package still runs unsandboxed as the
+      # runner user.
       - name: Install code-review skill
         env:
           GH_TOKEN: ''
@@ -526,7 +535,7 @@ jobs:
           PROVIDER_API_KEY: ''
         run: |
           cd "$HOME"
-          env -i PATH="$PATH" HOME="$HOME" DISABLE_TELEMETRY=1 \
+          env -i PATH="$PATH" HOME="$HOME" DISABLE_TELEMETRY=1 NODE_OPTIONS="$NODE_OPTIONS" \
             npx --yes skills add taoeffect/code-review --skill code-review -g -a crush --copy -y
 
           SKILL_FILE="$HOME/.config/crush/skills/code-review/SKILL.md"
@@ -646,6 +655,7 @@ jobs:
             --setenv PATH "$PATH"
             --setenv HOME "$HOME"
             --setenv TERM dumb
+            --setenv NODE_OPTIONS "$NODE_OPTIONS"
             --setenv OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
             --setenv ZAI_API_KEY "$ZAI_API_KEY"
             --setenv KIMI_API_KEY "$KIMI_API_KEY"
@@ -759,23 +769,30 @@ jobs:
             --repo "${{ github.repository }}" \
             --body-file /tmp/review_comment.txt
 
+      # Skipped when fix-ubuntu-ca-roots fails: the CA bundle can then still
+      # trust a removed root, and gh would send GH_TOKEN through it. That
+      # failure shows only in the Actions log. A later step can fail before
+      # "Get PR number" and "Extract review command" run, so this step takes
+      # the PR number from the event and gives REVIEW_COMMAND a default.
       - name: Post failure comment
-        if: failure() && steps.pr-info.outputs.number
+        if: failure() && steps.ca-roots.outcome == 'success'
         run: |
-          gh pr comment "${{ steps.pr-info.outputs.number }}" \
+          gh pr comment "${{ github.event.issue.number }}" \
             --repo "${{ github.repository }}" \
             --body "## Advanced AI Review
 
           - Type: Error
           - Model: ${REVIEW_MODEL}
 
-          The review workflow failed. Check the [workflow run](${RUN_URL}) for details. Comment \`${REVIEW_COMMAND}\` to re-run."
+          The review workflow failed. Check the [workflow run](${RUN_URL}) for details. Comment \`${REVIEW_COMMAND:-/review}\` to re-run."
 
       # Runs when the job is cancelled. The elapsed-time check distinguishes
       # the job timeout (timeout-minutes above) from a concurrency
-      # cancel-in-progress cancellation, which must NOT add the note.
+      # cancel-in-progress cancellation, which must NOT add the note. Skipped
+      # when fix-ubuntu-ca-roots did not succeed, for the reason given at
+      # "Post failure comment".
       - name: Report timeout on trigger comment
-        if: cancelled()
+        if: cancelled() && steps.ca-roots.outcome == 'success'
         env:
           COMMENT_ID: ${{ github.event.comment.id }}
           TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
@@ -787,7 +804,11 @@ jobs:
             exit 0
           fi
           ELAPSED=$(( $(date +%s) - JOB_STARTED_AT ))
-          if [ "$ELAPSED" -lt $(( TIMEOUT_SECONDS - 60 )) ]; then
+          # timeout-minutes counts from the job start, but JOB_STARTED_AT is set after
+          # "Set up job" and fix-ubuntu-ca-roots (apt-get update and upgrade), so the
+          # slack must cover both. Cost: a concurrency cancellation in the last
+          # 5 minutes is reported as a timeout.
+          if [ "$ELAPSED" -lt $(( TIMEOUT_SECONDS - 300 )) ]; then
             echo "Cancelled after ${ELAPSED}s (< timeout) — likely concurrency cancellation; skipping"
             exit 0
           fi
