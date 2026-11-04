@@ -32,9 +32,15 @@
 #   action cannot set NODE_OPTIONS for the steps after it, because GitHub
 #   blocks it in GITHUB_ENV. A reusable (workflow_call) workflow must set it
 #   itself, because the env of its caller does not reach it.
-# - Pass NODE_OPTIONS (and DENO_TLS_CA_STORE, if Deno runs there) through
-#   commands that clear the environment, such as env -i, bwrap --clearenv
-#   and sudo.
+# - Pass NODE_OPTIONS (and DENO_TLS_CA_STORE and SSL_CERT_FILE, if Deno or
+#   uv runs there) through commands that clear the environment, such as
+#   env -i, bwrap --clearenv and sudo.
+# - Point a tool that has its own root list and does not read SSL_CERT_FILE
+#   at /etc/ssl/certs/ca-certificates.crt. This action does not fix it. For
+#   example, Python requests uses only certifi, and certifi before 2026.10.18
+#   still trusts the bad chains: set REQUESTS_CA_BUNDLE in the jobs that run
+#   it. The action does not set it for every job, because with it requests
+#   ignores Session.verify = False.
 # - Set sync-nss-db to true only in jobs that run Playwright or Chromium.
 #
 #   env:
@@ -53,7 +59,7 @@
 # does not test the change.
 # https://github.blog/changelog/2023-10-05-github-actions-node_options-is-now-restricted-from-github_env/
 name: Fix Ubuntu runner CA root bundle
-description: On GitHub-hosted Ubuntu runners, upgrade ca-certificates and libnss3, remove emSign ECC Root CA - G3, emSign ECC Root CA - C3, emSign Root CA - C1 and Comodo AAA from the system CA bundle, and make Deno use that bundle.
+description: On GitHub-hosted Ubuntu runners, upgrade ca-certificates and libnss3, remove emSign ECC Root CA - G3, emSign ECC Root CA - C3, emSign Root CA - C1 and Comodo AAA from the system CA bundle, and make Deno and uv use that bundle.
 inputs:
   sync-nss-db:
     description: Also trust the fixed system bundle and distrust the removed roots in the user's NSS database, which Chromium reads.
@@ -81,14 +87,21 @@ runs:
           echo "::error::/etc/ssl/certs/ca-certificates.crt still trusts a root that this action removes"
           exit 1
         fi
-    # Deno uses its bundled Mozilla root list by default, and Deno releases
-    # before 2.9.8 still trust the bad chains. DENO_TLS_CA_STORE=system makes
-    # Deno use only the fixed system bundle. Unlike NODE_OPTIONS, GitHub
-    # allows this variable in GITHUB_ENV, so the callers do not have to set it.
+    # Deno and uv use their bundled Mozilla root lists by default. Deno
+    # before 2.9.8 and uv before 0.13.4 still trust the bad chains.
+    # DENO_TLS_CA_STORE=system makes Deno use the fixed system bundle.
+    # SSL_CERT_FILE makes uv, and httpx in place of certifi, use only that
+    # file. OpenSSL, Go and Python's ssl module also read SSL_CERT_FILE, but
+    # on Ubuntu they already use that file. Unlike NODE_OPTIONS, GitHub
+    # allows both variables in GITHUB_ENV, so the callers do not have to set
+    # them.
     # https://docs.deno.com/runtime/reference/env_variables/
-    - name: Make Deno use the system CA bundle
+    # https://docs.astral.sh/uv/concepts/authentication/certificates/
+    - name: Make Deno and uv use the system CA bundle
       shell: bash
-      run: echo "DENO_TLS_CA_STORE=system" >> "$GITHUB_ENV"
+      run: |
+        echo "DENO_TLS_CA_STORE=system" >> "$GITHUB_ENV"
+        echo "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" >> "$GITHUB_ENV"
     # Chromium ignores the system CA bundle. It trusts its built-in Chrome
     # Root Store plus the user's NSS database, and Playwright's Chromium gets
     # no CRLSet updates, so it still accepts the compromised eMudhra chains.
