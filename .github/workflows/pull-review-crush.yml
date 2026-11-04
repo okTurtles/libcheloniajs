@@ -796,7 +796,11 @@ jobs:
             exit 0
           fi
           ELAPSED=$(( $(date +%s) - JOB_STARTED_AT ))
-          if [ "$ELAPSED" -lt $(( TIMEOUT_SECONDS - 60 )) ]; then
+          # timeout-minutes counts from the job start, but JOB_STARTED_AT is set after
+          # "Set up job" and fix-ubuntu-ca-roots (apt-get update and upgrade), so the
+          # slack must cover both. Cost: a concurrency cancellation in the last
+          # 5 minutes is reported as a timeout.
+          if [ "$ELAPSED" -lt $(( TIMEOUT_SECONDS - 300 )) ]; then
             echo "Cancelled after ${ELAPSED}s (< timeout) — likely concurrency cancellation; skipping"
             exit 0
           fi
