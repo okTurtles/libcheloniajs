@@ -34,6 +34,7 @@
 #   (workflow_call) workflow must set it itself, because the env of its
 #   caller does not reach it. A job that only calls a reusable workflow
 #   cannot have steps, so it needs neither this action nor NODE_OPTIONS.
+#   https://github.blog/changelog/2023-10-05-github-actions-node_options-is-now-restricted-from-github_env/
 # - Pass NODE_OPTIONS (and DENO_TLS_CA_STORE and SSL_CERT_FILE, if Deno or
 #   uv runs there) through commands that clear the environment, such as
 #   env -i, bwrap --clearenv and sudo.
@@ -59,7 +60,6 @@
 # A change to this action reaches the callers only when it merges to main.
 # The CI of the PR that changes it still runs the copy on main, so that CI
 # does not test the change.
-# https://github.blog/changelog/2023-10-05-github-actions-node_options-is-now-restricted-from-github_env/
 name: Fix Ubuntu runner CA root bundle
 description: On GitHub-hosted Ubuntu runners, upgrade ca-certificates and libnss3, remove emSign ECC Root CA - G3, emSign ECC Root CA - C3, emSign Root CA - C1 and Comodo AAA from the system CA bundle, and make Deno and uv use that bundle.
 inputs:
