@@ -58,8 +58,10 @@ GitHub Actions files in `.github/`:
 
 Rules:
 
-- Every job runs `okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main` as its first step.
-- Every workflow sets `NODE_OPTIONS: --use-openssl-ca` in its workflow-level `env:`.
+- Every job that has `steps:` runs
+  `okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main` as its first step.
+- Every workflow with such a job sets `NODE_OPTIONS: --use-openssl-ca` in its workflow-level
+  `env:`. A job that only calls a reusable workflow (`pr-review.yml`) needs neither.
 - Other repos use the action and `pull-review-crush.yml` from `main`. A change to them affects
   those repos when it merges, and the PR's own CI still runs the copy on `main`.
 

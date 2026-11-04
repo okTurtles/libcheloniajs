@@ -16,22 +16,24 @@
 # installed libnss3 and a Debian-style /etc/ca-certificates.conf.
 #
 # Callers must:
-# - Run it as the first step of every job, before checkout and any other
-#   HTTPS request. Call it as
+# - Run it as the first step of every job that has steps, before checkout
+#   and any other HTTPS request. Call it as
 #   okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main, not
 #   with a ./ path: the runner downloads remote actions in "Set up job",
 #   before the first step, but a ./ path needs a checkout. This also keeps a
 #   workflow that checks out untrusted PR code from loading the action from
 #   that checkout.
 # - Set NODE_OPTIONS=--use-openssl-ca in the workflow-level env of every
-#   workflow. Node does not read the system bundle. It uses its built-in CA
-#   list, and unpatched Node releases, such as the runner's own Node for
-#   JavaScript actions, still trust the bad chains. --use-openssl-ca replaces
-#   that list with the fixed system bundle. Do not use --use-system-ca: it
-#   adds the system roots to the built-in list, so the bad roots stay. This
-#   action cannot set NODE_OPTIONS for the steps after it, because GitHub
-#   blocks it in GITHUB_ENV. A reusable (workflow_call) workflow must set it
-#   itself, because the env of its caller does not reach it.
+#   workflow that has such a job. Node does not read the system bundle. It
+#   uses its built-in CA list, and unpatched Node releases, such as the
+#   runner's own Node for JavaScript actions, still trust the bad chains.
+#   --use-openssl-ca replaces that list with the fixed system bundle. Do
+#   not use --use-system-ca: it adds the system roots to the built-in list,
+#   so the bad roots stay. This action cannot set NODE_OPTIONS for the steps
+#   after it, because GitHub blocks it in GITHUB_ENV. A reusable
+#   (workflow_call) workflow must set it itself, because the env of its
+#   caller does not reach it. A job that only calls a reusable workflow
+#   cannot have steps, so it needs neither this action nor NODE_OPTIONS.
 # - Pass NODE_OPTIONS (and DENO_TLS_CA_STORE and SSL_CERT_FILE, if Deno or
 #   uv runs there) through commands that clear the environment, such as
 #   env -i, bwrap --clearenv and sudo.
