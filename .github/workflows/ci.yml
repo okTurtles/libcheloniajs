@@ -8,11 +8,17 @@ on:
   pull_request:
     branches: [ "main" ]
 
+env:
+  # Node must use the system CA bundle that fix-ubuntu-ca-roots fixes. See
+  # .github/actions/fix-ubuntu-ca-roots/action.yml.
+  NODE_OPTIONS: --use-openssl-ca
+
 jobs:
   build:
     runs-on: ubuntu-latest
     environment: CI
     steps:
+      - uses: okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
