@@ -768,17 +768,21 @@ jobs:
             --repo "${{ github.repository }}" \
             --body-file /tmp/review_comment.txt
 
+      # Runs for every failure, also when fix-ubuntu-ca-roots fails and no
+      # other step has run. So it takes the PR number from the event, not
+      # from "Get PR number", and gives REVIEW_COMMAND (set by "Extract review
+      # command") a default.
       - name: Post failure comment
-        if: failure() && steps.pr-info.outputs.number
+        if: failure()
         run: |
-          gh pr comment "${{ steps.pr-info.outputs.number }}" \
+          gh pr comment "${{ github.event.issue.number }}" \
             --repo "${{ github.repository }}" \
             --body "## Advanced AI Review
 
           - Type: Error
           - Model: ${REVIEW_MODEL}
 
-          The review workflow failed. Check the [workflow run](${RUN_URL}) for details. Comment \`${REVIEW_COMMAND}\` to re-run."
+          The review workflow failed. Check the [workflow run](${RUN_URL}) for details. Comment \`${REVIEW_COMMAND:-/review}\` to re-run."
 
       # Runs when the job is cancelled. The elapsed-time check distinguishes
       # the job timeout (timeout-minutes above) from a concurrency
