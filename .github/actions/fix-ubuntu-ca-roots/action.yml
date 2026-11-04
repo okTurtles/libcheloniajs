@@ -44,6 +44,10 @@
 #   still trusts the bad chains: set REQUESTS_CA_BUNDLE in the jobs that run
 #   it. The action does not set it for every job, because with it requests
 #   ignores Session.verify = False.
+# - If a step runs after a failure (failure(), always(), cancelled()) and
+#   sends a token or other secret over HTTPS, give this action's step an id
+#   and add steps.<id>.outcome == 'success' to that step's if. When this
+#   action fails, the bundle can still trust a removed root.
 # - Set sync-nss-db to true only in jobs that run Playwright or Chromium.
 #
 #   env:

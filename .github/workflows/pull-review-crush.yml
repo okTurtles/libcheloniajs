@@ -107,6 +107,7 @@ jobs:
 
     steps:
       - uses: okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main
+        id: ca-roots
 
       - name: Update comment with status
         env:
@@ -768,12 +769,13 @@ jobs:
             --repo "${{ github.repository }}" \
             --body-file /tmp/review_comment.txt
 
-      # Runs for every failure, also when fix-ubuntu-ca-roots fails and no
-      # other step has run. So it takes the PR number from the event, not
-      # from "Get PR number", and gives REVIEW_COMMAND (set by "Extract review
-      # command") a default.
+      # Skipped when fix-ubuntu-ca-roots fails: the CA bundle can then still
+      # trust a removed root, and gh would send GH_TOKEN through it. That
+      # failure shows only in the Actions log. A later step can fail before
+      # "Get PR number" and "Extract review command" run, so this step takes
+      # the PR number from the event and gives REVIEW_COMMAND a default.
       - name: Post failure comment
-        if: failure()
+        if: failure() && steps.ca-roots.outcome == 'success'
         run: |
           gh pr comment "${{ github.event.issue.number }}" \
             --repo "${{ github.repository }}" \
@@ -786,9 +788,11 @@ jobs:
 
       # Runs when the job is cancelled. The elapsed-time check distinguishes
       # the job timeout (timeout-minutes above) from a concurrency
-      # cancel-in-progress cancellation, which must NOT add the note.
+      # cancel-in-progress cancellation, which must NOT add the note. Skipped
+      # when fix-ubuntu-ca-roots did not succeed, for the reason given at
+      # "Post failure comment".
       - name: Report timeout on trigger comment
-        if: cancelled()
+        if: cancelled() && steps.ca-roots.outcome == 'success'
         env:
           COMMENT_ID: ${{ github.event.comment.id }}
           TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
