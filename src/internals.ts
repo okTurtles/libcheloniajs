@@ -58,6 +58,7 @@ import {
   pruneStaleEntries
 } from './reingestTracker.js'
 import { isSignedData, type RawSignedData, signedIncomingData } from './signedData.js'
+import { timerDelay, unrefTimer } from './timer-utils.js'
 import {
   ChelContractKey,
   ChelContractManifest,
@@ -342,12 +343,9 @@ const ensurePublishedEventReceived = function (
     check('not subscribed')
     return
   }
-  const timeout = this.config.publishReceiptTimeout
-  if (typeof timeout !== 'number' || !(timeout > 0) || !Number.isFinite(timeout)) return
-  const timeoutID = setTimeout(() => check(`not received within ${timeout} ms`), timeout)
-  // Node.js-specific: `.unref()` prevents this timer from keeping the
-  // process alive. The optional chaining makes it a no-op in browsers.
-  ;(timeoutID as unknown as { unref?: () => void }).unref?.()
+  const timeout = timerDelay(this.config.publishReceiptTimeout)
+  if (timeout === undefined) return
+  unrefTimer(setTimeout(() => check(`not received within ${timeout} ms`), timeout))
 }
 
 // export const FERAL_FUNCTION = Function

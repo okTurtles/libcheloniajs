@@ -17,6 +17,7 @@ import {
   NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, createClient, oldestPendingSubSince
 } from './pubsub/index.js'
 import { clearReingestTrackerAll } from './reingestTracker.js'
+import { timerDelay, unrefTimer } from './timer-utils.js'
 import type {
   ProtoSPOpKeyRequestInnerV2,
   SPKey,
@@ -1345,12 +1346,8 @@ export default sbp('sbp/selectors/register', {
     }
     clearInterval(this.pubsubReconcileIntervalID)
     this.pubsubReconcileIntervalID = undefined
-    const reconcileInterval = this.config.pubsubReconcileInterval
-    if (
-      typeof reconcileInterval === 'number' &&
-      reconcileInterval > 0 &&
-      Number.isFinite(reconcileInterval)
-    ) {
+    const reconcileInterval = timerDelay(this.config.pubsubReconcileInterval)
+    if (reconcileInterval !== undefined) {
       const client = this.pubsub
       const intervalID = setInterval(() => {
         // Stop once the client has been replaced or destroyed (note that
@@ -1366,10 +1363,7 @@ export default sbp('sbp/selectors/register', {
           reconcilePubsub('periodic')
         }
       }, reconcileInterval)
-      // Node.js-specific: `.unref()` prevents this timer from keeping the
-      // process alive. The optional chaining makes it a no-op in browsers.
-      ;(intervalID as unknown as { unref?: () => void }).unref?.()
-      this.pubsubReconcileIntervalID = intervalID
+      this.pubsubReconcileIntervalID = unrefTimer(intervalID)
     }
     if (!this.kvContractsModifiedListener) {
       // KV-REVAMPED §11.4: on CONTRACTS_MODIFIED(added), reconcile every

@@ -211,6 +211,19 @@ describe('publishReceiptTimeout: 0 (CL-7)', () => {
   })
 })
 
+describe('publishReceiptTimeout above the longest timer delay (CL-7)', () => {
+  setUp({ publishReceiptTimeout: 2 ** 31 })
+
+  it('does not check before that delay', async () => {
+    const contract = await retainedContract(relay, pubsub)
+    server.blackhole()
+    server.pass()
+    const published = await publish(contract, 'checked much later')
+    await sleep(300)
+    assert.equal(syncsOf(contract.contractID, published.from), 0)
+  })
+})
+
 describe('chelonia/reset after publishing (CL-7)', () => {
   setUp({ publishReceiptTimeout: 200 })
 

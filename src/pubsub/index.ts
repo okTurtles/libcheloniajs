@@ -3,6 +3,7 @@ import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
 import { randomIntFromRange } from 'turtledash'
 import type { JSONObject, JSONType } from '../types.js'
+import { timerDelay, unrefTimer } from '../timer-utils.js'
 
 // ====== Enums ====== //
 
@@ -419,15 +420,14 @@ function abandonSocket (
   }
 }
 
-const isPingTimeoutEnabled = (pingTimeout: number) => pingTimeout > 0 && pingTimeout < Infinity
-
 // (Re)starts the ping timer of the current socket: no message from the
 // server within `pingTimeout` ms means that the connection is dead.
 function armPingTimeout (client: PubSubClient) {
-  const { socket, options: { pingTimeout } } = client
+  const { socket } = client
+  const pingTimeout = timerDelay(client.options.pingTimeout)
   clearTimeout(client.pingTimeoutID)
   client.pingTimeoutID = undefined
-  if (!socket || !isPingTimeoutEnabled(pingTimeout)) return
+  if (!socket || pingTimeout === undefined) return
   client.pingTimeoutID = setTimeout(() => {
     abandonSocket(client, socket, 'ping timeout')
   }, pingTimeout)
@@ -438,10 +438,11 @@ function armPingTimeout (client: PubSubClient) {
 // died in the meantime. `Date.now()` jumps forward on wake-up, so comparing
 // it with the time of the last message notices the silence within seconds.
 function startWallClockWatchdog (client: PubSubClient) {
-  const { socket, options: { pingTimeout } } = client
+  const { socket } = client
+  const pingTimeout = timerDelay(client.options.pingTimeout)
   clearInterval(client.wallClockWatchdogID)
   client.wallClockWatchdogID = undefined
-  if (!socket || !isPingTimeoutEnabled(pingTimeout)) return
+  if (!socket || pingTimeout === undefined) return
   const watchdogID = setInterval(() => {
     // `clearAllTimers()` normally stops it before the socket changes
     if (client.socket !== socket) {
@@ -502,7 +503,9 @@ function runWithRetry (
     const minDelay = (attemptNo - 1) * options.opRetryInterval
     const jitter = randomIntFromRange(0, options.opRetryInterval)
     const delay = minDelay + jitter
-    setTimeout(send, delay)
+    // Without a connection, `send` does nothing: this mustn't keep a Node.js
+    // process alive after `destroy()`
+    unrefTimer(setTimeout(send, delay))
   }
 
   send()
@@ -1101,7 +1104,8 @@ const publicMethods: {
       return send(data)
     }
 
-    if (client.options.timeout) {
+    const timeout = timerDelay(client.options.timeout)
+    if (timeout !== undefined) {
       const start = performance.now()
       const { socket } = client
       client.connectionTimeoutID = setTimeout(() => {
@@ -1111,7 +1115,7 @@ const publicMethods: {
         }
         // Aborting a stuck connection attempt may not fire `close` soon either
         abandonSocket(client, socket, 'connection timeout')
-      }, client.options.timeout)
+      }, timeout)
     }
     // Attach WebSocket event listeners.
     for (const name of socketEventNames) {

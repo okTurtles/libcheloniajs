@@ -407,6 +407,26 @@ describe('requests that exhaust the retry budget (CL-1)', () => {
     assert.ok(!connectionOf(client)!.subscriptions.has('w'))
   })
 
+  it('does not keep a Node.js process alive with its retry timers', async () => {
+    const { client } = setup({ opRetryInterval: 1000 })
+    assert.ok(await waitFor(isOpen(client)))
+    ignoreOnCurrentConnection(REQUEST_TYPE.SUB)
+    const timers: ReturnType<typeof setTimeout>[] = []
+    const realSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((callback: () => void, ms?: number) => {
+      const id = realSetTimeout(callback, ms)
+      if (callback.name === 'send') timers.push(id)
+      return id
+    }) as unknown as typeof setTimeout
+    try {
+      client.sub('r')
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+    }
+    assert.equal(timers.length, 1, 'retry scheduled')
+    assert.equal(timers[0].hasRef(), false)
+  })
+
   it('settles an unanswered KV_FILTER by replacing the connection', async () => {
     const { client } = setup({ opRetryInterval: I })
     client.sub('k')

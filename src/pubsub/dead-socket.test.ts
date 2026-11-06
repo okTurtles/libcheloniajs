@@ -314,6 +314,19 @@ describe('replacing dead sockets (CL-3)', () => {
       assert.equal(socket.readyState, WebSocket.OPEN, `pingTimeout: ${pingTimeout}`)
     }
   })
+
+  it('treats a pingTimeout or timeout above the longest timer delay as practically never', async () => {
+    const newLogs = logs.fromNow()
+    const { client } = setup({ pingTimeout: 2 ** 31 })
+    assert.ok(await waitFor(isOpen(client)))
+    const socket = client.socket
+    server.stallNewConnections()
+    const { client: connecting } = setup({ timeout: 2 ** 31 })
+    await sleep(200)
+    assert.equal(client.socket, socket)
+    assert.equal(connecting.socket?.readyState, WebSocket.CONNECTING)
+    assert.equal(newLogs.grep(/Abandoning socket/).length, 0)
+  })
 })
 
 describe('wall-clock ping watchdog (CL-4)', () => {
@@ -467,8 +480,7 @@ describe('connection state (CL-5)', () => {
   it('reports pending SUBs and when the oldest one was sent', async () => {
     server.onRequest = (_conn, msg) => msg.type === REQUEST_TYPE.SUB ? 'ignore' : undefined
     // Retries don't change anything (the server ignores them too), and this
-    // budget lasts the whole test. Retry timers are not cleared on destroy(),
-    // so a longer interval would keep the process alive.
+    // budget lasts the whole test
     const { client } = setup({ opRetryInterval: 1000 })
     assert.ok(await waitFor(isOpen(client)))
     const t0 = Date.now()

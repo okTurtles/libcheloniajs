@@ -308,6 +308,14 @@ describe('Chelonia reconciles its subscriptions with the pubsub client (CL-6)', 
     }
   })
 
+  it('treats a pubsubReconcileInterval above the longest timer delay as practically never', async () => {
+    await connect(2 ** 31)
+    await sleep(20)
+    updates = 0
+    await sleep(250)
+    assert.equal(updates, 0)
+  })
+
   it('does not reconcile while disconnected', async () => {
     await connect(50)
     await want('contract-E')
