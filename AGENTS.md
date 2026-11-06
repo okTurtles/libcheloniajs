@@ -43,7 +43,7 @@ Dual ESM/CJS output with TypeScript declarations:
 3. Runs `renameFiles.mjs` to rename `.js` → `.mjs`/`.cjs` and rewrite import paths within files
 4. Restores `package.json`
 
-**Note**: CJS build excludes test files via `tsconfig.cjs.json`.
+**Note**: CJS build excludes test files (and the `src/pubsub/test-harness.ts` test helper) via `tsconfig.cjs.json`.
 
 ## CI
 
@@ -107,13 +107,16 @@ src/
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
 ├── presets.ts            # Server preset for configuring Chelonia
-├── time-sync.ts          # Server time synchronization via monotonic offsets
+├── time-sync.ts          # Server time sync: performance.now()-driven, Date.now() jumps (sleep) trigger correction + resync
 ├── chelonia-utils.ts     # Optional utility selectors (e.g., chelonia/kv/queuedSet)
 ├── zkpp.ts               # Zero-knowledge password proof primitives
 ├── zkppConstants.ts      # ZKPP constants (AUTHSALT, CONTRACTSALT, etc.)
 ├── pubsub/
 │   ├── index.ts          # WebSocket PubSub client with reconnection logic
-│   └── index.test.ts     # Tests for reconnection delay
+│   ├── test-harness.ts   # Test-only fake pubsub server (fake global WebSocket, fault injection) + fake relay
+│   ├── index.test.ts     # Tests for reconnection delay
+│   ├── recovery.test.ts  # Unanswered requests, retry budget, diagnostic logs
+│   └── dead-socket.test.ts # Dead sockets, sleep/wake, offline/online, connection state
 └── local-selectors/
     └── index.ts          # External state sync (e.g., Chelonia in service worker → Vuex in tab)
 ```
@@ -164,6 +167,7 @@ chelonia/_init              — Initialize Chelonia context (call automatically 
 chelonia/configure          — Apply CheloniaConfig
 chelonia/reset              — Reset state
 chelonia/connect            — Connect to server
+chelonia/pubsub/status      — Pubsub connection state + contracts missing from the pubsub client
 chelonia/defineContract     — Register a contract definition
 chelonia/contract/sync      — Sync contract state from server
 chelonia/contract/retain    — Increment contract reference count
@@ -184,6 +188,32 @@ chelonia/out/atomic              — Execute multiple operations atomically
 
 1. **Outgoing**: Create `SPMessage` → Sign/Encrypt → Publish via `chelonia/private/out/publishEvent`
 2. **Incoming**: Receive via PubSub WebSocket or RESTful server endpoint → Deserialize → Validate signatures → Decrypt → Process → Update state → Run side effects
+
+### Pubsub recovery model
+
+Incoming events depend on the pubsub client (`src/pubsub/index.ts`) being
+subscribed to every contract in Chelonia's `subscriptionSet`. The recovery
+layers, each covering the failures of the previous one:
+
+1. **The client never drops a wanted subscription.** A SUB/UNSUB/KV_FILTER
+   without an answer after `maxOpRetries` retries makes the client
+   replace the connection (`abandonSocket`: synthetic `close`, code 4001).
+   SUBs (with their KV filters) are re-sent on the new connection; pending
+   UNSUBs are settled by the close. Replacements in a row back off
+   (`unansweredReplacements`). Dead sockets (ping timeout, also checked
+   against the wall clock after sleep; connection timeout; `offline`) are
+   abandoned at once too, instead of waiting for a `close` event.
+2. **Chelonia reconciles.** `chelonia/pubsub/update` also runs after every
+   (re)connection and every `pubsubReconcileInterval` ms (set up in
+   `chelonia/connect`), re-subscribing anything the client lost (e.g. a
+   rejected SUB).
+3. **Publishing and KV writes don't rely on pubsub.** `publishEvent` syncs
+   on a 409 and syncs a contract whose published event didn't come back
+   (`publishReceiptTimeout`); `chelonia/kv/set` syncs once on a 409.
+
+State is observable through `client.state` / `getStatus()`,
+`PUBSUB_STATE_CHANGED` and `chelonia/pubsub/status` (see
+[docs/debugging.md](docs/debugging.md#pubsub-connection)).
 
 ### Shelter Protocol Operations
 
@@ -353,6 +383,15 @@ registrations per file). Never import one test file from another: SBP keeps the 
 registration of a selector, and `src/chelonia.ts` locks the `chelonia` SBP domain at module
 scope, so a stub registered by one file (e.g. the `chelonia/contract/fullState` stub in
 `src/local-selectors/index.test.ts`) would shadow the real selectors for the whole process.
+
+Pubsub and network tests use `src/pubsub/test-harness.ts` (there is no WebSocket server in
+the repo): `createFakePubsubServer()` replaces the global `WebSocket` with an in-process fake
+that answers requests and injects faults (half-open sockets, stalled connects, latency, killed
+connections); `createFakeRelay()` fakes the HTTP endpoints for `config.fetch`, including real
+`SPMessage` chains (`createTestContract()`) and a KV store. Node has no `self`, so the client's
+`online`/`offline` listeners are triggered by hand (`emulateNavigator()`); `emulateSleep()`
+shifts `Date.now()` / holds back `performance.now()`. Examples: `src/pubsub/recovery.test.ts`,
+`src/chelonia-publish-receipt.test.ts`.
 
 ## Common Gotchas
 

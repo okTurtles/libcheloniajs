@@ -10,10 +10,11 @@ Also, see the [`chel`](https://github.com/okTurtles/chel) CLI utility for useful
 
 1. [Error hooks](#error-hooks)
 2. [Lifecycle events](#lifecycle-events)
-3. [Inspecting state](#inspecting-state)
-4. [Replaying state from the journal](#replaying-state-from-the-journal)
-5. [Reading history from the relay](#reading-history-from-the-relay)
-6. [Common failure modes](#common-failure-modes)
+3. [Pubsub connection](#pubsub-connection)
+4. [Inspecting state](#inspecting-state)
+5. [Replaying state from the journal](#replaying-state-from-the-journal)
+6. [Reading history from the relay](#reading-history-from-the-relay)
+7. [Common failure modes](#common-failure-modes)
 
 ---
 
@@ -79,6 +80,83 @@ sbp('okTurtles.events/on', EVENT_PUBLISHING_ERROR, ({ error, message }) => {
   console.error('[chelonia] publish failed', message?.hash(), error)
 })
 ```
+
+---
+
+## Pubsub connection
+
+Incoming events (other participants', and the echoes of your own
+publishes) arrive over the pubsub WebSocket that `chelonia/connect`
+opens. To check that it is healthy:
+
+```js
+sbp('chelonia/pubsub/status')
+// {
+//   state: 'open',            // 'connecting' | 'open' | 'reconnecting' | 'offline' | 'closed'
+//   since: 1762267000000,     // Date.now() when it entered `state`
+//   wanted: 12,               // how many contracts Chelonia is subscribed to
+//   missing: [],              // of those, the ones the pubsub client neither has nor is requesting
+//   pending: [],              // of those, the ones whose SUB awaits an answer or a connection
+//   oldestPendingSince: null  // Date.now() when the oldest pending SUB was sent
+// }
+```
+
+The result is plain data, so it can be posted across a service worker
+boundary. Without a pubsub client, `state` is `'closed'` and every
+contract is `missing`. `missing` should only be non-empty briefly:
+Chelonia subscribes again after every reconnection and every
+[`pubsubReconcileInterval`](./configure.md#connection) ms. A `pending`
+list with an old `oldestPendingSince` means that the relay doesn't
+answer; the pubsub client replaces the connection once the request's
+retry budget runs out (20 to 30 s with the defaults).
+
+To follow the connection state, e.g. for an "offline" banner, listen to
+`PUBSUB_STATE_CHANGED`:
+
+```js
+import { PUBSUB_STATE_CHANGED } from '@chelonia/lib/pubsub'
+
+sbp('okTurtles.events/on', PUBSUB_STATE_CHANGED, (client, { state, previous }) => {
+  showConnectionBanner(state !== 'open')
+})
+```
+
+On the pubsub client itself (the one `chelonia/connect` returns),
+`client.state`, `client.stateSince` and `client.getStatus()` (`{ state,
+since, subscribed, pending, oldestPendingSince }`) give the same
+information. `PUBSUB_SUBSCRIPTION_FAILED` `(client, { channelID, reason
+})` fires when the relay rejects a pending SUB; Chelonia requests it
+again at its next reconciliation.
+
+How the pubsub client recovers on its own:
+
+- A SUB, UNSUB or KV filter request that gets no answer is retried
+  `maxOpRetries` times, and then the connection is considered broken and
+  replaced. SUBs (with their KV filters) are sent again on the new
+  connection; pending UNSUBs are settled by the close, since the server
+  drops that connection's subscriptions. If the new connection doesn't
+  answer either (e.g. an overloaded relay), each replacement waits longer
+  than the previous one, like failed connection attempts.
+- The socket is dropped at once (close code `4001`), without waiting
+  for a `close` event that a dead socket may not fire for minutes, when
+  nothing arrived for `pingTimeout` ms (also checked against the wall
+  clock, so this happens within seconds of the device waking up), when
+  a connection attempt times out, and when the browser goes `offline`.
+  A new connection follows (once the browser is online again). Going
+  `online` also replaces a socket that is stuck closing.
+
+Log lines worth looking for:
+
+| Line | Level | Meaning |
+|---|---|---|
+| `[pubsub] Event: close (code C, reason "R"), open for N ms, last message M ms ago` | info | A socket closed. A connection attempt that never opened says `never opened (connecting for N ms)` instead. A large `last message` points at a dead connection, a small one at a close by the server. |
+| `[pubsub] Abandoning socket: <reason>` | warn | The client replaced a socket it considers dead: `ping timeout`, `ping timeout (wall clock)`, `connection timeout`, `offline`, `online, socket not open`, or `no response to <request> for <channelID>`. |
+| `[pubsub] Late ACK: subscribed to <channelID> N ms after the request` | info | The relay answered a SUB more than `opRetryInterval` ms after it was sent: a slow link. |
+| `[pubsub] Received unexpected sub for <channelID> (not requested)` | info | The relay answered a SUB that the client never sent (or no longer wants): client and relay disagree. The answers to a SUB's own retries are logged at debug level, as `Received duplicate sub ACK for <channelID>`. |
+| `[pubsub] State: <previous> -> <state>` | debug | Every connection state change. |
+| `[chelonia] pubsub reconcile (reconnected \| periodic): subscribing again to N contract(s) missing from the pubsub client` | info | Chelonia found subscriptions that the pubsub client had lost, and restores them. |
+| `[chelonia] Published <event> but did not receive it (<reason>); syncing <contractID>` | warn | A published event didn't come back over pubsub, so Chelonia syncs the contract to process it. See [`contracts.md`](./contracts.md#making-sure-a-published-event-is-processed). |
+| `[chelonia/time] Date.now() jumped N ms ahead of performance.now() (sleep or clock change); adjusted the time estimate` | info | The device slept (or the clock was set forward): `chelonia/time` was corrected at once and is being resynced with the relay. A jump `behind` is a clock change, which doesn't affect `chelonia/time`; it is resynced too. |
 
 ---
 
@@ -184,7 +262,8 @@ const msg = await sbp('chelonia/out/deserializedHEAD', hash, { contractID })
 |---|---|
 | `Missing reference count for contract` thrown by `chelonia/contract/sync` | You called `sync` without `retain`. Always `retain` first — see [`contracts.md`](./contracts.md#3-sync--reference-counting). |
 | `Signing key <id> is not defined` | The secret key for `signingKeyId` is not in `transientSecretKeys`. Did `chelonia/storeSecretKeys` get called this session? Persistent keys are restored from `rootState.secretKeys`; transient keys are not. |
-| Local state never updates after a publish | Pubsub isn't connected. Call `sbp('chelonia/connect')`. Outgoing publishes use `config.fetch` directly and can succeed without it, but incoming events (including your own echoes) require an open socket. |
+| Local state only changes after your own publishes, with `Published ... but did not receive it (not subscribed)` warnings | Pubsub isn't connected. Call `sbp('chelonia/connect')`. Outgoing publishes use `config.fetch` directly and can succeed without it, and Chelonia then syncs to process them, but other participants' events only arrive with those syncs. |
+| Other participants' events stop arriving for some contracts | Check [`chelonia/pubsub/status`](#pubsub-connection): `missing` contracts are restored at the next reconnection or within `pubsubReconcileInterval`; a `state` other than `'open'` or a long-`pending` SUB point at the connection itself. The pubsub log lines above show what happened. |
 | `ChelErrorDecryptionKeyNotFound` on an incoming op | You don't yet hold the encryption key. If this is a keyshare-pending contract, the op is buffered — watch for `CONTRACT_HAS_RECEIVED_KEYS`. If you should hold the key, check `chelonia/haveSecretKey(id)` and inspect `_volatile.pendingKeyRequests`. |
 | `ChelErrorSignatureKeyNotFound` | The signing key referenced by the op was never added (or has been deleted). Usually means the op was crafted under an out-of-date state; force a `chelonia/contract/sync`. |
 | `Selector not allowed in OP_ATOMIC` | You tried to nest a non-action / non-key-management selector inside `chelonia/out/atomic`. See the whitelist in [`contracts.md`](./contracts.md#atomic-batches). |

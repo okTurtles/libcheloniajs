@@ -17,7 +17,7 @@ be imported directly — use the package name.
 | [`kv.md`](./kv.md) | The server-side KV store and KV slots: the local mirror model, slot definitions, conflict retries, and consumer caveats. |
 | [`files.md`](./files.md) | Encrypted file upload, download, and delete — manifest layout and cipher choices. |
 | [`persistent-actions.md`](./persistent-actions.md) | The retry queue for must-succeed SBP calls — enqueue, cancel, persistence, and lifecycle. |
-| [`debugging.md`](./debugging.md) | Observability — error hooks, lifecycle events, inspecting state, and replaying from the journal. |
+| [`debugging.md`](./debugging.md) | Observability — error hooks, lifecycle events, pubsub connection status and log lines, inspecting state, and replaying from the journal. |
 | [`api.md`](./api.md) | Selector / type / error / event index with source links. Useful when you know what you're looking for. |
 
 If you're new to the library, start with

@@ -13,8 +13,12 @@ import {
 } from 'turtledash'
 import { createCID, maybeParseCID, multicodes, parseCID } from './functions.js'
 import { Buffer } from 'buffer'
-import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, createClient } from './pubsub/index.js'
+import {
+  NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, REQUEST_TYPE, createClient,
+  oldestPendingSubSince
+} from './pubsub/index.js'
 import { clearReingestTrackerAll } from './reingestTracker.js'
+import { timerDelay, unrefTimer } from './timer-utils.js'
 import type {
   ProtoSPOpKeyRequestInnerV2,
   SPKey,
@@ -89,6 +93,7 @@ import {
   ChelContractSideeffectMutationObject,
   ChelContractState,
   ChelKvOnConflictCallback,
+  ChelPubSubStatus,
   ChelRootState,
   CheloniaConfig,
   CheloniaContext,
@@ -336,6 +341,12 @@ export default sbp('sbp/selectors/register', {
         maxRetries: Infinity, // See https://github.com/okTurtles/group-income/issues/1183
         reconnectOnTimeout: true // can be enabled since we are not doing auth via web sockets
       },
+      // Check that the pubsub client hasn't lost any of our subscriptions
+      // every minute (and after every reconnection)
+      pubsubReconcileInterval: 60000,
+      // Sync a contract if an event published to it hasn't come back over
+      // pubsub after 5 seconds
+      publishReceiptTimeout: 5000,
       hooks: {
         preHandleEvent: null, // async (message: SPMessage) => {}
         postHandleEvent: null, // async (message: SPMessage) => {}
@@ -1306,6 +1317,55 @@ export default sbp('sbp/selectors/register', {
       }
       sbp('okTurtles.events/on', PUBSUB_RECONNECTION_SUCCEEDED, this.kvReconnectListener)
     }
+    // Chelonia and the pubsub client must agree on which contracts are
+    // subscribed to, but the client can lose one without Chelonia noticing
+    // (e.g., when the server rejects a SUB), and `chelonia/pubsub/update`
+    // otherwise only runs when `subscriptionSet` changes. So, also run it
+    // after every (re)connection and periodically. It's cheap: `sub()`
+    // skips contracts that are already subscribed or pending.
+    const reconcilePubsub = (trigger: string) => {
+      // Contracts that are neither subscribed nor pending have been lost by
+      // the pubsub client, which is worth knowing when diagnosing it
+      const { missing } = sbp('chelonia/pubsub/status') as ChelPubSubStatus
+      if (missing.length) {
+        console.info(`[chelonia] pubsub reconcile (${trigger}): subscribing again to ${missing.length} contract(s) missing from the pubsub client`, missing)
+      }
+      sbp('chelonia/pubsub/update')
+    }
+    if (!this.pubsubReconcileListener) {
+      this.pubsubReconcileListener = (client: PubSubClient) => {
+        if (client !== this.pubsub) return
+        // `open` emits PUBSUB_RECONNECTION_SUCCEEDED before it re-sends the
+        // pending SUBs, so wait for that to happen
+        setTimeout(() => {
+          if (client === this.pubsub && client.socket?.readyState === WebSocket.OPEN) {
+            reconcilePubsub('reconnected')
+          }
+        }, 0)
+      }
+      sbp('okTurtles.events/on', PUBSUB_RECONNECTION_SUCCEEDED, this.pubsubReconcileListener)
+    }
+    clearInterval(this.pubsubReconcileIntervalID)
+    this.pubsubReconcileIntervalID = undefined
+    const reconcileInterval = timerDelay(this.config.pubsubReconcileInterval)
+    if (reconcileInterval !== undefined) {
+      const client = this.pubsub
+      const intervalID = setInterval(() => {
+        // Stop once the client has been replaced or destroyed (note that
+        // `chelonia/reset` keeps the client)
+        if (client !== this.pubsub || !client.shouldReconnect) {
+          clearInterval(intervalID)
+          if (this.pubsubReconcileIntervalID === intervalID) {
+            this.pubsubReconcileIntervalID = undefined
+          }
+          return
+        }
+        if (client.socket?.readyState === WebSocket.OPEN) {
+          reconcilePubsub('periodic')
+        }
+      }, reconcileInterval)
+      this.pubsubReconcileIntervalID = unrefTimer(intervalID)
+    }
     if (!this.kvContractsModifiedListener) {
       // KV-REVAMPED §11.4: on CONTRACTS_MODIFIED(added), reconcile every
       // matching slot for newly-synced contracts. Registered per-instance
@@ -1531,7 +1591,10 @@ export default sbp('sbp/selectors/register', {
   // if you are using a custom stateSelector and reload the state (e.g. upon login)
   'chelonia/pubsub/update': function (this: CheloniaContext) {
     const client = this.pubsub
+    // A channel whose UNSUB is pending is being left: wanting it again needs
+    // a `sub()` (which cancels the UNSUB)
     const subscribedIDs = [...client.subscriptionSet]
+      .filter((id) => !client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, id))
     const currentIDs = Array.from(this.subscriptionSet)
     const leaveSubscribed = intersection(subscribedIDs, currentIDs)
     const toUnsubscribe = difference(subscribedIDs, leaveSubscribed)
@@ -1551,6 +1614,35 @@ export default sbp('sbp/selectors/register', {
         e
       )
       this.config.hooks.pubsubError?.(e, client)
+    }
+  },
+  // Connection state, plus the contracts that Chelonia is subscribed to but
+  // the pubsub client is not (`missing`) or not yet (`pending`). For UIs and
+  // diagnostics.
+  'chelonia/pubsub/status': function (this: CheloniaContext): ChelPubSubStatus {
+    const client = this.pubsub as PubSubClient | undefined
+    const wanted = Array.from(this.subscriptionSet)
+    if (!client) {
+      return {
+        state: 'closed',
+        since: null,
+        wanted: wanted.length,
+        missing: wanted,
+        pending: [],
+        oldestPendingSince: null
+      }
+    }
+    const status = client.getStatus()
+    const subscribed = new Set(status.subscribed)
+    const pending = new Set(status.pending)
+    const wantedPending = wanted.filter((id) => pending.has(id))
+    return {
+      state: status.state,
+      since: status.since,
+      wanted: wanted.length,
+      missing: wanted.filter((id) => !subscribed.has(id) && !pending.has(id)),
+      pending: wantedPending,
+      oldestPendingSince: oldestPendingSubSince(client, wantedPending)
     }
   },
   // resolves when all pending actions for these contractID(s) finish
@@ -2859,6 +2951,10 @@ export default sbp('sbp/selectors/register', {
   // this case, see if `chelonia/kv/queuedSet` covers your needs.
   // `data` is allowed to be falsy, in which case a fetch will occur first and
   // the `onconflict` handler will be called.
+  // On a 409 (the value wasn't signed with the contract's current height),
+  // this selector may sync the contract before retrying. So, it must not be
+  // awaited from inside that contract's internal queue (e.g., in a side
+  // effect), as that would deadlock.
   'chelonia/kv/set': async function (
     this: CheloniaContext,
     contractID: string,
@@ -2883,6 +2979,9 @@ export default sbp('sbp/selectors/register', {
     }
   ) {
     maxAttempts = maxAttempts ?? 3
+    // The contract height that the last value written was signed with
+    let signedHeight: number | undefined
+    let syncedAfterConflict = false
     const url = `${this.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`
     const hasOnconflict = typeof onconflict === 'function'
     // Compose the caller-provided signal with Chelonia's global abort
@@ -3021,6 +3120,7 @@ export default sbp('sbp/selectors/register', {
             data: data!,
             meta: key
           })
+          signedHeight = Number(serializedData.height)
           response = await this.config.fetch(url, {
             headers: new Headers([
               ['authorization', buildShelterAuthorizationHeader.call(this, contractID)],
@@ -3082,6 +3182,27 @@ export default sbp('sbp/selectors/register', {
               )
             }
             await delay(randomIntFromRange(0, 1500))
+            // A 409 means that the value wasn't signed with the contract's
+            // current height: some events haven't reached us. They may still
+            // arrive over pubsub during the delay above, but if they didn't
+            // (e.g., the subscription was lost), every further attempt would
+            // fail the same way, so sync (once per call). Only contracts that
+            // Chelonia wants are synced, as syncing subscribes to a contract.
+            if (
+              response.status === 409 &&
+              !syncedAfterConflict &&
+              this.subscriptionSet.has(contractID) &&
+              sbp(this.config.stateSelector).contracts[contractID]?.height === signedHeight
+            ) {
+              syncedAfterConflict = true
+              try {
+                await sbp('chelonia/private/in/sync', contractID, { force: true })
+              } catch (e) {
+                console.warn(
+                  `[kv/set] Error syncing ${contractID} after a conflict setting ${key}; retrying anyway: ${(e as Error)?.message || e}`
+                )
+              }
+            }
             if (await resolveData()) {
               continue
             } else {

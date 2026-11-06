@@ -26,9 +26,10 @@ For the authoritative signatures, follow the source links.
 | `chelonia/config` | `src/chelonia.ts` | Return the live `CheloniaConfig` object. Useful for introspection in tests. |
 | `chelonia/configure` | `src/chelonia.ts` | Apply a `CheloniaConfig`. See [`configure.md`](./configure.md). |
 | `chelonia/reset` | `src/chelonia.ts` | Drain publishes, abort in-flight messages, clear state. `(newState?, postCleanupFn?)`. |
-| `chelonia/connect` | `src/chelonia.ts` | Open the pubsub WebSocket. Returns a `PubSubClient`. |
+| `chelonia/connect` | `src/chelonia.ts` | Open the pubsub WebSocket (destroying the previous pubsub client, if any). Returns a `PubSubClient`. Also starts the periodic subscription check (`pubsubReconcileInterval`, see [`configure.md`](./configure.md#connection)). |
 | `chelonia/defineContract` | `src/chelonia.ts` | Register a contract definition (actions / getters / methods / metadata). |
-| `chelonia/pubsub/update` | `src/chelonia.ts` | Reconcile pubsub subscriptions against the current subscription set. Auto-called after subscription changes; call manually if you swap `stateSelector` at runtime. |
+| `chelonia/pubsub/update` | `src/chelonia.ts` | Reconcile pubsub subscriptions against the current subscription set: subscribe the pubsub client to the contracts it is missing, unsubscribe it from the others. Auto-called after subscription changes, after every (re)connection and every `pubsubReconcileInterval` ms; call manually if you swap `stateSelector` at runtime. |
+| `chelonia/pubsub/status` | `src/chelonia.ts` | `() => ChelPubSubStatus`: plain-data snapshot `{ state, since, wanted, missing, pending, oldestPendingSince }` of the pubsub connection and of the contracts Chelonia is subscribed to that the pubsub client is not (`missing`) or not yet (`pending`). Without a pubsub client: `state: 'closed'`, `since: null`, everything `missing`. See [`debugging.md`](./debugging.md#pubsub-connection). |
 | `chelonia/handleEvent` | `src/chelonia.ts` | Hand a raw incoming event string to Chelonia's processing queue. Used by the pubsub client; rarely called directly. |
 | `chelonia/in/processMessage` | `src/chelonia.ts` | Try-applying an `SPMessage`: deep-clones the supplied per-contract `state`, runs `chelonia/private/in/processMessage` against the clone, and returns the mutated copy on success or the original `state` unchanged on failure (errors are caught and logged via `console.warn`). Useful in tests / dry-runs; root state is never touched. (The outgoing-validation path in `publishEvent` calls the private `chelonia/private/in/processMessage` directly.) |
 | `chelonia/queueInvocation` | `src/chelonia.ts` | Queue an SBP invocation on a contract's event queue. Use to ensure work runs after the current sync drains. |
@@ -118,7 +119,7 @@ All publish to the relay via `chelonia/private/out/publishEvent` once
 
 | Selector | Source | Purpose |
 |---|---|---|
-| `chelonia/time` | `src/time-sync.ts` | Returns the relay-synchronized timestamp (Date.now() offset by the server delta). |
+| `chelonia/time` | `src/time-sync.ts` | Returns the relay-synchronized timestamp in ms: the latest `/time` sample advanced with `performance.now()`, so that system clock changes don't affect it. A sudden jump of `Date.now()` relative to `performance.now()` (the device slept, or the clock changed) is detected on the next call or within 10 s and starts an immediate resync; a forward jump over 1 s (e.g. a sleep, during which some browsers stop `performance.now()`) is also added to the estimate right away. |
 
 ### Not-yet-implemented op selectors
 
@@ -190,7 +191,7 @@ See [`files.md`](./files.md) for the prose guide and full signatures.
 
 | Selector | Source | Purpose |
 |---|---|---|
-| `chelonia/kv/set` | `src/chelonia.ts` | `POST /kv/:contractID/:key`. Encrypts, signs, and retries conflicts on `409`/`412`. Resolves to `{ etag: string | null }`. |
+| `chelonia/kv/set` | `src/chelonia.ts` | `POST /kv/:contractID/:key`. Encrypts, signs, and retries conflicts on `409`/`412`. On a `409` (value signed with a stale contract height) it syncs the contract once per call before retrying, if Chelonia is subscribed to it and no event arrived during the back-off, so it must not be awaited from inside that contract's internal queue (e.g. a side effect). Resolves to `{ etag: string | null }`. |
 | `chelonia/kv/get` | `src/chelonia.ts` | `GET /kv/:contractID/:key`. Returns `ChelKvGetResult | null`: the parsed encrypted/unencrypted message with `.data` and `.etag`, or `null` on 404. |
 | `chelonia/kv/setFilter` | `src/chelonia.ts` | Restrict the set of KV keys subscribed to over pubsub. |
 | `chelonia/kv/queuedSet` | `src/chelonia-utils.ts` | Wrapper around `chelonia/kv/set` that serializes concurrent updates via `okTurtles.eventQueue`. Prefer this over `kv/set` for typical writes. |
@@ -284,6 +285,29 @@ import { CHELONIA_RESET } from '@chelonia/lib/events'
 sbp('okTurtles.events/on', CHELONIA_RESET, () => { /* ... */ })
 ```
 
+### Pubsub events
+
+The pubsub client emits its own events, also via `okTurtles.events/emit`,
+with the `PubSubClient` as the first argument. The constants are exported
+from `@chelonia/lib/pubsub` (and the package root). See
+[`debugging.md`](./debugging.md#pubsub-connection).
+
+| Event | Payload | Fires |
+|---|---|---|
+| `PUBSUB_STATE_CHANGED` | `(client, { state, previous })` | Whenever `client.state` (a `PubSubState`) changes. The first one (`closed -> connecting`) fires inside `createClient`, before `chelonia/connect` returns the client, so a listener that compares `client` with Chelonia's current client misses it. `client.getStatus()` (and so `chelonia/pubsub/status`) can fire it too, when the socket changed state without an event. |
+| `PUBSUB_RECONNECTION_SCHEDULED` | `(client, { delay, nth })` | A reconnection attempt was scheduled `delay` ms from now. |
+| `PUBSUB_RECONNECTION_ATTEMPT` | `(client)` | A reconnection attempt starts. |
+| `PUBSUB_RECONNECTION_SUCCEEDED` | `(client)` | A (re)connection opened. Chelonia then reconciles its subscriptions. |
+| `PUBSUB_RECONNECTION_FAILED` | `(client)` | The client gave up reconnecting (`maxRetries` exhausted). |
+| `PUBSUB_SUBSCRIPTION_SUCCEEDED` | `(client, { channelID })` | The relay confirmed a pending SUB. |
+| `PUBSUB_SUBSCRIPTION_FAILED` | `(client, { channelID, reason })` | The relay rejected a pending SUB. The subscription is no longer pending; Chelonia requests it again at its next reconciliation. |
+| `PUBSUB_ERROR` | `(client, message)` | A handler threw, or the relay sent a malformed message (the client is then destroyed). |
+
+The client itself exposes `client.state`, `client.stateSince`
+(`Date.now()` when it entered `state`) and `client.getStatus()`, a
+plain-data `PubSubStatus` `{ state, since, subscribed, pending,
+oldestPendingSince }`.
+
 ## Types
 
 The most useful exported types and values (re-exported from the package root):
@@ -291,6 +315,8 @@ The most useful exported types and values (re-exported from the package root):
 | Type | Source | Purpose |
 |---|---|---|
 | `CheloniaConfig` | `src/types.ts` | Top-level configuration object passed to `chelonia/configure`. |
+| `ChelPubSubStatus` | `src/types.ts` | Result of `chelonia/pubsub/status`: `{ state, since: number \| null, wanted: number, missing: string[], pending: string[], oldestPendingSince: number \| null }`. |
+| `PubSubState` / `PubSubStatus` | `src/pubsub/index.ts` | `'connecting' \| 'open' \| 'reconnecting' \| 'offline' \| 'closed'`, and the result of `client.getStatus()`. |
 | `PublishOptions` | `src/internals.ts` (re-exported from `src/chelonia.ts`, reachable from the package root and the `./chelonia` subpath) | Per-call `/out/*` options: `maxAttempts`, `headers`, `billableContractID`, `bearer`, `disableAutoDedup`. |
 | `ChelRegParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/registerContract`. |
 | `ChelActionParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/actionEncrypted` / `actionUnencrypted`. |

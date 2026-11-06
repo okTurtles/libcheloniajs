@@ -17,17 +17,78 @@ let monotonicBase = performance.now()
 // request has finished
 let resyncTimeout: ReturnType<typeof setTimeout> | null | undefined
 let watchdog: ReturnType<typeof setInterval> | null | undefined
+// Starts a resync right away (only while the sync process is running)
+let resyncNow: (() => void) | undefined
+
+// `performance.now()` drives the estimate, so that changes of the system
+// clock don't affect it. However, browsers on macOS don't advance it while
+// the device sleeps, which would make the estimate lag by the time slept.
+// So, `Date.now()` is used to detect anomalies: if it advanced more than
+// `performance.now()` by over `CLOCK_JUMP_THRESHOLD` ms, the device most
+// likely slept (or the clock was set forward, which can't be told apart),
+// and the estimate is shifted by the difference until a resync replaces it.
+// If it advanced less, the clock was set back, which doesn't affect the
+// estimate.
+const CLOCK_JUMP_THRESHOLD = 1000
+// The watchdog also resyncs on smaller differences (between two of its checks)
+const WATCHDOG_TOLERANCE = 10
+// `Date.now()` and `performance.now()` when the estimate was last known to
+// account for every jump of `Date.now()` relative to `performance.now()`
+let checkpointWall = Date.now()
+let checkpointMonotonic = performance.now()
+
+const moveCheckpoint = (wallNow = Date.now(), monotonicNow = performance.now()) => {
+  checkpointWall = wallNow
+  checkpointMonotonic = monotonicNow
+}
+
+// Compares how far `Date.now()` and `performance.now()` advanced since the
+// checkpoint. Above `tolerance` ms of difference, it shifts the estimate on a
+// forward jump (see `CLOCK_JUMP_THRESHOLD`), moves the checkpoint and starts
+// a resync. Otherwise, the checkpoint stays (unless `alwaysMove` is set), so
+// that the watchdog still sees small differences.
+const checkClock = (tolerance: number, alwaysMove = false) => {
+  const wallNow = Date.now()
+  const monotonicNow = performance.now()
+  const jump = (wallNow - checkpointWall) - (monotonicNow - checkpointMonotonic)
+  if (Math.abs(jump) <= tolerance) {
+    if (alwaysMove) moveCheckpoint(wallNow, monotonicNow)
+    return
+  }
+  if (jump > CLOCK_JUMP_THRESHOLD) {
+    wallBase += jump
+    console.info(
+      `[chelonia/time] Date.now() jumped ${Math.round(jump)} ms ahead of performance.now() ` +
+      '(sleep or clock change); adjusted the time estimate'
+    )
+  } else if (jump < -CLOCK_JUMP_THRESHOLD) {
+    console.info(
+      `[chelonia/time] Date.now() jumped ${Math.round(-jump)} ms behind performance.now() ` +
+      '(clock change)'
+    )
+  }
+  moveCheckpoint(wallNow, monotonicNow)
+  resyncNow?.()
+}
 
 const syncServerTime = async function (this: CheloniaContext) {
   // Get our current monotonic time
   const startTime = performance.now()
+  const wallStartTime = Date.now()
   // Now, ask the server for the time
   const time = await this.config.fetch(`${this.config.connectionURL}/time`, {
     signal: this.abortController.signal
   })
   const requestTimeElapsed = performance.now()
+  const wallRequestTimeElapsed = Date.now()
   if (requestTimeElapsed - startTime > 8000) {
     throw new Error('Error fetching server time: request took too long')
+  }
+  // A reply that was sent before a sleep (during which `performance.now()`
+  // stood still) and processed after it is older than the round trip suggests
+  const wallElapsed = wallRequestTimeElapsed - wallStartTime
+  if (Math.abs(wallElapsed - (requestTimeElapsed - startTime)) > CLOCK_JUMP_THRESHOLD) {
+    throw new Error('Error fetching server time: the clock jumped during the request')
   }
   // If the request didn't succeed, report it
   if (!time.ok) throw new Error('Error fetching server time')
@@ -45,6 +106,10 @@ const syncServerTime = async function (this: CheloniaContext) {
     // and this line (which should be very little)
     (newMonotonicBase - requestTimeElapsed)
   monotonicBase = newMonotonicBase
+  // The estimate is now based on the server's time, so earlier jumps no
+  // longer matter. A jump after the sample (e.g., while reading the body)
+  // still does, so the checkpoint is the moment of the sample.
+  moveCheckpoint(wallRequestTimeElapsed, requestTimeElapsed)
 }
 
 export default sbp('sbp/selectors/register', {
@@ -83,26 +148,21 @@ export default sbp('sbp/selectors/register', {
       resyncTimeout = timeout
     }
 
-    let wallLast = Date.now()
-    let monotonicLast = performance.now()
+    // Account for jumps while the sync process was stopped (until the first
+    // resync below answers), and start the watchdog's checks from here
+    checkClock(CLOCK_JUMP_THRESHOLD, true)
+
+    resyncNow = () => {
+      if (resyncTimeout != null) clearTimeout(resyncTimeout)
+      resyncTimeout = null
+      resync(0)
+    }
 
     // Watchdog to ensure our time doesn't drift. Periodically check for
     // differences between the elapsed wall time and the elapsed monotonic
-    // time
+    // time (`chelonia/time` itself only checks for large ones)
     watchdog = setInterval(() => {
-      const wallNow = Date.now()
-      const monotonicNow = performance.now()
-      const difference = Math.abs(
-        Math.abs(wallNow - wallLast) - Math.abs(monotonicNow - monotonicLast)
-      )
-      // Tolerate up to a 10ms difference
-      if (difference > 10) {
-        if (resyncTimeout != null) clearTimeout(resyncTimeout)
-        resyncTimeout = null
-        resync(0)
-      }
-      wallLast = wallNow
-      monotonicLast = monotonicNow
+      checkClock(WATCHDOG_TOLERANCE, true)
     }, 10000)
 
     // Start the sync process
@@ -115,6 +175,7 @@ export default sbp('sbp/selectors/register', {
       if (resyncTimeout != null) clearTimeout(resyncTimeout)
       watchdog = undefined
       resyncTimeout = undefined
+      resyncNow = undefined
     }
   },
   // Get an estimate of the server's current time based on the time elapsed as
@@ -122,6 +183,8 @@ export default sbp('sbp/selectors/register', {
   // a previously retrieved server time. The time value is returned as a UNIX
   // _millisecond_ timestamp (milliseconds since 1 Jan 1970 00:00:00 UTC)
   'chelonia/time': function (): number {
+    // E.g., right after waking up from sleep, before the watchdog runs
+    checkClock(CLOCK_JUMP_THRESHOLD)
     const monotonicNow = performance.now()
     const wallNow = wallBase - monotonicBase + monotonicNow
     return Math.round(wallNow)

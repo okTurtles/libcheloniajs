@@ -91,6 +91,9 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
                 maxRetries: Infinity, // See https://github.com/okTurtles/group-income/issues/1183
                 reconnectOnTimeout: true // can be enabled since we are not doing auth via web sockets
             },
+            // Check that the pubsub client hasn't lost any of our subscriptions
+            // every minute (and after every reconnection)
+            pubsubReconcileInterval: 60000,
             hooks: {
                 preHandleEvent: null, // async (message: SPMessage) => {}
                 postHandleEvent: null, // async (message: SPMessage) => {}
@@ -947,6 +950,50 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             };
             (0, sbp_1.default)('okTurtles.events/on', index_js_1.PUBSUB_RECONNECTION_SUCCEEDED, this.kvReconnectListener);
         }
+        // Chelonia and the pubsub client must agree on which contracts are
+        // subscribed to, but the client can lose one without Chelonia noticing
+        // (e.g., when the server rejects a SUB), and `chelonia/pubsub/update`
+        // otherwise only runs when `subscriptionSet` changes. So, also run it
+        // after every (re)connection and periodically. It's cheap: `sub()`
+        // skips contracts that are already subscribed or pending.
+        if (!this.pubsubReconcileListener) {
+            this.pubsubReconcileListener = (client) => {
+                if (client !== this.pubsub)
+                    return;
+                // `open` emits PUBSUB_RECONNECTION_SUCCEEDED before it re-sends the
+                // pending SUBs, so wait for that to happen
+                setTimeout(() => {
+                    if (client === this.pubsub && client.socket?.readyState === WebSocket.OPEN) {
+                        (0, sbp_1.default)('chelonia/pubsub/update');
+                    }
+                }, 0);
+            };
+            (0, sbp_1.default)('okTurtles.events/on', index_js_1.PUBSUB_RECONNECTION_SUCCEEDED, this.pubsubReconcileListener);
+        }
+        clearInterval(this.pubsubReconcileIntervalID);
+        this.pubsubReconcileIntervalID = undefined;
+        const reconcileInterval = this.config.pubsubReconcileInterval;
+        if (typeof reconcileInterval === 'number' &&
+            reconcileInterval > 0 &&
+            Number.isFinite(reconcileInterval)) {
+            const client = this.pubsub;
+            const intervalID = setInterval(() => {
+                // Stop once the client has been replaced or destroyed (note that
+                // `chelonia/reset` keeps the client)
+                if (client !== this.pubsub || !client.shouldReconnect) {
+                    clearInterval(intervalID);
+                    if (this.pubsubReconcileIntervalID === intervalID) {
+                        this.pubsubReconcileIntervalID = undefined;
+                    }
+                    return;
+                }
+                if (client.socket?.readyState === WebSocket.OPEN) {
+                    (0, sbp_1.default)('chelonia/pubsub/update');
+                }
+            }, reconcileInterval);
+            intervalID.unref?.();
+            this.pubsubReconcileIntervalID = intervalID;
+        }
         if (!this.kvContractsModifiedListener) {
             // KV-REVAMPED §11.4: on CONTRACTS_MODIFIED(added), reconcile every
             // matching slot for newly-synced contracts. Registered per-instance
@@ -1168,6 +1215,34 @@ exports.default = (0, sbp_1.default)('sbp/selectors/register', {
             console.error(`[chelonia] pubsub/update: error ${e.name}: ${e.message}`, { toUnsubscribe, toSubscribe }, e);
             this.config.hooks.pubsubError?.(e, client);
         }
+    },
+    // Connection state, plus the contracts that Chelonia is subscribed to but
+    // the pubsub client is not (`missing`) or not yet (`pending`). For UIs and
+    // diagnostics.
+    'chelonia/pubsub/status': function () {
+        const client = this.pubsub;
+        const wanted = Array.from(this.subscriptionSet);
+        if (!client) {
+            return {
+                state: 'closed',
+                since: null,
+                wanted: wanted.length,
+                missing: wanted,
+                pending: [],
+                oldestPendingSince: null
+            };
+        }
+        const status = client.getStatus();
+        const subscribed = new Set(status.subscribed);
+        const pending = new Set(status.pending);
+        return {
+            state: status.state,
+            since: status.since,
+            wanted: wanted.length,
+            missing: wanted.filter((id) => !subscribed.has(id) && !pending.has(id)),
+            pending: wanted.filter((id) => pending.has(id)),
+            oldestPendingSince: status.oldestPendingSince
+        };
     },
     // resolves when all pending actions for these contractID(s) finish
     'chelonia/contract/wait': function (contractIDs) {
