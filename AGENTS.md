@@ -172,12 +172,14 @@ Incoming events depend on the pubsub client (`src/pubsub/index.ts`) being
 subscribed to every contract in Chelonia's `subscriptionSet`. The recovery
 layers, each covering the failures of the previous one:
 
-1. **The client never drops a wanted request.** A SUB/UNSUB/KV_FILTER
+1. **The client never drops a wanted subscription.** A SUB/UNSUB/KV_FILTER
    without an answer after `maxOpRetries` retries makes the client
-   replace the connection (`abandonSocket`: synthetic `close`, code 4001)
-   and re-send it. Dead sockets (ping timeout, also checked against the
-   wall clock after sleep; connection timeout; `offline`) are abandoned
-   at once too, instead of waiting for a `close` event.
+   replace the connection (`abandonSocket`: synthetic `close`, code 4001).
+   SUBs (with their KV filters) are re-sent on the new connection; pending
+   UNSUBs are settled by the close. Replacements in a row back off
+   (`unansweredReplacements`). Dead sockets (ping timeout, also checked
+   against the wall clock after sleep; connection timeout; `offline`) are
+   abandoned at once too, instead of waiting for a `close` event.
 2. **Chelonia reconciles.** `chelonia/pubsub/update` also runs after every
    (re)connection and every `pubsubReconcileInterval` ms (set up in
    `chelonia/connect`), re-subscribing anything the client lost (e.g. a

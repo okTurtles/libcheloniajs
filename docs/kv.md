@@ -129,8 +129,9 @@ direct callers (the high-level slot API hides them):
   where previously it was only representable at the type level as a
   tuple. No runtime behaviour change for existing callers.
 
-One runtime change applies to every caller, slots included: **a `409`
-makes `chelonia/kv/set` sync the contract** (at most once per call)
+One runtime change applies to every caller that retries a conflict (with
+an `onconflict` handler and `maxAttempts` above 1), slots included: **a
+`409` makes `chelonia/kv/set` sync the contract** (at most once per call)
 before it retries. A `409` means that the value was signed with a stale
 contract height, i.e. this client missed some of the contract's events
 (e.g. its pubsub subscription was lost); every retry used to fail the
@@ -139,8 +140,10 @@ happens if Chelonia is subscribed to the contract and no event arrived
 during the back-off, and a failing sync is logged and the write retried
 anyway. Because of it, never await `chelonia/kv/set` from inside the
 contract's internal queue (e.g. from a side effect), as the sync would
-wait for that queue; `chelonia/kv/queuedSet`, `chelonia/queueInvocation`
-and the slot API use the public queue and are safe.
+wait for that queue. `chelonia/kv/queuedSet`, `chelonia/queueInvocation`
+and the slot API use the public queue, so they are safe to call (but not
+to await) from a side effect: the public queue waits for the internal
+one.
 
 ## Schema-driven default normalization
 

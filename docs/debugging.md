@@ -132,8 +132,11 @@ How the pubsub client recovers on its own:
 
 - A SUB, UNSUB or KV filter request that gets no answer is retried
   `maxOpRetries` times, and then the connection is considered broken and
-  replaced; the request is never dropped, but sent again on the new
-  connection.
+  replaced. SUBs (with their KV filters) are sent again on the new
+  connection; pending UNSUBs are settled by the close, since the server
+  drops that connection's subscriptions. If the new connection doesn't
+  answer either (e.g. an overloaded relay), each replacement waits longer
+  than the previous one, like failed connection attempts.
 - The socket is dropped at once (close code `4001`), without waiting
   for a `close` event that a dead socket may not fire for minutes, when
   nothing arrived for `pingTimeout` ms (also checked against the wall
