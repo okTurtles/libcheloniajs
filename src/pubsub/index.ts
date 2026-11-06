@@ -1241,17 +1241,19 @@ const publicMethods: {
   sub (channelID: string) {
     const client = this
 
+    // Wanted again while being left: cancel the UNSUB (the channel is still in
+    // `subscriptionSet`) and send a SUB. The server gets it after the UNSUB, on
+    // the same socket, so it ends up subscribed.
+    if (client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)) {
+      client.subscriptionSet.delete(channelID)
+    }
     // In order to send subscribe to the server, we need to not be already
     // subscribed (meaning that we've sent REQUEST_TYPE.SUB, confirmed by it
     // either being a pending operation or having it in `subscriptionSet`).
-    // Whether we've sent an unsubscription request and whether it's been
-    // confirmed isn't relevant.
     if (
       !client.pendingOperations.tHas(REQUEST_TYPE.SUB, channelID) &&
       !client.subscriptionSet.has(channelID)
     ) {
-      client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)
-
       runWithRetry(client, channelID, REQUEST_TYPE.SUB, pubPayloadFactory(client, channelID))
     }
   },

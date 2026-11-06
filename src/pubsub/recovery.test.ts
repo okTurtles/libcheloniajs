@@ -163,6 +163,23 @@ describe('pubsub client baseline', () => {
     assert.equal(server.lastConnection!.subscriptions.size, 0)
   })
 
+  it('subscribes again when sub() comes while the UNSUB is pending', async () => {
+    const { client } = setup()
+    client.sub('x')
+    assert.ok(await waitFor(subscribed(client, ['x'])))
+    server.slow(100)
+    const since = server.frames.length
+    client.unsub('x')
+    client.sub('x')
+    await sleep(300)
+    assert.deepEqual(
+      server.frames.slice(since).map(({ msg }) => `${msg.type}:${msg.channelID}`),
+      ['unsub:x', 'sub:x']
+    )
+    assert.ok(subscribed(client, ['x'])(), 'not subscribed')
+    assert.ok(server.lastConnection!.subscriptions.has('x'), 'not subscribed on the server')
+  })
+
   it('forgets a SUB that the server refuses', async () => {
     server.onRequest = (_conn, msg) =>
       msg.type === REQUEST_TYPE.SUB && msg.channelID === 'refused'

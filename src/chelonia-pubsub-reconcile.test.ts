@@ -255,6 +255,18 @@ describe('Chelonia reconciles its subscriptions with the pubsub client (CL-6)', 
     assert.deepEqual(reconciled[0].args[1], ['contract-A'])
   })
 
+  it('subscribes again to a contract that it wants while its UNSUB is pending', async () => {
+    // E.g., the contract was released and then retained again right away
+    await connect(0)
+    await want('contract-U')
+    server.slow(100)
+    pubsub.unsub('contract-U')
+    sbp('chelonia/pubsub/update')
+    await sleep(300)
+    assert.ok(pubsub.subscriptionSet.has('contract-U'), 'lost in the pubsub client')
+    assert.deepEqual(status().missing, [])
+  })
+
   it('re-subscribes a lost contract within pubsubReconcileInterval, without a reconnect', async () => {
     const INTERVAL = 200
     await connect(INTERVAL)

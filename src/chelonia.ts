@@ -14,7 +14,8 @@ import {
 import { createCID, maybeParseCID, multicodes, parseCID } from './functions.js'
 import { Buffer } from 'buffer'
 import {
-  NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, createClient, oldestPendingSubSince
+  NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, REQUEST_TYPE, createClient,
+  oldestPendingSubSince
 } from './pubsub/index.js'
 import { clearReingestTrackerAll } from './reingestTracker.js'
 import { timerDelay, unrefTimer } from './timer-utils.js'
@@ -1590,7 +1591,10 @@ export default sbp('sbp/selectors/register', {
   // if you are using a custom stateSelector and reload the state (e.g. upon login)
   'chelonia/pubsub/update': function (this: CheloniaContext) {
     const client = this.pubsub
+    // A channel whose UNSUB is pending is being left: wanting it again needs
+    // a `sub()` (which cancels the UNSUB)
     const subscribedIDs = [...client.subscriptionSet]
+      .filter((id) => !client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, id))
     const currentIDs = Array.from(this.subscriptionSet)
     const leaveSubscribed = intersection(subscribedIDs, currentIDs)
     const toUnsubscribe = difference(subscribedIDs, leaveSubscribed)
