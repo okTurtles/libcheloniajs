@@ -248,3 +248,52 @@ describe('chelonia/reset after publishing, then retaining the contract again (CL
     assert.equal(published.logged.grep(/did not receive/).length, 0)
   })
 })
+
+describe('a 409 for a contract that is released or deleted in the meantime (CL-7)', () => {
+  setUp()
+
+  // The relay holds the first POST /event while `during` runs, then answers 409
+  async function publishWithConflict (contract: TestContract, during: () => Promise<unknown>) {
+    const from = relay.requests.length
+    let first = true
+    relay.onRequest = ({ method, path }) => {
+      if (!first || method !== 'POST' || path !== '/event') return
+      first = false
+      return during().then(() => new Response('', { status: 409 }))
+    }
+    try {
+      const sent = await sbp(
+        'chelonia/private/out/publishEvent', actionMessage(contract, { text: 'conflict' })
+      )
+      return { sent, from }
+    } finally {
+      relay.onRequest = undefined
+    }
+  }
+  const postsOf = (from: number) => relay.requests.slice(from)
+    .filter(({ method, path }) => method === 'POST' && path === '/event')
+    .map(({ status }) => status)
+
+  it('stops without syncing (which would subscribe to it again) once it is released', async () => {
+    const contract = await retainedContract(relay, pubsub)
+    const { contractID } = contract
+    const { sent, from } = await publishWithConflict(
+      contract, () => sbp('chelonia/contract/release', contractID)
+    )
+    assert.equal(sent, undefined)
+    assert.deepEqual(postsOf(from), [409])
+    assert.equal(syncsOf(contractID, from), 0)
+    await sleep(50)
+    assert.ok(!pubsub.subscriptionSet.has(contractID), 'subscribed again')
+  })
+
+  it('stops without an error once it is deleted', async () => {
+    const contract = await retainedContract(relay, pubsub)
+    const { contractID } = contract
+    const { sent, from } = await publishWithConflict(
+      contract, () => sbp('chelonia/contract/remove', contractID, { permanent: true })
+    )
+    assert.equal(sent, undefined)
+    assert.deepEqual(postsOf(from), [409])
+  })
+})

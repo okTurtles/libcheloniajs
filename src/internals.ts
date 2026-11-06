@@ -954,10 +954,12 @@ export default sbp('sbp/selectors/register', {
             // some event (at the height that we attempted) hasn't reached us.
             // It may still arrive over pubsub during the delay above, but if
             // it didn't (e.g., the subscription was lost), every further
-            // attempt would fail the same way, so sync.
-            if (!entry.isFirstMessage()) {
+            // attempt would fail the same way, so sync. Only while the contract
+            // is wanted: one released or deleted meanwhile has no local state,
+            // so the next attempt stops (and syncing would subscribe to it).
+            if (!entry.isFirstMessage() && this.subscriptionSet.has(contractID)) {
               const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
-              if (localHeight == null || localHeight < entry.height()) {
+              if (localHeight != null && localHeight < entry.height()) {
                 await sbp('chelonia/private/in/sync', contractID, { force: true })
               }
             }
