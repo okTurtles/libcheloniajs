@@ -80,14 +80,14 @@ const syncServerTime = async function (this: CheloniaContext) {
     signal: this.abortController.signal
   })
   const requestTimeElapsed = performance.now()
+  const wallRequestTimeElapsed = Date.now()
   if (requestTimeElapsed - startTime > 8000) {
     throw new Error('Error fetching server time: request took too long')
   }
   // A reply that was sent before a sleep (during which `performance.now()`
   // stood still) and processed after it is older than the round trip suggests
-  if (
-    Math.abs(Date.now() - wallStartTime - (requestTimeElapsed - startTime)) > CLOCK_JUMP_THRESHOLD
-  ) {
+  const wallElapsed = wallRequestTimeElapsed - wallStartTime
+  if (Math.abs(wallElapsed - (requestTimeElapsed - startTime)) > CLOCK_JUMP_THRESHOLD) {
     throw new Error('Error fetching server time: the clock jumped during the request')
   }
   // If the request didn't succeed, report it
@@ -107,8 +107,9 @@ const syncServerTime = async function (this: CheloniaContext) {
     (newMonotonicBase - requestTimeElapsed)
   monotonicBase = newMonotonicBase
   // The estimate is now based on the server's time, so earlier jumps no
-  // longer matter
-  moveCheckpoint()
+  // longer matter. A jump after the sample (e.g., while reading the body)
+  // still does, so the checkpoint is the moment of the sample.
+  moveCheckpoint(wallRequestTimeElapsed, requestTimeElapsed)
 }
 
 export default sbp('sbp/selectors/register', {

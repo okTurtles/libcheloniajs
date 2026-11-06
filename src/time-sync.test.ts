@@ -205,6 +205,48 @@ describe('a /time reply from before a sleep that arrives after it', () => {
   })
 })
 
+describe('a sleep while the body of a /time reply is read', () => {
+  const obs = {} as { skew: number; resynced: boolean }
+  before(async () => {
+    let first = true
+    relay.onRequest = ({ path }) => {
+      if (path !== '/time' || !first) return undefined
+      first = false
+      const sentAt = new Date().toISOString()
+      // `highWaterMark: 0`: `pull` runs once the body is read
+      return new Response(new ReadableStream({
+        pull (controller) {
+          clock.wake(SLEEP)
+          controller.enqueue(new TextEncoder().encode(sentAt))
+          controller.close()
+        }
+      }, { highWaterMark: 0 }))
+    }
+    const from = relay.requests.length
+    sbp('chelonia/private/stopClockSync')
+    sbp('chelonia/private/startClockSync')
+    assert.ok(await waitFor(() => timeRequests(from) > 0), 'no /time reply')
+    const sampled = relay.requests.findIndex((r, i) => i >= from && r.path === '/time')
+    // `chelonia/time` (called by `resynced`) notices the sleep and resyncs
+    obs.resynced = !!(await resynced(sampled + 1))
+    obs.skew = skew()
+  })
+
+  after(async () => {
+    relay.onRequest = undefined
+    // So that the next tests start on the real time, even if this one failed
+    const from = relay.requests.length
+    sbp('chelonia/private/stopClockSync')
+    sbp('chelonia/private/startClockSync')
+    assert.ok(await resynced(from), 'resynced')
+  })
+
+  it('notices the sleep, and corrects chelonia/time', () => {
+    assert.ok(obs.resynced, 'not resynced')
+    assert.ok(Math.abs(obs.skew) < 1000, `chelonia/time is off by ${obs.skew} ms`)
+  })
+})
+
 describe('after the system clock is set back by an hour', () => {
   const obs = {} as { skew: number; kvGet: string; resynced: boolean; skewAfterResync: number }
   before(async () => {
