@@ -1,8 +1,9 @@
 // Tests of how the pubsub client keeps (and recovers) its subscriptions,
 // against the in-process fake server from `./test-harness.ts`.
+import sbp from '@sbp/sbp'
 import * as assert from 'node:assert/strict'
 import { after, afterEach, before, describe, it } from 'node:test'
-import { NOTIFICATION_TYPE, REQUEST_TYPE } from './index.js'
+import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SCHEDULED, REQUEST_TYPE } from './index.js'
 import type { PubSubClient } from './index.js'
 import {
   captureConsole, createCloseEvent, createFakePubsubServer, createTestClients, emulateSleep,
@@ -418,6 +419,65 @@ describe('requests that exhaust the retry budget (CL-1)', () => {
     }), 'reconnected and re-subscribed')
     assert.deepEqual(connectionOf(client)!.kvFilters.get('k'), ['a'])
     assert.ok(!client.pendingOperations.tHas(REQUEST_TYPE.KV_FILTER, 'k'))
+  })
+
+  // Reconnection delays start at 20 to 40 ms and double with every attempt
+  const BACKOFF = { opRetryInterval: I, minReconnectionDelay: 20, reconnectionDelayGrowFactor: 2 }
+  const scheduledDelays = (client: PubSubClient) => {
+    const delays: number[] = []
+    const listener = (target: PubSubClient, { delay }: { delay: number }) => {
+      if (target === client) delays.push(delay)
+    }
+    sbp('okTurtles.events/on', PUBSUB_RECONNECTION_SCHEDULED, listener)
+    return {
+      delays,
+      stop: () => sbp('okTurtles.events/off', PUBSUB_RECONNECTION_SCHEDULED, listener)
+    }
+  }
+
+  it('backs off while it keeps replacing connections over an unanswered SUB', async () => {
+    server.onRequest = (_conn, msg) =>
+      msg.type === REQUEST_TYPE.SUB && msg.channelID === 'never' ? 'ignore' : undefined
+    const { client } = setup(BACKOFF)
+    client.sub('ok')
+    assert.ok(await waitFor(subscribed(client, ['ok'])))
+    const scheduled = scheduledDelays(client)
+    try {
+      client.sub('never')
+      assert.ok(await waitFor(() => scheduled.delays.length >= 3, { timeout: 5000 }))
+      // The third replacement in a row waits for 160 to 320 ms
+      assert.ok(scheduled.delays[2] >= 160, JSON.stringify(scheduled.delays))
+    } finally {
+      scheduled.stop()
+    }
+  })
+
+  it('backs off while it keeps replacing connections over a KV filter whose ACK never matches', async () => {
+    // A server that de-duplicates the KV filter in its ACKs
+    server.onRequest = (conn, msg) => {
+      if (msg.channelID !== 'k') return
+      if (msg.type !== REQUEST_TYPE.SUB && msg.type !== REQUEST_TYPE.KV_FILTER) return
+      if (msg.type === REQUEST_TYPE.SUB) conn.subscriptions.add('k')
+      const kvFilter = Array.isArray(msg.kvFilter) ? [...new Set(msg.kvFilter)] : undefined
+      setTimeout(() => {
+        if (conn.state !== 'open') return
+        conn.socket.dispatchEvent(new MessageEvent('message', {
+          data: JSON.stringify({ type: 'ok', data: { type: msg.type, channelID: 'k', kvFilter } })
+        }))
+      }, 0)
+      return 'ignore'
+    }
+    const { client } = setup(BACKOFF)
+    client.sub('k')
+    assert.ok(await waitFor(subscribed(client, ['k'])))
+    const scheduled = scheduledDelays(client)
+    try {
+      client.setKvFilter('k', ['a', 'a'])
+      assert.ok(await waitFor(() => scheduled.delays.length >= 3, { timeout: 5000 }))
+      assert.ok(scheduled.delays[2] >= 160, JSON.stringify(scheduled.delays))
+    } finally {
+      scheduled.stop()
+    }
   })
 })
 

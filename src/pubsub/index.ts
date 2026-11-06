@@ -145,6 +145,8 @@ export type PubSubClient = {
   stateSince: number;
   subscriptionSet: Set<string>;
   kvFilter: Map<string, string[]>;
+  // Connections replaced in a row because a request went unanswered
+  unansweredReplacements: number;
   url: string;
   wallClockWatchdogID: IntervalID | undefined;
   // Methods
@@ -296,6 +298,17 @@ class TieredMap <K, L, V> extends Map<K, Map<L, V>> {
 
   tClear (k1: K) {
     this.delete(k1)
+  }
+}
+
+// A connection works once every pending SUB and KV filter is answered: only
+// then may replacements over unanswered requests stop backing off
+const noteAnsweredRequests = (client: PubSubClient) => {
+  if (
+    !client.pendingOperations.get(REQUEST_TYPE.SUB)?.size &&
+    !client.pendingOperations.get(REQUEST_TYPE.KV_FILTER)?.size
+  ) {
+    client.unansweredReplacements = 0
   }
 }
 
@@ -453,6 +466,7 @@ function runWithRetry (
       // are sent again on the next connection; UNSUBs are done, since the
       // server drops the subscriptions of a closed connection; KV filters
       // are sent along with the SUBs).
+      client.unansweredReplacements++
       abandonSocket(client, socket, `no response to ${type} for ${channelID}`)
       return
     }
@@ -519,6 +533,7 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
     subscriptionSet: new Set(),
     kvFilter: new Map(),
     connectionTimeoutID: undefined,
+    unansweredReplacements: 0,
     url: url.replace(/^http/, 'ws'),
     wallClockWatchdogID: undefined,
     ...publicMethods
@@ -901,6 +916,7 @@ const defaultMessageHandlers: MessageHandlers = {
             console.debug(`[pubsub] Subscribed to ${channelID}, need to set new KV filter`)
             this.setKvFilter(channelID, ourKvFilter)
           }
+          noteAnsweredRequests(client)
         } else {
           const status = client.subscriptionSet.has(channelID) ? 'already subscribed' : 'not requested'
           console.info(`[pubsub] Received unexpected sub for ${channelID} (${status})`)
@@ -923,6 +939,7 @@ const defaultMessageHandlers: MessageHandlers = {
           if (isKvFilterFresh(ourKvFilter, kvFilter)) {
             console.debug(`[pubsub] Set KV filter for ${channelID}`, kvFilter)
             client.pendingOperations.tDelete(REQUEST_TYPE.KV_FILTER, channelID)
+            noteAnsweredRequests(client)
           } else {
             console.debug(`[pubsub] Received stale KV filter ack for ${channelID}`, kvFilter, ourKvFilter)
           }
@@ -1137,8 +1154,8 @@ const publicMethods: {
     const { maxReconnectionDelay, minReconnectionDelay, reconnectionDelayGrowFactor } =
       client.options
 
-    const minDelay =
-      minReconnectionDelay * reconnectionDelayGrowFactor ** client.failedConnectionAttempts
+    const attempts = Math.max(client.failedConnectionAttempts, client.unansweredReplacements)
+    const minDelay = minReconnectionDelay * reconnectionDelayGrowFactor ** attempts
     const maxDelay = minDelay * reconnectionDelayGrowFactor
     const connectionTimeUsed = client.connectionTimeUsed
     client.connectionTimeUsed = undefined
