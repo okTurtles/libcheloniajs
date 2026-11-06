@@ -24,11 +24,10 @@ import './internals.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
   captureConsole, createFakePubsubServer, createFakeRelay, createTestContract, emulateSleep,
-  sleep, storeSecretKeys, waitFor
+  RELAY_URL, sleep, storeSecretKeys, waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
 
-const URL = 'http://relay.test'
 const SLEEP = 5 * 60 * 1000
 const HOUR = 60 * 60 * 1000
 const server = createFakePubsubServer()
@@ -75,7 +74,7 @@ before(async () => {
   clock = emulateSleep({ monotonic: true })
   sbp('chelonia/_init')
   await sbp('chelonia/configure', {
-    connectionURL: URL,
+    connectionURL: RELAY_URL,
     fetch: relay.fetch,
     skipActionProcessing: true,
     connectionOptions: { minReconnectionDelay: 20 }
@@ -178,11 +177,14 @@ describe('a /time reply from before a sleep that arrives after it', () => {
     // A resync whose request reaches the server before the sleep
     sbp('chelonia/private/stopClockSync')
     sbp('chelonia/private/startClockSync')
-    await waitFor(() => relay.requests.slice(from).some(({ path }) => path === '/time'))
+    assert.ok(
+      await waitFor(() => relay.requests.slice(from).some(({ path }) => path === '/time')),
+      'no /time request'
+    )
     clock.changeClock(SLEEP)
     // Chelonia notices the sleep (and its resync fails)...
     sbp('chelonia/time')
-    await waitFor(() => timeRequests(from, 503) > 0, { timeout: 1000 })
+    assert.ok(await waitFor(() => timeRequests(from, 503) > 0, { timeout: 1000 }), 'no resync')
     // ...and then gets the old reply
     release()
     obs.stale = !!(await waitFor(() => timeRequests(from) > 0))

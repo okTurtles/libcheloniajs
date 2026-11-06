@@ -17,12 +17,11 @@ import './internals.js'
 import { createClient, REQUEST_TYPE } from './pubsub/index.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
-  captureConsole, createFakePubsubServer, createFakeRelay, fakeEntryData, onNextOpen, sleep,
-  waitFor
+  captureConsole, createFakePubsubServer, createFakeRelay, fakeEntryData, isOpen, onNextOpen,
+  RELAY_URL, sleep, waitFor
 } from './pubsub/test-harness.js'
 import type { ChelPubSubStatus, ChelRootState } from './types.js'
 
-const URL = 'http://relay.test'
 const server = createFakePubsubServer()
 const relay = createFakeRelay()
 let logs: ReturnType<typeof captureConsole>
@@ -65,18 +64,16 @@ after(() => {
   server.uninstall()
 })
 
-const isOpen = (client: PubSubClient) => client.socket?.readyState === WebSocket.OPEN
-
 async function connect (pubsubReconcileInterval: number) {
   await sbp('chelonia/configure', {
-    connectionURL: URL,
+    connectionURL: RELAY_URL,
     fetch: relay.fetch,
     pubsubReconcileInterval,
     // Reconnect within tens of milliseconds
     connectionOptions: { minReconnectionDelay: 20 }
   })
   pubsub = sbp('chelonia/connect')
-  assert.ok(await waitFor(() => isOpen(pubsub)), 'connected')
+  assert.ok(await waitFor(isOpen(pubsub)), 'connected')
 }
 
 // Chelonia starts wanting `contractID` (the sync finds it up to date and
@@ -129,7 +126,7 @@ const status = () => sbp('chelonia/pubsub/status') as ChelPubSubStatus
 describe('chelonia/pubsub/status (CL-6)', () => {
   // Must run before the first `chelonia/connect` of this file
   it('reports "closed" and every wanted contract as missing without a pubsub client', async () => {
-    await sbp('chelonia/configure', { connectionURL: URL, fetch: relay.fetch })
+    await sbp('chelonia/configure', { connectionURL: RELAY_URL, fetch: relay.fetch })
     await seed('contract-S0')
     assert.deepEqual(status(), {
       state: 'closed',
@@ -299,7 +296,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client (CL-6)', 
     await want('contract-E')
     server.stallNewConnections()
     server.killClients()
-    assert.ok(!isOpen(pubsub))
+    assert.ok(!isOpen(pubsub)())
     updates = 0
     await sleep(300)
     assert.equal(updates, 0)
@@ -326,13 +323,43 @@ describe('Chelonia reconciles its subscriptions with the pubsub client (CL-6)', 
     assert.equal(updates, 0)
   })
 
+  it('clears the timer of the replaced client at once, and its own once the client is destroyed', async () => {
+    const INTERVAL = 100
+    const timers: unknown[] = []
+    const cleared = new Set<unknown>()
+    const realSetInterval = globalThis.setInterval
+    const realClearInterval = globalThis.clearInterval
+    globalThis.setInterval = ((handler: () => void, ms?: number) => {
+      const id = realSetInterval(handler, ms)
+      if (ms === INTERVAL) timers.push(id)
+      return id
+    }) as unknown as typeof setInterval
+    globalThis.clearInterval = ((id?: ReturnType<typeof setInterval>) => {
+      cleared.add(id)
+      realClearInterval(id)
+    }) as unknown as typeof clearInterval
+    try {
+      await connect(INTERVAL)
+      pubsub = sbp('chelonia/connect')
+      assert.equal(timers.length, 2)
+      assert.ok(cleared.has(timers[0]), 'the first timer is still running')
+      assert.ok(await waitFor(isOpen(pubsub)), 'connected')
+      pubsub.destroy()
+      await sleep(3 * INTERVAL)
+      assert.ok(cleared.has(timers[1]), 'the timer is still running after destroy()')
+    } finally {
+      globalThis.setInterval = realSetInterval
+      globalThis.clearInterval = realClearInterval
+    }
+  })
+
   it('ignores the connections of other pubsub clients', async () => {
     await connect(0)
     await sleep(20)
     updates = 0
-    const other = createClient(URL, { minReconnectionDelay: 20 })
+    const other = createClient(RELAY_URL, { minReconnectionDelay: 20 })
     try {
-      assert.ok(await waitFor(() => isOpen(other)))
+      assert.ok(await waitFor(isOpen(other)))
       await sleep(20)
       assert.equal(updates, 0)
     } finally {

@@ -11,14 +11,17 @@ import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/
 import type { Key } from '@chelonia/crypto'
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
+import * as assert from 'node:assert/strict'
 import { SPMessage } from '../SPMessage.js'
 import type { ProtoSPOpActionUnencrypted, SPKey, SPOpContract, SPOpValue } from '../SPMessage.js'
 import { Secret } from '../Secret.js'
 import { createCID } from '../functions.js'
 import { signedOutgoingDataWithRawKey } from '../signedData.js'
 import type { JSONType } from '../types.js'
-import { PUBSUB_RECONNECTION_SUCCEEDED } from './index.js'
-import type { PubSubClient } from './index.js'
+import {
+  createClient, NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, REQUEST_TYPE
+} from './index.js'
+import type { Options, PubSubClient } from './index.js'
 
 const CONNECTING = 0
 const OPEN = 1
@@ -61,8 +64,6 @@ export type FakeConnection = {
   kvFilters: Map<string, string[]>;
   // eslint-disable-next-line no-use-before-define
   frames: ClientFrame[];
-  createdAt: number;
-  openedAt?: number;
 }
 
 // Every frame the client sent, recorded on the client side (also when the
@@ -74,6 +75,49 @@ export type ClientFrame = { t: number; connection: FakeConnection; msg: FakeRequ
 export type RequestOverride = undefined | 'ignore' | { error: string }
 
 export type FakePubsubServer = ReturnType<typeof createFakePubsubServer>
+
+// `CloseEvent` is only a global from Node.js 23 on (CI runs Node 22)
+export const createCloseEvent = (code: number, reason = '', wasClean = false): Event =>
+  typeof CloseEvent === 'function'
+    ? new CloseEvent('close', { code, reason, wasClean })
+    : Object.assign(new Event('close'), { code, reason, wasClean })
+
+// What the tests connect to (named so as not to shadow the global `URL`)
+export const PUBSUB_URL = 'ws://pubsub.test'
+export const RELAY_URL = 'http://relay.test'
+
+// Conditions for `waitFor()`
+export const isOpen = (client: PubSubClient) => () => client.socket?.readyState === WebSocket.OPEN
+export const subscribed = (client: PubSubClient, ids: string[]) => () =>
+  ids.every((id) => client.subscriptionSet.has(id))
+
+// Pubsub clients for one test file. `setup()` creates one that reconnects
+// within tens of milliseconds and records the ENTRY notifications it gets;
+// `destroyAll()` destroys them (before `server.reset()`, so that they don't
+// reconnect).
+export function createTestClients () {
+  const clients: PubSubClient[] = []
+  return {
+    setup (options: Partial<Options> = {}) {
+      const received: { channelID: unknown; data: unknown }[] = []
+      const client = createClient(PUBSUB_URL, {
+        minReconnectionDelay: 20,
+        ...options,
+        messageHandlers: {
+          [NOTIFICATION_TYPE.ENTRY] (msg) {
+            received.push({ channelID: msg.channelID, data: msg.data })
+          },
+          ...options.messageHandlers
+        }
+      })
+      clients.push(client)
+      return { client, received }
+    },
+    destroyAll () {
+      while (clients.length) clients.pop()!.destroy()
+    }
+  }
+}
 
 export function createFakePubsubServer () {
   let nextID = 1
@@ -91,7 +135,7 @@ export function createFakePubsubServer () {
   const dispatchClose = (conn: FakeConnection, code: number, reason: string, wasClean: boolean) => {
     conn.state = 'closed'
     conn.socket.readyState = CLOSED
-    conn.socket.dispatchEvent(new CloseEvent('close', { code, reason, wasClean }))
+    conn.socket.dispatchEvent(createCloseEvent(code, reason, wasClean))
   }
 
   // A connection attempt that fails (or is aborted): `error`, then close 1006
@@ -99,7 +143,7 @@ export function createFakePubsubServer () {
     conn.state = 'closed'
     conn.socket.readyState = CLOSED
     conn.socket.dispatchEvent(new Event('error'))
-    conn.socket.dispatchEvent(new CloseEvent('close', { code: 1006, reason: '', wasClean: false }))
+    conn.socket.dispatchEvent(createCloseEvent(1006))
   }
 
   const scheduleOpen = (conn: FakeConnection) => {
@@ -107,7 +151,6 @@ export function createFakePubsubServer () {
     later(() => {
       if (conn.state !== 'connecting' || conn.socket.readyState !== CONNECTING) return
       conn.state = 'open'
-      conn.openedAt = Date.now()
       conn.socket.readyState = OPEN
       conn.socket.dispatchEvent(new Event('open'))
     })
@@ -215,8 +258,7 @@ export function createFakePubsubServer () {
         state: 'connecting',
         subscriptions: new Set(),
         kvFilters: new Map(),
-        frames: [],
-        createdAt: Date.now()
+        frames: []
       }
       connections.push(this.connection)
       if (mode === 'pass') {
@@ -236,6 +278,13 @@ export function createFakePubsubServer () {
     }
 
     close (code?: number, reason?: string) {
+      // Like a real socket, whatever its state
+      if (code !== undefined && code !== 1000 && !(code >= 3000 && code <= 4999)) {
+        throw new DOMException(`Invalid close code ${code}`, 'InvalidAccessError')
+      }
+      if (reason !== undefined && new TextEncoder().encode(reason).length > 123) {
+        throw new DOMException('The close reason is longer than 123 bytes', 'SyntaxError')
+      }
       if (this.readyState === CLOSING || this.readyState === CLOSED) return
       const conn = this.connection
       if (this.readyState === CONNECTING) {
@@ -259,7 +308,6 @@ export function createFakePubsubServer () {
     // Inspect (and override) each request the server gets
     onRequest: undefined as
       ((conn: FakeConnection, msg: FakeRequest) => RequestOverride) | undefined,
-    get latency () { return latency },
     get openConnections () { return connections.filter((conn) => conn.state === 'open') },
     get lastConnection (): FakeConnection | undefined {
       return connections[connections.length - 1]
@@ -345,9 +393,6 @@ export function createFakePubsubServer () {
     },
     entry (channelID: string, data: unknown) {
       server.notify(channelID, { type: 'entry', channelID, data })
-    },
-    kv (channelID: string, key: string, data: unknown, cid?: string) {
-      server.notify(channelID, { type: 'kv', channelID, key, data, cid })
     },
     // Frames the client sent, optionally filtered by type, channel and time
     framesOf (type?: string, channelID?: string, since = -Infinity): ClientFrame[] {
@@ -453,6 +498,41 @@ export function storeSecretKeys (contract: TestContract): void {
     { key: contract.CSK, transient: true },
     { key: contract.SAK, transient: true }
   ]))
+}
+
+// A contract that Chelonia has synced (and has the secret keys of), and that
+// `pubsub` is subscribed to
+export async function retainedContract (
+  relay: FakeRelay, pubsub: PubSubClient
+): Promise<TestContract> {
+  const contract = createTestContract()
+  assert.equal(relay.append(contract.first), 200)
+  storeSecretKeys(contract)
+  await sbp('chelonia/contract/retain', contract.contractID)
+  assert.ok(await waitFor(subscribed(pubsub, [contract.contractID])), 'subscribed')
+  // Let the sync that follows every new subscription finish
+  await sbp('chelonia/contract/wait', contract.contractID)
+  return contract
+}
+
+// A retained contract that `pubsub` then lost while Chelonia still wants it,
+// and that another participant has posted to since (so Chelonia's copy is
+// stale)
+export async function staleContract (
+  relay: FakeRelay, pubsub: PubSubClient
+): Promise<{ contract: TestContract; reply: SPMessage }> {
+  const contract = await retainedContract(relay, pubsub)
+  const { contractID } = contract
+  pubsub.unsub(contractID)
+  assert.ok(
+    await waitFor(() => (
+      !pubsub.subscriptionSet.has(contractID) &&
+      !pubsub.pendingOperations.tHas(REQUEST_TYPE.UNSUB, contractID)
+    )),
+    'unsubscribed in pubsub'
+  )
+  const reply = relay.postAction(contract, { text: 'reply from the other party' })
+  return { contract, reply }
 }
 
 // Stand-in for the HTTP side of the server, for Chelonia-level tests: pass
@@ -599,10 +679,6 @@ export function createFakeRelay ({ pubsub }: { pubsub?: FakePubsubServer } = {})
       request.status = response.status
       return response
     },
-    // Requests whose path starts with `prefix`
-    requestsTo (prefix: string, since = -Infinity): RelayRequest[] {
-      return requests.filter(({ t, path }) => t >= since && path.startsWith(prefix))
-    },
     reset () {
       contracts.clear()
       chains.clear()
@@ -614,6 +690,11 @@ export function createFakeRelay ({ pubsub }: { pubsub?: FakePubsubServer } = {})
   return relay
 }
 
+// The relay's answer to a KV write signed with a stale contract height, when
+// no value is stored
+export const kvConflict = (): Response =>
+  new Response('', { status: 409, headers: { 'x-cid': '""' } })
+
 // `SPMessage.deserializeHEAD` only needs the head's `contractID`, which is
 // enough for Chelonia's ENTRY handler to dispatch a fake event
 export const fakeEntryData = (contractID: string): string =>
@@ -622,33 +703,42 @@ export const fakeEntryData = (contractID: string): string =>
 export const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms))
 
+// The harness's own clock, which `emulateSleep()` doesn't hold back
+const harnessNow = performance.now.bind(performance)
+
 // Resolves with the (truthy) value of `condition()`, or with `undefined` once
 // `timeout` ms passed (so that assertions can report what went wrong)
 export async function waitFor<T> (
   condition: () => T,
   { timeout = 2000, interval = 5 }: { timeout?: number; interval?: number } = {}
 ): Promise<T | undefined> {
-  const deadline = performance.now() + timeout
+  const deadline = harnessNow() + timeout
   for (;;) {
     const value = condition()
     if (value) return value
-    if (performance.now() >= deadline) return undefined
+    if (harnessNow() >= deadline) return undefined
     await sleep(interval)
   }
 }
 
 // Resolves with `Date.now()` at the next `open` of `client`. `callback` runs
 // synchronously inside the client's `open` handler, before the pending SUBs
-// are re-sent (e.g. to black-hole the connection right after it opens).
+// are re-sent (e.g. to black-hole the connection right after it opens). If
+// it throws, the promise rejects (the client's listener would only log it).
 export function onNextOpen (
   client: PubSubClient,
   callback?: () => void
 ): Promise<number> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const listener = (target: PubSubClient) => {
       if (target !== client) return
       sbp('okTurtles.events/off', PUBSUB_RECONNECTION_SUCCEEDED, listener)
-      callback?.()
+      try {
+        callback?.()
+      } catch (e) {
+        reject(e)
+        return
+      }
       resolve(Date.now())
     }
     sbp('okTurtles.events/on', PUBSUB_RECONNECTION_SUCCEEDED, listener)
@@ -690,6 +780,7 @@ export function emulateNavigator () {
 export function emulateSleep ({ monotonic = false }: { monotonic?: boolean } = {}) {
   const realNow = Date.now
   const realPerformanceNow = performance.now
+  const savedPerformanceNow = Object.getOwnPropertyDescriptor(performance, 'now')
   let dateOffset = 0
   let monotonicOffset = 0
   Date.now = () => realNow.call(Date) + dateOffset
@@ -708,7 +799,9 @@ export function emulateSleep ({ monotonic = false }: { monotonic?: boolean } = {
     },
     restore () {
       Date.now = realNow
-      if (monotonic) delete (performance as { now?: unknown }).now
+      if (!monotonic) return
+      if (savedPerformanceNow) Object.defineProperty(performance, 'now', savedPerformanceNow)
+      else delete (performance as { now?: unknown }).now
     }
   }
 }

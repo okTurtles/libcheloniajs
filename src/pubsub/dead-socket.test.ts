@@ -1,7 +1,8 @@
 // Tests of how the pubsub client replaces dead sockets (CL-3), notices
 // them right after waking up from sleep (CL-4) and reports its connection
 // state (CL-5), against the in-process fake server from `./test-harness.ts`.
-// Port of `3175-report/tests/02-dead-socket.test.mjs`.
+// Port of `02-dead-socket.test.mjs`, from the regression suite of the
+// okTurtles/group-income#3176 report (okTurtles/libcheloniajs#121).
 //
 // On a dead connection (e.g., after the device slept) the closing handshake
 // never completes, so a socket that is only `close()`d stays CLOSING until
@@ -12,17 +13,16 @@ import sbp from '@sbp/sbp'
 import * as assert from 'node:assert/strict'
 import { after, afterEach, before, describe, it } from 'node:test'
 import {
-  createClient, NOTIFICATION_TYPE, PUBSUB_STATE_CHANGED, PUBSUB_SUBSCRIPTION_FAILED, REQUEST_TYPE
+  PUBSUB_STATE_CHANGED, PUBSUB_SUBSCRIPTION_FAILED, REQUEST_TYPE
 } from './index.js'
-import type { Options, PubSubClient, PubSubState } from './index.js'
+import type { PubSubClient, PubSubState } from './index.js'
 import {
-  captureConsole, createFakePubsubServer, emulateNavigator, emulateSleep, onNextOpen, sleep,
-  waitFor
+  captureConsole, createFakePubsubServer, createTestClients, emulateNavigator, emulateSleep,
+  isOpen, onNextOpen, sleep, subscribed, waitFor
 } from './test-harness.js'
 
-const URL = 'ws://pubsub.test'
 const server = createFakePubsubServer()
-const clients: PubSubClient[] = []
+const { setup, destroyAll } = createTestClients()
 const pingers: ReturnType<typeof setInterval>[] = []
 const nav = emulateNavigator()
 let logs: ReturnType<typeof captureConsole>
@@ -47,8 +47,7 @@ before(() => {
 
 afterEach(() => {
   while (pingers.length) clearInterval(pingers.pop())
-  // Destroy the clients first, so that they don't reconnect
-  while (clients.length) clients.pop()!.destroy()
+  destroyAll()
   server.reset()
   nav.online()
 })
@@ -59,30 +58,10 @@ after(() => {
   server.uninstall()
 })
 
-function setup (options: Partial<Options> = {}) {
-  const received: unknown[] = []
-  const client = createClient(URL, {
-    // Reconnect within tens of milliseconds
-    minReconnectionDelay: 20,
-    ...options,
-    messageHandlers: {
-      [NOTIFICATION_TYPE.ENTRY] (msg) {
-        received.push(msg.channelID)
-      }
-    }
-  })
-  clients.push(client)
-  return { client, received }
-}
-
 // The server pings every working connection every `interval` ms
 const keepPinging = (interval: number) => {
   pingers.push(setInterval(() => server.ping(), interval))
 }
-
-const isOpen = (client: PubSubClient) => () => client.socket?.readyState === WebSocket.OPEN
-const subscribed = (client: PubSubClient, ids: string[]) => () =>
-  ids.every((id) => client.subscriptionSet.has(id))
 
 // Resolves with the ms from `since` until the next `open` of `client`, or
 // with `null` after `timeout` ms
@@ -183,7 +162,7 @@ describe('offline -> online while the old socket is dead (CL-3)', () => {
     obs.resubscribed = !!(await waitFor(subscribed(client, ['o'])))
     obs.states = statesOf(client, mark1)
     server.entry('o', 'from the other party')
-    obs.delivered = !!(await waitFor(() => received.includes('o')))
+    obs.delivered = !!(await waitFor(() => received.some(({ channelID }) => channelID === 'o')))
   })
 
   it('lets go of the socket right away when going offline, keeping the subscription wanted', () => {

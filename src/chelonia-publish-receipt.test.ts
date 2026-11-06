@@ -17,16 +17,14 @@ import './chelonia.js'
 import './internals.js'
 import type { SPMessage } from './SPMessage.js'
 import { EVENT_HANDLED } from './events.js'
-import { REQUEST_TYPE } from './pubsub/index.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
-  actionMessage, captureConsole, createFakePubsubServer, createFakeRelay, createTestContract, sleep,
-  waitFor
+  actionMessage, captureConsole, createFakePubsubServer, createFakeRelay, isOpen, RELAY_URL,
+  retainedContract, sleep, staleContract, waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
 import type { ChelRootState } from './types.js'
 
-const URL = 'http://relay.test'
 const server = createFakePubsubServer()
 const relay = createFakeRelay({ pubsub: server })
 let logs: ReturnType<typeof captureConsole>
@@ -49,8 +47,6 @@ after(() => {
   server.uninstall()
 })
 
-const isOpen = (client: PubSubClient) => client.socket?.readyState === WebSocket.OPEN
-
 const localHeight = (contractID: string) =>
   (sbp('chelonia/private/state') as ChelRootState).contracts[contractID]?.height
 
@@ -64,7 +60,7 @@ function setUp (config: Record<string, unknown> = {}) {
   before(async () => {
     sbp('chelonia/_init')
     await sbp('chelonia/configure', {
-      connectionURL: URL,
+      connectionURL: RELAY_URL,
       fetch: relay.fetch,
       skipActionProcessing: true,
       // A lost subscription stays lost (unless publishing heals it)
@@ -73,7 +69,7 @@ function setUp (config: Record<string, unknown> = {}) {
       ...config
     })
     pubsub = sbp('chelonia/connect')
-    assert.ok(await waitFor(() => isOpen(pubsub)), 'connected')
+    assert.ok(await waitFor(isOpen(pubsub)), 'connected')
   })
   after(() => {
     // Destroy the client first, so that it doesn't reconnect
@@ -81,34 +77,6 @@ function setUp (config: Record<string, unknown> = {}) {
     server.reset()
     relay.reset()
   })
-}
-
-// A contract that Chelonia has synced and the pubsub client is subscribed to
-async function retainedContract (): Promise<TestContract> {
-  const contract = createTestContract()
-  assert.equal(relay.append(contract.first), 200)
-  await sbp('chelonia/contract/retain', contract.contractID)
-  assert.ok(await waitFor(() => pubsub.subscriptionSet.has(contract.contractID)), 'subscribed')
-  // Let the sync that follows every new subscription finish
-  await sbp('chelonia/contract/wait', contract.contractID)
-  return contract
-}
-
-// A contract that the pubsub client lost while Chelonia still wants it, and
-// that another participant has posted to since (so Chelonia's copy is stale)
-async function staleContract (): Promise<{ contract: TestContract; reply: SPMessage }> {
-  const contract = await retainedContract()
-  const { contractID } = contract
-  pubsub.unsub(contractID)
-  assert.ok(
-    await waitFor(() => (
-      !pubsub.subscriptionSet.has(contractID) &&
-      !pubsub.pendingOperations.tHas(REQUEST_TYPE.UNSUB, contractID)
-    )),
-    'unsubscribed in pubsub'
-  )
-  const reply = relay.postAction(contract, { text: 'reply from the other party' })
-  return { contract, reply }
 }
 
 // Publishes an action like a Group Income chat message
@@ -145,7 +113,7 @@ describe('publishing to a contract whose pubsub subscription was lost (CL-7)', (
   let processed: boolean
 
   before(async () => {
-    const stale = await staleContract()
+    const stale = await staleContract(relay, pubsub)
     contractID = stale.contract.contractID
     reply = stale.reply
     published = await publish(stale.contract, 'own message')
@@ -188,7 +156,7 @@ describe('publishing while the socket is half-open (subscribed, but nothing arri
   let published: Awaited<ReturnType<typeof publish>>
 
   before(async () => {
-    const contract = await retainedContract()
+    const contract = await retainedContract(relay, pubsub)
     contractID = contract.contractID
     // The WebSocket is dead (the server dropped it while we slept) but still
     // OPEN; HTTP works
@@ -219,7 +187,7 @@ describe('publishing on a healthy connection (CL-7)', () => {
   setUp({ publishReceiptTimeout: 200 })
 
   it('does not sync when pubsub delivers the published event', async () => {
-    const contract = await retainedContract()
+    const contract = await retainedContract(relay, pubsub)
     const published = await publish(contract, 'hello')
     assert.ok(await waitFor(() => published.processedAt() !== undefined), 'processed')
     await sleep(400)
@@ -233,7 +201,7 @@ describe('publishReceiptTimeout: 0 (CL-7)', () => {
   setUp({ publishReceiptTimeout: 0 })
 
   it('disables the timed check for a subscribed contract', async () => {
-    const contract = await retainedContract()
+    const contract = await retainedContract(relay, pubsub)
     server.blackhole()
     server.pass()
     const published = await publish(contract, 'not checked')
@@ -247,7 +215,7 @@ describe('chelonia/reset after publishing (CL-7)', () => {
   setUp({ publishReceiptTimeout: 200 })
 
   it('cancels the pending check', async () => {
-    const contract = await retainedContract()
+    const contract = await retainedContract(relay, pubsub)
     server.blackhole()
     server.pass()
     const published = await publish(contract, 'before the reset')
@@ -255,6 +223,28 @@ describe('chelonia/reset after publishing (CL-7)', () => {
     const from = relay.requests.length
     await sleep(400)
     assert.equal(syncsOf(contract.contractID, from), 0)
+    assert.equal(published.logged.grep(/did not receive/).length, 0)
+  })
+})
+
+describe('chelonia/reset after publishing, then retaining the contract again (CL-7)', () => {
+  setUp({ publishReceiptTimeout: 200 })
+
+  it('cancels the pending check of the previous session', async () => {
+    const contract = await retainedContract(relay, pubsub)
+    const { contractID } = contract
+    server.blackhole()
+    server.pass()
+    const published = await publish(contract, 'before the reset')
+    await sbp('chelonia/reset')
+    // The new session gets the contract as it was before the publish (e.g.,
+    // restored from an older saved state), so it is behind the event
+    relay.chains.set(contractID, relay.chains.get(contractID)!.slice(0, -1))
+    await sbp('chelonia/contract/retain', contractID)
+    assert.equal(localHeight(contractID), published.height - 1, 'precondition: behind the event')
+    const from = relay.requests.length
+    await sleep(400)
+    assert.equal(syncsOf(contractID, from), 0)
     assert.equal(published.logged.grep(/did not receive/).length, 0)
   })
 })

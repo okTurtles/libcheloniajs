@@ -2,16 +2,16 @@
 // against the in-process fake server from `./test-harness.ts`.
 import * as assert from 'node:assert/strict'
 import { after, afterEach, before, describe, it } from 'node:test'
-import { createClient, NOTIFICATION_TYPE, REQUEST_TYPE } from './index.js'
-import type { Options, PubSubClient } from './index.js'
+import { NOTIFICATION_TYPE, REQUEST_TYPE } from './index.js'
+import type { PubSubClient } from './index.js'
 import {
-  captureConsole, createFakePubsubServer, onNextOpen, sleep, waitFor
+  captureConsole, createCloseEvent, createFakePubsubServer, createTestClients, emulateSleep,
+  isOpen, onNextOpen, sleep, subscribed, waitFor
 } from './test-harness.js'
 import type { FakeConnection } from './test-harness.js'
 
-const URL = 'ws://pubsub.test'
 const server = createFakePubsubServer()
-const clients: PubSubClient[] = []
+const { setup, destroyAll } = createTestClients()
 let logs: ReturnType<typeof captureConsole>
 
 before(() => {
@@ -20,8 +20,7 @@ before(() => {
 })
 
 afterEach(() => {
-  // Destroy the clients first, so that they don't reconnect
-  while (clients.length) clients.pop()!.destroy()
+  destroyAll()
   server.reset()
 })
 
@@ -29,27 +28,6 @@ after(() => {
   logs.restore()
   server.uninstall()
 })
-
-function setup (options: Partial<Options> = {}) {
-  const received: { channelID: unknown; data: unknown }[] = []
-  const client = createClient(URL, {
-    // Reconnect within tens of milliseconds
-    minReconnectionDelay: 20,
-    ...options,
-    messageHandlers: {
-      [NOTIFICATION_TYPE.ENTRY] (msg) {
-        received.push({ channelID: msg.channelID, data: msg.data })
-      },
-      ...options.messageHandlers
-    }
-  })
-  clients.push(client)
-  return { client, received }
-}
-
-const isOpen = (client: PubSubClient) => () => client.socket?.readyState === WebSocket.OPEN
-const subscribed = (client: PubSubClient, ids: string[]) => () =>
-  ids.every((id) => client.subscriptionSet.has(id))
 
 describe('fake pubsub server (harness self-checks)', () => {
   it('answers SUB requests and records the frames', async () => {
@@ -113,6 +91,35 @@ describe('fake pubsub server (harness self-checks)', () => {
     socket.addEventListener('close', (event) => { closeCode = (event as CloseEvent).code })
     server.killClients()
     assert.equal(closeCode, 1006)
+  })
+
+  it('rejects the close codes and reasons that a real socket rejects', async () => {
+    const { client } = setup()
+    assert.ok(await waitFor(isOpen(client)))
+    const socket = client.socket!
+    assert.throws(() => socket.close(1006), { name: 'InvalidAccessError' })
+    // 62 characters, 124 bytes
+    assert.throws(() => socket.close(4001, 'ñ'.repeat(62)), { name: 'SyntaxError' })
+    assert.equal(socket.readyState, WebSocket.OPEN)
+  })
+
+  it('rejects onNextOpen() if its callback throws', async () => {
+    const { client } = setup()
+    const opened = onNextOpen(client, () => { throw new Error('callback failed') })
+    await assert.rejects(opened, /callback failed/)
+  })
+
+  it('keeps the timeout of waitFor() when an emulated sleep holds back performance.now()', async () => {
+    const clock = emulateSleep({ monotonic: true })
+    try {
+      const start = Date.now()
+      const waiting = waitFor(() => false, { timeout: 200 })
+      setTimeout(() => clock.wake(2000), 50)
+      assert.equal(await waiting, undefined)
+      assert.ok(Date.now() - start < 1000, `waited ${Date.now() - start} ms`)
+    } finally {
+      clock.restore()
+    }
   })
 })
 
@@ -189,17 +196,18 @@ describe('pubsub client baseline', () => {
   })
 })
 
-// Port of `3175-report/tests/01-subscription-recovery.test.mjs`. The trigger
-// seen in okTurtles/group-income#3176: a reconnect completes, then the
-// device sleeps; after waking up the socket is still OPEN but dead and the
-// network is not usable yet. Each SUB goes unanswered.
+// Port of `01-subscription-recovery.test.mjs`, from the regression suite of
+// the okTurtles/group-income#3176 report (okTurtles/libcheloniajs#121). The
+// trigger seen there: a reconnect completes, then the device sleeps; after
+// waking up the socket is still OPEN but dead and the network is not usable
+// yet. Each SUB goes unanswered.
 describe('SUBs unanswered right after a reconnect (half-open socket after sleep/wake)', () => {
   // Retry budget: 10 * I plus up to 5 * I of jitter (2.5 to 3.75 s)
   const I = 250
   const OUTAGE = 5000
   const ids = ['h1', 'h2', 'h3', 'h4']
   const obs = {} as {
-    giveUps: number;
+    pendingDuringOutage: boolean;
     abandoned: number;
     gaps: number[][];
     restored: boolean;
@@ -219,7 +227,7 @@ describe('SUBs unanswered right after a reconnect (half-open socket after sleep/
     server.killClients()
     const tOpen = await opened
     await sleep(OUTAGE)
-    obs.giveUps = logs.grep(/Giving up/, tOpen).length
+    obs.pendingDuringOutage = ids.every((id) => client.pendingOperations.tHas(REQUEST_TYPE.SUB, id))
     obs.abandoned = logs.grep(/Abandoning socket/, tOpen).length
     obs.gaps = ids.map((id) => {
       const sends = server.framesOf(REQUEST_TYPE.SUB, id, tOpen)
@@ -240,7 +248,7 @@ describe('SUBs unanswered right after a reconnect (half-open socket after sleep/
   it('restores every wanted subscription once the network is back (CL-1)', () => {
     assert.ok(obs.restored,
       `${obs.missing.length}/${ids.length} channels still not subscribed 3 s after the ` +
-      `network came back; "Giving up" logged ${obs.giveUps} times`)
+      'network came back')
   })
 
   it('delivers events for those channels again (CL-1)', () => {
@@ -248,7 +256,7 @@ describe('SUBs unanswered right after a reconnect (half-open socket after sleep/
   })
 
   it('replaces the dead connection instead of giving up on the channels (CL-1)', () => {
-    assert.equal(obs.giveUps, 0)
+    assert.ok(obs.pendingDuringOutage, 'a SUB was dropped during the outage')
     assert.ok(obs.abandoned >= 1, 'the dead socket was not abandoned')
   })
 
@@ -333,14 +341,19 @@ describe('requests that exhaust the retry budget (CL-1)', () => {
     const { client } = setup({ opRetryInterval: I })
     assert.ok(await waitFor(isOpen(client)))
     const first = ignoreOnCurrentConnection(REQUEST_TYPE.SUB)
+    let pendingOnReconnect = false
+    const reopened = onNextOpen(client, () => {
+      pendingOnReconnect = client.pendingOperations.tHas(REQUEST_TYPE.SUB, 'u')
+    })
     client.sub('u')
+    await reopened
+    assert.ok(pendingOnReconnect, 'the SUB was dropped with the connection')
     assert.ok(await waitFor(subscribed(client, ['u'])), 'subscribed on a later connection')
     assert.notEqual(connectionOf(client), first)
     assert.equal(server.framesOf(REQUEST_TYPE.SUB, 'u', since)
       .filter(({ connection }) => connection === first).length, 5)
     assert.ok(first.socket.readyState >= WebSocket.CLOSING, 'the abandoned socket was closed')
     assert.equal(logs.grep(/Abandoning socket: no response to sub for u/, since).length, 1)
-    assert.equal(logs.grep(/Giving up/, since).length, 0)
   })
 
   it('detaches the abandoned socket', async () => {
@@ -356,12 +369,23 @@ describe('requests that exhaust the retry budget (CL-1)', () => {
     first.socket.dispatchEvent(new MessageEvent('message', {
       data: JSON.stringify({ type: NOTIFICATION_TYPE.ENTRY, channelID: 'd', data: 'stale' })
     }))
-    first.socket.dispatchEvent(new CloseEvent('close', { code: 1006 }))
+    first.socket.dispatchEvent(createCloseEvent(1006))
     await sleep(50)
     assert.equal(client.socket, current)
     assert.equal(client.failedConnectionAttempts, attempts)
     assert.ok(subscribed(client, ['d', 'u'])())
     assert.deepEqual(received, [])
+  })
+
+  it('closes the abandoned socket when the reason is too long for close()', async () => {
+    // The reason has 92 characters, but 162 bytes
+    const channelID = 'ñ'.repeat(70)
+    const { client } = setup({ opRetryInterval: I })
+    assert.ok(await waitFor(isOpen(client)))
+    const first = ignoreOnCurrentConnection(REQUEST_TYPE.SUB)
+    client.sub(channelID)
+    assert.ok(await waitFor(subscribed(client, [channelID])), 'subscribed on a later connection')
+    assert.ok(first.socket.readyState >= WebSocket.CLOSING, 'the abandoned socket was closed')
   })
 
   it('settles an unanswered UNSUB by replacing the connection', async () => {
