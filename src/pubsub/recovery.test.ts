@@ -515,7 +515,7 @@ describe('diagnostic logs (CL-10)', () => {
     assert.match(close.text, /never opened \(connecting for \d+ ms\)$/)
   })
 
-  it('logs late and duplicate SUB ACKs at info level', async () => {
+  it('logs late SUB ACKs at info level, and the answers to the retries at debug level', async () => {
     const SLOW = 300
     const { client } = setup({ opRetryInterval: 50 })
     assert.ok(await waitFor(isOpen(client)))
@@ -528,11 +528,11 @@ describe('diagnostic logs (CL-10)', () => {
     assert.equal(late[0].level, 'info')
     assert.ok(Number(/(\d+) ms/.exec(late[0].text)![1]) >= SLOW - 5, late[0].text)
     // The retries sent before the first ACK arrived are answered too
-    assert.ok(await waitFor(() => newLogs.grep(/Received unexpected sub for late/).length > 0))
-    const duplicates = newLogs.grep(/Received unexpected sub for late/)
-    assert.ok(duplicates.every(({ level, text }) => (
-      level === 'info' && text.endsWith('(already subscribed)')
-    )), JSON.stringify(duplicates.map(({ level, text }) => `${level}: ${text}`)))
+    assert.ok(await waitFor(() => newLogs.grep(/Received duplicate sub ACK for late/).length > 0))
+    const duplicates = newLogs.grep(/Received duplicate sub ACK for late/)
+    assert.ok(duplicates.every(({ level }) => level === 'debug'),
+      JSON.stringify(duplicates.map(({ level, text }) => `${level}: ${text}`)))
+    assert.equal(newLogs.grep(/Received unexpected sub/).length, 0)
     assert.equal(newLogs.grep(/Abandoning socket/).length, 0)
   })
 

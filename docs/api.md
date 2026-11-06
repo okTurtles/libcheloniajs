@@ -294,7 +294,7 @@ from `@chelonia/lib/pubsub` (and the package root). See
 
 | Event | Payload | Fires |
 |---|---|---|
-| `PUBSUB_STATE_CHANGED` | `(client, { state, previous })` | Whenever `client.state` (a `PubSubState`) changes. |
+| `PUBSUB_STATE_CHANGED` | `(client, { state, previous })` | Whenever `client.state` (a `PubSubState`) changes. The first one (`closed -> connecting`) fires inside `createClient`, before `chelonia/connect` returns the client, so a listener that compares `client` with Chelonia's current client misses it. `client.getStatus()` (and so `chelonia/pubsub/status`) can fire it too, when the socket changed state without an event. |
 | `PUBSUB_RECONNECTION_SCHEDULED` | `(client, { delay, nth })` | A reconnection attempt was scheduled `delay` ms from now. |
 | `PUBSUB_RECONNECTION_ATTEMPT` | `(client)` | A reconnection attempt starts. |
 | `PUBSUB_RECONNECTION_SUCCEEDED` | `(client)` | A (re)connection opened. Chelonia then reconciles its subscriptions. |

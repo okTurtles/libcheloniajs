@@ -13,7 +13,7 @@ import sbp from '@sbp/sbp'
 import * as assert from 'node:assert/strict'
 import { after, afterEach, before, describe, it } from 'node:test'
 import {
-  PUBSUB_STATE_CHANGED, PUBSUB_SUBSCRIPTION_FAILED, REQUEST_TYPE
+  PUBSUB_ERROR, PUBSUB_STATE_CHANGED, PUBSUB_SUBSCRIPTION_FAILED, REQUEST_TYPE
 } from './index.js'
 import type { PubSubClient, PubSubState } from './index.js'
 import {
@@ -277,6 +277,32 @@ describe('replacing dead sockets (CL-3)', () => {
     assert.ok(subscribed(client, ['k'])())
   })
 
+  it('`online` leaves a client alone that its last allowed attempt just destroyed', async () => {
+    server.stallNewConnections()
+    const { client } = setup({
+      maxRetries: 2, timeout: 150, minReconnectionDelay: 10, maxReconnectionDelay: 20
+    })
+    assert.ok(await waitFor(() => (
+      client.failedConnectionAttempts === 2 && client.socket?.readyState === WebSocket.CONNECTING
+    ), { timeout: 3000 }), 'third attempt in progress')
+    const errors: unknown[] = []
+    const onError = (target: PubSubClient, error: unknown) => {
+      if (target === client) errors.push(error)
+    }
+    sbp('okTurtles.events/on', PUBSUB_ERROR, onError)
+    try {
+      // The attempt fails: a browser sets CLOSED and queues the `close` event,
+      // and `online` runs first
+      ;(client.socket as { readyState: number }).readyState = WebSocket.CLOSED
+      nav.online(client)
+    } finally {
+      sbp('okTurtles.events/off', PUBSUB_ERROR, onError)
+    }
+    assert.equal(client.shouldReconnect, false, 'precondition: destroyed')
+    assert.deepEqual(errors, [])
+    assert.equal(client.state, 'closed')
+  })
+
   it('does not close the socket on PING when the ping timeout is disabled', async () => {
     for (const pingTimeout of [0, Infinity]) {
       const { client } = setup({ pingTimeout })
@@ -298,6 +324,18 @@ describe('wall-clock ping watchdog (CL-4)', () => {
     assert.ok(await waitFor(isOpen(client)))
     const socket = client.socket
     // Past the first check (every second with this ping timeout)
+    await sleep(1300)
+    assert.equal(client.socket, socket)
+    assert.equal(newLogs.grep(/Abandoning socket/).length, 0)
+  })
+
+  it('agrees with the ping timer that any message (not only a PING) shows the socket works', async () => {
+    const newLogs = logs.fromNow()
+    const { client } = setup({ pingTimeout: 300 })
+    client.sub('e')
+    assert.ok(await waitFor(subscribed(client, ['e'])))
+    const socket = client.socket
+    pingers.push(setInterval(() => server.entry('e', 'data'), 50))
     await sleep(1300)
     assert.equal(client.socket, socket)
     assert.equal(newLogs.grep(/Abandoning socket/).length, 0)
@@ -356,6 +394,19 @@ describe('connection state (CL-5)', () => {
     assert.equal(client.state, 'connecting')
     assert.ok(await waitFor(isOpen(client)))
     assert.deepEqual(statesOf(client, mark), ['connecting', 'open'])
+  })
+
+  it('needs no global WebSocket with `manual` before connect(), and to be destroyed', () => {
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket')!
+    delete (globalThis as { WebSocket?: unknown }).WebSocket
+    try {
+      const { client } = setup({ manual: true })
+      assert.equal(client.state, 'closed')
+      client.destroy()
+      assert.equal(client.state, 'closed')
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', saved)
+    }
   })
 
   it('is closed after destroy()', async () => {
@@ -448,6 +499,26 @@ describe('connection state (CL-5)', () => {
       status.oldestPendingSince !== null && status.oldestPendingSince >= t2,
       `oldestPendingSince: ${status.oldestPendingSince} (reconnected after ${t2})`
     )
+  })
+
+  it('does not count a SUB that waits for a connection in oldestPendingSince', async () => {
+    server.stallNewConnections()
+    const { client } = setup()
+    client.sub('a')
+    await sleep(50)
+    let status = client.getStatus()
+    assert.equal(status.state, 'connecting')
+    assert.deepEqual(status.pending, ['a'])
+    assert.equal(status.oldestPendingSince, null, 'while connecting')
+
+    server.pass()
+    assert.ok(await waitFor(subscribed(client, ['a'])))
+    server.killClients()
+    client.sub('b')
+    status = client.getStatus()
+    assert.equal(client.socket, null)
+    assert.deepEqual(status.pending, ['a', 'b'])
+    assert.equal(status.oldestPendingSince, null, 'while waiting to reconnect')
   })
 
   it('emits PUBSUB_SUBSCRIPTION_FAILED when the server rejects a SUB', async () => {

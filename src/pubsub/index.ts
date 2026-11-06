@@ -257,7 +257,10 @@ export const PUBSUB_RECONNECTION_FAILED = 'pubsub-reconnection-failed'
 export const PUBSUB_RECONNECTION_SCHEDULED = 'pubsub-reconnection-scheduled'
 export const PUBSUB_RECONNECTION_SUCCEEDED = 'pubsub-reconnection-succeeded'
 export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded'
-// Emitted as `(client, { state, previous })` whenever `client.state` changes
+// Emitted as `(client, { state, previous })` whenever `client.state` changes.
+// The first one (`closed -> connecting`) is emitted by `createClient`, before
+// it returns the client. `getStatus()` can emit it too, if the socket changed
+// state without an event (e.g., it started closing).
 export const PUBSUB_STATE_CHANGED = 'pubsub-state-changed'
 // Emitted as `(client, { channelID, reason })` when the server rejects a SUB
 // request. The subscription is no longer pending; Chelonia requests it again
@@ -299,6 +302,22 @@ class TieredMap <K, L, V> extends Map<K, Map<L, V>> {
   tClear (k1: K) {
     this.delete(k1)
   }
+}
+
+// `PubSubStatus.oldestPendingSince`, for the pending SUBs of `channelIDs`
+// (by default, of every channel)
+export function oldestPendingSubSince (
+  client: PubSubClient,
+  channelIDs?: Iterable<string>
+): number | null {
+  const pending = client.pendingOperations.get(REQUEST_TYPE.SUB)
+  if (!pending) return null
+  let oldest: number | null = null
+  for (const id of channelIDs ?? pending.keys()) {
+    const since = pending.get(id)?.since
+    if (since !== undefined && (oldest === null || since < oldest)) oldest = since
+  }
+  return oldest
 }
 
 // A connection works once every pending SUB and KV filter is answered: only
@@ -446,7 +465,7 @@ function runWithRetry (
   let attemptNo = 0
   const { socket, options } = client
   // `runWithRetry` will use reference equality to determine freshness.
-  const instance: PendingOperation = { since: Date.now() }
+  const instance: PendingOperation = {}
 
   client.pendingOperations.tSet(type, channelID, instance)
 
@@ -475,6 +494,8 @@ function runWithRetry (
     const payload = getPayload()
 
     socket.send(createRequest(type, payload))
+    // When it was first sent on this connection, not when it was queued
+    instance.since ??= Date.now()
 
     // 4. Schedule retry
     // Randomness / jitter to prevent bursts
@@ -706,6 +727,9 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     const { data } = event
 
     client.lastMessageAt = Date.now()
+    // Any message shows that the connection works, like the wall-clock
+    // watchdog assumes
+    armPingTimeout(client)
     if (typeof data !== 'string') {
       sbp('okTurtles.events/emit', PUBSUB_ERROR, client, {
         message: `Wrong data type: ${typeof data}`
@@ -761,7 +785,9 @@ const defaultClientEventHandlers: ClientEventHandlers = {
       ) {
         abandonSocket(client, client.socket, 'online, socket not open')
       }
-      if (!client.socket) {
+      // Abandoning the socket may also have given up reconnecting (and
+      // destroyed the client)
+      if (!client.socket && client.shouldReconnect) {
         client.failedConnectionAttempts = 0
         // Abandoning the socket may have scheduled the attempt already
         if (!client.nextConnectionAttemptDelayID) client.scheduleConnectionAttempt()
@@ -839,8 +865,6 @@ const defaultMessageHandlers: MessageHandlers = {
     // TODO: Type coercion to string because we actually support passing this
     // object type, but the correct TypeScript type hasn't been written.
     client.socket?.send(createMessage(NOTIFICATION_TYPE.PONG, data) as unknown as string)
-    // Refresh the ping timer, waiting for the next ping.
-    armPingTimeout(client)
   },
 
   [NOTIFICATION_TYPE.PUB] ({ channelID, data }) {
@@ -917,9 +941,11 @@ const defaultMessageHandlers: MessageHandlers = {
             this.setKvFilter(channelID, ourKvFilter)
           }
           noteAnsweredRequests(client)
+        } else if (client.subscriptionSet.has(channelID)) {
+          // The answer to one of our retries; `Late ACK` reported the delay
+          console.debug(`[pubsub] Received duplicate sub ACK for ${channelID}`)
         } else {
-          const status = client.subscriptionSet.has(channelID) ? 'already subscribed' : 'not requested'
-          console.info(`[pubsub] Received unexpected sub for ${channelID} (${status})`)
+          console.info(`[pubsub] Received unexpected sub for ${channelID} (not requested)`)
         }
         break
       }
@@ -979,9 +1005,13 @@ if (typeof self === 'object' && self instanceof EventTarget) {
 const isDefinetelyOffline = () => typeof navigator === 'object' && navigator.onLine === false
 
 const computeState = (client: PubSubClient): PubSubState => {
-  const readyState = client.socket?.readyState
-  if (readyState === WebSocket.OPEN) return 'open'
-  if (readyState === WebSocket.CONNECTING) return 'connecting'
+  // The socket's own constants: `createClient` and `destroy()` call this
+  // without a socket, and then a global `WebSocket` isn't needed
+  const { socket } = client
+  if (socket) {
+    if (socket.readyState === socket.OPEN) return 'open'
+    if (socket.readyState === socket.CONNECTING) return 'connecting'
+  }
   if (!client.shouldReconnect) return 'closed'
   if (isDefinetelyOffline()) return 'offline'
   if (client.nextConnectionAttemptDelayID !== undefined || client.socket) return 'reconnecting'
@@ -1133,18 +1163,12 @@ const publicMethods: {
     // socket that started closing)
     updateState(client)
     const pending = client.pendingOperations.get(REQUEST_TYPE.SUB)
-    let oldestPendingSince: number | null = null
-    for (const { since } of pending?.values() ?? []) {
-      if (since !== undefined && (oldestPendingSince === null || since < oldestPendingSince)) {
-        oldestPendingSince = since
-      }
-    }
     return {
       state: client.state,
       since: client.stateSince,
       subscribed: [...client.subscriptionSet],
       pending: pending ? [...pending.keys()] : [],
-      oldestPendingSince
+      oldestPendingSince: oldestPendingSubSince(client)
     }
   },
 

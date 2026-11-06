@@ -13,7 +13,9 @@ import {
 } from 'turtledash'
 import { createCID, maybeParseCID, multicodes, parseCID } from './functions.js'
 import { Buffer } from 'buffer'
-import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, createClient } from './pubsub/index.js'
+import {
+  NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, createClient, oldestPendingSubSince
+} from './pubsub/index.js'
 import { clearReingestTrackerAll } from './reingestTracker.js'
 import type {
   ProtoSPOpKeyRequestInnerV2,
@@ -1635,13 +1637,14 @@ export default sbp('sbp/selectors/register', {
     const status = client.getStatus()
     const subscribed = new Set(status.subscribed)
     const pending = new Set(status.pending)
+    const wantedPending = wanted.filter((id) => pending.has(id))
     return {
       state: status.state,
       since: status.since,
       wanted: wanted.length,
       missing: wanted.filter((id) => !subscribed.has(id) && !pending.has(id)),
-      pending: wanted.filter((id) => pending.has(id)),
-      oldestPendingSince: status.oldestPendingSince
+      pending: wantedPending,
+      oldestPendingSince: oldestPendingSubSince(client, wantedPending)
     }
   },
   // resolves when all pending actions for these contractID(s) finish

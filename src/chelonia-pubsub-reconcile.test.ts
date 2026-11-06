@@ -202,6 +202,23 @@ describe('chelonia/pubsub/status (CL-6)', () => {
     assert.deepEqual(current.missing, [])
     assert.equal(current.oldestPendingSince, null)
   })
+
+  it('leaves the pending SUBs of channels that Chelonia does not want out of oldestPendingSince', async () => {
+    server.onRequest = (_conn, msg) => (
+      msg.type === REQUEST_TYPE.SUB && msg.channelID === 'app-channel' ? 'ignore' : undefined
+    )
+    await connect(0)
+    await want('contract-S5')
+    pubsub.sub('app-channel')
+    assert.ok(
+      await waitFor(() => server.framesOf(REQUEST_TYPE.SUB, 'app-channel').length > 0),
+      'SUB sent'
+    )
+    assert.notEqual(pubsub.getStatus().oldestPendingSince, null, 'precondition')
+    const current = status()
+    assert.deepEqual(current.pending, [])
+    assert.equal(current.oldestPendingSince, null)
+  })
 })
 
 describe('Chelonia reconciles its subscriptions with the pubsub client (CL-6)', () => {
