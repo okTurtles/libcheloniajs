@@ -101,7 +101,8 @@ export type Options = {
   // Maximum retry attempts after initial send (maxOpRetries + 1 total attempts).
   // A request that gets no response to any of them is not dropped: the
   // connection is considered broken and replaced, and the request is sent
-  // again on the new connection.
+  // again on the new connection. With `reconnectOnDisconnection: false`,
+  // nothing would replace it, so the request is dropped instead.
   maxOpRetries: number;
   // Base interval between retries (linear backoff): retry k waits
   // (k - 1) * opRetryInterval plus up to opRetryInterval of jitter, so the
@@ -480,6 +481,13 @@ function runWithRetry (
 
     // 2b. Retries check
     if (attemptNo++ > options.maxOpRetries) {
+      if (!options.reconnectOnDisconnection) {
+        // Nothing would replace the connection, so keep it (and every other
+        // subscription) and drop only this request
+        console.warn(`[pubsub] Giving up ${type} for channel`, channelID)
+        client.pendingOperations.tDelete(type, channelID)
+        return
+      }
       // The request is still wanted, so it stays pending. No response within
       // the whole retry budget means that this connection doesn't work:
       // replace it. The `close` logic settles every pending request (SUBs

@@ -136,7 +136,9 @@ How the pubsub client recovers on its own:
   connection; pending UNSUBs are settled by the close, since the server
   drops that connection's subscriptions. If the new connection doesn't
   answer either (e.g. an overloaded relay), each replacement waits longer
-  than the previous one, like failed connection attempts.
+  than the previous one, like failed connection attempts. With
+  `reconnectOnDisconnection: false`, nothing would replace the
+  connection, so the request is dropped instead.
 - The socket is dropped at once (close code `4001`), without waiting
   for a `close` event that a dead socket may not fire for minutes, when
   nothing arrived for `pingTimeout` ms (also checked against the wall
@@ -151,6 +153,7 @@ Log lines worth looking for:
 |---|---|---|
 | `[pubsub] Event: close (code C, reason "R"), open for N ms, last message M ms ago` | info | A socket closed. A connection attempt that never opened says `never opened (connecting for N ms)` instead. A large `last message` points at a dead connection, a small one at a close by the server. |
 | `[pubsub] Abandoning socket: <reason>` | warn | The client replaced a socket it considers dead: `ping timeout`, `ping timeout (wall clock)`, `connection timeout`, `offline`, `online, socket not open`, or `no response to <request> for <channelID>`. |
+| `[pubsub] Giving up <request> for channel <channelID>` | warn | With `reconnectOnDisconnection: false`: a request got no answer within its retry budget and was dropped; the connection is kept. |
 | `[pubsub] Late ACK: subscribed to <channelID> N ms after the request` | info | The relay answered a SUB more than `opRetryInterval` ms after it was sent: a slow link. |
 | `[pubsub] Received unexpected sub for <channelID> (not requested)` | info | The relay answered a SUB that the client never sent (or no longer wants): client and relay disagree. The answers to a SUB's own retries are logged at debug level, as `Received duplicate sub ACK for <channelID>`. |
 | `[pubsub] State: <previous> -> <state>` | debug | Every connection state change. |

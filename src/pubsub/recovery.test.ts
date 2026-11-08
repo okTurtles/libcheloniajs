@@ -478,6 +478,27 @@ describe('requests that exhaust the retry budget', () => {
     assert.ok(!client.pendingOperations.tHas(REQUEST_TYPE.KV_FILTER, 'k'))
   })
 
+  it('keeps the connection and drops the request with reconnectOnDisconnection: false', async () => {
+    const { client } = setup({ opRetryInterval: I, reconnectOnDisconnection: false })
+    client.sub('keep')
+    assert.ok(await waitFor(subscribed(client, ['keep'])))
+    const first = ignoreOnCurrentConnection(REQUEST_TYPE.SUB)
+    const newLogs = logs.fromNow()
+    client.sub('slow')
+    assert.ok(
+      await waitFor(() => !client.pendingOperations.tHas(REQUEST_TYPE.SUB, 'slow')),
+      'still pending'
+    )
+    await sleep(50)
+    assert.equal(connectionOf(client), first)
+    assert.ok(isOpen(client)(), 'the connection was closed')
+    assert.ok(subscribed(client, ['keep'])(), 'the other subscriptions were lost')
+    assert.equal(first.frames
+      .filter(({ msg }) => msg.type === REQUEST_TYPE.SUB && msg.channelID === 'slow').length, 5)
+    assert.equal(newLogs.grep(/Giving up sub for channel slow$/).length, 1)
+    assert.equal(newLogs.grep(/Abandoning socket/).length, 0)
+  })
+
   // Reconnection delays start at 20 to 40 ms and double with every attempt
   const BACKOFF = { opRetryInterval: I, minReconnectionDelay: 20, reconnectionDelayGrowFactor: 2 }
   const scheduledDelays = (client: PubSubClient) => {
