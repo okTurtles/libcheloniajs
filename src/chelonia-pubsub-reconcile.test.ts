@@ -14,7 +14,7 @@ import { after, afterEach, before, beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
-import { createClient, REQUEST_TYPE } from './pubsub/index.js'
+import { createClient, PUBSUB_RECONNECTION_FAILED, REQUEST_TYPE } from './pubsub/index.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
   captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay, fakeEntryData, isOpen,
@@ -418,5 +418,32 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
       `still not subscribed ${INTERVAL + 1000} ms later`
     )
     assert.ok(!pubsub.subscriptionSet.has('contract-F'))
+  })
+})
+
+describe('connectionOptions given to chelonia/configure', () => {
+  it('reach the pubsub client as given, so maxRetries: Infinity keeps reconnecting', async () => {
+    pubsub = await connectChelonia(relay, {
+      connectionOptions: { minReconnectionDelay: 20, maxRetries: Infinity }
+    })
+    assert.equal(pubsub.options.maxRetries, Infinity)
+    let failures = 0
+    const listener = (target: PubSubClient) => { if (target === pubsub) failures++ }
+    sbp('okTurtles.events/on', PUBSUB_RECONNECTION_FAILED, listener)
+    try {
+      // The connection drops, then the first attempt to reconnect fails
+      server.stallNewConnections()
+      server.killClients()
+      assert.ok(
+        await waitFor(() => pubsub.socket?.readyState === WebSocket.CONNECTING),
+        'reconnecting'
+      )
+      server.killClients()
+      server.pass()
+      assert.ok(await waitFor(isOpen(pubsub)), 'not reconnected')
+      assert.equal(failures, 0)
+    } finally {
+      sbp('okTurtles.events/off', PUBSUB_RECONNECTION_FAILED, listener)
+    }
   })
 })

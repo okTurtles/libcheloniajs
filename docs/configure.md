@@ -202,6 +202,9 @@ config:
   JSON-clone them away).
 - `hooks` is patched with `Object.assign` (same reason).
 - Setting a hook to `null` disables it.
+- `connectionOptions` is patched with `Object.assign` too, so values
+  that JSON can't hold (such as `maxRetries: Infinity`) reach the pubsub
+  client as given.
 - `connectionOptions` and `pubsubReconcileInterval` are read by
   `chelonia/connect`: a change applies to the next pubsub client, not to
   the current one.

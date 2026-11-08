@@ -534,6 +534,11 @@ export default sbp('sbp/selectors/register', {
     // merge will strip the hooks off of config.hooks when merging from the root of the object
     // because they are functions and cloneDeep doesn't clone functions
     Object.assign(this.config.hooks, config.hooks || {})
+    // ...and turns `Infinity` into `null`: `maxRetries: Infinity` would then
+    // stop reconnecting after one failed attempt
+    if (config.connectionOptions && this.config.connectionOptions) {
+      Object.assign(this.config.connectionOptions, config.connectionOptions)
+    }
     if (journalOverride === null) {
       // Explicit `journal: null` means "stop journaling": reset the
       // whole block to disabled defaults and wipe any persisted
