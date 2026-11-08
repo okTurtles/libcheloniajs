@@ -1,6 +1,6 @@
 // `chelonia/kv/set` signs the value with Chelonia's local height of the
 // contract, and the server answers 409 unless that is the contract's current
-// height (okTurtles/group-income#3176, CL-8). If Chelonia missed events (e.g.
+// height (okTurtles/group-income#3176). If Chelonia missed events (e.g.
 // the pubsub client lost the contract), every retry used to fail the same way
 // and `kv/set` gave up with "kv/set conflict setting KV value" (Group Income's
 // read markers and `lastLoggedIn`). Now it syncs the contract (once per call)
@@ -11,18 +11,18 @@
 import { serializeKey } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert/strict'
-import { after, before, describe, it } from 'node:test'
+import { after, afterEach, before, describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
 import type { SPMessage } from './SPMessage.js'
-import { EVENT_HANDLED } from './events.js'
 import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import { REQUEST_TYPE } from './pubsub/index.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
-  captureConsole, createFakePubsubServer, createFakeRelay, createTestContract, isOpen, kvConflict,
-  RELAY_URL, retainedContract, sleep, staleContract, storeSecretKeys, waitFor
+  captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay, createTestContract,
+  handledEvents, kvConflict, localHeight, retainedContract, sleep, staleContract, storeSecretKeys,
+  waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
 import type { ChelKvGetResult, ChelRootState, JSONType } from './types.js'
@@ -32,27 +32,22 @@ const server = createFakePubsubServer()
 const relay = createFakeRelay({ pubsub: server })
 let logs: ReturnType<typeof captureConsole>
 let pubsub: PubSubClient
-// Hashes of the events that Chelonia has processed
-const handled = new Set<string>()
-
-sbp('okTurtles.events/on', EVENT_HANDLED, (_contractID: string, message: SPMessage) => {
-  handled.add(message.hash())
-})
+const handled = handledEvents()
 
 before(async () => {
   server.install()
   logs = captureConsole()
   sbp('chelonia/_init')
-  await sbp('chelonia/configure', {
-    connectionURL: RELAY_URL,
-    fetch: relay.fetch,
+  pubsub = await connectChelonia(relay, {
     skipActionProcessing: true,
-    // A lost subscription stays lost
-    pubsubReconcileInterval: 0,
-    connectionOptions: { minReconnectionDelay: 20 }
+    // No periodic reconcile: a contract lost with `pubsub.unsub()` stays
+    // lost until the next `chelonia/pubsub/update` (e.g. the next retain)
+    pubsubReconcileInterval: 0
   })
-  pubsub = sbp('chelonia/connect')
-  assert.ok(await waitFor(isOpen(pubsub)), 'connected')
+})
+
+afterEach(() => {
+  relay.onRequest = undefined
 })
 
 after(() => {
@@ -64,8 +59,6 @@ after(() => {
 })
 
 const rootState = () => sbp('chelonia/private/state') as ChelRootState
-
-const localHeight = (contractID: string) => rootState().contracts[contractID]?.height
 
 // A stale copy of a contract that Chelonia does not want (not retained, so
 // not in its subscription set), e.g. state left over from a previous session
@@ -120,7 +113,7 @@ async function kvSet (
       .filter(({ method, path }) => method === 'POST' && path.startsWith('/kv/'))
       .map(({ status }) => status),
     // Number of syncs of the contract
-    syncs: requests.filter(({ path }) => path === `/latestHEADinfo/${contract.contractID}`).length
+    syncs: relay.syncsOf(contract.contractID, from)
   }
 }
 
@@ -130,7 +123,7 @@ const describeError = (e: unknown) =>
 const kvValue = async (contractID: string) =>
   ((await sbp('chelonia/kv/get', contractID, KEY)) as ChelKvGetResult | null)?.data
 
-describe('kv/set on a contract whose subscription was lost (CL-8)', () => {
+describe('kv/set on a contract whose subscription was lost', () => {
   const data = { messageHash: 'x' }
   let contractID: string
   let reply: SPMessage
@@ -159,7 +152,7 @@ describe('kv/set on a contract whose subscription was lost (CL-8)', () => {
   })
 })
 
-describe('kv/set on a contract that Chelonia is up to date with (CL-8)', () => {
+describe('kv/set on a contract that Chelonia is up to date with', () => {
   it('writes without syncing', async () => {
     const contract = await retainedContract(relay, pubsub)
     const result = await kvSet(contract, { messageHash: 'y' })
@@ -179,32 +172,24 @@ describe('kv/set on a contract that Chelonia is up to date with (CL-8)', () => {
       const reply = relay.postAction(contract, { text: 'just before' })
       return waitFor(() => handled.has(reply.hash())).then(kvConflict)
     }
-    try {
-      const result = await kvSet(contract, { messageHash: 'z' })
-      assert.ok(!result.error, describeError(result.error))
-      assert.deepEqual(result.statuses, [409, 204])
-      assert.equal(result.syncs, 0)
-    } finally {
-      relay.onRequest = undefined
-    }
+    const result = await kvSet(contract, { messageHash: 'z' })
+    assert.ok(!result.error, describeError(result.error))
+    assert.deepEqual(result.statuses, [409, 204])
+    assert.equal(result.syncs, 0)
   })
 })
 
-describe('kv/set when syncing does not help (CL-8)', () => {
+describe('kv/set when syncing does not help', () => {
   it('syncs at most once per call', async () => {
     const { contract } = await staleContract(relay, pubsub)
     // The server keeps answering 409 (e.g. it keeps getting new events)
     relay.onRequest = ({ method, path }) => {
       if (method === 'POST' && path.startsWith('/kv/')) return kvConflict()
     }
-    try {
-      const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 3 })
-      assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
-      assert.deepEqual(result.statuses, [409, 409, 409])
-      assert.equal(result.syncs, 1)
-    } finally {
-      relay.onRequest = undefined
-    }
+    const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 3 })
+    assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
+    assert.deepEqual(result.statuses, [409, 409, 409])
+    assert.equal(result.syncs, 1)
   })
 
   it('keeps the outcome when the sync fails, and logs it', async () => {
@@ -215,15 +200,11 @@ describe('kv/set when syncing does not help (CL-8)', () => {
         return new Response('', { status: 500 })
       }
     }
-    try {
-      const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 3 })
-      assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
-      assert.deepEqual(result.statuses, [409, 409, 409])
-      assert.equal(result.syncs, 1)
-      assert.equal(logged.grep(/\[kv\/set\] .*sync/).length, 1)
-    } finally {
-      relay.onRequest = undefined
-    }
+    const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 3 })
+    assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
+    assert.deepEqual(result.statuses, [409, 409, 409])
+    assert.equal(result.syncs, 1)
+    assert.equal(logged.grep(/\[kv\/set\] .*sync/).length, 1)
   })
 
   it('does not sync on a 412 (the If-Match etag is stale, not the height)', async () => {
@@ -231,18 +212,14 @@ describe('kv/set when syncing does not help (CL-8)', () => {
     relay.onRequest = ({ method, path }) => {
       if (method === 'POST' && path.startsWith('/kv/')) return new Response('', { status: 412 })
     }
-    try {
-      const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 2 })
-      assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
-      assert.deepEqual(result.statuses, [412, 412])
-      assert.equal(result.syncs, 0)
-    } finally {
-      relay.onRequest = undefined
-    }
+    const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 2 })
+    assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
+    assert.deepEqual(result.statuses, [412, 412])
+    assert.equal(result.syncs, 0)
   })
 })
 
-describe('kv/set on a contract that Chelonia does not want (CL-8)', () => {
+describe('kv/set on a contract that Chelonia does not want', () => {
   it('does not sync (which would subscribe to it)', async () => {
     const contract = unwantedContract()
     const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 2 })
@@ -255,12 +232,13 @@ describe('kv/set on a contract that Chelonia does not want (CL-8)', () => {
   })
 })
 
-describe('chelonia/kv/queuedSet on a contract whose subscription was lost (CL-8)', () => {
-  it('succeeds (the sync runs on the internal queue, the write on the public one)', async () => {
+describe('chelonia/kv/queuedSet on a contract whose subscription was lost', () => {
+  // A deadlock fails it with a timeout
+  it('succeeds (the sync runs on the internal queue, the write on the public one)', { timeout: 5000 }, async () => {
     const { contract } = await staleContract(relay, pubsub)
     const from = relay.requests.length
     const data = { messageHash: 'q' }
-    const written = sbp('chelonia/kv/queuedSet', {
+    await sbp('chelonia/kv/queuedSet', {
       contractID: contract.contractID,
       key: KEY,
       data,
@@ -269,23 +247,13 @@ describe('chelonia/kv/queuedSet on a contract whose subscription was lost (CL-8)
       // unencrypted
       encryptionKeyName: 'none',
       onconflict: writeAgain(data)
-    }) as Promise<unknown>
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const outcome = await Promise.race([
-      written.then(() => 'written', describeError),
-      new Promise((resolve) => { timer = setTimeout(resolve, 5000, 'timed out (deadlock?)') })
-    ])
-    clearTimeout(timer)
-    assert.equal(outcome, 'written')
-    const syncs = relay.requests.slice(from).filter(
-      ({ path }) => path === `/latestHEADinfo/${contract.contractID}`
-    )
-    assert.equal(syncs.length, 1)
+    })
+    assert.equal(relay.syncsOf(contract.contractID, from), 1)
     assert.deepEqual(await kvValue(contract.contractID), data)
   })
 })
 
-describe('chelonia/kv/update (slot API) on a contract whose subscription was lost (CL-8)', () => {
+describe('chelonia/kv/update (slot API) on a contract whose subscription was lost', () => {
   const SLOT = 'slotValue'
 
   before(() => {
@@ -309,7 +277,6 @@ describe('chelonia/kv/update (slot API) on a contract whose subscription was los
     assert.deepEqual(requests
       .filter(({ method, path }) => method === 'POST' && path.startsWith('/kv/'))
       .map(({ status }) => status), [409, 204])
-    assert.equal(requests
-      .filter(({ path }) => path === `/latestHEADinfo/${contract.contractID}`).length, 1)
+    assert.equal(relay.syncsOf(contract.contractID, from), 1)
   })
 })

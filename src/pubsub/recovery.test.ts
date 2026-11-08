@@ -110,6 +110,18 @@ describe('fake pubsub server (harness self-checks)', () => {
     await assert.rejects(opened, /callback failed/)
   })
 
+  it('rejects onNextOpen() without an open in time, and then forgets its callback', async () => {
+    const { client } = setup()
+    assert.ok(await waitFor(isOpen(client)))
+    let calls = 0
+    const opened = onNextOpen(client, () => { calls++ }, { timeout: 50 })
+    await assert.rejects(opened, /no open within 50 ms/)
+    const reopened = onNextOpen(client)
+    server.killClients()
+    await reopened
+    assert.equal(calls, 0)
+  })
+
   it('keeps the timeout of waitFor() when an emulated sleep holds back performance.now()', async () => {
     const clock = emulateSleep({ monotonic: true })
     try {
@@ -172,10 +184,12 @@ describe('pubsub client baseline', () => {
     client.unsub('x')
     client.sub('x')
     await sleep(300)
-    assert.deepEqual(
-      server.frames.slice(since).map(({ msg }) => `${msg.type}:${msg.channelID}`),
-      ['unsub:x', 'sub:x']
-    )
+    // The SUB's first retry (after 0 to opRetryInterval ms) can go out before
+    // its slow ACK arrives
+    const frames = server.frames.slice(since).map(({ msg }) => `${msg.type}:${msg.channelID}`)
+    const [first, ...rest] = frames
+    assert.equal(first, 'unsub:x', JSON.stringify(frames))
+    assert.ok(rest.length > 0 && rest.every((frame) => frame === 'sub:x'), JSON.stringify(frames))
     assert.ok(subscribed(client, ['x'])(), 'not subscribed')
     assert.ok(server.lastConnection!.subscriptions.has('x'), 'not subscribed on the server')
   })
@@ -263,22 +277,22 @@ describe('SUBs unanswered right after a reconnect (half-open socket after sleep/
     )))
   })
 
-  it('restores every wanted subscription once the network is back (CL-1)', () => {
+  it('restores every wanted subscription once the network is back', () => {
     assert.ok(obs.restored,
       `${obs.missing.length}/${ids.length} channels still not subscribed 3 s after the ` +
       'network came back')
   })
 
-  it('delivers events for those channels again (CL-1)', () => {
+  it('delivers events for those channels again', () => {
     assert.ok(obs.delivered, 'events posted by another participant were not delivered')
   })
 
-  it('replaces the dead connection instead of giving up on the channels (CL-1)', () => {
+  it('replaces the dead connection instead of giving up on the channels', () => {
     assert.ok(obs.pendingDuringOutage, 'a SUB was dropped during the outage')
     assert.ok(obs.abandoned >= 1, 'the dead socket was not abandoned')
   })
 
-  it('backs off between SUB retries: gap k >= k * opRetryInterval (CL-2)', () => {
+  it('backs off between SUB retries: gap k >= k * opRetryInterval', () => {
     assert.ok(obs.gaps.every((gaps) => gaps.length >= 4),
       `expected 5 sends per channel, got ${obs.gaps.map((gaps) => gaps.length + 1)}`)
     const violations = obs.gaps.flatMap(
@@ -327,21 +341,21 @@ describe('SUB ACKs delayed by a slow link', () => {
     )))
   })
 
-  it('accepts ACKs that arrive within the retry budget, so client and server agree (CL-1, CL-2)', () => {
+  it('accepts ACKs that arrive within the retry budget, so client and server agree', () => {
     assert.ok(obs.subscribed,
       `not subscribed ${SLOW + 3000} ms after open; ` +
       `${obs.unexpected} late ACKs ignored as "Received unexpected sub"`)
     assert.equal(obs.abandoned, 0, 'a slow but working connection was replaced')
   })
 
-  it('still has the subscriptions after the next reconnect (CL-1)', () => {
+  it('still has the subscriptions after the next reconnect', () => {
     assert.ok(obs.subscribedAfterReconnect && obs.delivered,
       `subscribed after reconnect: ${obs.subscribedAfterReconnect}, ` +
       `events delivered: ${obs.delivered}`)
   })
 })
 
-describe('requests that exhaust the retry budget (CL-1)', () => {
+describe('requests that exhaust the retry budget', () => {
   // Retry budget: 200 to 300 ms
   const I = 20
   // Ignores the requests of type `type` on the connection that is open now
@@ -412,12 +426,15 @@ describe('requests that exhaust the retry budget (CL-1)', () => {
     client.sub('keep')
     assert.ok(await waitFor(subscribed(client, ['w', 'keep'])))
     const first = ignoreOnCurrentConnection(REQUEST_TYPE.UNSUB)
+    const newLogs = logs.fromNow()
     client.unsub('w')
     assert.ok(await waitFor(() => {
       const current = connectionOf(client)
       return current && current !== first && current.subscriptions.has('keep') &&
         client.subscriptionSet.has('keep')
     }), 'reconnected and re-subscribed')
+    assert.equal(first.frames.filter(({ msg }) => msg.type === REQUEST_TYPE.UNSUB).length, 5)
+    assert.equal(newLogs.grep(/Abandoning socket: no response to unsub for w$/).length, 1)
     assert.ok(!client.subscriptionSet.has('w'))
     assert.ok(!client.pendingOperations.tHas(REQUEST_TYPE.SUB, 'w'))
     assert.ok(!client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, 'w'))
@@ -449,11 +466,14 @@ describe('requests that exhaust the retry budget (CL-1)', () => {
     client.sub('k')
     assert.ok(await waitFor(subscribed(client, ['k'])))
     const first = ignoreOnCurrentConnection(REQUEST_TYPE.KV_FILTER)
+    const newLogs = logs.fromNow()
     client.setKvFilter('k', ['a'])
     assert.ok(await waitFor(() => {
       const current = connectionOf(client)
       return current && current !== first && client.subscriptionSet.has('k')
     }), 'reconnected and re-subscribed')
+    assert.equal(first.frames.filter(({ msg }) => msg.type === REQUEST_TYPE.KV_FILTER).length, 5)
+    assert.equal(newLogs.grep(/Abandoning socket: no response to kv_filter for k$/).length, 1)
     assert.deepEqual(connectionOf(client)!.kvFilters.get('k'), ['a'])
     assert.ok(!client.pendingOperations.tHas(REQUEST_TYPE.KV_FILTER, 'k'))
   })
@@ -518,7 +538,7 @@ describe('requests that exhaust the retry budget (CL-1)', () => {
   })
 })
 
-describe('diagnostic logs (CL-10)', () => {
+describe('diagnostic logs', () => {
   it('logs a close at info level, with the code, the reason and how long the socket was open', async () => {
     const { client } = setup()
     client.sub('c')

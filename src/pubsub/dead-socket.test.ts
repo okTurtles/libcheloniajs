@@ -1,6 +1,6 @@
-// Tests of how the pubsub client replaces dead sockets (CL-3), notices
-// them right after waking up from sleep (CL-4) and reports its connection
-// state (CL-5), against the in-process fake server from `./test-harness.ts`.
+// Tests of how the pubsub client replaces dead sockets, notices them right
+// after waking up from sleep and reports its connection state, against the
+// in-process fake server from `./test-harness.ts`.
 // Port of `02-dead-socket.test.mjs`, from the regression suite of the
 // okTurtles/group-income#3176 report (okTurtles/libcheloniajs#121).
 //
@@ -66,12 +66,9 @@ const keepPinging = (interval: number) => {
 // Resolves with the ms from `since` until the next `open` of `client`, or
 // with `null` after `timeout` ms
 const reopenedWithin = (client: PubSubClient, timeout: number, since = performance.now()) =>
-  Promise.race([
-    onNextOpen(client).then(() => performance.now() - since),
-    sleep(timeout).then(() => null)
-  ])
+  onNextOpen(client, undefined, { timeout }).then(() => performance.now() - since, () => null)
 
-describe('ping timeout on a dead socket (CL-3)', () => {
+describe('ping timeout on a dead socket', () => {
   const PING = 300
   const obs = {} as {
     reopenedAfter: number | null;
@@ -122,12 +119,12 @@ describe('ping timeout on a dead socket (CL-3)', () => {
     assert.ok(obs.stable, 'the new socket was replaced too')
   })
 
-  it('emits PUBSUB_STATE_CHANGED for the transition (CL-5)', () => {
+  it('emits PUBSUB_STATE_CHANGED for the transition', () => {
     assert.deepEqual(obs.states, ['reconnecting', 'connecting', 'open'])
   })
 })
 
-describe('offline -> online while the old socket is dead (CL-3)', () => {
+describe('offline -> online while the old socket is dead', () => {
   const obs = {} as {
     detached: boolean;
     pending: boolean;
@@ -180,19 +177,19 @@ describe('offline -> online while the old socket is dead (CL-3)', () => {
     assert.ok(obs.delivered, 'events are not delivered')
   })
 
-  it('reports the state "offline" while the browser is offline (CL-5)', () => {
+  it('reports the state "offline" while the browser is offline', () => {
     assert.equal(obs.statusOffline.state, 'offline', `getStatus(): ${JSON.stringify(obs.statusOffline)}`)
     assert.deepEqual(obs.statusOffline.subscribed, [])
     assert.deepEqual(obs.statusOffline.pending, ['o'])
     assert.deepEqual(obs.statesOffline, ['offline'])
   })
 
-  it('emits reconnecting -> connecting -> open (CL-5)', () => {
+  it('emits reconnecting -> connecting -> open', () => {
     assert.deepEqual(obs.states, ['reconnecting', 'connecting', 'open'])
   })
 })
 
-describe('waking up from sleep with a dead socket (CL-4)', () => {
+describe('waking up from sleep with a dead socket', () => {
   // With this ping timeout the watchdog checks the wall clock every second
   // (every 5 s with the default of 45 s). The ping timer alone would need
   // 3 s of awake time.
@@ -232,7 +229,7 @@ describe('waking up from sleep with a dead socket (CL-4)', () => {
   })
 })
 
-describe('replacing dead sockets (CL-3)', () => {
+describe('replacing dead sockets', () => {
   it('abandons a connection attempt that times out, without waiting for it to close', async () => {
     const newLogs = logs.fromNow()
     server.stallNewConnections()
@@ -329,7 +326,7 @@ describe('replacing dead sockets (CL-3)', () => {
   })
 })
 
-describe('wall-clock ping watchdog (CL-4)', () => {
+describe('wall-clock ping watchdog', () => {
   it('leaves a socket that keeps receiving messages alone', async () => {
     const newLogs = logs.fromNow()
     keepPinging(100)
@@ -369,7 +366,7 @@ describe('wall-clock ping watchdog (CL-4)', () => {
   })
 })
 
-describe('connection state (CL-5)', () => {
+describe('connection state', () => {
   it('getStatus() reports the state and the subscriptions', async () => {
     const start = Date.now()
     const { client } = setup()

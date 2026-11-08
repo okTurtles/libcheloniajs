@@ -1,5 +1,5 @@
-// `chelonia/time` must stay right across sleep (okTurtles/group-income#3176,
-// CL-9). It is based on `performance.now()`, which browsers on macOS don't
+// `chelonia/time` must stay right across sleep (okTurtles/group-income#3176).
+// It is based on `performance.now()`, which browsers on macOS don't
 // advance while the machine sleeps (MDN, "Ticking during sleep"), so after
 // waking up it used to lag by the time slept. Every shelter-auth request (KV,
 // billable uploads) then got a 401 (the server allows 60 s of skew) until the
@@ -23,8 +23,8 @@ import './chelonia.js'
 import './internals.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
-  captureConsole, createFakePubsubServer, createFakeRelay, createTestContract, emulateSleep,
-  RELAY_URL, sleep, storeSecretKeys, waitFor
+  captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay, createTestContract,
+  emulateSleep, sleep, storeSecretKeys, waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
 
@@ -73,13 +73,7 @@ before(async () => {
   logs = captureConsole()
   clock = emulateSleep({ monotonic: true })
   sbp('chelonia/_init')
-  await sbp('chelonia/configure', {
-    connectionURL: RELAY_URL,
-    fetch: relay.fetch,
-    skipActionProcessing: true,
-    connectionOptions: { minReconnectionDelay: 20 }
-  })
-  pubsub = sbp('chelonia/connect')
+  pubsub = await connectChelonia(relay, { skipActionProcessing: true })
   contract = createTestContract()
   assert.equal(relay.append(contract.first), 200)
   storeSecretKeys(contract)

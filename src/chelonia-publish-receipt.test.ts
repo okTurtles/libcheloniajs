@@ -1,5 +1,5 @@
 // Publishing must not depend on pubsub delivering the published event back
-// (okTurtles/group-income#3176, CL-7). When the pubsub client has lost a
+// (okTurtles/group-income#3176). When the pubsub client has lost a
 // contract (or its socket is half-open) and another participant has posted
 // in the meantime, `publishEvent` must sync on the first 409 (not only on the
 // second), and the published event must be processed (`onprocessed`) even
@@ -16,25 +16,18 @@ import { after, before, describe, it } from 'node:test'
 import './chelonia.js'
 import './internals.js'
 import type { SPMessage } from './SPMessage.js'
-import { EVENT_HANDLED } from './events.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
-  actionMessage, captureConsole, createFakePubsubServer, createFakeRelay, isOpen, RELAY_URL,
-  retainedContract, sleep, staleContract, waitFor
+  actionMessage, captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay,
+  handledEvents, localHeight, retainedContract, sleep, staleContract, waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
-import type { ChelRootState } from './types.js'
 
 const server = createFakePubsubServer()
 const relay = createFakeRelay({ pubsub: server })
 let logs: ReturnType<typeof captureConsole>
 let pubsub: PubSubClient
-// Hashes of the events that Chelonia has processed
-const handled = new Set<string>()
-
-sbp('okTurtles.events/on', EVENT_HANDLED, (_contractID: string, message: SPMessage) => {
-  handled.add(message.hash())
-})
+const handled = handledEvents()
 
 before(() => {
   server.install()
@@ -47,29 +40,17 @@ after(() => {
   server.uninstall()
 })
 
-const localHeight = (contractID: string) =>
-  (sbp('chelonia/private/state') as ChelRootState).contracts[contractID]?.height
-
-// Number of syncs of `contractID` among the requests from position `from`
-// (positions, unlike timestamps, can't count a request from the same ms)
-const syncsOf = (contractID: string, from: number) =>
-  relay.requests.slice(from).filter(({ path }) => path === `/latestHEADinfo/${contractID}`).length
-
 // A fresh Chelonia, connected to the fake server, for the current `describe`
 function setUp (config: Record<string, unknown> = {}) {
   before(async () => {
     sbp('chelonia/_init')
-    await sbp('chelonia/configure', {
-      connectionURL: RELAY_URL,
-      fetch: relay.fetch,
+    pubsub = await connectChelonia(relay, {
       skipActionProcessing: true,
-      // A lost subscription stays lost (unless publishing heals it)
+      // No periodic reconcile: a lost subscription stays lost until publishing
+      // heals it or the next `chelonia/pubsub/update` (e.g. the next retain)
       pubsubReconcileInterval: 0,
-      connectionOptions: { minReconnectionDelay: 20 },
       ...config
     })
-    pubsub = sbp('chelonia/connect')
-    assert.ok(await waitFor(isOpen(pubsub)), 'connected')
   })
   after(() => {
     // Destroy the client first, so that it doesn't reconnect
@@ -105,7 +86,7 @@ async function publish (contract: TestContract, text: string) {
   }
 }
 
-describe('publishing to a contract whose pubsub subscription was lost (CL-7)', () => {
+describe('publishing to a contract whose pubsub subscription was lost', () => {
   setUp()
   let contractID: string
   let published: Awaited<ReturnType<typeof publish>>
@@ -149,7 +130,7 @@ describe('publishing to a contract whose pubsub subscription was lost (CL-7)', (
   })
 })
 
-describe('publishing while the socket is half-open (subscribed, but nothing arrives) (CL-7)', () => {
+describe('publishing while the socket is half-open (subscribed, but nothing arrives)', () => {
   const TIMEOUT = 300
   setUp({ publishReceiptTimeout: TIMEOUT })
   let contractID: string
@@ -179,11 +160,11 @@ describe('publishing while the socket is half-open (subscribed, but nothing arri
       published.processedAt()! >= TIMEOUT - 5,
       `processed ${published.processedAt()} ms after publishing`
     )
-    assert.equal(syncsOf(contractID, published.from), 1)
+    assert.equal(relay.syncsOf(contractID, published.from), 1)
   })
 })
 
-describe('publishing on a healthy connection (CL-7)', () => {
+describe('publishing on a healthy connection', () => {
   setUp({ publishReceiptTimeout: 200 })
 
   it('does not sync when pubsub delivers the published event', async () => {
@@ -191,27 +172,33 @@ describe('publishing on a healthy connection (CL-7)', () => {
     const published = await publish(contract, 'hello')
     assert.ok(await waitFor(() => published.processedAt() !== undefined), 'processed')
     await sleep(400)
-    assert.equal(syncsOf(contract.contractID, published.from), 0)
+    assert.equal(relay.syncsOf(contract.contractID, published.from), 0)
     assert.equal(published.logged.grep(/did not receive/).length, 0)
     assert.equal(published.conflicts, 0)
   })
 })
 
-describe('publishReceiptTimeout: 0 (CL-7)', () => {
+describe('publishReceiptTimeout: 0', () => {
   setUp({ publishReceiptTimeout: 0 })
 
-  it('disables the timed check for a subscribed contract', async () => {
+  it('disables the timed check for a subscribed contract', async (t) => {
     const contract = await retainedContract(relay, pubsub)
     server.blackhole()
     server.pass()
+    // Treating 0 as unset would arm the check for the default 5000 ms, which
+    // the sleep below can't wait for
+    const timers = t.mock.method(globalThis, 'setTimeout')
     const published = await publish(contract, 'not checked')
+    timers.mock.restore()
+    const delays = timers.mock.calls.map(({ arguments: args }) => args[1])
+    assert.ok(!delays.includes(5000), `timers armed while publishing: ${delays}`)
     await sleep(500)
     assert.equal(published.processedAt(), undefined)
-    assert.equal(syncsOf(contract.contractID, published.from), 0)
+    assert.equal(relay.syncsOf(contract.contractID, published.from), 0)
   })
 })
 
-describe('publishReceiptTimeout above the longest timer delay (CL-7)', () => {
+describe('publishReceiptTimeout above the longest timer delay', () => {
   setUp({ publishReceiptTimeout: 2 ** 31 })
 
   it('does not check before that delay', async () => {
@@ -220,11 +207,11 @@ describe('publishReceiptTimeout above the longest timer delay (CL-7)', () => {
     server.pass()
     const published = await publish(contract, 'checked much later')
     await sleep(300)
-    assert.equal(syncsOf(contract.contractID, published.from), 0)
+    assert.equal(relay.syncsOf(contract.contractID, published.from), 0)
   })
 })
 
-describe('chelonia/reset after publishing (CL-7)', () => {
+describe('chelonia/reset after publishing', () => {
   setUp({ publishReceiptTimeout: 200 })
 
   it('cancels the pending check', async () => {
@@ -235,12 +222,12 @@ describe('chelonia/reset after publishing (CL-7)', () => {
     await sbp('chelonia/reset')
     const from = relay.requests.length
     await sleep(400)
-    assert.equal(syncsOf(contract.contractID, from), 0)
+    assert.equal(relay.syncsOf(contract.contractID, from), 0)
     assert.equal(published.logged.grep(/did not receive/).length, 0)
   })
 })
 
-describe('chelonia/reset after publishing, then retaining the contract again (CL-7)', () => {
+describe('chelonia/reset after publishing, then retaining the contract again', () => {
   setUp({ publishReceiptTimeout: 200 })
 
   it('cancels the pending check of the previous session', async () => {
@@ -257,12 +244,12 @@ describe('chelonia/reset after publishing, then retaining the contract again (CL
     assert.equal(localHeight(contractID), published.height - 1, 'precondition: behind the event')
     const from = relay.requests.length
     await sleep(400)
-    assert.equal(syncsOf(contractID, from), 0)
+    assert.equal(relay.syncsOf(contractID, from), 0)
     assert.equal(published.logged.grep(/did not receive/).length, 0)
   })
 })
 
-describe('a 409 for a contract that is released or deleted in the meantime (CL-7)', () => {
+describe('a 409 for a contract that is released or deleted in the meantime', () => {
   setUp()
 
   // The relay holds the first POST /event while `during` runs, then answers 409
@@ -295,7 +282,7 @@ describe('a 409 for a contract that is released or deleted in the meantime (CL-7
     )
     assert.equal(sent, undefined)
     assert.deepEqual(postsOf(from), [409])
-    assert.equal(syncsOf(contractID, from), 0)
+    assert.equal(relay.syncsOf(contractID, from), 0)
     await sleep(50)
     assert.ok(!pubsub.subscriptionSet.has(contractID), 'subscribed again')
   })

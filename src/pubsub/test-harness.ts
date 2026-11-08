@@ -15,11 +15,12 @@ import * as assert from 'node:assert/strict'
 import { SPMessage } from '../SPMessage.js'
 import type { ProtoSPOpActionUnencrypted, SPKey, SPOpContract, SPOpValue } from '../SPMessage.js'
 import { Secret } from '../Secret.js'
+import { EVENT_HANDLED } from '../events.js'
 import { createCID } from '../functions.js'
 import { signedOutgoingDataWithRawKey } from '../signedData.js'
-import type { JSONType } from '../types.js'
+import type { ChelRootState, JSONType } from '../types.js'
 import {
-  createClient, NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, REQUEST_TYPE
+  createClient, NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, REQUEST_TYPE, RESPONSE_TYPE
 } from './index.js'
 import type { Options, PubSubClient } from './index.js'
 
@@ -170,6 +171,13 @@ export function createFakePubsubServer () {
     (conn) => conn.state === 'open' && conn.subscriptions.has(channelID)
   )
 
+  // A SUB or KV_FILTER request sets the channel's KV filter, or clears it if
+  // the request has none
+  const setKvFilter = (conn: FakeConnection, channelID: string, kvFilter: unknown) => {
+    if (Array.isArray(kvFilter)) conn.kvFilters.set(channelID, kvFilter)
+    else conn.kvFilters.delete(channelID)
+  }
+
   // Client -> server
   const receive = (conn: FakeConnection, text: string) => {
     let msg: FakeRequest
@@ -186,47 +194,33 @@ export function createFakePubsubServer () {
     if (override === 'ignore') return
     const { type, channelID } = msg
     if (override && typeof override === 'object') {
-      deliver(conn, { type: 'error', data: { type, channelID, reason: override.error } })
+      const data = { type, channelID, reason: override.error }
+      deliver(conn, { type: RESPONSE_TYPE.ERROR, data })
       return
     }
+    // Requests without a channel (PONG, PUSH_ACTION, ...) need nothing
+    if (typeof channelID !== 'string') return
+    const answer = (data: object) => deliver(conn, { type: RESPONSE_TYPE.OK, data })
     switch (type) {
-      case 'sub': {
-        if (typeof channelID !== 'string') return
+      case REQUEST_TYPE.SUB:
         conn.subscriptions.add(channelID)
-        if (Array.isArray(msg.kvFilter)) {
-          conn.kvFilters.set(channelID, msg.kvFilter)
-        } else {
-          conn.kvFilters.delete(channelID)
-        }
-        deliver(conn, { type: 'ok', data: { type, channelID, kvFilter: msg.kvFilter } })
+        setKvFilter(conn, channelID, msg.kvFilter)
+        answer({ type, channelID, kvFilter: msg.kvFilter })
         break
-      }
-      case 'unsub': {
-        if (typeof channelID !== 'string') return
+      case REQUEST_TYPE.UNSUB:
         conn.subscriptions.delete(channelID)
         conn.kvFilters.delete(channelID)
-        deliver(conn, { type: 'ok', data: { type, channelID } })
+        answer({ type, channelID })
         break
-      }
-      case 'kv_filter': {
-        if (typeof channelID !== 'string') return
-        if (Array.isArray(msg.kvFilter)) {
-          conn.kvFilters.set(channelID, msg.kvFilter)
-        } else {
-          conn.kvFilters.delete(channelID)
-        }
-        deliver(conn, { type: 'ok', data: { type, channelID, kvFilter: msg.kvFilter } })
+      case REQUEST_TYPE.KV_FILTER:
+        setKvFilter(conn, channelID, msg.kvFilter)
+        answer({ type, channelID, kvFilter: msg.kvFilter })
         break
-      }
-      case 'pub': {
-        if (typeof channelID !== 'string') return
+      case REQUEST_TYPE.PUB:
         for (const other of subscribersOf(channelID)) {
-          if (other !== conn) deliver(other, { type: 'pub', channelID, data: msg.data })
+          if (other === conn) continue
+          deliver(other, { type: NOTIFICATION_TYPE.PUB, channelID, data: msg.data })
         }
-        break
-      }
-      default:
-        // PONG, PUSH_ACTION, ...: nothing to answer
         break
     }
   }
@@ -385,14 +379,16 @@ export function createFakePubsubServer () {
       }
     },
     ping () {
-      for (const conn of server.openConnections) deliver(conn, { type: 'ping', data: Date.now() })
+      for (const conn of server.openConnections) {
+        deliver(conn, { type: NOTIFICATION_TYPE.PING, data: Date.now() })
+      }
     },
     // Sends `message` to every working connection subscribed to `channelID`
     notify (channelID: string, message: object) {
       for (const conn of subscribersOf(channelID)) deliver(conn, message)
     },
     entry (channelID: string, data: unknown) {
-      server.notify(channelID, { type: 'entry', channelID, data })
+      server.notify(channelID, { type: NOTIFICATION_TYPE.ENTRY, channelID, data })
     },
     // Frames the client sent, optionally filtered by type, channel and time
     framesOf (type?: string, channelID?: string, since = -Infinity): ClientFrame[] {
@@ -535,6 +531,37 @@ export async function staleContract (
   return { contract, reply }
 }
 
+// Configures Chelonia (after `chelonia/_init`) to use `relay`, connects it to
+// the installed fake pubsub server and waits for the connection to open.
+// `config` adds to (or overrides) the defaults.
+export async function connectChelonia (
+  relay: FakeRelay, config: Record<string, unknown> = {}
+): Promise<PubSubClient> {
+  await sbp('chelonia/configure', {
+    connectionURL: RELAY_URL,
+    fetch: relay.fetch,
+    // Reconnect within tens of milliseconds
+    connectionOptions: { minReconnectionDelay: 20 },
+    ...config
+  })
+  const pubsub: PubSubClient = sbp('chelonia/connect')
+  assert.ok(await waitFor(isOpen(pubsub)), 'connected')
+  return pubsub
+}
+
+// The hashes of the events that Chelonia handles from now on
+export function handledEvents (): Set<string> {
+  const handled = new Set<string>()
+  sbp('okTurtles.events/on', EVENT_HANDLED, (_contractID: string, message: SPMessage) => {
+    handled.add(message.hash())
+  })
+  return handled
+}
+
+// The height of Chelonia's copy of a contract
+export const localHeight = (contractID: string): number | undefined =>
+  (sbp('chelonia/private/state') as ChelRootState).contracts[contractID]?.height
+
 // Stand-in for the HTTP side of the server, for Chelonia-level tests: pass
 // `relay.fetch` as `config.fetch`. Answers `GET /time`, records every request
 // and serves two kinds of contracts:
@@ -646,6 +673,12 @@ export function createFakeRelay ({ pubsub }: { pubsub?: FakePubsubServer } = {})
     kv,
     requests,
     headInfo,
+    // Number of syncs of `contractID` among the requests from position `from`
+    // (positions, unlike timestamps, can't count a request from the same ms)
+    syncsOf (contractID: string, from = 0): number {
+      return requests.slice(from)
+        .filter(({ path }) => path === `/latestHEADinfo/${contractID}`).length
+    },
     // Appends an event without going through `fetch` (e.g. for another
     // participant's events); returns the `POST /event` status
     append (message: SPMessage): number {
@@ -725,14 +758,21 @@ export async function waitFor<T> (
 // synchronously inside the client's `open` handler, before the pending SUBs
 // are re-sent (e.g. to black-hole the connection right after it opens). If
 // it throws, the promise rejects (the client's listener would only log it).
+// Without an `open` within `timeout` ms, it rejects and `callback` never
+// runs, so that a broken reconnection fails the test instead of hanging it.
 export function onNextOpen (
   client: PubSubClient,
-  callback?: () => void
+  callback?: () => void,
+  { timeout = 5000 }: { timeout?: number } = {}
 ): Promise<number> {
   return new Promise((resolve, reject) => {
+    const stop = () => {
+      clearTimeout(timer)
+      sbp('okTurtles.events/off', PUBSUB_RECONNECTION_SUCCEEDED, listener)
+    }
     const listener = (target: PubSubClient) => {
       if (target !== client) return
-      sbp('okTurtles.events/off', PUBSUB_RECONNECTION_SUCCEEDED, listener)
+      stop()
       try {
         callback?.()
       } catch (e) {
@@ -741,6 +781,10 @@ export function onNextOpen (
       }
       resolve(Date.now())
     }
+    const timer = setTimeout(() => {
+      stop()
+      reject(new Error(`onNextOpen: no open within ${timeout} ms`))
+    }, timeout)
     sbp('okTurtles.events/on', PUBSUB_RECONNECTION_SUCCEEDED, listener)
   })
 }

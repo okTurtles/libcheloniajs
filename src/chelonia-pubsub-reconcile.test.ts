@@ -1,5 +1,5 @@
 // Chelonia must keep its pubsub client subscribed to every contract that it
-// wants (okTurtles/group-income#3176, CL-6), whatever made the client lose
+// wants (okTurtles/group-income#3176), whatever made the client lose
 // one (an unanswered or rejected SUB, a bug, ...): it reconciles the two sets
 // after every (re)connection and every `pubsubReconcileInterval` ms, and
 // `chelonia/pubsub/status` reports any mismatch.
@@ -17,8 +17,8 @@ import './internals.js'
 import { createClient, REQUEST_TYPE } from './pubsub/index.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
-  captureConsole, createFakePubsubServer, createFakeRelay, fakeEntryData, isOpen, onNextOpen,
-  RELAY_URL, sleep, waitFor
+  captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay, fakeEntryData, isOpen,
+  onNextOpen, RELAY_URL, sleep, waitFor
 } from './pubsub/test-harness.js'
 import type { ChelPubSubStatus, ChelRootState } from './types.js'
 
@@ -65,15 +65,7 @@ after(() => {
 })
 
 async function connect (pubsubReconcileInterval: number) {
-  await sbp('chelonia/configure', {
-    connectionURL: RELAY_URL,
-    fetch: relay.fetch,
-    pubsubReconcileInterval,
-    // Reconnect within tens of milliseconds
-    connectionOptions: { minReconnectionDelay: 20 }
-  })
-  pubsub = sbp('chelonia/connect')
-  assert.ok(await waitFor(isOpen(pubsub)), 'connected')
+  pubsub = await connectChelonia(relay, { pubsubReconcileInterval })
 }
 
 // Chelonia starts wanting `contractID` (the sync finds it up to date and
@@ -123,7 +115,7 @@ const subsOnConnection = (contractID: string) => server.lastConnection!.frames.f
 
 const status = () => sbp('chelonia/pubsub/status') as ChelPubSubStatus
 
-describe('chelonia/pubsub/status (CL-6)', () => {
+describe('chelonia/pubsub/status', () => {
   // Must run before the first `chelonia/connect` of this file
   it('reports "closed" and every wanted contract as missing without a pubsub client', async () => {
     await sbp('chelonia/configure', { connectionURL: RELAY_URL, fetch: relay.fetch })
@@ -221,7 +213,7 @@ describe('chelonia/pubsub/status (CL-6)', () => {
   })
 })
 
-describe('Chelonia reconciles its subscriptions with the pubsub client (CL-6)', () => {
+describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
   it('re-subscribes a contract that the pubsub client lost on the next reconnect', async () => {
     await connect(0)
     await want('contract-A')
@@ -246,7 +238,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client (CL-6)', 
     // `open` re-sent the SUB for B; reconciling adds the missing one only
     assert.equal(subsOnConnection('contract-A'), 1)
     assert.equal(subsOnConnection('contract-B'), 1)
-    // CL-10
+    // ...and logs it
     const reconciled = newLogs.grep(
       /\[chelonia\] pubsub reconcile \(reconnected\): subscribing again to 1 contract/
     )
@@ -283,7 +275,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client (CL-6)', 
     )
     assert.equal(pubsub.socket, socket, 'no reconnection')
     assert.ok(await eventIsReceived('contract-C'))
-    // CL-10
+    // ...and logs it
     const reconciled = newLogs.grep(
       /\[chelonia\] pubsub reconcile \(periodic\): subscribing again to 1 contract/
     )
