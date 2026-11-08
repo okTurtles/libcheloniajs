@@ -87,9 +87,10 @@ export type CheloniaConfig = {
   pubsubReconcileInterval?: number;
   // How long (in ms) to wait for a published event to come back over pubsub
   // before syncing the contract to process it (e.g., because the socket is
-  // half-open). If the pubsub client isn't subscribed to the contract, the
-  // contract is synced right away. `0` (or any value that is not a positive
-  // finite number) disables the timed check. Default: 5000.
+  // half-open). If the pubsub client is neither subscribed nor subscribing
+  // to the contract, the contract is synced right away. `0` (or any value
+  // that is not a positive finite number) disables the timed check.
+  // Default: 5000.
   publishReceiptTimeout?: number;
   preOp?: (message: SPMessage, state: ChelContractState) => boolean;
   postOp?: (message: SPMessage, state: ChelContractState) => boolean;

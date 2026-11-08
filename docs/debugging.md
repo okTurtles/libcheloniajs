@@ -136,9 +136,13 @@ How the pubsub client recovers on its own:
   connection; pending UNSUBs are settled by the close, since the server
   drops that connection's subscriptions. If the new connection doesn't
   answer either (e.g. an overloaded relay), each replacement waits longer
-  than the previous one, like failed connection attempts. With
-  `reconnectOnDisconnection: false`, nothing would replace the
-  connection, so the request is dropped instead.
+  than the previous one, like failed connection attempts. A request that
+  the relay never answers (a relay bug) keeps the cycle going: with the
+  defaults, every 80 to 90 s once the delay reaches
+  `maxReconnectionDelay`, and every new connection re-syncs every
+  contract. The `Abandoning socket` lines then name the same request
+  each time. With `reconnectOnDisconnection: false`, nothing would
+  replace the connection, so the request is dropped instead.
 - The socket is dropped at once (close code `4001`), without waiting
   for a `close` event that a dead socket may not fire for minutes, when
   nothing arrived for `pingTimeout` ms (also checked against the wall

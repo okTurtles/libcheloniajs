@@ -166,31 +166,17 @@ chelonia/out/atomic              — Execute multiple operations atomically
 1. **Outgoing**: Create `SPMessage` → Sign/Encrypt → Publish via `chelonia/private/out/publishEvent`
 2. **Incoming**: Receive via PubSub WebSocket or RESTful server endpoint → Deserialize → Validate signatures → Decrypt → Process → Update state → Run side effects
 
-### Pubsub recovery model
+### Pubsub recovery
 
-Incoming events depend on the pubsub client (`src/pubsub/index.ts`) being
-subscribed to every contract in Chelonia's `subscriptionSet`. The recovery
-layers, each covering the failures of the previous one:
+Chelonia must keep the pubsub client (`src/pubsub/index.ts`) subscribed to
+every contract in its `subscriptionSet`. Three layers make sure of it: the
+client replaces a connection that stops answering instead of dropping
+requests, Chelonia re-subscribes whatever the client lost (after every
+reconnection and periodically), and publishing and KV writes sync the
+contract instead of relying on pubsub alone.
 
-1. **The client never drops a wanted subscription.** A SUB/UNSUB/KV_FILTER
-   without an answer after `maxOpRetries` retries makes the client
-   replace the connection (`abandonSocket`: synthetic `close`, code 4001).
-   SUBs (with their KV filters) are re-sent on the new connection; pending
-   UNSUBs are settled by the close. Replacements in a row back off
-   (`unansweredReplacements`). Dead sockets (ping timeout, also checked
-   against the wall clock after sleep; connection timeout; `offline`) are
-   abandoned at once too, instead of waiting for a `close` event.
-2. **Chelonia reconciles.** `chelonia/pubsub/update` also runs after every
-   (re)connection and every `pubsubReconcileInterval` ms (set up in
-   `chelonia/connect`), re-subscribing anything the client lost (e.g. a
-   rejected SUB).
-3. **Publishing and KV writes don't rely on pubsub.** `publishEvent` syncs
-   on a 409 and syncs a contract whose published event didn't come back
-   (`publishReceiptTimeout`); `chelonia/kv/set` syncs once on a 409.
-
-State is observable through `client.state` / `getStatus()`,
-`PUBSUB_STATE_CHANGED` and `chelonia/pubsub/status` (see
-[docs/debugging.md](docs/debugging.md#pubsub-connection)).
+Full documentation: [docs/debugging.md](docs/debugging.md#pubsub-connection)
+(behaviour, status and log lines) and the comments in `src/pubsub/index.ts`.
 
 ### Shelter Protocol Operations
 
@@ -361,13 +347,9 @@ registration of a selector, and `src/chelonia.ts` locks the `chelonia` SBP domai
 scope, so a stub registered by one file (e.g. the `chelonia/contract/fullState` stub in
 `src/local-selectors/index.test.ts`) would shadow the real selectors for the whole process.
 
-Pubsub and network tests use `src/pubsub/test-harness.ts` (there is no WebSocket server in
-the repo): `createFakePubsubServer()` replaces the global `WebSocket` with an in-process fake
-that answers requests and injects faults (half-open sockets, stalled connects, latency, killed
-connections); `createFakeRelay()` fakes the HTTP endpoints for `config.fetch`, including real
-`SPMessage` chains (`createTestContract()`) and a KV store. Node has no `self`, so the client's
-`online`/`offline` listeners are triggered by hand (`emulateNavigator()`); `emulateSleep()`
-shifts `Date.now()` / holds back `performance.now()`. Examples: `src/pubsub/recovery.test.ts`,
+Pubsub and network tests use the in-process fakes in `src/pubsub/test-harness.ts` (there is
+no WebSocket server in the repo; the file's header comment lists what it fakes). Shared test
+helpers go there too. Examples: `src/pubsub/recovery.test.ts`,
 `src/chelonia-publish-receipt.test.ts`.
 
 ## Common Gotchas

@@ -706,7 +706,7 @@ it reaches the message and the logs.
 Chelonia doesn't apply a published event to the local state when the relay
 accepts it: it waits for the event to come back over pubsub, like everyone
 else's. If the pubsub client lost the subscription, or the socket is
-half-open, that never happens, so for a contract Chelonia is subscribed to
+half-open, that never happens, so for a contract Chelonia is subscribed to,
 it checks after every successful publish:
 
 - if the pubsub client is neither subscribed nor subscribing to the
