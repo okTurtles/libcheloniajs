@@ -958,7 +958,15 @@ export default sbp('sbp/selectors/register', {
             if (!entry.isFirstMessage() && this.subscriptionSet.has(contractID)) {
               const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
               if (localHeight != null && localHeight < entry.height()) {
-                await sbp('chelonia/private/in/sync', contractID, { force: true })
+                // A failed sync (e.g., a network error) doesn't end the publish
+                // while attempts remain: the next 409 syncs again, as in `kv/set`
+                try {
+                  await sbp('chelonia/private/in/sync', contractID, { force: true })
+                } catch (e) {
+                  console.warn(
+                    `[chelonia] Error syncing ${contractID} after a publish conflict; retrying anyway: ${(e as Error)?.message || e}`
+                  )
+                }
               }
             }
           } else {

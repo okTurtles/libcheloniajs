@@ -86,6 +86,11 @@ async function publish (contract: TestContract, text: string) {
   }
 }
 
+// The statuses of the `POST /event` requests from position `from`
+const postsOf = (from: number) => relay.requests.slice(from)
+  .filter(({ method, path }) => method === 'POST' && path === '/event')
+  .map(({ status }) => status)
+
 describe('publishing to a contract whose pubsub subscription was lost', () => {
   setUp()
   let contractID: string
@@ -270,9 +275,6 @@ describe('a 409 for a contract that is released or deleted in the meantime', () 
       relay.onRequest = undefined
     }
   }
-  const postsOf = (from: number) => relay.requests.slice(from)
-    .filter(({ method, path }) => method === 'POST' && path === '/event')
-    .map(({ status }) => status)
 
   it('stops without syncing (which would subscribe to it again) once it is released', async () => {
     const contract = await retainedContract(relay, pubsub)
@@ -295,5 +297,30 @@ describe('a 409 for a contract that is released or deleted in the meantime', () 
     )
     assert.equal(sent, undefined)
     assert.deepEqual(postsOf(from), [409])
+  })
+})
+
+describe('a 409 whose sync fails', () => {
+  setUp()
+
+  it('logs the error and tries again (the next 409 syncs again)', async () => {
+    const { contract } = await staleContract(relay, pubsub)
+    const { contractID } = contract
+    // Only the first sync fails, as with a short network outage
+    let failed = false
+    relay.onRequest = ({ path }) => {
+      if (failed || path !== `/latestHEADinfo/${contractID}`) return
+      failed = true
+      return new Response('', { status: 500 })
+    }
+    try {
+      const published = await publish(contract, 'after a failed sync')
+      assert.deepEqual(postsOf(published.from), [409, 409, 200])
+      assert.equal(published.logged.grep(
+        new RegExp(`Error syncing ${contractID} after a publish conflict; retrying anyway`)
+      ).length, 1)
+    } finally {
+      relay.onRequest = undefined
+    }
   })
 })
