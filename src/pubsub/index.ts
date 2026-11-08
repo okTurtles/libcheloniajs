@@ -937,9 +937,9 @@ const defaultMessageHandlers: MessageHandlers = {
 
     switch (type) {
       case REQUEST_TYPE.SUB: {
-        if (client.pendingOperations.tHas(REQUEST_TYPE.SUB, channelID)) {
-          const { since } = client.pendingOperations.tGet(REQUEST_TYPE.SUB, channelID) ?? {}
-          const elapsed = since === undefined ? 0 : Date.now() - since
+        const pending = client.pendingOperations.tGet(REQUEST_TYPE.SUB, channelID)
+        if (pending) {
+          const elapsed = pending.since === undefined ? 0 : Date.now() - pending.since
           if (elapsed > client.options.opRetryInterval) {
             console.info(`[pubsub] Late ACK: subscribed to ${channelID} ${elapsed} ms after the request`)
           }
