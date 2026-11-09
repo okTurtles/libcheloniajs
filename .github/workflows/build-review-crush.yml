@@ -24,6 +24,19 @@ name: Build Review (Crush)
 #
 # Steps whose comment names a step of pull-review-crush.yml are copies of that
 # step. Apply a fix in one of the two files to the other file too.
+#
+# Limits:
+#   - The audit vets the build that this job makes. A maintainer still
+#     publishes from a local machine, and that build is not compared with this
+#     one. Builds are reproducible, so a later change can publish from CI or
+#     compare the npm tarball with this build.
+#   - The base build is trusted: each release is compared only with the
+#     previous one. A toolchain change shows in the audit of the release that
+#     brings it in (package-lock.json is in the source diff).
+#   - Type declarations are not audited, because Node never runs them.
+#   - An LLM audit can miss code or be prompt-injected by the built files. The
+#     sandbox limits what the agent can do, and "Check verdict" fails unless
+#     the review ends with the CLEAN verdict.
 
 on:
   push:

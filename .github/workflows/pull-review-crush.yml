@@ -18,6 +18,11 @@ name: AI PR Review (Crush)
 # It reads its inputs from these optional repo variables (Settings → Secrets
 # and variables → Actions → Variables): REVIEW_PROVIDER, REVIEW_MODEL,
 # PROJECT_CTX and REVIEW_TIMEOUT_MINUTES.
+#
+# build-review-crush.yml copies the steps "Resolve provider settings",
+# "Install crush and bubblewrap", "Install code-review skill" and the sandbox
+# of "Run agentic review". Apply a fix in one of the two files to the other
+# file too.
 
 on:
   workflow_call:
