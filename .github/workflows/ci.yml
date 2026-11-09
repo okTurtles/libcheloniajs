@@ -27,3 +27,6 @@ jobs:
       - run: npm ci
       - run: npm install
       - run: npm test
+      # dist/ is not in git, so this is the only check of the CJS build
+      # (tsconfig.cjs.json) before a release. npm test does not cover it.
+      - run: npm run build
