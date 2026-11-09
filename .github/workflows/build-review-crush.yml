@@ -382,7 +382,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       # Copied from "Install crush and bubblewrap" in pull-review-crush.yml.
-      # The comment above that step explains the tool settings in crush.json.
+      # The comment above that step explains the settings in crush.json.
       - name: Install crush and bubblewrap
         if: steps.builds.outputs.changed == 'true'
         run: |
@@ -421,7 +421,8 @@ jobs:
                     "supports_attachments": true,
                     "can_reason": true,
                     "reasoning_levels": ["low", "high", "max"],
-                    "default_reasoning_effort": "max"
+                    "default_reasoning_effort": "max",
+                    "default_max_tokens": 131072
                   }
                 ]
               }
