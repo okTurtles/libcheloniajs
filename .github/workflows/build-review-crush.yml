@@ -549,14 +549,16 @@ jobs:
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
         run: |
           # crush output is untrusted. Stop workflow commands while it is
-          # printed, so a line such as `::error::` in it does nothing.
+          # printed, so a line such as `::error::` in it does nothing. The
+          # runner sees the resume token only at the start of a line, and the
+          # output may not end with a newline.
           log_untrusted() {
             local token
             token=$(openssl rand -hex 16)
             echo "::group::$1"
             echo "::stop-commands::$token"
             cat "$2"
-            echo "::$token::"
+            printf '\n::%s::\n' "$token"
             echo "::endgroup::"
           }
 
