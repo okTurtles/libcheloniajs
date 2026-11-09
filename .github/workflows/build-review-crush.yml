@@ -602,8 +602,16 @@ jobs:
             --ro-bind / /
             --dev /dev --proc /proc
             --tmpfs /tmp
+            --tmpfs /run
             --tmpfs "$RUNNER_TEMP"
           )
+          # crush needs DNS, and on Ubuntu /etc/resolv.conf links to the
+          # systemd-resolved stub file in /run. Bind that one file back,
+          # read-only.
+          RESOLV_CONF=$(readlink -f /etc/resolv.conf)
+          case "$RESOLV_CONF" in
+            /run/*) BWRAP+=(--ro-bind "$RESOLV_CONF" "$RESOLV_CONF") ;;
+          esac
           for dir in "${RUNNER_AGENT_DIRS[@]}"; do
             BWRAP+=(--tmpfs "$dir")
           done
