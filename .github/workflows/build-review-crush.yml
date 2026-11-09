@@ -147,10 +147,73 @@ jobs:
         with:
           node-version: 22
 
-      # Only "Run build review" has secrets in its env, so the dependencies
-      # and build scripts of both tags see none.
+      # Copied from the bubblewrap part of "Install crush and bubblewrap" in
+      # pull-review-crush.yml. bubblewrap (bwrap) sandboxes "Build both tags"
+      # and "Run build review". ripgrep speeds up crush's code search. Neither
+      # is preinstalled on ubuntu-latest.
+      - name: Install bubblewrap and ripgrep
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap ripgrep
+
+          # Ubuntu 24.04 restricts unprivileged user namespaces through
+          # AppArmor (see actions/runner-images#10015), so bwrap can fail out
+          # of the box. Lift the restriction only if bwrap does not work as-is.
+          if ! bwrap --unshare-all --die-with-parent --ro-bind / / --dev /dev --proc /proc -- true; then
+            echo "bwrap blocked by AppArmor userns restriction; lifting kernel.apparmor_restrict_unprivileged_userns"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            bwrap --unshare-all --die-with-parent --ro-bind / / --dev /dev --proc /proc -- true
+          fi
+
+      # The build runs code of the tag under audit (its build scripts and its
+      # dependencies), which is the code that this audit suspects. Outside a
+      # sandbox, that code could write GITHUB_ENV or GITHUB_PATH, leave a
+      # process that outlives the step, or use sudo, and so read the API keys
+      # of "Run build review" or change its verdict. `npm ci --ignore-scripts`
+      # runs no dependency code, so it runs outside. `npm run build` runs in
+      # bwrap, which gives it:
+      #   - no network, and from the step env only PATH, HOME and NODE_OPTIONS
+      #     (no GITHUB_ENV, GITHUB_PATH or token);
+      #   - its own PID namespace, so all of its processes end with it;
+      #   - no_new_privs (bwrap always sets it), so no sudo;
+      #   - write access only to its source dir and to tmpfs dirs;
+      #   - a tmpfs over /run. The runner user is in the docker group, and a
+      #     read-only mount does not stop a connection to /run/docker.sock,
+      #     which gives root;
+      #   - a tmpfs over the runner temp dir and the runner agent dirs, as in
+      #     "Run build review".
+      # No later step runs code from the source dirs; they only read files
+      # there ("Run build review" reads them inside its own sandbox).
       - name: Build both tags
         run: |
+          RUNNER_AGENT_DIRS=()
+          for dir in /home/runner/actions-runner /home/runner/runners/*; do
+            if [ -d "$dir" ]; then
+              RUNNER_AGENT_DIRS+=("$dir")
+            fi
+          done
+          BWRAP=(
+            bwrap
+            --unshare-all
+            --die-with-parent
+            --ro-bind / /
+            --dev /dev --proc /proc
+            --tmpfs /tmp
+            --tmpfs /run
+            --tmpfs "$RUNNER_TEMP"
+          )
+          for dir in "${RUNNER_AGENT_DIRS[@]}"; do
+            BWRAP+=(--tmpfs "$dir")
+          done
+          # npm writes its log files to its cache dir, which must be writable.
+          BWRAP+=(
+            --clearenv
+            --setenv PATH "$PATH"
+            --setenv HOME "$HOME"
+            --setenv NODE_OPTIONS "$NODE_OPTIONS"
+            --setenv npm_config_cache /tmp/npm-cache
+          )
+
           build_tag() {
             local tag=$1 dir=$2
             echo "::group::Build $tag"
@@ -159,9 +222,10 @@ jobs:
             # Old tags have dist/ in git, and their build does not delete it
             # first, so files of deleted sources would stay.
             rm -rf "$dir/dist"
-            # --ignore-scripts: install scripts would run outside any sandbox.
-            # No dependency has one, so the build output is the same.
-            (cd "$dir" && npm ci --ignore-scripts --no-audit --no-fund && npm run build)
+            # No dependency has an install script, so --ignore-scripts does
+            # not change the build output.
+            (cd "$dir" && npm ci --ignore-scripts --no-audit --no-fund)
+            "${BWRAP[@]}" --bind "$dir" "$dir" --chdir "$dir" -- npm run build
             echo "::endgroup::"
           }
           build_tag "$BASE_TAG" "$WORK_DIR/base-src"
@@ -263,13 +327,19 @@ jobs:
         run: |
           copy_build() {
             local dist=$1/dist
-            # The TypeScript build writes no dotfiles. A .gitignore or
-            # .gitattributes in the build could hide files from the diff or
-            # mark them binary, so refuse any dotfile.
-            DOTFILES=$(find "$dist" -mindepth 1 -name '.*')
-            if [ -n "$DOTFILES" ]; then
-              echo "::error::The build in $1 has dotfiles, which the audit does not accept"
-              printf '%s\n' "$DOTFILES"
+            # This copy runs outside the build sandbox. A symlink could make
+            # it read a path that the sandbox hides, and a .gitignore or
+            # .gitattributes could hide files from the diff or mark them
+            # binary. The TypeScript build writes only regular files and dirs,
+            # and no dotfiles, so refuse anything else.
+            if [ -L "$dist" ] || [ ! -d "$dist" ]; then
+              echo "::error::The build in $1 has no dist/ dir, or its dist/ is a symlink"
+              exit 1
+            fi
+            ODD_FILES=$(find "$dist" -mindepth 1 \( -name '.*' -o ! -type f ! -type d \))
+            if [ -n "$ODD_FILES" ]; then
+              echo "::error::The build in $1 has dotfiles, symlinks or other special files, which the audit does not accept"
+              printf '%s\n' "$ODD_FILES"
               exit 1
             fi
             mkdir -p "$BUILD_REPO/built"
@@ -394,26 +464,12 @@ jobs:
             echo "SMALL_MODEL=$SMALL_MODEL"
           } >> "$GITHUB_ENV"
 
-      # Copied from "Install crush and bubblewrap" in pull-review-crush.yml.
-      # The comment above that step explains the settings in crush.json.
-      - name: Install crush and bubblewrap
+      # Copied from the crush part of "Install crush and bubblewrap" in
+      # pull-review-crush.yml. The comment above that step explains the
+      # settings in crush.json.
+      - name: Install crush
         if: steps.builds.outputs.changed == 'true'
         run: |
-          # bubblewrap (bwrap) sandboxes crush in "Run build review". ripgrep
-          # speeds up crush's code search. Neither is preinstalled on
-          # ubuntu-latest.
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap ripgrep
-
-          # Ubuntu 24.04 restricts unprivileged user namespaces through
-          # AppArmor (see actions/runner-images#10015), so bwrap can fail out
-          # of the box. Lift the restriction only if bwrap does not work as-is.
-          if ! bwrap --unshare-all --die-with-parent --ro-bind / / --dev /dev --proc /proc -- true; then
-            echo "bwrap blocked by AppArmor userns restriction; lifting kernel.apparmor_restrict_unprivileged_userns"
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-            bwrap --unshare-all --die-with-parent --ro-bind / / --dev /dev --proc /proc -- true
-          fi
-
           npm install -g @charmland/crush
           mkdir -p ~/.config/crush
           cat > ~/.config/crush/crush.json << 'EOF'
