@@ -215,7 +215,7 @@ jobs:
           )
 
           build_tag() {
-            local tag=$1 dir=$2
+            local tag=$1 dir=$2 pristine
             echo "::group::Build $tag"
             mkdir -p "$dir"
             git archive --format=tar "refs/tags/$tag" | tar -x -C "$dir"
@@ -226,6 +226,18 @@ jobs:
             # not change the build output.
             (cd "$dir" && npm ci --ignore-scripts --no-audit --no-fund)
             "${BWRAP[@]}" --bind "$dir" "$dir" --chdir "$dir" -- npm run build
+            # npm packs package.json, README, LICENSE and the other root
+            # files that it always includes as the build leaves them, but the
+            # audit reads only dist/. A normal build changes no file outside
+            # dist/ and node_modules/, so fail on any other change. The
+            # sandbox has ended all build processes by now.
+            pristine=$(mktemp -d)
+            git archive --format=tar "refs/tags/$tag" | tar -x -C "$pristine"
+            if ! diff -ru --no-dereference -x dist -x node_modules "$pristine" "$dir"; then
+              echo "::error::The build of $tag changed files outside dist/ and node_modules/ (diff in the log of this step)"
+              exit 1
+            fi
+            rm -rf "$pristine"
             echo "::endgroup::"
           }
           build_tag "$BASE_TAG" "$WORK_DIR/base-src"
