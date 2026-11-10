@@ -62,7 +62,7 @@ import {
   unwrapMaybeEncryptedData
 } from './encryptedData.js'
 import './files.js'
-import { clearReprocessDebounceAll, type PublishOptions } from './internals.js'
+import { clearReprocessDebounceAll, syncIfBehind, type PublishOptions } from './internals.js'
 import './kv.js'
 import {
   isSignedData,
@@ -3200,15 +3200,12 @@ export default sbp('sbp/selectors/register', {
             // (e.g., the subscription was lost), every further attempt would
             // fail the same way, so sync (once per call). Only contracts that
             // Chelonia wants are synced, as syncing subscribes to a contract.
-            if (
-              response.status === 409 &&
-              !syncedAfterConflict &&
-              this.subscriptionSet.has(contractID) &&
-              sbp(this.config.stateSelector).contracts[contractID]?.height === signedHeight
-            ) {
-              syncedAfterConflict = true
+            if (response.status === 409 && !syncedAfterConflict) {
               try {
-                await sbp('chelonia/private/in/sync', contractID, { force: true })
+                // Unless an event past `signedHeight` arrived meanwhile
+                await syncIfBehind.call(this, contractID, signedHeight + 1, () => {
+                  syncedAfterConflict = true
+                })
               } catch (e) {
                 console.warn(
                   `[kv/set] Error syncing ${contractID} after a conflict setting ${key}; retrying anyway: ${(e as Error)?.message || e}`

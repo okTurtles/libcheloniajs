@@ -21,8 +21,8 @@ import { REQUEST_TYPE } from './pubsub/index.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
   captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay, createTestContract,
-  handledEvents, kvConflict, localHeight, retainedContract, sleep, staleContract, storeSecretKeys,
-  waitFor
+  handledEvents, keepQueueBusy, kvConflict, localHeight, retainedContract, sleep, staleContract,
+  storeSecretKeys, waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
 import type { ChelKvGetResult, ChelRootState, JSONType } from './types.js'
@@ -229,6 +229,25 @@ describe('kv/set on a contract that Chelonia does not want', () => {
     await sleep(50)
     assert.ok(!pubsub.subscriptionSet.has(contract.contractID))
     assert.ok(!pubsub.pendingOperations.tHas(REQUEST_TYPE.SUB, contract.contractID))
+  })
+
+  it('does not sync one released while its queue is busy (the removal waits in the queue)', async (t) => {
+    const contract = await retainedContract(relay, pubsub)
+    const { contractID } = contract
+    // No back-off, so that the 409 is handled while the removal waits
+    t.mock.method(Math, 'random', () => 0)
+    let first = true
+    relay.onRequest = ({ method, path }) => {
+      if (!first || method !== 'POST' || !path.startsWith('/kv/')) return
+      first = false
+      keepQueueBusy(contractID, 300)
+      sbp('chelonia/contract/release', contractID).catch(() => {})
+      return kvConflict()
+    }
+    const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 2 })
+    await sbp('chelonia/contract/wait', contractID)
+    assert.equal(result.syncs, 0)
+    assert.equal(localHeight(contractID), undefined, 'the contract is back')
   })
 })
 

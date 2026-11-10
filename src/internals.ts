@@ -298,6 +298,22 @@ const keyRotationHelper = <T>(
   })
 }
 
+// Force-syncs `contractID` unless Chelonia no longer wants it or its state has
+// reached `height`. Checked in the contract's queue, i.e. after a removal
+// queued earlier: syncing a released contract would subscribe to it again.
+// `beforeSync` runs right before the sync.
+export const syncIfBehind = function (
+  this: CheloniaContext, contractID: string, height: number, beforeSync?: () => void
+): Promise<void> {
+  return sbp('chelonia/private/queueEvent', contractID, async () => {
+    if (!this.subscriptionSet.has(contractID)) return
+    const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
+    if (localHeight == null || localHeight >= height) return
+    beforeSync?.()
+    await sbp('chelonia/private/in/syncContract', contractID, { force: true })
+  })
+}
+
 // A published event normally comes back over pubsub, and is processed then
 // (which is when `onprocessed` fires). That doesn't happen if the pubsub
 // client isn't subscribed to the contract (e.g., the subscription was lost)
@@ -314,22 +330,22 @@ const ensurePublishedEventReceived = function (
 ) {
   if (entry.isFirstMessage() || !this.subscriptionSet.has(contractID)) return
   const instance = this._instance
+  const { signal } = this.abortController
   const height = entry.height()
   const check = (reason: string) => {
     try {
-      // Nothing to do after a reset, if the contract is no longer wanted or
-      // once the event (or a later one) has been processed
-      if (instance !== this._instance || !this.subscriptionSet.has(contractID)) return
-      const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
-      if (localHeight != null && localHeight >= height) return
-      console.warn(
-        `[chelonia] Published ${entry.description()} but did not receive it (${reason}); syncing ${contractID}`
-      )
-      sbp('chelonia/private/in/sync', contractID, { force: true }).catch((e: unknown) => {
+      // Nothing to do after a reset, or during one (`chelonia/reset` aborts
+      // `signal` before it waits for `postCleanupFn`)
+      if (instance !== this._instance || signal.aborted) return
+      syncIfBehind.call(this, contractID, height, () => {
+        console.warn(
+          `[chelonia] Published ${entry.description()} but did not receive it (${reason}); syncing ${contractID}`
+        )
+        // Re-subscribe to the contract if the pubsub client lost it
+        if (this.pubsub) sbp('chelonia/pubsub/update')
+      }).catch((e: unknown) => {
         console.error(`[chelonia] Error syncing ${contractID} after publishing`, e)
       })
-      // Re-subscribe to the contract if the pubsub client lost it
-      if (this.pubsub) sbp('chelonia/pubsub/update')
     } catch (e) {
       console.error(`[chelonia] Error checking that ${entry.description()} was received`, e)
     }
@@ -955,18 +971,16 @@ export default sbp('sbp/selectors/register', {
             // attempt would fail the same way, so sync. Only while the contract
             // is wanted: one released or deleted meanwhile has no local state,
             // so the next attempt stops (and syncing would subscribe to it).
-            if (!entry.isFirstMessage() && this.subscriptionSet.has(contractID)) {
-              const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
-              if (localHeight != null && localHeight < entry.height()) {
-                // A failed sync (e.g., a network error) doesn't end the publish
-                // while attempts remain: the next 409 syncs again, as in `kv/set`
-                try {
-                  await sbp('chelonia/private/in/sync', contractID, { force: true })
-                } catch (e) {
-                  console.warn(
-                    `[chelonia] Error syncing ${contractID} after a publish conflict; retrying anyway: ${(e as Error)?.message || e}`
-                  )
-                }
+            if (!entry.isFirstMessage()) {
+              // A failed sync (e.g., a network error) doesn't end the publish
+              // while attempts remain: unlike `kv/set`, which syncs once per
+              // call, the next 409 syncs again
+              try {
+                await syncIfBehind.call(this, contractID, entry.height())
+              } catch (e) {
+                console.warn(
+                  `[chelonia] Error syncing ${contractID} after a publish conflict; retrying anyway: ${(e as Error)?.message || e}`
+                )
               }
             }
           } else {

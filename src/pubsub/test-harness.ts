@@ -565,6 +565,13 @@ export function handledEvents (): Set<string> {
 export const localHeight = (contractID: string): number | undefined =>
   (sbp('chelonia/private/state') as ChelRootState).contracts[contractID]?.height
 
+// Keeps the queue of `contractID` busy for `ms` ms, like a slow event handler,
+// so that whatever is queued meanwhile (e.g., a released contract's removal)
+// waits
+export const keepQueueBusy = (contractID: string, ms: number): void => {
+  sbp('chelonia/private/queueEvent', contractID, () => sleep(ms)).catch(() => {})
+}
+
 // Stand-in for the HTTP side of the server, for Chelonia-level tests: pass
 // `relay.fetch` as `config.fetch`. Answers `GET /time`, records every request
 // and serves two kinds of contracts:

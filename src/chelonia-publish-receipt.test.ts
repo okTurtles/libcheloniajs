@@ -19,7 +19,8 @@ import type { SPMessage } from './SPMessage.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
   actionMessage, captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay,
-  handledEvents, localHeight, retainedContract, sleep, staleContract, subscribed, waitFor
+  handledEvents, keepQueueBusy, localHeight, retainedContract, sleep, staleContract, subscribed,
+  waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
 
@@ -255,6 +256,39 @@ describe('chelonia/reset after publishing, then retaining the contract again', (
   })
 })
 
+describe('chelonia/reset while the check after publishing is due', () => {
+  setUp({ publishReceiptTimeout: 200 })
+
+  it('does not start a sync that outlives the reset', async () => {
+    const contract = await retainedContract(relay, pubsub)
+    server.blackhole()
+    server.pass()
+    await publish(contract, 'right before the reset')
+    const from = relay.requests.length
+    // The check is due while `postCleanupFn` runs, before the reset ends
+    await sbp('chelonia/reset', () => sleep(400))
+    assert.equal(relay.syncsOf(contract.contractID, from), 0)
+  })
+})
+
+describe('a contract released while its queue is busy (the removal waits in the queue)', () => {
+  setUp({ publishReceiptTimeout: 200 })
+
+  it('is not synced again by the check after publishing', async () => {
+    const contract = await retainedContract(relay, pubsub)
+    const { contractID } = contract
+    server.blackhole()
+    server.pass()
+    await publish(contract, 'right before the release')
+    keepQueueBusy(contractID, 400)
+    const from = relay.requests.length
+    await sbp('chelonia/contract/release', contractID)
+    await sbp('chelonia/contract/wait', contractID)
+    assert.equal(relay.syncsOf(contractID, from), 0)
+    assert.equal(localHeight(contractID), undefined, 'the contract is back')
+  })
+})
+
 describe('a 409 for a contract that is released or deleted in the meantime', () => {
   setUp()
 
@@ -301,6 +335,22 @@ describe('a 409 for a contract that is released or deleted in the meantime', () 
     assert.deepEqual(postsOf(from), [409])
     // Its sync would throw (and be logged) before sending a request
     assert.ok(!syncStarted.includes(contractID), 'started to sync it')
+  })
+
+  it('stops once it is released, also while its queue is busy', async (t) => {
+    const contract = await retainedContract(relay, pubsub)
+    const { contractID } = contract
+    // No back-off, so that the 409 is handled while the removal waits
+    t.mock.method(Math, 'random', () => 0)
+    const { sent, from } = await publishWithConflict(contract, async () => {
+      keepQueueBusy(contractID, 300)
+      sbp('chelonia/contract/release', contractID).catch(() => {})
+    })
+    assert.equal(sent, undefined)
+    assert.deepEqual(postsOf(from), [409])
+    await sbp('chelonia/contract/wait', contractID)
+    assert.equal(relay.syncsOf(contractID, from), 0)
+    assert.equal(localHeight(contractID), undefined, 'the contract is back')
   })
 })
 
