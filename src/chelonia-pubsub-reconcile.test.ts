@@ -18,7 +18,7 @@ import { createClient, PUBSUB_RECONNECTION_FAILED, REQUEST_TYPE } from './pubsub
 import type { PubSubClient } from './pubsub/index.js'
 import {
   captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay, fakeEntryData, isOpen,
-  onNextOpen, RELAY_URL, sleep, waitFor
+  onNextOpen, RELAY_URL, sleep, subscribed, waitFor
 } from './pubsub/test-harness.js'
 import type { ChelPubSubStatus, ChelRootState } from './types.js'
 
@@ -81,7 +81,7 @@ async function seed (contractID: string) {
 // Chelonia wants `contractID` and the pubsub client subscribes to it
 async function want (contractID: string) {
   await seed(contractID)
-  assert.ok(await waitFor(() => pubsub.subscriptionSet.has(contractID)), `subscribed to ${contractID}`)
+  assert.ok(await waitFor(subscribed(pubsub, [contractID])), `subscribed to ${contractID}`)
 }
 
 // The pubsub client loses `contractID` while Chelonia still wants it.
@@ -153,9 +153,7 @@ describe('chelonia/pubsub/status', () => {
     const reopened = onNextOpen(pubsub)
     server.killClients()
     await reopened
-    assert.ok(await waitFor(() => (
-      pubsub.subscriptionSet.has('contract-S1') && pubsub.subscriptionSet.has('contract-S2')
-    )), 're-subscribed')
+    assert.ok(await waitFor(subscribed(pubsub, ['contract-S1', 'contract-S2'])), 're-subscribed')
     const healed = status()
     assert.equal(healed.state, 'open')
     assert.equal(healed.wanted, 2)
@@ -229,7 +227,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
     server.killClients()
     await reopened
     assert.ok(
-      await waitFor(() => pubsub.subscriptionSet.has('contract-A'), { timeout: 5000 }),
+      await waitFor(subscribed(pubsub, ['contract-A']), { timeout: 5000 }),
       'not subscribed in the pubsub client 5 s after the reconnect'
     )
     assert.ok(await eventIsReceived('contract-A'), 'events are received again')
@@ -295,16 +293,24 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
     await seed('contract-D')
     assert.ok(await waitFor(() => rejected === 1), 'first SUB rejected')
     assert.ok(
-      await waitFor(() => pubsub.subscriptionSet.has('contract-D'), { timeout: INTERVAL + 1000 }),
+      await waitFor(subscribed(pubsub, ['contract-D']), { timeout: INTERVAL + 1000 }),
       `still not subscribed ${INTERVAL + 1000} ms later`
     )
     assert.equal(subsOnConnection('contract-D'), 2)
     assert.ok(await eventIsReceived('contract-D'))
   })
 
-  it('does not reconcile periodically when pubsubReconcileInterval is 0, negative or not finite', async () => {
+  it('does not reconcile periodically when pubsubReconcileInterval is 0, negative or not finite', async (t) => {
     for (const interval of [0, -1, Infinity, NaN]) {
+      // Treating the value as unset would arm the default 60000 ms timer,
+      // which the sleep below can't wait for
+      const timers = t.mock.method(globalThis, 'setInterval')
       await connect(interval)
+      timers.mock.restore()
+      assert.ok(
+        !timers.mock.calls.some(({ arguments: args }) => args[1] === 60000),
+        `pubsubReconcileInterval: ${interval} armed the default interval`
+      )
       await sleep(20)
       updates = 0
       await sleep(250)
@@ -332,54 +338,38 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
     assert.equal(pubsub.socket?.readyState, WebSocket.CONNECTING, 'still connecting')
 
     server.pass()
-    assert.ok(await waitFor(() => pubsub.subscriptionSet.has('contract-E')), 're-subscribed')
-    assert.ok(await waitFor(() => updates > 0), 'reconciling again')
-  })
-
-  it('replaces the periodic reconcile on chelonia/connect and stops it once the client is destroyed', async () => {
-    await connect(100)
-    // A second connection replaces the first client (and its timer)
-    await connect(100)
+    assert.ok(await waitFor(subscribed(pubsub, ['contract-E'])), 're-subscribed')
+    // Not the reconcile that follows every reconnection: the next periodic one
     await sleep(20)
     updates = 0
-    await sleep(450)
-    assert.ok(updates >= 1 && updates <= 6, `${updates} reconciliations in 450 ms`)
-
-    pubsub.destroy()
-    await sleep(20)
-    updates = 0
-    await sleep(300)
-    assert.equal(updates, 0)
+    assert.ok(await waitFor(() => updates > 0, { timeout: 500 }), 'reconciling again')
   })
 
-  it('clears the timer of the replaced client at once, and its own once the client is destroyed', async () => {
+  it('replaces the periodic reconcile on chelonia/connect, and stops it once the client is destroyed', async (t) => {
     const INTERVAL = 100
-    const timers: unknown[] = []
-    const cleared = new Set<unknown>()
-    const realSetInterval = globalThis.setInterval
-    const realClearInterval = globalThis.clearInterval
-    globalThis.setInterval = ((handler: () => void, ms?: number) => {
-      const id = realSetInterval(handler, ms)
-      if (ms === INTERVAL) timers.push(id)
-      return id
-    }) as unknown as typeof setInterval
-    globalThis.clearInterval = ((id?: ReturnType<typeof setInterval>) => {
-      cleared.add(id)
-      realClearInterval(id)
-    }) as unknown as typeof clearInterval
-    try {
-      await connect(INTERVAL)
-      pubsub = sbp('chelonia/connect')
-      assert.equal(timers.length, 2)
-      assert.ok(cleared.has(timers[0]), 'the first timer is still running')
-      assert.ok(await waitFor(isOpen(pubsub)), 'connected')
-      pubsub.destroy()
-      await sleep(3 * INTERVAL)
-      assert.ok(cleared.has(timers[1]), 'the timer is still running after destroy()')
-    } finally {
-      globalThis.setInterval = realSetInterval
-      globalThis.clearInterval = realClearInterval
-    }
+    const timers = t.mock.method(globalThis, 'setInterval')
+    const cleared = t.mock.method(globalThis, 'clearInterval')
+    const armed = () => timers.mock.calls
+      .filter(({ arguments: args }) => args[1] === INTERVAL)
+      .map(({ result }) => result)
+    const wasCleared = (id: unknown) =>
+      cleared.mock.calls.some(({ arguments: args }) => args[0] === id)
+    await connect(INTERVAL)
+    // A second connection replaces the first client (and its timer)
+    pubsub = sbp('chelonia/connect')
+    assert.equal(armed().length, 2)
+    assert.ok(wasCleared(armed()[0]), 'the first timer is still running')
+    assert.ok(await waitFor(isOpen(pubsub)), 'connected')
+    // Not the reconcile that follows the connection: the periodic ones
+    await sleep(20)
+    updates = 0
+    await sleep(4.5 * INTERVAL)
+    assert.ok(updates >= 1 && updates <= 6, `${updates} reconciliations in ${4.5 * INTERVAL} ms`)
+    pubsub.destroy()
+    assert.ok(
+      await waitFor(() => wasCleared(armed()[1]), { timeout: 3 * INTERVAL }),
+      'the timer is still running after destroy()'
+    )
   })
 
   it('ignores the connections of other pubsub clients', async () => {

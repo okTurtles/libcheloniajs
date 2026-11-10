@@ -19,7 +19,7 @@ import type { SPMessage } from './SPMessage.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
   actionMessage, captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay,
-  handledEvents, localHeight, retainedContract, sleep, staleContract, waitFor
+  handledEvents, localHeight, retainedContract, sleep, staleContract, subscribed, waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
 
@@ -28,6 +28,14 @@ const relay = createFakeRelay({ pubsub: server })
 let logs: ReturnType<typeof captureConsole>
 let pubsub: PubSubClient
 const handled = handledEvents()
+// The contracts that Chelonia started to sync, also those whose sync fails
+// before it sends a request (e.g. a deleted contract)
+const syncStarted: string[] = []
+sbp('sbp/filters/selector/add', 'chelonia/private/in/syncContract', (
+  _domain: string, _selector: string, data: unknown[]
+) => {
+  syncStarted.push(data[0] as string)
+})
 
 before(() => {
   server.install()
@@ -67,10 +75,8 @@ async function publish (contract: TestContract, text: string) {
   const from = relay.requests.length
   const start = performance.now()
   let processedAt: number | undefined
-  let requests = 0
   const sent: SPMessage = await sbp(
     'chelonia/private/out/publishEvent', actionMessage(contract, { text }), {}, {
-      beforeRequest: () => { requests++ },
       onprocessed: () => { processedAt = performance.now() - start }
     }
   )
@@ -78,8 +84,6 @@ async function publish (contract: TestContract, text: string) {
     from,
     hash: sent.hash(),
     height: sent.height(),
-    requests,
-    conflicts: logged.grep(/\[chelonia\] publish attempt \d+ of \d+ failed/).length,
     // ms from the start of `publish` until `onprocessed`
     processedAt: () => processedAt,
     logged
@@ -110,10 +114,7 @@ describe('publishing to a contract whose pubsub subscription was lost', () => {
   })
 
   it('syncs on the first 409 instead of the second', () => {
-    assert.equal(
-      published.conflicts, 1, `${published.conflicts} x 409 in ${published.requests} requests`
-    )
-    assert.equal(published.requests, 2)
+    assert.deepEqual(postsOf(published.from), [409, 200])
   })
 
   it('processes the published event (onprocessed fires) although pubsub will not deliver it', () => {
@@ -127,7 +128,7 @@ describe('publishing to a contract whose pubsub subscription was lost', () => {
   })
 
   it('re-subscribes the contract in the pubsub client', async () => {
-    assert.ok(await waitFor(() => pubsub.subscriptionSet.has(contractID)), 'not re-subscribed')
+    assert.ok(await waitFor(subscribed(pubsub, [contractID])), 'not re-subscribed')
   })
 
   it('explains in the log why it synced', () => {
@@ -157,7 +158,7 @@ describe('publishing while the socket is half-open (subscribed, but nothing arri
       published.processedAt() !== undefined, `not processed ${TIMEOUT + 2000} ms after publishing`
     )
     assert.ok(handled.has(published.hash))
-    assert.equal(published.conflicts, 0)
+    assert.deepEqual(postsOf(published.from), [200])
   })
 
   it('waits for publishReceiptTimeout before syncing', () => {
@@ -179,7 +180,7 @@ describe('publishing on a healthy connection', () => {
     await sleep(400)
     assert.equal(relay.syncsOf(contract.contractID, published.from), 0)
     assert.equal(published.logged.grep(/did not receive/).length, 0)
-    assert.equal(published.conflicts, 0)
+    assert.deepEqual(postsOf(published.from), [200])
   })
 })
 
@@ -292,11 +293,14 @@ describe('a 409 for a contract that is released or deleted in the meantime', () 
   it('stops without an error once it is deleted', async () => {
     const contract = await retainedContract(relay, pubsub)
     const { contractID } = contract
+    syncStarted.length = 0
     const { sent, from } = await publishWithConflict(
       contract, () => sbp('chelonia/contract/remove', contractID, { permanent: true })
     )
     assert.equal(sent, undefined)
     assert.deepEqual(postsOf(from), [409])
+    // Its sync would throw (and be logged) before sending a request
+    assert.ok(!syncStarted.includes(contractID), 'started to sync it')
   })
 })
 

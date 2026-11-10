@@ -6,8 +6,8 @@ import { after, afterEach, before, describe, it } from 'node:test'
 import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SCHEDULED, REQUEST_TYPE } from './index.js'
 import type { PubSubClient } from './index.js'
 import {
-  captureConsole, createCloseEvent, createFakePubsubServer, createTestClients, emulateSleep,
-  isOpen, onNextOpen, sleep, subscribed, waitFor
+  captureConsole, createCloseEvent, createFakePubsubServer, createFakeRelay, createTestClients,
+  emulateSleep, isOpen, onNextOpen, RELAY_URL, sleep, subscribed, waitFor
 } from './test-harness.js'
 import type { FakeConnection } from './test-harness.js'
 
@@ -38,6 +38,17 @@ describe('fake pubsub server (harness self-checks)', () => {
     assert.ok(await waitFor(subscribed(client, ['c1'])))
     assert.deepEqual([...server.lastConnection!.subscriptions], ['c1'])
     assert.equal(server.framesOf(REQUEST_TYPE.SUB, 'c1', since).length, 1)
+  })
+
+  it('delivers ENTRY notifications to the subscribers of their channel only', async () => {
+    const { client, received } = setup()
+    client.sub('a')
+    assert.ok(await waitFor(subscribed(client, ['a'])))
+    server.entry('a', 'one')
+    server.entry('b', 'two')
+    assert.ok(await waitFor(() => received.length >= 1))
+    await sleep(20)
+    assert.deepEqual(received, [{ channelID: 'a', data: 'one' }])
   })
 
   it('keeps black-holed sockets OPEN and unanswered, and stuck in CLOSING after close()', async () => {
@@ -122,6 +133,19 @@ describe('fake pubsub server (harness self-checks)', () => {
     assert.equal(calls, 0)
   })
 
+  it('rejects relay requests with the abort reason, also while onRequest holds the answer', async () => {
+    const relay = createFakeRelay()
+    relay.onRequest = () => sleep(100).then(() => new Response('late'))
+    const controller = new AbortController()
+    const pending = relay.fetch(`${RELAY_URL}/time`, { signal: controller.signal })
+    const reason = new Error('reset')
+    controller.abort(reason)
+    await assert.rejects(pending, (e) => e === reason)
+    // A request aborted before it starts is never sent
+    await assert.rejects(relay.fetch(`${RELAY_URL}/time`, { signal: controller.signal }))
+    assert.equal(relay.requests.length, 1)
+  })
+
   it('keeps the timeout of waitFor() when an emulated sleep holds back performance.now()', async () => {
     const clock = emulateSleep({ monotonic: true })
     try {
@@ -137,17 +161,6 @@ describe('fake pubsub server (harness self-checks)', () => {
 })
 
 describe('pubsub client baseline', () => {
-  it('receives ENTRY notifications for subscribed channels only', async () => {
-    const { client, received } = setup()
-    client.sub('a')
-    assert.ok(await waitFor(subscribed(client, ['a'])))
-    server.entry('a', 'one')
-    server.entry('b', 'two')
-    assert.ok(await waitFor(() => received.length >= 1))
-    await sleep(20)
-    assert.deepEqual(received, [{ channelID: 'a', data: 'one' }])
-  })
-
   it('re-subscribes every channel after the connection drops', async () => {
     const { client, received } = setup()
     client.sub('a')
@@ -410,7 +423,7 @@ describe('requests that exhaust the retry budget', () => {
   })
 
   it('closes the abandoned socket when the reason is too long for close()', async () => {
-    // The reason has 92 characters, but 162 bytes
+    // The reason has 93 characters, but 163 bytes
     const channelID = 'ñ'.repeat(70)
     const { client } = setup({ opRetryInterval: I })
     assert.ok(await waitFor(isOpen(client)))
@@ -532,18 +545,9 @@ describe('requests that exhaust the retry budget', () => {
 
   it('backs off while it keeps replacing connections over a KV filter whose ACK never matches', async () => {
     // A server that de-duplicates the KV filter in its ACKs
-    server.onRequest = (conn, msg) => {
-      if (msg.channelID !== 'k') return
-      if (msg.type !== REQUEST_TYPE.SUB && msg.type !== REQUEST_TYPE.KV_FILTER) return
-      if (msg.type === REQUEST_TYPE.SUB) conn.subscriptions.add('k')
-      const kvFilter = Array.isArray(msg.kvFilter) ? [...new Set(msg.kvFilter)] : undefined
-      setTimeout(() => {
-        if (conn.state !== 'open') return
-        conn.socket.dispatchEvent(new MessageEvent('message', {
-          data: JSON.stringify({ type: 'ok', data: { type: msg.type, channelID: 'k', kvFilter } })
-        }))
-      }, 0)
-      return 'ignore'
+    server.onRequest = (_conn, msg) => {
+      if (msg.channelID !== 'k' || !Array.isArray(msg.kvFilter)) return
+      return { ok: { kvFilter: [...new Set(msg.kvFilter)] } }
     }
     const { client } = setup(BACKOFF)
     client.sub('k')

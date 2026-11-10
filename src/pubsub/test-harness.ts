@@ -73,7 +73,8 @@ export type ClientFrame = { t: number; connection: FakeConnection; msg: FakeRequ
 
 // `undefined`: default handling. `'ignore'`: no answer at all.
 // `{ error }`: answer with an ERROR response carrying `error` as the reason.
-export type RequestOverride = undefined | 'ignore' | { error: string }
+// `{ ok }`: default handling, with the fields of `ok` in the OK response.
+export type RequestOverride = undefined | 'ignore' | { error: string } | { ok: object }
 
 export type FakePubsubServer = ReturnType<typeof createFakePubsubServer>
 
@@ -193,14 +194,15 @@ export function createFakePubsubServer () {
     const override = server.onRequest?.(conn, msg)
     if (override === 'ignore') return
     const { type, channelID } = msg
-    if (override && typeof override === 'object') {
+    if (override && 'error' in override) {
       const data = { type, channelID, reason: override.error }
       deliver(conn, { type: RESPONSE_TYPE.ERROR, data })
       return
     }
     // Requests without a channel (PONG, PUSH_ACTION, ...) need nothing
     if (typeof channelID !== 'string') return
-    const answer = (data: object) => deliver(conn, { type: RESPONSE_TYPE.OK, data })
+    const answer = (data: object) =>
+      deliver(conn, { type: RESPONSE_TYPE.OK, data: { ...data, ...override?.ok } })
     switch (type) {
       case REQUEST_TYPE.SUB:
         conn.subscriptions.add(channelID)
@@ -351,7 +353,8 @@ export function createFakePubsubServer () {
         if (conn.state === 'stalled') scheduleOpen(conn)
       }
     },
-    // Server -> client latency for everything sent from now on
+    // Server -> client latency for everything sent from now on (per message:
+    // lowering it lets later messages overtake those still in flight)
     slow (ms: number) {
       latency = ms
     },
@@ -704,11 +707,18 @@ export function createFakeRelay ({ pubsub }: { pubsub?: FakePubsubServer } = {})
       const url = input instanceof Request ? input.url : String(input)
       const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
       const request: RelayRequest = { t: Date.now(), method, url, path: new URL(url).pathname }
+      // Like `fetch`, an abort rejects with the signal's reason, also while
+      // `onRequest` holds the answer. An aborted request is never sent.
+      const signal = init?.signal
+      signal?.throwIfAborted()
       requests.push(request)
-      if (init?.signal?.aborted) {
-        throw new DOMException('The operation was aborted', 'AbortError')
-      }
-      const response = await (relay.onRequest?.(request, init) ?? respond(request, init))
+      const response = await new Promise<Response>((resolve, reject) => {
+        const onAbort = () => reject(signal!.reason)
+        signal?.addEventListener('abort', onAbort, { once: true })
+        Promise.resolve(relay.onRequest?.(request, init) ?? respond(request, init))
+          .then(resolve, reject)
+          .finally(() => signal?.removeEventListener('abort', onAbort))
+      })
       request.status = response.status
       return response
     },
