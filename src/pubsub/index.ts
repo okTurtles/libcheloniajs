@@ -4,6 +4,7 @@ import sbp from '@sbp/sbp'
 import { randomIntFromRange } from 'turtledash'
 import type { JSONObject, JSONType } from '../types.js'
 import { timerDelay, unrefTimer } from '../timer-utils.js'
+import { createCloseEvent } from './close-event.js'
 
 // ====== Enums ====== //
 
@@ -387,13 +388,6 @@ const describeClosingSocket = (client: PubSubClient): string => {
     ? ''
     : `, last message ${now - lastMessageAt} ms ago`
   return `open for ${now - times.openedAt} ms${lastMessage}`
-}
-
-const createCloseEvent = (code: number, reason: string): CloseEvent => {
-  if (typeof CloseEvent === 'function') {
-    return new CloseEvent('close', { code, reason, wasClean: false })
-  }
-  return Object.assign(new Event('close'), { code, reason, wasClean: false }) as CloseEvent
 }
 
 // Throws away a socket that we no longer trust, e.g., one on which requests

@@ -19,6 +19,7 @@ import { EVENT_HANDLED } from '../events.js'
 import { createCID } from '../functions.js'
 import { signedOutgoingDataWithRawKey } from '../signedData.js'
 import type { ChelRootState, JSONType } from '../types.js'
+import { createCloseEvent } from './close-event.js'
 import {
   createClient, NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, REQUEST_TYPE, RESPONSE_TYPE
 } from './index.js'
@@ -78,11 +79,7 @@ export type RequestOverride = undefined | 'ignore' | { error: string } | { ok: o
 
 export type FakePubsubServer = ReturnType<typeof createFakePubsubServer>
 
-// `CloseEvent` is only a global from Node.js 23 on (CI runs Node 22)
-export const createCloseEvent = (code: number, reason = '', wasClean = false): Event =>
-  typeof CloseEvent === 'function'
-    ? new CloseEvent('close', { code, reason, wasClean })
-    : Object.assign(new Event('close'), { code, reason, wasClean })
+export { createCloseEvent }
 
 // What the tests connect to (named so as not to shadow the global `URL`)
 export const PUBSUB_URL = 'ws://pubsub.test'
