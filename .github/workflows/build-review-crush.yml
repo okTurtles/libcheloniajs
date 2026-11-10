@@ -1,26 +1,35 @@
 name: Build Review (Crush)
 
-# Audits the build of each release for code that the build toolchain added.
-# When a version tag is pushed, the job builds that tag and the previous
-# version tag, diffs the runtime JavaScript of the two builds, and has crush
-# review the diff with the taoeffect/code-review skill. The skill splits a
-# large diff into slices and reviews them in batches of at most three crush
-# workers. The job fails when the audit finds suspect code or cannot finish.
+# Reusable workflow: audits the build of a release for code that the build
+# toolchain added. The job builds the tag under audit and the previous
+# version tag, diffs the files of the two builds, and has crush review the
+# diff with the taoeffect/code-review skill. The skill splits a large diff
+# into slices and reviews them in batches of at most three crush workers.
+# The job fails when the audit finds suspect code or cannot finish.
 #
-# dist/ is not in git, so this audit replaces reading the built files in PRs.
-# Nothing is posted to GitHub: the review is in the job summary and in the
-# build-review-<tag> artifact.
+# The build output is not in git, so this audit replaces reading the built
+# files in PRs. Nothing is posted to GitHub: the review is in the job summary
+# and in the build-review-<tag> artifact.
 #
-# Triggers:
-#   - Push of a tag that matches v[0-9]*. The base is the nearest earlier
-#     v[0-9]* tag in the history of the tagged commit.
-#   - workflow_dispatch with `tag` and an optional `base-tag`, to run an audit
-#     again. GitHub offers it only once this file is on the default branch.
+# Caller requirements:
+#   - Trigger on the push of version tags (`push: tags: ['v[0-9]*']`). To
+#     run an audit again, also trigger on workflow_dispatch with the inputs
+#     `tag` and `base-tag`. Pass `inputs.tag || github.ref_name` as `tag`.
+#     GitHub offers workflow_dispatch only once the caller is on the default
+#     branch.
+#   - Grant the calling job `contents: read`.
+#   - Pass the API key secret of each provider you use: OPENROUTER_API_KEY,
+#     ZAI_API_KEY and/or KIMI_API_KEY.
+#   - Describe the build with the inputs from `package-name` on. The scripts
+#     trust these values, because they come from the caller's workflow file.
+#   - Do not give the calling job the concurrency group used below.
 #
-# Repo variables (Settings → Secrets and variables → Actions → Variables), all
-# optional: REVIEW_PROVIDER, REVIEW_MODEL and PROJECT_CTX, which pr-review.yml
-# also uses, and BUILD_REVIEW_TIMEOUT_MINUTES (default 60). Secrets: the API key
-# of the provider in use (OPENROUTER_API_KEY, ZAI_API_KEY or KIMI_API_KEY).
+# Example caller: copy .github/workflows/build-review.yml from this repo, set
+#   uses: okTurtles/libcheloniajs/.github/workflows/build-review-crush.yml@main
+# and set the build inputs of your repo. The caller reads the other inputs
+# from these optional repo variables (Settings → Secrets and variables →
+# Actions → Variables): REVIEW_PROVIDER, REVIEW_MODEL and PROJECT_CTX, which
+# pr-review.yml also uses, and BUILD_REVIEW_TIMEOUT_MINUTES.
 #
 # Steps whose comment names a step of pull-review-crush.yml are copies of that
 # step. Apply a fix in one of the two files to the other file too.
@@ -28,20 +37,18 @@ name: Build Review (Crush)
 # Limits:
 #   - The audit vets the build that this job makes. A maintainer still
 #     publishes from a local machine, and that build is not compared with this
-#     one. Builds are reproducible, so a later change can publish from CI or
-#     compare the npm tarball with this build.
+#     one. If the build is reproducible, a later change can publish from CI or
+#     compare the published files with this build.
 #   - The base build is trusted: each release is compared only with the
 #     previous one. A toolchain change shows in the audit of the release that
-#     brings it in (package-lock.json is in the source diff).
-#   - Type declarations are not audited, because Node never runs them.
+#     brings it in, if the lock files are in source-paths.
+#   - Built files that match excluded-files are not audited.
 #   - An LLM audit can miss code or be prompt-injected by the built files. The
 #     sandbox limits what the agent can do, and "Check verdict" fails unless
 #     the review ends with the CLEAN verdict and lists no finding.
 
 on:
-  push:
-    tags: ['v[0-9]*']
-  workflow_dispatch:
+  workflow_call:
     inputs:
       tag:
         description: Version tag to audit, e.g. v2.2.0.
@@ -50,6 +57,112 @@ on:
       base-tag:
         description: Tag to compare with. Empty means the nearest earlier v* tag.
         type: string
+        required: false
+      provider:
+        description: 'LLM provider: openrouter, zai-coding-plan or kimi. Empty means openrouter.'
+        type: string
+        required: false
+      model:
+        description: >-
+          Model ID for the provider. Empty means the provider default
+          (openrouter: stepfun/step-3.5-flash, zai-coding-plan: glm-5,
+          kimi: k3.1-pro-highspeed).
+        type: string
+        required: false
+      project-context:
+        description: >-
+          First paragraph of the review prompt, e.g. what the project is.
+          Empty means "You are auditing a release of an npm package."
+        type: string
+        required: false
+      timeout-minutes:
+        description: Job timeout in minutes.
+        type: number
+        required: false
+        default: 60
+      package-name:
+        description: Name of the package in the audit rules, e.g. @chelonia/lib.
+        type: string
+        required: true
+      output-dir:
+        description: >-
+          Top-level dir that the build writes its output to. The audit
+          reviews the files in it.
+        type: string
+        required: false
+        default: dist
+      deno-version:
+        description: Deno version to set up, e.g. v2.9.5. Empty means no Deno.
+        type: string
+        required: false
+      install-command:
+        description: >-
+          Command that installs the dependencies in the source dir. It runs
+          outside the build sandbox, with network, so it must not run code of
+          the repo or of its dependencies (no install scripts).
+        type: string
+        required: false
+        default: npm ci --ignore-scripts --no-audit --no-fund
+      install-dirs:
+        description: >-
+          Names of the dirs that the install command fills, separated by
+          spaces. The check that the build changed no file outside output-dir
+          leaves out all files and dirs with these names.
+        type: string
+        required: false
+        default: node_modules
+      build-command:
+        description: >-
+          Command that builds the source dir into output-dir. It runs in the
+          build sandbox, without network.
+        type: string
+        required: false
+        default: npm run build
+      source-paths:
+        description: >-
+          Git pathspecs of the build inputs, separated by spaces, e.g.
+          `src package.json package-lock.json`. Their diff tells the auditor
+          which build changes to expect.
+        type: string
+        required: true
+      excluded-files:
+        description: >-
+          `find -name` patterns of built files that the audit leaves out,
+          separated by spaces, e.g. `*.d.ts`. Give the reason in build-notes.
+        type: string
+        required: false
+      copied-files:
+        description: >-
+          `find -path` patterns, relative to output-dir and separated by
+          spaces, of built files that the build copies byte for byte from
+          files in git, e.g. fonts. The job fails unless each match equals a
+          file that git tracks at the same tag outside output-dir. The audit
+          then leaves the matches out.
+        type: string
+        required: false
+      build-notes:
+        description: >-
+          Markdown paragraph that the audit rules add about the build output,
+          e.g. why excluded-files are left out.
+        type: string
+        required: false
+      dependency-list-command:
+        description: >-
+          Command that prints the top-level dependencies of a source dir into
+          toolchain.txt. It runs outside the build sandbox, so it must not run
+          code of the repo or of its dependencies. Empty means no list.
+        type: string
+        required: false
+        default: npm ls --depth=0
+    secrets:
+      OPENROUTER_API_KEY:
+        description: API key for the openrouter provider.
+        required: false
+      ZAI_API_KEY:
+        description: API key for the zai-coding-plan provider.
+        required: false
+      KIMI_API_KEY:
+        description: API key for the kimi provider.
         required: false
 
 permissions:
@@ -73,10 +186,12 @@ jobs:
     # Read the self-hosted runner warning in pull-review-crush.yml before you
     # change runs-on.
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ fromJSON(vars.BUILD_REVIEW_TIMEOUT_MINUTES || '60') }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     concurrency:
-      group: build-review-crush-${{ inputs.tag || github.ref_name }}
+      group: build-review-crush-${{ inputs.tag }}
       cancel-in-progress: false
+    env:
+      OUTPUT_DIR: ${{ inputs.output-dir }}
 
     steps:
       - uses: okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main
@@ -91,11 +206,7 @@ jobs:
         env:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            TAG=$INPUT_TAG
-          else
-            TAG=$GITHUB_REF_NAME
-          fi
+          TAG=$INPUT_TAG
           if [[ ! "$TAG" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]; then
             echo "::error::The release tag is not a version tag (v, a digit, then letters, digits, '.', '_' or '-')"
             exit 1
@@ -147,6 +258,12 @@ jobs:
         with:
           node-version: 22
 
+      - name: Set up Deno
+        if: inputs.deno-version != ''
+        uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2.3.0
+        with:
+          deno-version: ${{ inputs.deno-version }}
+
       # Copied from the bubblewrap part of "Install crush and bubblewrap" in
       # pull-review-crush.yml. bubblewrap (bwrap) sandboxes "Build both tags"
       # and "Run build review". ripgrep speeds up crush's code search. Neither
@@ -169,11 +286,12 @@ jobs:
       # dependencies), which is the code that this audit suspects. Outside a
       # sandbox, that code could write GITHUB_ENV or GITHUB_PATH, leave a
       # process that outlives the step, or use sudo, and so read the API keys
-      # of "Run build review" or change its verdict. `npm ci --ignore-scripts`
-      # runs no dependency code, so it runs outside. `npm run build` runs in
-      # bwrap, which gives it:
-      #   - no network, and from the step env only PATH, HOME and NODE_OPTIONS
-      #     (no GITHUB_ENV, GITHUB_PATH or token);
+      # of "Run build review" or change its verdict. The install command runs
+      # no dependency code (see the install-command input), so it runs
+      # outside. The build command runs in bwrap, which gives it:
+      #   - no network, and from the step env only PATH, HOME, NODE_OPTIONS
+      #     and the CA settings of fix-ubuntu-ca-roots (no GITHUB_ENV,
+      #     GITHUB_PATH or token);
       #   - its own PID namespace, so all of its processes end with it;
       #   - no_new_privs (bwrap always sets it), so no sudo;
       #   - write access only to its source dir and to tmpfs dirs;
@@ -185,7 +303,18 @@ jobs:
       # No later step runs code from the source dirs; they only read files
       # there ("Run build review" reads them inside its own sandbox).
       - name: Build both tags
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+          INSTALL_DIRS: ${{ inputs.install-dirs }}
+          BUILD_COMMAND: ${{ inputs.build-command }}
         run: |
+          # OUTPUT_DIR is a path in the source dirs, a `diff -x` name and an
+          # `rm -rf` target, so accept only the name of a top-level dir.
+          if [[ ! "$OUTPUT_DIR" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::output-dir must be the name of a top-level dir"
+            exit 1
+          fi
+
           RUNNER_AGENT_DIRS=()
           for dir in /home/runner/actions-runner /home/runner/runners/*; do
             if [ -d "$dir" ]; then
@@ -213,28 +342,40 @@ jobs:
             --setenv NODE_OPTIONS "$NODE_OPTIONS"
             --setenv npm_config_cache /tmp/npm-cache
           )
+          # fix-ubuntu-ca-roots sets these for Deno and other tools that read
+          # them (see its action.yml).
+          for name in DENO_TLS_CA_STORE SSL_CERT_FILE; do
+            if [ -n "${!name}" ]; then
+              BWRAP+=(--setenv "$name" "${!name}")
+            fi
+          done
+
+          # Split on spaces and newlines, without glob expansion.
+          read -r -d '' -a INSTALL_DIR_NAMES < <(printf '%s\0' "$INSTALL_DIRS")
+          DIFF_EXCLUDES=(-x "$OUTPUT_DIR")
+          for name in "${INSTALL_DIR_NAMES[@]}"; do
+            DIFF_EXCLUDES+=(-x "$name")
+          done
 
           build_tag() {
             local tag=$1 dir=$2 pristine
             echo "::group::Build $tag"
             mkdir -p "$dir"
             git archive --format=tar "refs/tags/$tag" | tar -x -C "$dir"
-            # Old tags have dist/ in git, and their build does not delete it
-            # first, so files of deleted sources would stay.
-            rm -rf "$dir/dist"
-            # No dependency has an install script, so --ignore-scripts does
-            # not change the build output.
-            (cd "$dir" && npm ci --ignore-scripts --no-audit --no-fund)
-            "${BWRAP[@]}" --bind "$dir" "$dir" --chdir "$dir" -- npm run build
-            # npm packs package.json, README, LICENSE and the other root
-            # files that it always includes as the build leaves them, but the
-            # audit reads only dist/. A normal build changes no file outside
-            # dist/ and node_modules/, so fail on any other change. The
-            # sandbox has ended all build processes by now.
+            # Old tags can have the output dir in git, and their build may not
+            # delete it first, so files of deleted sources would stay.
+            rm -rf "${dir:?}/$OUTPUT_DIR"
+            (cd "$dir" && bash -c "$INSTALL_COMMAND")
+            "${BWRAP[@]}" --bind "$dir" "$dir" --chdir "$dir" -- bash -c "$BUILD_COMMAND"
+            # A package can ship root files, such as package.json, as the
+            # build leaves them, but the audit reads only the output dir. A
+            # normal build changes no file outside the output dir and the
+            # install dirs, so fail on any other change. The sandbox has
+            # ended all build processes by now.
             pristine=$(mktemp -d)
             git archive --format=tar "refs/tags/$tag" | tar -x -C "$pristine"
-            if ! diff -ru --no-dereference -x dist -x node_modules "$pristine" "$dir"; then
-              echo "::error::The build of $tag changed files outside dist/ and node_modules/ (diff in the log of this step)"
+            if ! diff -ru --no-dereference "${DIFF_EXCLUDES[@]}" "$pristine" "$dir"; then
+              echo "::error::The build of $tag changed files outside $OUTPUT_DIR/ and the install dirs (diff in the log of this step)"
               exit 1
             fi
             rm -rf "$pristine"
@@ -248,52 +389,104 @@ jobs:
       # worker (both run in a copy of the repo), and "Build review prompt"
       # puts it in the prompt.
       - name: Write audit context
+        env:
+          PACKAGE_NAME: ${{ inputs.package-name }}
+          SOURCE_PATHS: ${{ inputs.source-paths }}
+          EXCLUDED_FILES: ${{ inputs.excluded-files }}
+          COPIED_FILES: ${{ inputs.copied-files }}
+          BUILD_NOTES: ${{ inputs.build-notes }}
+          DENO_VERSION: ${{ inputs.deno-version }}
+          DEPENDENCY_LIST_COMMAND: ${{ inputs.dependency-list-command }}
         run: |
+          # Prints the words of $1 (split on spaces and newlines, without glob
+          # expansion) as Markdown code, separated by commas.
+          # shellcheck disable=SC2016
+          code_list() {
+            local words
+            read -r -d '' -a words < <(printf '%s\0' "$1")
+            printf '`%s`, ' "${words[@]}" | sed 's/, $//'
+          }
+
           mkdir -p "$CONTEXT_DIR"
           # The build inputs. Build changes that they do not explain are what
           # the audit looks for.
-          SOURCE_PATHS=(src package.json package-lock.json .npmrc buildHelper.ts renameFiles.mjs 'tsconfig*.json' scripts)
-          git diff "refs/tags/$BASE_TAG" "refs/tags/$TAG" -- "${SOURCE_PATHS[@]}" > "$CONTEXT_DIR/source.diff"
+          read -r -d '' -a SOURCE_PATH_LIST < <(printf '%s\0' "$SOURCE_PATHS")
+          git diff "refs/tags/$BASE_TAG" "refs/tags/$TAG" -- "${SOURCE_PATH_LIST[@]}" > "$CONTEXT_DIR/source.diff"
           git log --no-decorate --format='%h %s' "refs/tags/$BASE_TAG..refs/tags/$TAG" > "$CONTEXT_DIR/commits.txt"
           {
             echo "Node $(node --version), npm $(npm --version)"
-            for build in "base-src $BASE_TAG" "release-src $TAG"; do
-              read -r dir tag <<< "$build"
-              echo
-              echo "Top-level dependencies of $tag ($WORK_DIR/$dir):"
-              (cd "$WORK_DIR/$dir" && npm ls --depth=0) || true
-            done
+            if [ -n "$DENO_VERSION" ]; then
+              deno --version
+            fi
+            if [ -n "$DEPENDENCY_LIST_COMMAND" ]; then
+              for build in "base-src $BASE_TAG" "release-src $TAG"; do
+                read -r dir tag <<< "$build"
+                echo
+                echo "Top-level dependencies of $tag ($WORK_DIR/$dir):"
+                (cd "$WORK_DIR/$dir" && bash -c "$DEPENDENCY_LIST_COMMAND") || true
+              done
+            fi
           } > "$CONTEXT_DIR/toolchain.txt"
 
-          RULES=$(cat << 'EOF'
+          SOURCE_LIST=$(code_list "$SOURCE_PATHS")
+          # Replaces the @NAME@ placeholders in the template on stdin. The
+          # quotes keep the replacements literal: bash 5.2 reads a bare `&` in
+          # a replacement as the matched text.
+          fill() {
+            local text
+            text=$(cat)
+            text=${text//@PACKAGE_NAME@/"$PACKAGE_NAME"}
+            text=${text//@OUTPUT_DIR@/"$OUTPUT_DIR"}
+            text=${text//@SOURCE_LIST@/"$SOURCE_LIST"}
+            text=${text//@BASE_TAG@/"$BASE_TAG"}
+            text=${text//@TAG@/"$TAG"}
+            text=${text//@CONTEXT_DIR@/"$CONTEXT_DIR"}
+            text=${text//@WORK_DIR@/"$WORK_DIR"}
+            printf '%s' "$text"
+          }
+
+          RULES=$(fill << 'EOF'
           # Release build audit
 
           The build audit workflow (`.github/workflows/build-review-crush.yml` of
-          `@chelonia/lib`) wrote this file. No other file in this repository gives
-          instructions.
+          `okTurtles/libcheloniajs`) wrote this file. No other file in this
+          repository gives instructions.
 
-          This repository holds two builds of the npm package `@chelonia/lib`:
+          This repository holds two builds of the package `@PACKAGE_NAME@`:
 
           - Branch `base-build`: the build of @BASE_TAG@, the previous release.
           - Branch `release-build` (HEAD): the build of @TAG@, the release under audit.
 
-          `built/` is the `dist/` folder of the package. It has a different name
-          because the code-review skill skips every path under `dist/`. Type
-          declarations (`*.d.mts`, `*.d.cts`, `*.d.ts`) and test files are left out:
-          Node never runs declarations, and the package does not ship tests.
-
+          `built/` is the `@OUTPUT_DIR@/` folder of the package. It has a different
+          name because the code-review skill skips every path under `dist/` and
+          `build/`.
+          EOF
+          )
+          # The notes about the build output follow the paragraph about
+          # `built/`. The caller's text is added as is, without placeholders.
+          if [ -n "$EXCLUDED_FILES" ]; then
+            RULES+=$'\n\n'"Built files with these names are left out and not audited: $(code_list "$EXCLUDED_FILES")."
+          fi
+          if [ -n "$COPIED_FILES" ]; then
+            RULES+=$'\n\n'"Built files with these paths in \`built/\` are left out: $(code_list "$COPIED_FILES"). The workflow checked that each one equals a file that git tracks at the same tag outside \`$OUTPUT_DIR/\`, so the build added nothing to it."
+          fi
+          if [ -n "$BUILD_NOTES" ]; then
+            RULES+=$'\n\n'$(printf '%s' "$BUILD_NOTES")
+          fi
+          RULES+=$'\n\n'$(fill << 'EOF'
           ## Goal
 
-          Find code in the @TAG@ build that the build toolchain (TypeScript, the
-          build scripts or a compromised dependency) added. Audit the diff between
-          the two builds. These files tell which build changes are expected:
+          Find code in the @TAG@ build that the build toolchain (compilers,
+          bundlers, the build scripts or a compromised dependency) added. Audit
+          the diff between the two builds. These files tell which build changes
+          are expected:
 
           - `@CONTEXT_DIR@/source.diff`: `git diff @BASE_TAG@ @TAG@` of the build
-            inputs (`src/`, `package.json`, `package-lock.json`, `.npmrc`,
-            `buildHelper.ts`, `renameFiles.mjs`, `tsconfig*.json`, `scripts/`).
+            inputs (@SOURCE_LIST@).
           - `@CONTEXT_DIR@/commits.txt`: the commits from @BASE_TAG@ to @TAG@.
-          - `@CONTEXT_DIR@/toolchain.txt`: the Node, npm and dependency versions.
-          - The full source trees, with their `node_modules`:
+          - `@CONTEXT_DIR@/toolchain.txt`: the versions of the build tools and,
+            if listed, the top-level dependencies.
+          - The full source trees, with their installed dependencies:
             `@WORK_DIR@/base-src` (@BASE_TAG@) and `@WORK_DIR@/release-src` (@TAG@).
 
           ## Rules
@@ -325,12 +518,6 @@ jobs:
              - `BUILD-REVIEW-VERDICT: SUSPICIOUS` in all other cases.
           EOF
           )
-          # The quotes keep the replacements literal: bash 5.2 reads a bare `&`
-          # in a replacement as the matched text.
-          RULES=${RULES//@BASE_TAG@/"$BASE_TAG"}
-          RULES=${RULES//@TAG@/"$TAG"}
-          RULES=${RULES//@CONTEXT_DIR@/"$CONTEXT_DIR"}
-          RULES=${RULES//@WORK_DIR@/"$WORK_DIR"}
           printf '%s\n' "$RULES" > "$CONTEXT_DIR/audit-rules.md"
 
       # The build repo holds the two builds as two commits: base-build, and
@@ -338,45 +525,84 @@ jobs:
       # `prep --base base-build` diffs exactly the two builds.
       - name: Assemble build repo
         id: builds
+        env:
+          EXCLUDED_FILES: ${{ inputs.excluded-files }}
+          COPIED_FILES: ${{ inputs.copied-files }}
         run: |
+          # Split on spaces and newlines, without glob expansion.
+          read -r -d '' -a EXCLUDED_PATTERNS < <(printf '%s\0' "$EXCLUDED_FILES")
+          read -r -d '' -a COPIED_PATTERNS < <(printf '%s\0' "$COPIED_FILES")
+
+          # Sets MATCH to the find tests `$1 $2<pattern>` of the patterns that
+          # follow, joined with -o.
+          match_any() {
+            local test=$1 prefix=$2 pattern
+            shift 2
+            MATCH=()
+            for pattern in "$@"; do
+              if [ "${#MATCH[@]}" -gt 0 ]; then
+                MATCH+=(-o)
+              fi
+              MATCH+=("$test" "$prefix$pattern")
+            done
+          }
+
           copy_build() {
-            local dist=$1/dist
+            local src=$1 tag=$2 out=$1/$OUTPUT_DIR built=$BUILD_REPO/built tracked file id
+            local -a copies
             # This copy runs outside the build sandbox. A symlink could make
             # it read a path that the sandbox hides, and a .gitignore or
             # .gitattributes could hide files from the diff or mark them
-            # binary. The TypeScript build writes only regular files and dirs,
-            # and no dotfiles, so refuse anything else.
-            if [ -L "$dist" ] || [ ! -d "$dist" ]; then
-              echo "::error::The build in $1 has no dist/ dir, or its dist/ is a symlink"
+            # binary. So the audit accepts only regular files and dirs, and no
+            # dotfiles.
+            if [ -L "$out" ] || [ ! -d "$out" ]; then
+              echo "::error::The build in $src has no $OUTPUT_DIR/ dir, or its $OUTPUT_DIR/ is a symlink"
               exit 1
             fi
-            ODD_FILES=$(find "$dist" -mindepth 1 \( -name '.*' -o ! -type f ! -type d \))
+            ODD_FILES=$(find "$out" -mindepth 1 \( -name '.*' -o ! -type f ! -type d \))
             if [ -n "$ODD_FILES" ]; then
-              echo "::error::The build in $1 has dotfiles, symlinks or other special files, which the audit does not accept"
+              echo "::error::The build in $src has dotfiles, symlinks or other special files, which the audit does not accept"
               printf '%s\n' "$ODD_FILES"
               exit 1
             fi
-            mkdir -p "$BUILD_REPO/built"
-            cp -a "$dist/." "$BUILD_REPO/built/"
-            # Declarations: Node never runs them, and a .mjs or .cjs file that
-            # imports one shows in the diff. Tests: the package does not ship
-            # them (keep in sync with the negations in the package.json
-            # `files` field).
-            find "$BUILD_REPO/built" -type f \( -name '*.d.mts' -o -name '*.d.cts' -o -name '*.d.ts' \
-              -o -name '*.test.*' -o -name 'test-utils.*' \) -delete
+            mkdir -p "$built"
+            cp -a "$out/." "$built/"
+
+            # A byte copy of a file in git holds nothing that the build added.
+            # Old tags can have their output dir in git, so a file there does
+            # not count.
+            if [ "${#COPIED_PATTERNS[@]}" -gt 0 ]; then
+              tracked=$(git ls-tree -r --format='%(objecttype) %(objectname)%x09%(path)' "refs/tags/$tag" \
+                | awk -F '\t' -v out="$OUTPUT_DIR/" '$1 ~ /^blob / && index($2, out) != 1 { print substr($1, 6) }')
+              match_any -path "$built/" "${COPIED_PATTERNS[@]}"
+              mapfile -d '' -t copies < <(find "$built" -type f \( "${MATCH[@]}" \) -print0)
+              for file in "${copies[@]}"; do
+                id=$(git hash-object --no-filters -- "$file")
+                if ! grep -qxF "$id" <<< "$tracked"; then
+                  echo "::error::$OUTPUT_DIR/${file#"$built/"} of $tag matches copied-files, but git tracks no equal file outside $OUTPUT_DIR/"
+                  exit 1
+                fi
+                rm -- "$file"
+              done
+              echo "Left out ${#copies[@]} files of $tag that equal files in git (copied-files)"
+            fi
+            if [ "${#EXCLUDED_PATTERNS[@]}" -gt 0 ]; then
+              match_any -name '' "${EXCLUDED_PATTERNS[@]}"
+              find "$built" -type f \( "${MATCH[@]}" \) -delete
+            fi
           }
 
           git init -q -b base-build "$BUILD_REPO"
           git -C "$BUILD_REPO" config user.name 'Build review'
           git -C "$BUILD_REPO" config user.email 'build-review@invalid'
           cp "$CONTEXT_DIR/audit-rules.md" "$BUILD_REPO/AGENTS.md"
-          copy_build "$WORK_DIR/base-src"
+          copy_build "$WORK_DIR/base-src" "$BASE_TAG"
           # -f: a global git ignore file must not hide a built file.
           git -C "$BUILD_REPO" add -A -f
           git -C "$BUILD_REPO" commit -q -m "Build of $BASE_TAG"
           git -C "$BUILD_REPO" checkout -q -b release-build
           rm -rf "$BUILD_REPO/built"
-          copy_build "$WORK_DIR/release-src"
+          copy_build "$WORK_DIR/release-src" "$TAG"
           git -C "$BUILD_REPO" add -A -f
           git -C "$BUILD_REPO" commit -q --allow-empty -m "Build of $TAG"
 
@@ -444,8 +670,8 @@ jobs:
       - name: Resolve provider settings
         if: steps.builds.outputs.changed == 'true'
         env:
-          REVIEW_PROVIDER: ${{ vars.REVIEW_PROVIDER || 'openrouter' }}
-          REVIEW_MODEL: ${{ vars.REVIEW_MODEL }}
+          REVIEW_PROVIDER: ${{ inputs.provider || 'openrouter' }}
+          REVIEW_MODEL: ${{ inputs.model }}
         run: |
           case "$REVIEW_PROVIDER" in
             openrouter)
@@ -524,7 +750,7 @@ jobs:
       - name: Build review prompt
         if: steps.builds.outputs.changed == 'true'
         env:
-          PROJECT_CTX: ${{ vars.PROJECT_CTX }}
+          PROJECT_CTX: ${{ inputs.project-context }}
         run: |
           PROJECT_CTX="${PROJECT_CTX:-You are auditing a release of an npm package.}"
           mkdir -p "$RESULT_DIR"
