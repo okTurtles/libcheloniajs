@@ -294,14 +294,14 @@ from `@chelonia/lib/pubsub` (and the package root). See
 
 | Event | Payload | Fires |
 |---|---|---|
-| `PUBSUB_STATE_CHANGED` | `(client, { state, previous })` | Whenever `client.state` (a `PubSubState`) changes. The first one (`closed -> connecting`) fires inside `createClient`, before `chelonia/connect` returns the client, so a listener that compares `client` with Chelonia's current client misses it. `client.getStatus()` (and so `chelonia/pubsub/status`) can fire it too, when the socket changed state without an event. |
+| `PUBSUB_STATE_CHANGED` | `(client, { state, previous })` | Whenever `client.state` (a `PubSubState`) changes. The first one (`closed -> connecting`, or `offline -> connecting` for a client created while offline; none with `manual: true`) fires inside `createClient`, before `chelonia/connect` returns the client, so a listener that compares `client` with Chelonia's current client misses it. `client.getStatus()` (and so `chelonia/pubsub/status`) can fire it too, when the socket changed state without an event. |
 | `PUBSUB_RECONNECTION_SCHEDULED` | `(client, { delay, nth })` | A reconnection attempt was scheduled `delay` ms from now. |
 | `PUBSUB_RECONNECTION_ATTEMPT` | `(client)` | A reconnection attempt starts. |
 | `PUBSUB_RECONNECTION_SUCCEEDED` | `(client)` | A (re)connection opened. Chelonia then reconciles its subscriptions. |
 | `PUBSUB_RECONNECTION_FAILED` | `(client)` | The client gave up reconnecting (`maxRetries` exhausted). |
 | `PUBSUB_SUBSCRIPTION_SUCCEEDED` | `(client, { channelID })` | The relay confirmed a pending SUB. |
 | `PUBSUB_SUBSCRIPTION_FAILED` | `(client, { channelID, reason })` | The relay rejected a pending SUB. The subscription is no longer pending; Chelonia requests it again at its next reconciliation. |
-| `PUBSUB_ERROR` | `(client, message)` | A handler threw, or the relay sent a malformed message (the client is then destroyed). |
+| `PUBSUB_ERROR` | `(client, error)` | A handler threw, e.g. on a message of an unknown type (`error` is the message string), or the relay sent a malformed or binary message (`error` is `{ message }`, and the client is then destroyed). |
 
 The client itself exposes `client.state`, `client.stateSince`
 (`Date.now()` when it entered `state`) and `client.getStatus()`, a

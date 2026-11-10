@@ -281,7 +281,9 @@ export function createFakePubsubServer () {
       if (this.readyState === CLOSING || this.readyState === CLOSED) return
       const conn = this.connection
       if (this.readyState === CONNECTING) {
-        // Aborting a connection attempt fails it
+        // Aborting a connection attempt fails it. `error` and `close` fire
+        // synchronously, as in Node.js 26 (browsers queue them), and this
+        // socket is then CLOSED, where a real one would still be CLOSING.
         failConnection(conn)
         return
       }

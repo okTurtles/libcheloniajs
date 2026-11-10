@@ -43,7 +43,7 @@ Dual ESM/CJS output with TypeScript declarations:
 3. Runs `renameFiles.mjs` to rename `.js` → `.mjs`/`.cjs` and rewrite import paths within files
 4. Restores `package.json`
 
-**Note**: CJS build excludes test files (and the `src/pubsub/test-harness.ts` test helper) via `tsconfig.cjs.json`.
+**Note**: CJS build excludes test files and the test helpers `src/test-utils.ts` and `src/pubsub/test-harness.ts` via `tsconfig.cjs.json`.
 
 ## Key Dependencies
 
@@ -85,6 +85,7 @@ src/
 ├── kv.ts                 # KV slots — declarative typed key/value store API
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time sync: performance.now()-driven, Date.now() jumps (sleep) trigger correction + resync
+├── timer-utils.ts        # timerDelay()/unrefTimer(): timers that can be disabled, clamped, and don't keep Node alive
 ├── chelonia-utils.ts     # Optional utility selectors (e.g., chelonia/kv/queuedSet)
 ├── zkpp.ts               # Zero-knowledge password proof primitives
 ├── zkppConstants.ts      # ZKPP constants (AUTHSALT, CONTRACTSALT, etc.)
@@ -349,8 +350,9 @@ scope, so a stub registered by one file (e.g. the `chelonia/contract/fullState` 
 `src/local-selectors/index.test.ts`) would shadow the real selectors for the whole process.
 
 Pubsub and network tests use the in-process fakes in `src/pubsub/test-harness.ts` (there is
-no WebSocket server in the repo; the file's header comment lists what it fakes). Shared test
-helpers go there too. Examples: `src/pubsub/recovery.test.ts`,
+no WebSocket server in the repo; the file's header comment lists what it fakes). Shared pubsub
+and relay test helpers go there too; generic ones (e.g. `waitMicrotasks`) live in
+`src/test-utils.ts`. Examples: `src/pubsub/recovery.test.ts`,
 `src/chelonia-publish-receipt.test.ts`.
 
 ## Common Gotchas

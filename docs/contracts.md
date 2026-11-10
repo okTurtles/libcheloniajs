@@ -648,7 +648,7 @@ the initial `OP_CONTRACT` rather than to the follow-up action.
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
-| `maxAttempts` | `number` | `5` | How many times to retry on HTTP `409` (HEAD raced). Before each retry Chelonia waits up to 1.5 s and then syncs the contract, unless the event it was missing arrived meanwhile, so that the retry goes on top of the relay's HEAD. After this many failures `publishEvent` throws. |
+| `maxAttempts` | `number` | `5` | How many times to retry on HTTP `409` (HEAD raced). Before each retry Chelonia waits up to 1.5 s and then, unless the event it was missing arrived meanwhile, syncs the contract so that the retry goes on top of the relay's HEAD. It skips that sync for a contract it isn't subscribed to and for a contract's first event (`OP_CONTRACT`). A contract released or deleted meanwhile ends the retries without an error. After this many failures `publishEvent` throws. |
 | `headers` | `Record<string, string>` | none | Extra HTTP headers merged into the `POST /event` request (e.g. tracing IDs). |
 | `billableContractID` | `string` | none | Sets the `Shelter` Authorization header. The relay charges this contract's quota for the operation. Mutually exclusive with `bearer`. |
 | `bearer` | `string` | none | Sets `Authorization: Bearer <token>` instead. |
@@ -714,8 +714,8 @@ it checks after every successful publish:
   the contract right away, and subscribes the pubsub client (if any) to it
   again;
 - otherwise, if the event hasn't been processed within
-  `publishReceiptTimeout` ms (default `5000`, see
-  [`configure.md`](./configure.md#connection)), it syncs the contract
+  `publishReceiptTimeout` ms (default `5000`; `0` turns this check off,
+  see [`configure.md`](./configure.md#connection)), it syncs the contract
   then.
 
 Either way it warns `[chelonia] Published <event> but did not receive it

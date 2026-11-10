@@ -261,9 +261,10 @@ export const PUBSUB_RECONNECTION_SCHEDULED = 'pubsub-reconnection-scheduled'
 export const PUBSUB_RECONNECTION_SUCCEEDED = 'pubsub-reconnection-succeeded'
 export const PUBSUB_SUBSCRIPTION_SUCCEEDED = 'pubsub-subscription-succeeded'
 // Emitted as `(client, { state, previous })` whenever `client.state` changes.
-// The first one (`closed -> connecting`) is emitted by `createClient`, before
-// it returns the client. `getStatus()` can emit it too, if the socket changed
-// state without an event (e.g., it started closing).
+// The first one (`closed -> connecting`, or `offline -> connecting` when
+// offline) is emitted by `createClient`, before it returns the client (unless
+// `manual`). `getStatus()` can emit it too, if the socket changed state
+// without an event (e.g., it started closing).
 export const PUBSUB_STATE_CHANGED = 'pubsub-state-changed'
 // Emitted as `(client, { channelID, reason })` when the server rejects a SUB
 // request. The subscription is no longer pending; Chelonia requests it again
@@ -531,7 +532,7 @@ function runWithRetry (
  * {boolean?} reconnectOnDisconnection=true - Whether to reconnect after a server-side disconnection.
  * {boolean?} reconnectOnOnline=true - Whether to reconnect after coming back online.
  * {boolean?} reconnectOnTimeout=false - Whether to reconnect after a connection timeout.
- * {number?} timeout=5_000 - Connection timeout duration in milliseconds.
+ * {number?} timeout=60_000 - Connection timeout duration in milliseconds.
  * @returns {PubSubClient}
  */
 export function createClient (url: string, options: Partial<Options> = {}): PubSubClient {
@@ -958,7 +959,7 @@ const defaultMessageHandlers: MessageHandlers = {
           // The answer to one of our retries; `Late ACK` reported the delay
           console.debug(`[pubsub] Received duplicate sub ACK for ${channelID}`)
         } else {
-          console.info(`[pubsub] Received unexpected sub for ${channelID} (not requested)`)
+          console.info(`[pubsub] Received unexpected sub for ${channelID} (not pending)`)
         }
         break
       }
