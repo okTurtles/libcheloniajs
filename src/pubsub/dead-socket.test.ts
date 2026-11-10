@@ -13,7 +13,7 @@ import sbp from '@sbp/sbp'
 import * as assert from 'node:assert/strict'
 import { after, afterEach, before, describe, it } from 'node:test'
 import {
-  PUBSUB_ERROR, PUBSUB_STATE_CHANGED, PUBSUB_SUBSCRIPTION_FAILED, REQUEST_TYPE
+  NOTIFICATION_TYPE, PUBSUB_ERROR, PUBSUB_STATE_CHANGED, PUBSUB_SUBSCRIPTION_FAILED, REQUEST_TYPE
 } from './index.js'
 import type { PubSubClient, PubSubState } from './index.js'
 import {
@@ -310,6 +310,23 @@ describe('replacing dead sockets', () => {
       assert.equal(client.socket, socket, `pingTimeout: ${pingTimeout}`)
       assert.equal(socket.readyState, WebSocket.OPEN, `pingTimeout: ${pingTimeout}`)
     }
+  })
+
+  it('keeps the ping timer running when a message handler throws', async () => {
+    const newLogs = logs.fromNow()
+    const { client } = setup({
+      pingTimeout: 300,
+      messageHandlers: {
+        [NOTIFICATION_TYPE.ENTRY] () { throw new Error('handler failed') }
+      }
+    })
+    client.sub('t')
+    assert.ok(await waitFor(subscribed(client, ['t'])))
+    const socket = client.socket
+    server.entry('t', 'data')
+    // By the ping timer, not a second later by the wall-clock watchdog
+    assert.ok(await waitFor(() => client.socket !== socket, { timeout: 700 }), 'not replaced')
+    assert.equal(newLogs.grep(/Abandoning socket: ping timeout$/).length, 1)
   })
 
   it('treats a pingTimeout or timeout above the longest timer delay as practically never', async () => {

@@ -723,12 +723,12 @@ const defaultClientEventHandlers: ClientEventHandlers = {
 
   // Emitted when an error has occured.
   // The socket will be closed automatically by the engine if necessary.
+  // PUBSUB_ERROR (e.g., a message handler threw) also reaches it, on a socket
+  // that may still work, so it leaves the ping timer alone.
   error (event) {
-    const client = this
     // Not all error events should be logged with console.error, for example every
     // failed connection attempt generates one such event.
     console.warn('[pubsub] Event: error', event)
-    clearTimeout(client.pingTimeoutID)
   },
 
   // Emitted when a message is received.

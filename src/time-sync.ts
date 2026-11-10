@@ -1,4 +1,5 @@
 import sbp from '@sbp/sbp'
+import { unrefTimer } from './timer-utils.js'
 import type { CheloniaContext } from './types.js'
 
 // `wallBase` is the base used to calculate wall time (i.e., time elapsed as one
@@ -37,7 +38,7 @@ const WATCHDOG_TOLERANCE = 10
 let checkpointWall = Date.now()
 let checkpointMonotonic = performance.now()
 
-const moveCheckpoint = (wallNow = Date.now(), monotonicNow = performance.now()) => {
+const moveCheckpoint = (wallNow: number, monotonicNow: number) => {
   checkpointWall = wallNow
   checkpointMonotonic = monotonicNow
 }
@@ -137,8 +138,9 @@ export default sbp('sbp/selectors/register', {
               // In this case, it was the current task that failed
               resyncTimeout = null
               console.error('Error re-syncing server time; will re-attempt in 5s', e)
-              // Call resync again, with a shorter delay
-              setTimeout(() => resync(0), 5000)
+              // Call resync again, with a shorter delay (`stopClockSync`
+              // doesn't clear it, but it does nothing once stopped)
+              unrefTimer(setTimeout(() => resync(0), 5000))
             } else {
               // If there is already another attempt, just log it
               console.error('Error re-syncing server time; another attempt is in progress', e)
