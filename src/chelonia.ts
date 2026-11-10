@@ -475,7 +475,9 @@ export default sbp('sbp/selectors/register', {
       ...cloneDeep(this.config),
       fetch: this.config.fetch,
       reactiveSet: this.config.reactiveSet,
-      reactiveDel: this.config.reactiveDel
+      reactiveDel: this.config.reactiveDel,
+      // `cloneDeep` turns `Infinity` (e.g., `maxRetries`) into `null`
+      connectionOptions: { ...this.config.connectionOptions }
     } as ReturnType<typeof cloneDeep> & { journal?: CheloniaConfig['journal'] }
     // `cloneDeep` strips function values (same pitfall handled below by
     // `chelonia/configure`). Re-attach the journal's function fields so

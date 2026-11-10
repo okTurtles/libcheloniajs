@@ -23,7 +23,7 @@ For the authoritative signatures, follow the source links.
 | Selector | Source | Purpose |
 |---|---|---|
 | `chelonia/_init` | `src/chelonia.ts` | Initialize the Chelonia context. Runs automatically the first time a selector that needs it is invoked. |
-| `chelonia/config` | `src/chelonia.ts` | Return the live `CheloniaConfig` object. Useful for introspection in tests. |
+| `chelonia/config` | `src/chelonia.ts` | Return a copy of the current `CheloniaConfig`, which `chelonia/configure` accepts back. Useful for introspection in tests. |
 | `chelonia/configure` | `src/chelonia.ts` | Apply a `CheloniaConfig`. See [`configure.md`](./configure.md). |
 | `chelonia/reset` | `src/chelonia.ts` | Drain publishes, abort in-flight messages, clear state. `(newState?, postCleanupFn?)`. |
 | `chelonia/connect` | `src/chelonia.ts` | Open the pubsub WebSocket (destroying the previous pubsub client, if any). Returns a `PubSubClient`. Also starts the periodic subscription check (`pubsubReconcileInterval`, see [`configure.md`](./configure.md#connection)). |

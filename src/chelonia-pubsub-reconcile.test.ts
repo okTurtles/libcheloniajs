@@ -447,4 +447,10 @@ describe('connectionOptions given to chelonia/configure', () => {
     server.killClients()
     await reopened
   })
+
+  it('survive a round trip through chelonia/config, maxRetries: Infinity included', async () => {
+    await sbp('chelonia/configure', { connectionURL: RELAY_URL, fetch: relay.fetch })
+    await sbp('chelonia/configure', sbp('chelonia/config'))
+    assert.equal(sbp('chelonia/config').connectionOptions.maxRetries, Infinity)
+  })
 })
