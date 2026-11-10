@@ -7,7 +7,7 @@ import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SCHEDULED, REQUEST_TYPE } from '
 import type { PubSubClient } from './index.js'
 import {
   captureConsole, createCloseEvent, createFakePubsubServer, createFakeRelay, createTestClients,
-  emulateSleep, isOpen, onNextOpen, RELAY_URL, sleep, subscribed, waitFor
+  emulateNavigator, emulateSleep, isOpen, onNextOpen, RELAY_URL, sleep, subscribed, waitFor
 } from './test-harness.js'
 import type { FakeConnection } from './test-harness.js'
 
@@ -559,6 +559,66 @@ describe('requests that exhaust the retry budget', () => {
       assert.ok(scheduled.delays[2] >= 160, JSON.stringify(scheduled.delays))
     } finally {
       scheduled.stop()
+    }
+  })
+
+  it('ends the back-off once the relay answers the request, also with an ERROR', async () => {
+    const { client } = setup(BACKOFF)
+    // Unanswered on the first two connections, then refused
+    server.onRequest = (_conn, msg) => {
+      if (msg.type !== REQUEST_TYPE.SUB || msg.channelID !== 'bad') return
+      return client.unansweredReplacements < 2 ? 'ignore' : { error: 'refused' }
+    }
+    client.sub('bad')
+    assert.ok(await waitFor(
+      () => !client.pendingOperations.tHas(REQUEST_TYPE.SUB, 'bad'), { timeout: 5000 }
+    ), 'not refused')
+    assert.equal(client.unansweredReplacements, 0)
+    // A refused KV filter is an answer too
+    server.onRequest = (_conn, msg) =>
+      msg.type === REQUEST_TYPE.KV_FILTER ? { error: 'refused' } : undefined
+    client.sub('k')
+    assert.ok(await waitFor(subscribed(client, ['k'])))
+    client.unansweredReplacements = 1
+    client.setKvFilter('k', ['a'])
+    assert.ok(await waitFor(() => !client.pendingOperations.tHas(REQUEST_TYPE.KV_FILTER, 'k')))
+    assert.equal(client.unansweredReplacements, 0)
+    // So the next ordinary reconnection waits for 20 to 40 ms, not 80 to 160
+    const scheduled = scheduledDelays(client)
+    try {
+      server.killClients()
+      assert.ok(await waitFor(() => scheduled.delays.length > 0))
+      assert.ok(scheduled.delays[0] <= 40, JSON.stringify(scheduled.delays))
+    } finally {
+      scheduled.stop()
+    }
+  })
+
+  it('ends the back-off once a new connection has nothing to send', async () => {
+    const { client } = setup(BACKOFF)
+    client.sub('w')
+    assert.ok(await waitFor(subscribed(client, ['w'])))
+    // Replaced over an UNSUB, which the close settles
+    const first = ignoreOnCurrentConnection(REQUEST_TYPE.UNSUB)
+    client.unsub('w')
+    assert.ok(await waitFor(() => {
+      const current = connectionOf(client)
+      return current && current !== first && isOpen(client)()
+    }), 'not replaced')
+    assert.equal(client.unansweredReplacements, 0)
+  })
+
+  it('ends the back-off when the browser comes back online', async () => {
+    const nav = emulateNavigator()
+    try {
+      const { client } = setup(BACKOFF)
+      assert.ok(await waitFor(isOpen(client)))
+      client.unansweredReplacements = 3
+      nav.offline(client)
+      nav.online(client)
+      assert.equal(client.unansweredReplacements, 0)
+    } finally {
+      nav.restore()
     }
   })
 })

@@ -322,8 +322,9 @@ export function oldestPendingSubSince (
   return oldest
 }
 
-// A connection works once every pending SUB and KV filter is answered: only
-// then may replacements over unanswered requests stop backing off
+// A connection works once every pending SUB and KV filter is answered (an
+// ERROR is an answer too), or if it has none to send: only then may
+// replacements over unanswered requests stop backing off
 const noteAnsweredRequests = (client: PubSubClient) => {
   if (
     !client.pendingOperations.get(REQUEST_TYPE.SUB)?.size &&
@@ -799,7 +800,9 @@ const defaultClientEventHandlers: ClientEventHandlers = {
       // Abandoning the socket may also have given up reconnecting (and
       // destroyed the client)
       if (!client.socket && client.shouldReconnect) {
+        // The network changed, so both back-offs start over
         client.failedConnectionAttempts = 0
+        client.unansweredReplacements = 0
         // Abandoning the socket may have scheduled the attempt already
         if (!client.nextConnectionAttemptDelayID) client.scheduleConnectionAttempt()
       }
@@ -830,6 +833,8 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     for (const [channelID] of client.pendingOperations.get(REQUEST_TYPE.SUB) || []) {
       runWithRetry(client, channelID, REQUEST_TYPE.SUB, pubPayloadFactory(client, channelID))
     }
+    // E.g. replaced over an UNSUB, which the close settled
+    noteAnsweredRequests(client)
     // There should be no pending unsubscription since we just got connected.
     updateState(client)
   },
@@ -906,6 +911,7 @@ const defaultMessageHandlers: MessageHandlers = {
         console.warn(`[pubsub] Could not subscribe to ${channelID}: ${reason}`)
         if (client.pendingOperations.tDelete(REQUEST_TYPE.SUB, channelID)) {
           sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_FAILED, client, { channelID, reason })
+          noteAnsweredRequests(client)
         }
         break
       }
@@ -923,7 +929,9 @@ const defaultMessageHandlers: MessageHandlers = {
       }
       case REQUEST_TYPE.KV_FILTER: {
         console.warn(`[pubsub] Could not set KV filter for ${channelID}: ${reason}`)
-        client.pendingOperations.tDelete(REQUEST_TYPE.KV_FILTER, channelID)
+        if (client.pendingOperations.tDelete(REQUEST_TYPE.KV_FILTER, channelID)) {
+          noteAnsweredRequests(client)
+        }
         break
       }
       default: {
