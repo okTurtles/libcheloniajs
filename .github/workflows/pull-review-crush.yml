@@ -18,6 +18,11 @@ name: AI PR Review (Crush)
 # It reads its inputs from these optional repo variables (Settings → Secrets
 # and variables → Actions → Variables): REVIEW_PROVIDER, REVIEW_MODEL,
 # PROJECT_CTX and REVIEW_TIMEOUT_MINUTES.
+#
+# build-review-crush.yml copies the steps "Resolve provider settings",
+# "Install crush and bubblewrap", "Install code-review skill" and the sandbox
+# of "Run agentic review". Apply a fix in one of the two files to the other
+# file too.
 
 on:
   workflow_call:
@@ -453,6 +458,11 @@ jobs:
       # available to improve review quality. The allowlist mirrors the
       # enabled set as a belt-and-braces measure in case a future crush
       # release stops auto-approving in non-interactive mode.
+      # `default_max_tokens` of the Kimi model: without it, crush sends no
+      # output limit for a custom model and its Anthropic client caps every
+      # response at 4096 tokens, thinking included. That cut off the parent
+      # agent while it launched the workers of a massive review. 131072 is
+      # the limit catwalk gives Kimi K3 on the same API.
       - name: Install crush and bubblewrap
         run: |
           # bubblewrap (bwrap) sandboxes the crush invocation in "Run
@@ -496,7 +506,8 @@ jobs:
                     "supports_attachments": true,
                     "can_reason": true,
                     "reasoning_levels": ["low", "high", "max"],
-                    "default_reasoning_effort": "max"
+                    "default_reasoning_effort": "max",
+                    "default_max_tokens": 131072
                   }
                 ]
               }
@@ -585,6 +596,11 @@ jobs:
           #     runners use JIT config and keep credentials in memory, so
           #     no such files may exist on disk — the mask mainly protects
           #     self-hosted or differently provisioned runners;
+          #   - a tmpfs over /run (and so over /var/run, a link to it). The
+          #     runner user is in the docker group, and a read-only mount
+          #     does not stop a connection to /run/docker.sock, which gives
+          #     root on the runner and so access to everything above. Only
+          #     the DNS config file is bound back, read-only;
           #   - network access (required for the inference API).
           # OPENROUTER_API_KEY / ZAI_API_KEY / KIMI_API_KEY are deliberately
           # passed in: crush reads whichever one its active provider needs
@@ -640,8 +656,16 @@ jobs:
             --ro-bind / /
             --dev /dev --proc /proc
             --tmpfs /tmp
+            --tmpfs /run
             --tmpfs "$RUNNER_TEMP"
           )
+          # crush needs DNS, and on Ubuntu /etc/resolv.conf links to the
+          # systemd-resolved stub file in /run. Bind that one file back,
+          # read-only.
+          RESOLV_CONF=$(readlink -f /etc/resolv.conf)
+          case "$RESOLV_CONF" in
+            /run/*) BWRAP+=(--ro-bind "$RESOLV_CONF" "$RESOLV_CONF") ;;
+          esac
           for dir in "${RUNNER_AGENT_DIRS[@]}"; do
             BWRAP+=(--tmpfs "$dir")
           done

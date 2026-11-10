@@ -20,11 +20,11 @@ Every contract is represented as an append-only log of operations (op codes). So
 ```bash
 npm install        # Install dependencies
 npm test           # Run tests (node:test; every .test.ts file auto-discovered, each in its own process)
-npm run build      # Build both ESM and CJS outputs
+npm run build      # Delete dist/, then build both ESM and CJS outputs into it
 npm run build:esm  # Build ESM only (.mjs files)
 npm run build:cjs  # Build CJS only (.cjs files)
 npm run lint       # Run ESLint
-npm run clean      # Remove dist/ artifacts
+npm run clean      # Delete dist/
 ```
 
 ## Build System
@@ -35,6 +35,11 @@ Dual ESM/CJS output with TypeScript declarations:
 |---|---|---|---|
 | ESM | `dist/esm/` | `.mjs`, `.d.mts` | `tsconfig.json` (target ES2022, module esnext) |
 | CJS | `dist/cjs/` | `.cjs`, `.d.cts` | `tsconfig.cjs.json` (module nodenext) |
+
+`dist/` is build output and is not in git. `prepack` runs `npm run build`, so `npm pack` and
+`npm publish` always ship a fresh build. The `files` field in `package.json` limits the package
+to `dist/` without tests and `test-utils.*`. An install from a git URL gets no `dist/`: npm
+runs only `prepare`, not `prepack`, for git dependencies.
 
 ### Build Process (`buildHelper.ts`)
 
@@ -51,9 +56,10 @@ GitHub Actions files in `.github/`:
 
 | Path | Purpose |
 |---|---|
-| `workflows/ci.yml` | Runs `npm ci` and `npm test` on pushes and PRs to `main` |
+| `workflows/ci.yml` | Runs `npm ci`, `npm test` and `npm run build` on pushes and PRs to `main` |
 | `workflows/pr-review.yml` | Runs `pull-review-crush.yml` when a member comments `/review` on a PR |
 | `workflows/pull-review-crush.yml` | Reusable AI PR review workflow. Other okTurtles repos call it through `@main` |
+| `workflows/build-review-crush.yml` | On a `v*` tag push, builds that tag and the previous one, and has crush audit the diff of the two builds for code that the build added |
 | `actions/fix-ubuntu-ca-roots/` | Shared action that removes distrusted CA roots on the runner. All okTurtles repos call it through `@main` |
 
 Rules:
@@ -64,6 +70,8 @@ Rules:
   `env:`. A job that only calls a reusable workflow (`pr-review.yml`) needs neither.
 - Other repos use the action and `pull-review-crush.yml` from `main`. A change to them affects
   those repos when it merges, and the PR's own CI still runs the copy on `main`.
+- `build-review-crush.yml` copies some steps of `pull-review-crush.yml` (the comment above
+  each copy names its source). Apply a fix in one file to the other too.
 
 The header of `.github/actions/fix-ubuntu-ca-roots/action.yml` gives the reasons and the full
 rules for callers.
@@ -358,7 +366,7 @@ scope, so a stub registered by one file (e.g. the `chelonia/contract/fullState` 
 
 1. **Import extensions**: Always use `.js` extension in imports, even for TypeScript files. The build process does not transform these.
 2. **SBP context**: Many functions use `this: CheloniaContext` - they must be called through SBP to have proper context binding.
-3. **`dist/` under version control**: Ignore the files in `dist/`, don't review them or read them or update them.
+3. **`dist/` is build output**: It is not in git. Never edit, read or review it; change `src/` and run `npm run build`.
 4. **Test isolation**: Tests use SBP selectors which are globally registered. Each test file runs in its own process; keep files self-contained and never import one test file from another. Mock functions carefully to avoid cross-test contamination within a file.
 5. **Secret keys**: Secret keys are stored in `rootState.secretKeys` as serialized strings and accessed via `transientSecretKeys` proxy.
 6. **Reference counting for contracts** — Use `chelonia/contract/retain` and `chelonia/contract/release` for contract lifecycle. At refcount 0, the contract is unsubscribed.
