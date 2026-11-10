@@ -436,4 +436,15 @@ describe('connectionOptions given to chelonia/configure', () => {
       sbp('okTurtles.events/off', PUBSUB_RECONNECTION_FAILED, listener)
     }
   })
+
+  it('keep the client\'s default for a field set to undefined', async () => {
+    // E.g. built with `{ reconnectOnDisconnection: cfg.reconnect }`
+    pubsub = await connectChelonia(relay, {
+      connectionOptions: { minReconnectionDelay: 20, reconnectOnDisconnection: undefined }
+    })
+    assert.equal(pubsub.options.reconnectOnDisconnection, true)
+    const reopened = onNextOpen(pubsub)
+    server.killClients()
+    await reopened
+  })
 })

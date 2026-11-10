@@ -535,9 +535,14 @@ export default sbp('sbp/selectors/register', {
     // because they are functions and cloneDeep doesn't clone functions
     Object.assign(this.config.hooks, config.hooks || {})
     // ...and turns `Infinity` into `null`: `maxRetries: Infinity` would then
-    // stop reconnecting after one failed attempt
+    // stop reconnecting after one failed attempt. Like `merge`, skip a field
+    // set to `undefined`: it would override the pubsub client's default
     if (config.connectionOptions && this.config.connectionOptions) {
-      Object.assign(this.config.connectionOptions, config.connectionOptions)
+      for (const [key, value] of Object.entries(config.connectionOptions)) {
+        if (value !== undefined) {
+          (this.config.connectionOptions as Record<string, unknown>)[key] = value
+        }
+      }
     }
     if (journalOverride === null) {
       // Explicit `journal: null` means "stop journaling": reset the
