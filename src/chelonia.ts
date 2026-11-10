@@ -62,7 +62,9 @@ import {
   unwrapMaybeEncryptedData
 } from './encryptedData.js'
 import './files.js'
-import { clearReprocessDebounceAll, syncIfBehind, type PublishOptions } from './internals.js'
+import {
+  clearReprocessDebounceAll, reconcilePubsub, syncIfBehind, type PublishOptions
+} from './internals.js'
 import './kv.js'
 import {
   isSignedData,
@@ -1333,25 +1335,18 @@ export default sbp('sbp/selectors/register', {
     // subscribed to, but the client can lose one without Chelonia noticing
     // (e.g., when the server rejects a SUB), and `chelonia/pubsub/update`
     // otherwise only runs when `subscriptionSet` changes. So, also run it
-    // after every (re)connection and periodically. It's cheap: `sub()`
-    // skips contracts that are already subscribed or pending.
-    const reconcilePubsub = (trigger: string) => {
-      // Contracts that are neither subscribed nor pending have been lost by
-      // the pubsub client, which is worth knowing when diagnosing it
-      const { missing } = sbp('chelonia/pubsub/status') as ChelPubSubStatus
-      if (missing.length) {
-        console.info(`[chelonia] pubsub reconcile (${trigger}): subscribing again to ${missing.length} contract(s) missing from the pubsub client`, missing)
-      }
-      sbp('chelonia/pubsub/update')
-    }
+    // after every (re)connection and periodically (`reconcilePubsub`). It's
+    // cheap: `sub()` skips contracts that are already subscribed or pending.
     if (!this.pubsubReconcileListener) {
       this.pubsubReconcileListener = (client: PubSubClient) => {
         if (client !== this.pubsub) return
+        // Read `isNew` now: `open` sets it to `false` after emitting the event
+        const trigger = client.isNew ? 'connected' : 'reconnected'
         // `open` emits PUBSUB_RECONNECTION_SUCCEEDED before it re-sends the
         // pending SUBs, so wait for that to happen
         setTimeout(() => {
           if (client === this.pubsub && client.socket?.readyState === WebSocket.OPEN) {
-            reconcilePubsub('reconnected')
+            reconcilePubsub.call(this, trigger)
           }
         }, 0)
       }
@@ -1373,7 +1368,7 @@ export default sbp('sbp/selectors/register', {
           return
         }
         if (client.socket?.readyState === WebSocket.OPEN) {
-          reconcilePubsub('periodic')
+          reconcilePubsub.call(this, 'periodic')
         }
       }, reconcileInterval)
       this.pubsubReconcileIntervalID = unrefTimer(intervalID)
@@ -3211,6 +3206,9 @@ export default sbp('sbp/selectors/register', {
                   `[kv/set] Error syncing ${contractID} after a conflict setting ${key}; retrying anyway: ${(e as Error)?.message || e}`
                 )
               }
+              // Like publishing, re-subscribe to the contract if the pubsub
+              // client lost it
+              if (syncedAfterConflict && this.pubsub) reconcilePubsub.call(this, 'kv/set')
             }
             if (await resolveData()) {
               continue

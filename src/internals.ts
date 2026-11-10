@@ -66,6 +66,7 @@ import {
   ChelContractProcessMessageObject,
   ChelContractSideeffectMutationObject,
   ChelContractState,
+  ChelPubSubStatus,
   ChelRootState,
   CheloniaConfig,
   CheloniaContext,
@@ -314,6 +315,23 @@ export const syncIfBehind = function (
   })
 }
 
+// Subscribes the pubsub client again to the contracts that it lost, and logs
+// them. They missed their KV pushes too, so their slots reload after the sync
+// that follows the new SUB. A new client's first connection lost nothing.
+export const reconcilePubsub = function (
+  this: CheloniaContext,
+  trigger: 'connected' | 'reconnected' | 'periodic' | 'publish' | 'kv/set'
+): void {
+  if (trigger !== 'connected') {
+    const { missing } = sbp('chelonia/pubsub/status') as ChelPubSubStatus
+    if (missing.length) {
+      console.info(`[chelonia] pubsub reconcile (${trigger}): subscribing again to ${missing.length} contract(s) missing from the pubsub client`, missing)
+      sbp('chelonia/kv/_markForRefresh', missing)
+    }
+  }
+  sbp('chelonia/pubsub/update')
+}
+
 // A published event normally comes back over pubsub, and is processed then
 // (which is when `onprocessed` fires). That doesn't happen if the pubsub
 // client isn't subscribed to the contract (e.g., the subscription was lost)
@@ -342,7 +360,7 @@ const ensurePublishedEventReceived = function (
           `[chelonia] Published ${entry.description()} but did not receive it (${reason}); syncing ${contractID}`
         )
         // Re-subscribe to the contract if the pubsub client lost it
-        if (this.pubsub) sbp('chelonia/pubsub/update')
+        if (this.pubsub) reconcilePubsub.call(this, 'publish')
       }).catch((e: unknown) => {
         console.error(`[chelonia] Error syncing ${contractID} after publishing`, e)
       })

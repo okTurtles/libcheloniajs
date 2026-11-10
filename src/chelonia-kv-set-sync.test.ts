@@ -22,7 +22,7 @@ import type { PubSubClient } from './pubsub/index.js'
 import {
   captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay, createTestContract,
   handledEvents, keepQueueBusy, kvConflict, localHeight, retainedContract, sleep, staleContract,
-  storeSecretKeys, waitFor
+  storeSecretKeys, subscribed, waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
 import type { ChelKvGetResult, ChelRootState, JSONType } from './types.js'
@@ -41,7 +41,8 @@ before(async () => {
   pubsub = await connectChelonia(relay, {
     skipActionProcessing: true,
     // No periodic reconcile: a contract lost with `pubsub.unsub()` stays
-    // lost until the next `chelonia/pubsub/update` (e.g. the next retain)
+    // lost until a `kv/set` that syncs it subscribes to it again, or the next
+    // `chelonia/pubsub/update` (e.g. the next retain)
     pubsubReconcileInterval: 0
   })
 })
@@ -147,6 +148,10 @@ describe('kv/set on a contract whose subscription was lost', () => {
     assert.equal(localHeight(contractID), relay.headInfo(contractID)!.height)
   })
 
+  it('subscribes the pubsub client to the contract again', async () => {
+    assert.ok(await waitFor(subscribed(pubsub, [contractID])), 'not re-subscribed')
+  })
+
   it('has stored the value', async () => {
     assert.deepEqual(await kvValue(contractID), data)
   })
@@ -180,8 +185,10 @@ describe('kv/set on a contract that Chelonia is up to date with', () => {
 })
 
 describe('kv/set when syncing does not help', () => {
+  // On a subscribed contract: once the pubsub client lost it, the sync that
+  // follows the new subscription would add to the count
   it('syncs at most once per call', async () => {
-    const { contract } = await staleContract(relay, pubsub)
+    const contract = await retainedContract(relay, pubsub)
     // The server keeps answering 409 (e.g. it keeps getting new events)
     relay.onRequest = ({ method, path }) => {
       if (method === 'POST' && path.startsWith('/kv/')) return kvConflict()
@@ -193,9 +200,10 @@ describe('kv/set when syncing does not help', () => {
   })
 
   it('keeps the outcome when the sync fails, and logs it', async () => {
-    const { contract } = await staleContract(relay, pubsub)
+    const contract = await retainedContract(relay, pubsub)
     const logged = logs.fromNow()
-    relay.onRequest = ({ path }) => {
+    relay.onRequest = ({ method, path }) => {
+      if (method === 'POST' && path.startsWith('/kv/')) return kvConflict()
       if (path === `/latestHEADinfo/${contract.contractID}`) {
         return new Response('', { status: 500 })
       }

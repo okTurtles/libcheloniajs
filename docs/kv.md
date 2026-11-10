@@ -74,7 +74,7 @@ state, project `{ ...rootState, _kv: undefined }`.
 | `signingKeyName` | `'csk'` | Contract key name used for signing. A missing named key rejects the write. |
 | `autoSubscribe` | `true` | Subscribe to pubsub for this slot automatically. |
 | `autoLoad` | `'on-sync'` | `'on-sync'` loads on contract sync; `'on-demand'` waits for `chelonia/kv/sync` (or a successful `update`); `'never'` skips. |
-| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect. |
+| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect, and when Chelonia subscribes the pubsub client again to a contract that the client lost. |
 | `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the plain-`value` form of `chelonia/kv/update`. |
 | `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw; must not synchronously call a same-contract KV write (rejected with `ChelErrorKvReentrant`; see the rejection taxonomy below). |
 
@@ -138,12 +138,13 @@ contract height, i.e. this client missed some of the contract's events
 same way, ending in `kv/set conflict setting KV value`. The sync only
 happens if Chelonia is subscribed to the contract and no event arrived
 during the back-off, and a failing sync is logged and the write retried
-anyway. Because of it, never await `chelonia/kv/set` from inside the
-contract's internal queue (e.g. from a side effect), as the sync would
-wait for that queue. `chelonia/kv/queuedSet`, `chelonia/queueInvocation`
-and the slot API use the public queue, so they are safe to call (but not
-to await) from a side effect: the public queue waits for the internal
-one.
+anyway. After the sync, `kv/set` also subscribes the pubsub client to the
+contract again if the client lost it, as publishing does. Because of the
+sync, never await `chelonia/kv/set` from inside the contract's internal
+queue (e.g. from a side effect), as the sync would wait for that queue.
+`chelonia/kv/queuedSet`, `chelonia/queueInvocation` and the slot API use
+the public queue, so they are safe to call (but not to await) from a side
+effect: the public queue waits for the internal one.
 
 ## Schema-driven default normalization
 

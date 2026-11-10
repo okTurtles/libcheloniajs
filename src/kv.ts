@@ -2002,7 +2002,18 @@ export default (sbp('sbp/selectors/register', {
   // are marked here and run after the per-subscription forced resync.
   'chelonia/kv/_onReconnect': function (this: CheloniaContext): void {
     this.kvLocalEchoCIDs.clear()
-    for (const [cID, perKey] of this.kvSlotsByContractID) {
+    sbp('chelonia/kv/_markForRefresh', this.kvSlotsByContractID.keys())
+  },
+
+  // Private. Marks the contracts with `refreshOnReconnect` slots, which reload
+  // after the forced resync that follows their next SUB (`_onContractResynced`).
+  // Also called when a subscription that the pubsub client lost is restored.
+  'chelonia/kv/_markForRefresh': function (
+    this: CheloniaContext, contractIDs: Iterable<string>
+  ): void {
+    for (const cID of contractIDs) {
+      const perKey = this.kvSlotsByContractID.get(cID)
+      if (!perKey) continue
       for (const [, slot] of perKey) {
         if (slot.refreshOnReconnect) {
           this.kvReconnectRefresh.add(cID)

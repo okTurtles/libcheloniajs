@@ -245,6 +245,16 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
     assert.deepEqual(reconciled[0].args[1], ['contract-A'])
   })
 
+  it('subscribes a new client to every contract without reporting them as lost', async () => {
+    await connect(0)
+    await want('contract-N')
+    const newLogs = logs.fromNow()
+    // A second `chelonia/connect` replaces the client
+    await connect(0)
+    assert.ok(await waitFor(subscribed(pubsub, ['contract-N'])), 'not subscribed')
+    assert.equal(newLogs.grep(/pubsub reconcile/).length, 0)
+  })
+
   it('subscribes again to a contract that it wants while its UNSUB is pending', async () => {
     // E.g., the contract was released and then retained again right away
     await connect(0)
