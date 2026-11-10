@@ -1191,7 +1191,12 @@ const publicMethods: {
       client.options
 
     const attempts = Math.max(client.failedConnectionAttempts, client.unansweredReplacements)
-    const minDelay = minReconnectionDelay * reconnectionDelayGrowFactor ** attempts
+    // Both counters are unbounded (e.g., `maxRetries: Infinity`), and with the
+    // defaults the uncapped value overflows from 1016 attempts on (a `NaN` delay)
+    const minDelay = Math.min(
+      maxReconnectionDelay,
+      minReconnectionDelay * reconnectionDelayGrowFactor ** attempts
+    )
     const maxDelay = minDelay * reconnectionDelayGrowFactor
     const connectionTimeUsed = client.connectionTimeUsed
     client.connectionTimeUsed = undefined
