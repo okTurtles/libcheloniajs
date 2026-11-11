@@ -30,8 +30,8 @@ import { env, fail, run, sandboxOptions, words } from './lib.mjs'
 const OUTPUT_DIR = env('OUTPUT_DIR')
 const WORK_DIR = env('WORK_DIR')
 
-// OUTPUT_DIR is a path in the source dirs, a `diff -x` name and an `rm -rf`
-// target, so accept only the name of a top-level dir.
+// OUTPUT_DIR is a path in the source dirs and an `rm -rf` target, so accept
+// only the name of a top-level dir.
 if (!/^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(OUTPUT_DIR)) {
   fail('output-dir must be the name of a top-level dir')
 }
@@ -51,7 +51,9 @@ for (const name of ['DENO_TLS_CA_STORE', 'SSL_CERT_FILE']) {
 const installSandbox = [...sandboxOptions({ network: true }), ...sandboxEnv]
 const buildSandbox = [...sandboxOptions({ network: false }), ...sandboxEnv]
 
-const diffExcludes = [OUTPUT_DIR, ...words(env('INSTALL_DIRS'))].flatMap(name => ['-x', name])
+// The install dirs are names, as `diff -x` reads them: a dir with such a name
+// is left out at any depth.
+const diffExcludes = words(env('INSTALL_DIRS')).flatMap(name => ['-x', name])
 
 // Extracts the files of `tag` into `dir`.
 function extractTag (tag, dir) {
@@ -62,9 +64,11 @@ function extractTag (tag, dir) {
   fs.rmSync(archive)
 }
 
-// Runs the shell command `command` of the caller in the sandbox `sandbox`.
+// Runs the shell command `command` of the caller in the sandbox `sandbox`. With
+// -e and pipefail, a failed part of a command list or pipeline fails the step.
 function runInSandbox (sandbox, writable, command, what) {
-  const result = spawnSync('bwrap', [...sandbox, ...writable, '--', 'bash', '-c', command], {
+  const shell = ['bash', '-e', '-o', 'pipefail', '-c', command]
+  const result = spawnSync('bwrap', [...sandbox, ...writable, '--', ...shell], {
     stdio: 'inherit'
   })
   if (result.status !== 0) {
@@ -91,14 +95,26 @@ function buildTag (tag, dir, home) {
   // A package can ship root files, such as package.json, as the build leaves
   // them, but the audit reads only the output dir. A normal build changes no
   // file outside the output dir and the install dirs, so fail on any other
-  // change. The sandbox has ended all build processes by now.
+  // change. The sandbox has ended all build processes by now. The output dir
+  // is moved out for the diff, because `diff -x` would also leave out a
+  // nested dir with its name, such as src/build/.
   const pristine = fs.mkdtempSync(path.join(os.tmpdir(), 'pristine-'))
   extractTag(tag, pristine)
+  fs.rmSync(path.join(pristine, OUTPUT_DIR), { recursive: true, force: true })
+  const output = path.join(dir, OUTPUT_DIR)
+  const movedOutput = `${dir}.${OUTPUT_DIR}`
+  const hasOutput = fs.lstatSync(output, { throwIfNoEntry: false }) !== undefined
+  if (hasOutput) {
+    fs.renameSync(output, movedOutput)
+  }
   const diff = spawnSync('diff', ['-ru', '--no-dereference', ...diffExcludes, pristine, dir], {
     stdio: 'inherit'
   })
   if (diff.status !== 0) {
     fail(`The build of ${tag} changed files outside ${OUTPUT_DIR}/ and the install dirs (diff in the log of this step)`)
+  }
+  if (hasOutput) {
+    fs.renameSync(movedOutput, output)
   }
   fs.rmSync(pristine, { recursive: true })
   console.log('::endgroup::')

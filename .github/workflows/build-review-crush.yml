@@ -103,8 +103,8 @@ on:
         required: false
       install-command:
         description: >-
-          Command that installs the dependencies in the source dir. It runs in
-          the build sandbox, but with network.
+          Command that installs the dependencies in the source dir. Bash runs
+          it with -e and -o pipefail in the build sandbox, but with network.
         type: string
         required: false
         default: npm ci --ignore-scripts --no-audit --no-fund
@@ -118,8 +118,8 @@ on:
         default: node_modules
       build-command:
         description: >-
-          Command that builds the source dir into output-dir. It runs in the
-          build sandbox, without network.
+          Command that builds the source dir into output-dir. Bash runs it
+          with -e and -o pipefail in the build sandbox, without network.
         type: string
         required: false
         default: npm run build
