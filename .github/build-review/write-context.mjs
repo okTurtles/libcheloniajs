@@ -6,7 +6,7 @@
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { codeList, env, fill, output, readTemplate, runToFile, words } from './lib.mjs'
+import { codeList, env, fill, output, readTemplate, runToFile, withoutCommands, words } from './lib.mjs'
 
 const TAG = env('TAG')
 const BASE_TAG = env('BASE_TAG')
@@ -37,10 +37,11 @@ if (dependencyListCommand) {
     const cwd = `${WORK_DIR}/${dir}`
     toolchain += `\nTop-level dependencies of ${tag} (${cwd}):\n`
     // The exit code does not matter: `npm ls` also lists the dependencies
-    // when it exits with 1 because it found a problem.
-    const list = spawnSync('bash', ['-c', dependencyListCommand], {
-      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], maxBuffer: 1 << 30
-    })
+    // when it exits with 1 because it found a problem. Its messages can quote
+    // the installed packages, so they are untrusted.
+    const list = withoutCommands(() => spawnSync('bash', ['-c', dependencyListCommand], {
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 1], maxBuffer: 1 << 30
+    }))
     toolchain += list.stdout ?? ''
   }
 }

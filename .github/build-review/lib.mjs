@@ -141,13 +141,24 @@ export function sandboxOptions ({ network }) {
   return options
 }
 
-// Prints the untrusted file `file` in a log group. Workflow commands stop
-// while it is printed, so a line such as `::error::` in it does nothing. The
-// runner sees the resume token only at the start of a line, and the file may
-// not end with a newline.
-export function logUntrusted (title, file) {
+// Runs `print`, which prints untrusted text, while the runner ignores workflow
+// commands, so that a line such as `::error::` or `::add-mask::` in the text
+// does nothing. The runner sees the resume token only at the start of a line,
+// and the text may not end with a newline. A child process that prints must
+// end before `print` returns, and must write its stderr to stdout (stdio
+// ['ignore', 1, 1]): the runner reads stderr in parallel, so a line there could
+// pass before the stop command.
+export function withoutCommands (print) {
   const token = crypto.randomBytes(16).toString('hex')
-  process.stdout.write(`::group::${title}\n::stop-commands::${token}\n`)
-  process.stdout.write(fs.readFileSync(file))
-  process.stdout.write(`\n::${token}::\n::endgroup::\n`)
+  process.stdout.write(`::stop-commands::${token}\n`)
+  const result = print()
+  process.stdout.write(`\n::${token}::\n`)
+  return result
+}
+
+// Prints the untrusted file `file` in a log group (see withoutCommands).
+export function logUntrusted (title, file) {
+  process.stdout.write(`::group::${title}\n`)
+  withoutCommands(() => process.stdout.write(fs.readFileSync(file)))
+  process.stdout.write('::endgroup::\n')
 }

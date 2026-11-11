@@ -25,7 +25,7 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { env, fail, run, sandboxOptions, words } from './lib.mjs'
+import { env, fail, run, sandboxOptions, withoutCommands, words } from './lib.mjs'
 
 const OUTPUT_DIR = env('OUTPUT_DIR')
 const WORK_DIR = env('WORK_DIR')
@@ -66,11 +66,12 @@ function extractTag (tag, dir) {
 
 // Runs the shell command `command` of the caller in the sandbox `sandbox`. With
 // -e and pipefail, a failed part of a command list or pipeline fails the step.
+// Its output is untrusted, so workflow commands stop while it runs.
 function runInSandbox (sandbox, writable, command, what) {
   const shell = ['bash', '-e', '-o', 'pipefail', '-c', command]
-  const result = spawnSync('bwrap', [...sandbox, ...writable, '--', ...shell], {
-    stdio: 'inherit'
-  })
+  const result = withoutCommands(() => spawnSync('bwrap', [...sandbox, ...writable, '--', ...shell], {
+    stdio: ['ignore', 1, 1]
+  }))
   if (result.status !== 0) {
     fail(`${what} failed with ${result.error?.message ?? result.signal ?? `exit code ${result.status}`}`)
   }
@@ -107,9 +108,10 @@ function buildTag (tag, dir, home) {
   if (hasOutput) {
     fs.renameSync(output, movedOutput)
   }
-  const diff = spawnSync('diff', ['-ru', '--no-dereference', ...diffExcludes, pristine, dir], {
-    stdio: 'inherit'
-  })
+  // The diff shows the content of files that the build wrote: untrusted too.
+  const diff = withoutCommands(() => spawnSync('diff', [
+    '-ru', '--no-dereference', ...diffExcludes, pristine, dir
+  ], { stdio: ['ignore', 1, 1] }))
   if (diff.status !== 0) {
     fail(`The build of ${tag} changed files outside ${OUTPUT_DIR}/ and the install dirs (diff in the log of this step)`)
   }

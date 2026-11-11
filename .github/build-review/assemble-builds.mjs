@@ -4,7 +4,7 @@
 // two builds. Sets the step output `changed`: whether the builds differ.
 import fs from 'node:fs'
 import path from 'node:path'
-import { addToSummary, env, fail, output, run, runToFile, setOutput, words } from './lib.mjs'
+import { addToSummary, env, fail, output, run, runToFile, setOutput, withoutCommands, words } from './lib.mjs'
 
 const TAG = env('TAG')
 const BASE_TAG = env('BASE_TAG')
@@ -71,7 +71,8 @@ function copyBuild (src, tag) {
     .filter(({ entry }) => entry.name.startsWith('.') || !(entry.isFile() || entry.isDirectory()))
     .map(({ file }) => file)
   if (oddFiles.length > 0) {
-    console.log(oddFiles.join('\n'))
+    // The build chose these names, and a name can hold a newline.
+    withoutCommands(() => console.log(oddFiles.join('\n')))
     fail(`The build in ${src} has dotfiles, symlinks or other special files, which the audit does not accept`)
   }
   fs.mkdirSync(built, { recursive: true })
