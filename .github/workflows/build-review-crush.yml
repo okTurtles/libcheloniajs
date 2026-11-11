@@ -180,8 +180,8 @@ env:
 
 defaults:
   run:
-    # An explicit `bash` adds `-o pipefail`, so a failed `git archive` in
-    # `git archive | tar` fails the step.
+    # An explicit `bash` adds `-o pipefail`, so a failed command in a pipe
+    # fails the step.
     shell: bash
 
 jobs:
