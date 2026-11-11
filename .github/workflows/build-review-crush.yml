@@ -565,7 +565,7 @@ jobs:
           }
 
           copy_build() {
-            local src=$1 tag=$2 out=$1/$OUTPUT_DIR built=$BUILD_REPO/built tracked file id
+            local src=$1 tag=$2 out=$1/$OUTPUT_DIR built=$BUILD_REPO/built tracked='' file id entry meta
             local -a copies
             # This copy runs outside the build sandbox. A symlink could make
             # it read a path that the sandbox hides, and a .gitignore or
@@ -587,10 +587,17 @@ jobs:
 
             # A byte copy of a file in git holds nothing that the build added.
             # Old tags can have their output dir in git, so a file there does
-            # not count.
+            # not count. Without -z, git quotes a path with unusual bytes, so
+            # an output dir path would not start with "$OUTPUT_DIR/". --format
+            # quotes %(path) even with -z, so this reads the default format:
+            # "<mode> <type> <id><TAB><path>".
             if [ "${#COPIED_PATTERNS[@]}" -gt 0 ]; then
-              tracked=$(git ls-tree -r --format='%(objecttype) %(objectname)%x09%(path)' "refs/tags/$tag" \
-                | awk -F '\t' -v out="$OUTPUT_DIR/" '$1 ~ /^blob / && index($2, out) != 1 { print substr($1, 6) }')
+              while IFS= read -r -d '' entry; do
+                meta=${entry%%$'\t'*}
+                if [[ $meta == *' blob '* && ${entry#*$'\t'} != "$OUTPUT_DIR"/* ]]; then
+                  tracked+=${meta##* }$'\n'
+                fi
+              done < <(git ls-tree -r -z "refs/tags/$tag")
               match_any -path "$built/" "${COPIED_PATTERNS[@]}"
               mapfile -d '' -t copies < <(find "$built" -type f \( "${MATCH[@]}" \) -print0)
               for file in "${copies[@]}"; do
