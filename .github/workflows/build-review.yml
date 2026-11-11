@@ -35,12 +35,10 @@ jobs:
       source-paths: >-
         src package.json package-lock.json .npmrc buildHelper.ts
         renameFiles.mjs tsconfig*.json scripts
-      # Keep the test patterns in sync with the negations in the package.json
+      # Keep these patterns in sync with the negations in the package.json
       # `files` field.
-      excluded-files: '*.d.mts *.d.cts *.d.ts *.test.* test-utils.*'
-      build-notes: >-
-        Node never runs type declarations, and the package does not ship
-        tests.
+      excluded-files: '*.test.* test-utils.*'
+      build-notes: The package does not ship tests.
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}

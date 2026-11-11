@@ -22,6 +22,8 @@ name: Build Review (Crush)
 #     ZAI_API_KEY and/or KIMI_API_KEY.
 #   - Describe the build with the inputs from `package-name` on. The scripts
 #     trust these values, because they come from the caller's workflow file.
+#   - Keep the build reproducible: two builds of the same tag must give the
+#     same files. The first limit below relies on it.
 #   - Do not give the calling job the concurrency group used below.
 #
 # Example caller: copy .github/workflows/build-review.yml from this repo, set
@@ -37,8 +39,8 @@ name: Build Review (Crush)
 # Limits:
 #   - The audit vets the build that this job makes. A maintainer still
 #     publishes from a local machine, and that build is not compared with this
-#     one. If the build is reproducible, a later change can publish from CI or
-#     compare the published files with this build.
+#     one. Builds are reproducible, so a later change can publish from CI or
+#     compare the npm tarball with this build.
 #   - The base build is trusted: each release is compared only with the
 #     previous one. A toolchain change shows in the audit of the release that
 #     brings it in, if the lock files are in source-paths.
@@ -127,7 +129,7 @@ on:
       excluded-files:
         description: >-
           `find -name` patterns of built files that the audit leaves out,
-          separated by spaces, e.g. `*.d.ts`. Give the reason in build-notes.
+          separated by spaces, e.g. `*.test.*`. Give the reason in build-notes.
         type: string
         required: false
       copied-files:
