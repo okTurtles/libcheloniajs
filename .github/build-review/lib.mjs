@@ -40,7 +40,7 @@ export function warning (message) {
 // Returns its stdout if `options.stdio` pipes it.
 export function run (command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: 'inherit', maxBuffer: MAX_BUFFER, ...options })
-  const name = `${command} ${args[0] ?? ''}`.trim()
+  const name = [command, ...args].join(' ')
   if (result.error) {
     fail(`${name}: ${result.error.message}`)
   }
