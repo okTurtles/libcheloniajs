@@ -97,9 +97,8 @@ on:
         required: false
       install-command:
         description: >-
-          Command that installs the dependencies in the source dir. It runs
-          outside the build sandbox, with network, so it must not run code of
-          the repo or of its dependencies (no install scripts).
+          Command that installs the dependencies in the source dir. It runs in
+          the build sandbox, but with network.
         type: string
         required: false
         default: npm ci --ignore-scripts --no-audit --no-fund
@@ -286,15 +285,19 @@ jobs:
       # dependencies), which is the code that this audit suspects. Outside a
       # sandbox, that code could write GITHUB_ENV or GITHUB_PATH, leave a
       # process that outlives the step, or use sudo, and so read the API keys
-      # of "Run build review" or change its verdict. The install command runs
-      # no dependency code (see the install-command input), so it runs
-      # outside. The build command runs in bwrap, which gives it:
-      #   - no network, and from the step env only PATH, HOME, NODE_OPTIONS
-      #     and the CA settings of fix-ubuntu-ca-roots (no GITHUB_ENV,
-      #     GITHUB_PATH or token);
+      # of "Run build review" or change its verdict. The install can run such
+      # code too: a config file of the tag can turn on install scripts, e.g.
+      # `allowScripts` in deno.json. So the install command and the build
+      # command both run in bwrap, which gives each of them:
+      #   - no network for the build. The install has network, because it
+      #     downloads the dependencies;
+      #   - from the step env only PATH, NODE_OPTIONS and the CA settings of
+      #     fix-ubuntu-ca-roots (no GITHUB_ENV, GITHUB_PATH or token);
       #   - its own PID namespace, so all of its processes end with it;
       #   - no_new_privs (bwrap always sets it), so no sudo;
-      #   - write access only to its source dir and to tmpfs dirs;
+      #   - write access only to its source dir, to a HOME dir of the tag
+      #     (for the caches of the tools) and to tmpfs dirs. The install and
+      #     the build of a tag share these dirs;
       #   - a tmpfs over /run. The runner user is in the docker group, and a
       #     read-only mount does not stop a connection to /run/docker.sock,
       #     which gives root;
@@ -334,13 +337,10 @@ jobs:
           for dir in "${RUNNER_AGENT_DIRS[@]}"; do
             BWRAP+=(--tmpfs "$dir")
           done
-          # npm writes its log files to its cache dir, which must be writable.
           BWRAP+=(
             --clearenv
             --setenv PATH "$PATH"
-            --setenv HOME "$HOME"
             --setenv NODE_OPTIONS "$NODE_OPTIONS"
-            --setenv npm_config_cache /tmp/npm-cache
           )
           # fix-ubuntu-ca-roots sets these for Deno and other tools that read
           # them (see its action.yml).
@@ -349,6 +349,15 @@ jobs:
               BWRAP+=(--setenv "$name" "${!name}")
             fi
           done
+          # The install gets the network to download the dependencies. It
+          # also needs DNS, and on Ubuntu /etc/resolv.conf links to the
+          # systemd-resolved stub file in /run, so bind that one file back,
+          # read-only, as in "Run build review".
+          INSTALL_BWRAP=("${BWRAP[@]}" --share-net)
+          RESOLV_CONF=$(readlink -f /etc/resolv.conf)
+          case "$RESOLV_CONF" in
+            /run/*) INSTALL_BWRAP+=(--ro-bind "$RESOLV_CONF" "$RESOLV_CONF") ;;
+          esac
 
           # Split on spaces and newlines, without glob expansion.
           read -r -d '' -a INSTALL_DIR_NAMES < <(printf '%s\0' "$INSTALL_DIRS")
@@ -358,15 +367,21 @@ jobs:
           done
 
           build_tag() {
-            local tag=$1 dir=$2 pristine
+            local tag=$1 dir=$2 home=$3 pristine
+            local -a writable=(
+              --bind "$dir" "$dir"
+              --bind "$home" "$home"
+              --setenv HOME "$home"
+              --chdir "$dir"
+            )
             echo "::group::Build $tag"
-            mkdir -p "$dir"
+            mkdir -p "$dir" "$home"
             git archive --format=tar "refs/tags/$tag" | tar -x -C "$dir"
             # Old tags can have the output dir in git, and their build may not
             # delete it first, so files of deleted sources would stay.
             rm -rf "${dir:?}/$OUTPUT_DIR"
-            (cd "$dir" && bash -c "$INSTALL_COMMAND")
-            "${BWRAP[@]}" --bind "$dir" "$dir" --chdir "$dir" -- bash -c "$BUILD_COMMAND"
+            "${INSTALL_BWRAP[@]}" "${writable[@]}" -- bash -c "$INSTALL_COMMAND"
+            "${BWRAP[@]}" "${writable[@]}" -- bash -c "$BUILD_COMMAND"
             # A package can ship root files, such as package.json, as the
             # build leaves them, but the audit reads only the output dir. A
             # normal build changes no file outside the output dir and the
@@ -381,8 +396,8 @@ jobs:
             rm -rf "$pristine"
             echo "::endgroup::"
           }
-          build_tag "$BASE_TAG" "$WORK_DIR/base-src"
-          build_tag "$TAG" "$WORK_DIR/release-src"
+          build_tag "$BASE_TAG" "$WORK_DIR/base-src" "$WORK_DIR/base-home"
+          build_tag "$TAG" "$WORK_DIR/release-src" "$WORK_DIR/release-home"
 
       # audit-rules.md is the audit contract. "Assemble build repo" commits it
       # as AGENTS.md, which crush loads as context in the parent and in every
@@ -510,7 +525,9 @@ jobs:
              finding, give the built `file:line`, quote the code, and tell why the
              source diff does not explain it.
           5. Code that was not reviewed makes the audit incomplete. List it under
-             `## Unreviewed files`, as the code-review skill describes.
+             `## Unreviewed files`, as the code-review skill describes. Add that
+             section only when some code was not reviewed: the audit fails on
+             that heading, also when the section says "None".
           6. The last line of the final review file is one of these two lines, as
              plain text without backticks or other formatting:
              - `BUILD-REVIEW-VERDICT: CLEAN` when every changed line was reviewed
