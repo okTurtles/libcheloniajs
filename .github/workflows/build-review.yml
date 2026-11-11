@@ -1,0 +1,45 @@
+name: Build Review
+
+# Audits the build of each release with build-review-crush.yml. Its header
+# describes the audit, the inputs and the limits.
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag to audit, e.g. v2.2.0.
+        type: string
+        required: true
+      base-tag:
+        description: Tag to compare with. Empty means the nearest earlier v* tag.
+        type: string
+        required: false
+
+jobs:
+  audit:
+    uses: ./.github/workflows/build-review-crush.yml
+    permissions:
+      contents: read
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+      base-tag: ${{ inputs.base-tag }}
+      provider: ${{ vars.REVIEW_PROVIDER }}
+      model: ${{ vars.REVIEW_MODEL }}
+      project-context: ${{ vars.PROJECT_CTX }}
+      timeout-minutes: ${{ fromJSON(vars.BUILD_REVIEW_TIMEOUT_MINUTES || '60') }}
+      package-name: '@chelonia/lib'
+      # The default install-command fits: no dependency has an install script,
+      # so --ignore-scripts does not change the build output.
+      source-paths: >-
+        src package.json package-lock.json .npmrc buildHelper.ts
+        renameFiles.mjs tsconfig*.json scripts
+      # Keep these patterns in sync with the negations in the package.json
+      # `files` field.
+      excluded-files: '*.test.* test-utils.*'
+      build-notes: The package does not ship tests.
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+      KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}

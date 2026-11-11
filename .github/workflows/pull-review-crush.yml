@@ -20,9 +20,9 @@ name: AI PR Review (Crush)
 # PROJECT_CTX and REVIEW_TIMEOUT_MINUTES.
 #
 # build-review-crush.yml copies the steps "Resolve provider settings",
-# "Install crush and bubblewrap", "Install code-review skill" and the sandbox
-# of "Run agentic review". Apply a fix in one of the two files to the other
-# file too.
+# "Install crush and bubblewrap" and "Install code-review skill", and
+# .github/build-review/run-review.mjs copies the sandbox of "Run agentic
+# review". Apply a fix in one of them to the other too.
 
 on:
   workflow_call:

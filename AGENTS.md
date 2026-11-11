@@ -59,7 +59,9 @@ GitHub Actions files in `.github/`:
 | `workflows/ci.yml` | Runs `npm ci`, `npm test` and `npm run build` on pushes and PRs to `main` |
 | `workflows/pr-review.yml` | Runs `pull-review-crush.yml` when a member comments `/review` on a PR |
 | `workflows/pull-review-crush.yml` | Reusable AI PR review workflow. Other okTurtles repos call it through `@main` |
-| `workflows/build-review-crush.yml` | On a `v*` tag push, builds that tag and the previous one, and has crush audit the diff of the two builds for code that the build added |
+| `workflows/build-review.yml` | Runs `build-review-crush.yml` on a `v*` tag push, or by hand for a given tag |
+| `workflows/build-review-crush.yml` | Reusable build audit workflow: builds a tag and the previous one, and has crush audit the diff of the two builds for code that the build added. Other okTurtles repos call it through `@main` |
+| `build-review/` | Node step scripts and templates of `build-review-crush.yml`, which it checks out at its own commit |
 | `actions/fix-ubuntu-ca-roots/` | Shared action that removes distrusted CA roots on the runner. All okTurtles repos call it through `@main` |
 
 Rules:
@@ -67,11 +69,17 @@ Rules:
 - Every job that has `steps:` runs
   `okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main` as its first step.
 - Every workflow with such a job sets `NODE_OPTIONS: --use-openssl-ca` in its workflow-level
-  `env:`. A job that only calls a reusable workflow (`pr-review.yml`) needs neither.
-- Other repos use the action and `pull-review-crush.yml` from `main`. A change to them affects
-  those repos when it merges, and the PR's own CI still runs the copy on `main`.
-- `build-review-crush.yml` copies some steps of `pull-review-crush.yml` (the comment above
-  each copy names its source). Apply a fix in one file to the other too.
+  `env:`. A job that only calls a reusable workflow (`pr-review.yml`, `build-review.yml`) needs
+  neither.
+- Other repos use the action, `pull-review-crush.yml`, `build-review-crush.yml` and its
+  `build-review/` scripts from `main`. A change to them affects those repos when it merges, and
+  the PR's own CI still runs the copy on `main`. Keep repo-specific values out of the reusable
+  workflows: callers pass them as inputs.
+- `build-review-crush.yml` and `build-review/run-review.mjs` copy some steps of
+  `pull-review-crush.yml` (the comment above each copy names its source). Apply a fix in one file
+  to the other too.
+- `npm run lint` skips `build-review/`. Lint it with
+  `npx eslint --no-ignore --ext .mjs .github/build-review/`.
 
 The header of `.github/actions/fix-ubuntu-ca-roots/action.yml` gives the reasons and the full
 rules for callers.
