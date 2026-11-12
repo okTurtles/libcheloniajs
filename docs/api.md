@@ -23,7 +23,7 @@ For the authoritative signatures, follow the source links.
 | Selector | Source | Purpose |
 |---|---|---|
 | `chelonia/_init` | `src/chelonia.ts` | Initialize the Chelonia context. Runs automatically the first time a selector that needs it is invoked. |
-| `chelonia/config` | `src/chelonia.ts` | Return a copy of the current `CheloniaConfig`, which `chelonia/configure` accepts back. Useful for introspection in tests. |
+| `chelonia/config` | `src/chelonia.ts` | Return a copy of the current `CheloniaConfig`, for introspection (e.g. in tests). Function values are left out, except `fetch`, `reactiveSet`, `reactiveDel`, the journal's (`redactions[].redact`, `diff`, `applyPatch`) and those in `contracts.defaults.modules` and `exposedGlobals` (both kept by reference). So the copy has no `hooks` functions, no `preOp`/`postOp` or `preOp_<op>`/`postOp_<op>`, and no `whitelisted` or `unwrapMaybeEncryptedData`. `chelonia/configure` accepts it back, and leaves the missing ones as they are, except `unwrapMaybeEncryptedData`: it is set again from the copy's `skipDecryptionAttempts`, which replaces a custom one. |
 | `chelonia/configure` | `src/chelonia.ts` | Apply a `CheloniaConfig`. See [`configure.md`](./configure.md). |
 | `chelonia/reset` | `src/chelonia.ts` | Drain publishes, abort in-flight messages, clear state. `(newState?, postCleanupFn?)`. |
 | `chelonia/connect` | `src/chelonia.ts` | Open the pubsub WebSocket (destroying the previous pubsub client, if any), and subscribe the new client to every contract Chelonia is subscribed to (the SUBs are sent once it opens). Returns a `PubSubClient`. Also starts the periodic subscription check (`pubsubReconcileInterval`, see [`configure.md`](./configure.md#connection)). |

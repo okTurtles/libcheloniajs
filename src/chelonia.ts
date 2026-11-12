@@ -481,6 +481,12 @@ export default sbp('sbp/selectors/register', {
       // `cloneDeep` turns `Infinity` (e.g., `maxRetries`) into `null`
       connectionOptions: { ...this.config.connectionOptions }
     } as ReturnType<typeof cloneDeep> & { journal?: CheloniaConfig['journal'] }
+    // `cloneDeep` also drops functions, and `chelonia/configure` would put
+    // these function-less copies in place of the live objects
+    if (out.contracts?.defaults) {
+      out.contracts.defaults.modules = this.config.contracts.defaults.modules
+      out.contracts.defaults.exposedGlobals = this.config.contracts.defaults.exposedGlobals
+    }
     // `cloneDeep` strips function values (same pitfall handled below by
     // `chelonia/configure`). Re-attach the journal's function fields so
     // the returned snapshot is a faithful copy of the live config and

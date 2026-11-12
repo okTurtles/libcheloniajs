@@ -456,4 +456,18 @@ describe('connectionOptions given to chelonia/configure', () => {
     await sbp('chelonia/configure', sbp('chelonia/config'))
     assert.equal(sbp('chelonia/config').connectionOptions.maxRetries, Infinity)
   })
+
+  it('keep the functions of contract modules and globals through chelonia/config', async () => {
+    const m = { f: () => 1 }
+    const g = () => 2
+    await sbp('chelonia/configure', {
+      connectionURL: RELAY_URL,
+      fetch: relay.fetch,
+      contracts: { defaults: { modules: { m }, exposedGlobals: { g } } }
+    })
+    await sbp('chelonia/configure', sbp('chelonia/config'))
+    const { defaults } = sbp('chelonia/config').contracts
+    assert.equal(defaults.modules.m.f, m.f, 'module function lost')
+    assert.equal(defaults.exposedGlobals.g, g, 'global lost')
+  })
 })
