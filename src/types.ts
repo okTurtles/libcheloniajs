@@ -4,7 +4,7 @@ import type { Key } from '@chelonia/crypto'
 import type sbp from '@sbp/sbp'
 import type { SPMessage, SPMsgDirection, SPOpType } from './SPMessage.js'
 import type { EncryptedData } from './encryptedData.js'
-import type { PubSubClient } from './pubsub/index.js'
+import type { PubSubClient, PubSubState } from './pubsub/index.js'
 import type { SignedDataContext } from './signedData.js'
 import type {
   KV_AUTO_LOAD,
@@ -79,6 +79,24 @@ export type CheloniaConfig = {
     maxRetries: number;
     reconnectOnTimeout: boolean;
   };
+  // How often (in ms) to check that the pubsub client is subscribed to every
+  // contract that Chelonia is subscribed to, re-subscribing any it lost. It
+  // is also checked after every (re)connection. `0` (or any value that is
+  // not a positive finite number) disables the periodic check. Applied by
+  // `chelonia/connect`. Default: 60000.
+  pubsubReconcileInterval?: number;
+  // How long (in ms) to wait for a published event to come back over pubsub
+  // before syncing the contract to process it (e.g., because the socket is
+  // half-open). If the pubsub client is neither subscribed nor subscribing
+  // to the contract, the contract is synced right away. `0` (or any value
+  // that is not a positive finite number) disables the timed check.
+  // Default: 5000.
+  publishReceiptTimeout?: number;
+  // How long (in ms) `chelonia/reset` waits for the contracts' queues before
+  // it aborts the requests still in flight (otherwise, it does once they are
+  // empty). `0` (or any value that is not a positive finite number) waits as
+  // long as they take. Default: 30000.
+  resetDrainTimeout?: number;
   preOp?: (message: SPMessage, state: ChelContractState) => boolean;
   postOp?: (message: SPMessage, state: ChelContractState) => boolean;
   hooks: Partial<{
@@ -90,7 +108,7 @@ export type CheloniaConfig = {
     sideEffectError: { (e: unknown, message?: SPMessage): void } | null;
     handleEventError: { (e: unknown, message?: SPMessage): void } | null;
     syncContractError: { (e: unknown, contractID: string): void } | null;
-    pubsubError: { (e: unknown, socket: PubSubClient): void } | null;
+    pubsubError: { (e: unknown, client: PubSubClient): void } | null;
   }>;
   skipDecryptionAttempts: boolean;
   unwrapMaybeEncryptedData: <T>(data: T | EncryptedData<T>) =>
@@ -441,6 +459,27 @@ export type CheloniaContractCtx = {
   // `contractType` set to the contract name and `key` set from the entry name.
   kv?: Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>;
 };
+// Result of `chelonia/pubsub/status`: the pubsub connection state and the
+// contracts that Chelonia is subscribed to but the pubsub client is not.
+// Plain data, so that it can be sent across a service worker boundary.
+export type ChelPubSubStatus = {
+  // `'closed'` if there is no pubsub client (`chelonia/connect` not called),
+  // or if the client won't reconnect by itself (see `docs/debugging.md`)
+  state: PubSubState;
+  // `Date.now()` when the client entered `state` (`null` without a client)
+  since: number | null;
+  // Number of contracts that Chelonia is subscribed to
+  wanted: number;
+  // Contracts that Chelonia is subscribed to and the pubsub client neither
+  // is subscribed to nor is subscribing to (Chelonia re-subscribes them the
+  // next time it reconciles, unless the client has stopped)
+  missing: string[];
+  // Contracts that Chelonia is subscribed to whose SUB request awaits a
+  // response or a connection
+  pending: string[];
+  // See `PubSubStatus`
+  oldestPendingSince: number | null;
+};
 export type CheloniaContext = {
   config: CheloniaConfig;
   _instance: object;
@@ -470,6 +509,12 @@ export type CheloniaContext = {
     { added, removed }: { added: string[]; removed: string[] },
   ) => void;
   kvReconnectListener?: (client: import('./pubsub/index.js').PubSubClient) => void;
+  // Reconciles Chelonia's and the pubsub client's subscriptions after every
+  // (re)connection (`chelonia/connect`)
+  pubsubReconcileListener?: (client: import('./pubsub/index.js').PubSubClient) => void;
+  // Timer of the periodic reconciliation (`config.pubsubReconcileInterval`)
+  // for the current pubsub client
+  pubsubReconcileIntervalID?: ReturnType<typeof setInterval>;
   kvContractsModifiedListener?: (
     contracts: string[],
     { added, removed }: { added: string[]; removed: string[] },

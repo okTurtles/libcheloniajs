@@ -74,7 +74,7 @@ state, project `{ ...rootState, _kv: undefined }`.
 | `signingKeyName` | `'csk'` | Contract key name used for signing. A missing named key rejects the write. |
 | `autoSubscribe` | `true` | Subscribe to pubsub for this slot automatically. |
 | `autoLoad` | `'on-sync'` | `'on-sync'` loads on contract sync; `'on-demand'` waits for `chelonia/kv/sync` (or a successful `update`); `'never'` skips. |
-| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect. |
+| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect, when Chelonia subscribes the pubsub client again to a contract that the client lost, and when `chelonia/connect` replaces a client that had connected. |
 | `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the plain-`value` form of `chelonia/kv/update`. |
 | `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw; must not synchronously call a same-contract KV write (rejected with `ChelErrorKvReentrant`; see the rejection taxonomy below). |
 
@@ -128,6 +128,29 @@ direct callers (the high-level slot API hides them):
   aborted; the type now *advertises* `false` as a valid return value
   where previously it was only representable at the type level as a
   tuple. No runtime behaviour change for existing callers.
+
+One runtime change applies to every caller that retries a conflict (with
+an `onconflict` handler and `maxAttempts` above 1), slots included: **a
+`409` makes `chelonia/kv/set` sync the contract** (at most once per call)
+before it retries. A `409` means that the value was signed with a stale
+contract height, i.e. this client missed some of the contract's events
+(e.g. its pubsub subscription was lost); every retry used to fail the
+same way, ending in `kv/set conflict setting KV value`. Before it retries
+a `409`, `kv/set` waits for the contract's internal queue and checks there
+that Chelonia is subscribed to the contract and that none of its events
+was processed since the value was signed (before the `409` came back,
+during the back-off or while waiting for the queue); only then does it
+sync. A failing sync is logged and the write retried anyway. After the
+sync, failed or not, `kv/set` also subscribes the pubsub client again to
+the contracts it lost, as publishing does. An abort during the back-off
+(the caller's `signal`, or `chelonia/reset`) ends the write before it
+syncs, with the signal's reason (an `AbortError` if the reason isn't an
+`Error`). Because of the wait, never await `chelonia/kv/set` from inside
+the contract's internal queue (e.g. from a side effect), even for a
+contract Chelonia isn't subscribed to: a `409` would deadlock it.
+`chelonia/kv/queuedSet`, `chelonia/queueInvocation` and the slot API use
+the public queue, so they are safe to call (but not to await) from a side
+effect: the public queue waits for the internal one.
 
 ## Schema-driven default normalization
 
@@ -280,9 +303,15 @@ omitted here; the source is authoritative.
   revalidation. Callbacks must not assume they are still the active slot
   for the contract/key.
 
-- **`chelonia/reset` drains in-flight KV writes.** `reset` aborts
-  stuck/offline network work, then waits for in-flight
-  `chelonia/kv/update` / `chelonia/kv/clear` writes to settle before
-  `postCleanupFn` and before clearing the KV runtime maps (matching
-  `chelonia/contract/wait`), so persistence hooks observe a quiescent
-  mirror and continuations never run against torn-down state.
+- **`chelonia/reset` drains in-flight KV writes.** `reset` first waits
+  for the contracts' queues (`chelonia/contract/wait`), where
+  `chelonia/kv/update`, `chelonia/kv/clear` and `chelonia/kv/queuedSet`
+  writes run, then aborts the network work still in flight (e.g. a raw
+  `chelonia/kv/set`, which then stops before it syncs) and waits again,
+  all before `postCleanupFn` and before clearing the KV runtime maps. So
+  persistence hooks observe a quiescent mirror and continuations never
+  run against torn-down state. If the queues haven't drained after
+  [`resetDrainTimeout`](./configure.md#connection) ms (default `30000`),
+  e.g. because a request hangs on a dead link, the reset aborts the
+  requests still in flight at once: a queued write whose request hasn't
+  settled rejects with an `AbortError` and leaves the mirror as it was.

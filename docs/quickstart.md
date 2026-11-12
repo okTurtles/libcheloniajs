@@ -23,7 +23,8 @@ For a flat selector listing see [`api.md`](./api.md).
 > A reachable relay is required for `/out/*` selectors to succeed:
 > Chelonia issues an `HTTP POST` to `${connectionURL}/event` for every
 > outgoing op (see `src/internals.ts`). If the URL is unreachable
-> the publish throws after `publishOptions.maxAttempts` retries. There
+> the publish throws the `fetch` error at once (only `409` answers are
+> retried, up to `publishOptions.maxAttempts` attempts). There
 > is **no** offline / mock mode in `@chelonia/lib` itself — stand up
 > a local relay (or stub `config.fetch`) to experiment without one.
 

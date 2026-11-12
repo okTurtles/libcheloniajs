@@ -37,7 +37,7 @@ jobs:
         renameFiles.mjs tsconfig*.json scripts
       # Keep these patterns in sync with the negations in the package.json
       # `files` field.
-      excluded-files: '*.test.* test-utils.*'
+      excluded-files: '*.test.* test-utils.* test-harness.*'
       build-notes: The package does not ship tests.
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
