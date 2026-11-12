@@ -31,7 +31,7 @@ caller).
 | `sideEffectError(err, msg?)` | Error during `sideEffect`. `sideEffect` shouldn't mutate state (see [`contracts.md`](./contracts.md)) — wire this to your error reporter. |
 | `handleEventError(err, msg?)` | Top-level error handling an incoming event. Usually indicates a bug or a malformed op from the relay. |
 | `syncContractError(err, contractID)` | Initial sync of a contract failed (network, decryption, validation, ...). |
-| `pubsubError(err, socket)` | Pubsub socket-level error. Reconnection is automatic; this is mostly informational. |
+| `pubsubError(err, socket)` | `chelonia/pubsub/update` failed to subscribe or unsubscribe the pubsub client (`socket`). Socket errors don't call it: the client reconnects by itself, unless it has stopped (see [Pubsub connection](#pubsub-connection)). |
 
 ```js
 await sbp('chelonia/configure', {
@@ -102,13 +102,30 @@ sbp('chelonia/pubsub/status')
 ```
 
 The result is plain data, so it can be posted across a service worker
-boundary. Without a pubsub client, `state` is `'closed'` and every
-contract is `missing`. `missing` should only be non-empty briefly:
-Chelonia subscribes again after every reconnection and every
+boundary. Before the first `chelonia/connect` there is no pubsub client:
+`state` is `'closed'`, `since` is `null` and every contract is `missing`.
+While the client is connecting, open or reconnecting, `missing` should
+only be non-empty briefly: Chelonia subscribes again after every
+reconnection and every
 [`pubsubReconcileInterval`](./configure.md#connection) ms. A `pending`
 list with an old `oldestPendingSince` means that the relay doesn't
 answer; the pubsub client replaces the connection once the request's
 retry budget runs out (20 to 30 s with the defaults).
+
+`'closed'` after a `chelonia/connect` means that the client won't
+reconnect by itself, and usually that it has stopped for good
+(`client.shouldReconnect` is `false`): the relay sent it a binary or
+malformed message (`PUBSUB_ERROR` with a `{ message }` payload), it gave
+up reconnecting after `maxRetries + 1` failed attempts
+(`PUBSUB_RECONNECTION_FAILED`; Chelonia's default `maxRetries` is
+`Infinity`), or the app called `client.destroy()`. Chelonia's periodic
+check stops with it, and nothing subscribes again until the next
+`chelonia/connect`. Meanwhile every wanted contract is listed as
+`missing`, or as `pending` with `oldestPendingSince: null` once Chelonia
+has asked the stopped client for it (e.g. after a subscription change).
+With `reconnectOnDisconnection: false`, a lost connection also leaves
+the client `'closed'` (its contracts `pending`), but the next `online`
+event or a `client.connect()` reconnects it and restores them.
 
 To follow the connection state, e.g. for an "offline" banner, listen to
 `PUBSUB_STATE_CHANGED`:
@@ -162,6 +179,8 @@ Log lines worth looking for:
 | `[pubsub] Event: close (code C, reason "R"), open for N ms, last message M ms ago` | info | A socket closed. A connection attempt that never opened says `never opened (connecting for N ms)` instead. A large `last message` points at a dead connection, a small one at a close by the server. |
 | `[pubsub] Abandoning socket: <reason>` | warn | The client replaced a socket it considers dead: `ping timeout`, `ping timeout (wall clock)`, `connection timeout`, `offline`, `online, socket not open`, or `no response to <request> for <channelID>`. |
 | `[pubsub] Giving up <request> for channel <channelID>` | warn | With `reconnectOnDisconnection: false`: a request got no answer within its retry budget and was dropped; the connection is kept. |
+| `[pubsub] Reconnection failed` | warn | The client gave up reconnecting (`maxRetries + 1` failed attempts) and destroyed itself; only `chelonia/connect` subscribes again. |
+| `[pubsub] Event: error` | warn | A `PUBSUB_ERROR` or socket error. Followed by `[pubsub] State: open -> closed` (debug) when the relay sent a binary or malformed message and the client destroyed itself. |
 | `[pubsub] Late ACK: subscribed to <channelID> N ms after the request` | info | The relay answered a SUB more than `opRetryInterval` ms after it was sent: a slow link. |
 | `[pubsub] Received unexpected sub for <channelID> (not pending)` | info | The relay answered a SUB that isn't pending: one that `unsub()` cancelled before the answer (e.g., Chelonia released the contract meanwhile), or one that the client never sent (client and relay disagree). The answers to a SUB's own retries are logged at debug level, as `Received duplicate sub ACK for <channelID>`. |
 | `[pubsub] State: <previous> -> <state>` | debug | Every connection state change. |
@@ -274,7 +293,7 @@ const msg = await sbp('chelonia/out/deserializedHEAD', hash, { contractID })
 | `Missing reference count for contract` thrown by `chelonia/contract/sync` | You called `sync` without `retain`. Always `retain` first — see [`contracts.md`](./contracts.md#3-sync--reference-counting). |
 | `Signing key <id> is not defined` | The secret key for `signingKeyId` is not in `transientSecretKeys`. Did `chelonia/storeSecretKeys` get called this session? Persistent keys are restored from `rootState.secretKeys`; transient keys are not. |
 | Local state only changes after your own publishes, with `Published ... but did not receive it (not subscribed)` warnings | Pubsub isn't connected. Call `sbp('chelonia/connect')`. Outgoing publishes use `config.fetch` directly and can succeed without it, and Chelonia then syncs to process them, but other participants' events only arrive with those syncs. |
-| Other participants' events stop arriving for some contracts | Check [`chelonia/pubsub/status`](#pubsub-connection): `missing` contracts are restored at the next reconnection or within `pubsubReconcileInterval`; a `state` other than `'open'` or a long-`pending` SUB points at the connection itself. The pubsub log lines above show what happened. |
+| Other participants' events stop arriving for some contracts | Check [`chelonia/pubsub/status`](#pubsub-connection). `state: 'closed'` after a `chelonia/connect` means that the pubsub client stopped (see [Pubsub connection](#pubsub-connection)): nothing is subscribed, whatever `missing` and `pending` say, until `sbp('chelonia/connect')` is called again (with `reconnectOnDisconnection: false`, until the next `online` event). Otherwise, `missing` contracts are restored at the next reconnection or within `pubsubReconcileInterval`, and a `state` other than `'open'`, or a long-`pending` SUB, points at the connection itself. The pubsub log lines above show what happened. |
 | `ChelErrorDecryptionKeyNotFound` on an incoming op | You don't yet hold the encryption key. If this is a keyshare-pending contract, the op is buffered — watch for `CONTRACT_HAS_RECEIVED_KEYS`. If you should hold the key, check `chelonia/haveSecretKey(id)` and inspect `_volatile.pendingKeyRequests`. |
 | `ChelErrorSignatureKeyNotFound` | The signing key referenced by the op was never added (or has been deleted). Usually means the op was crafted under an out-of-date state; force a `chelonia/contract/sync`. |
 | `Selector not allowed in OP_ATOMIC` | You tried to nest a non-action / non-key-management selector inside `chelonia/out/atomic`. See the whitelist in [`contracts.md`](./contracts.md#atomic-batches). |

@@ -243,8 +243,7 @@ const defaultOptions: Options = {
   minReconnectionDelay: 500,
   reconnectOnDisconnection: true,
   reconnectOnOnline: true,
-  // Defaults to false to avoid reconnection attempts in case the server doesn't
-  // respond because of a failed authentication.
+  // A timed-out attempt is retried either way; see the JSDoc of `createClient`
   reconnectOnTimeout: false,
   reconnectionDelayGrowFactor: 2,
   timeout: 60000,
@@ -532,7 +531,10 @@ function runWithRetry (
  *   regularly) before replacing the connection, in milliseconds. 0 or Infinity disables it.
  * {boolean?} reconnectOnDisconnection=true - Whether to reconnect after a server-side disconnection.
  * {boolean?} reconnectOnOnline=true - Whether to reconnect after coming back online.
- * {boolean?} reconnectOnTimeout=false - Whether to reconnect after a connection timeout.
+ * {boolean?} reconnectOnTimeout=false - Whether the time that a timed-out connection attempt
+ *   took counts against the delay before the next attempt, which is then at most
+ *   maxReconnectionDelay minus that time (but at least minReconnectionDelay). A timed-out
+ *   attempt is always abandoned, and retried if reconnectOnDisconnection is set.
  * {number?} timeout=60_000 - Connection timeout duration in milliseconds.
  * @returns {PubSubClient}
  */
@@ -1258,7 +1260,8 @@ const publicMethods: {
    *
    * - The given channel ID will be cached until we get a relevant server
    * response, allowing us to resend the same request if necessary.
-   * - Any identical UNSUB request that has not been sent yet will be cancelled.
+   * - Any pending UNSUB request for the same channel, sent or not, is cancelled, and a SUB is
+   *   sent after it (the server handles them in order, so it ends up subscribed).
    * - Calling this method again before the server has responded has no effect.
    * @param channelID - The ID of the channel whose updates we want to subscribe to.
    */
@@ -1315,7 +1318,7 @@ const publicMethods: {
    *
    * - The given channel ID will be cached until we get a relevant server
    * response, allowing us to resend the same request if necessary.
-   * - Any identical SUB request that has not been sent yet will be cancelled.
+   * - Any pending SUB request for the same channel, sent or not, is cancelled.
    * - Calling this method again before the server has responded has no effect.
    * @param channelID - The ID of the channel whose updates we want to unsubscribe from.
    */

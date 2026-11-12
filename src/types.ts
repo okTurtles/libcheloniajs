@@ -458,7 +458,8 @@ export type CheloniaContractCtx = {
 // contracts that Chelonia is subscribed to but the pubsub client is not.
 // Plain data, so that it can be sent across a service worker boundary.
 export type ChelPubSubStatus = {
-  // `'closed'` if there is no pubsub client (`chelonia/connect` not called)
+  // `'closed'` if there is no pubsub client (`chelonia/connect` not called),
+  // or if the client won't reconnect by itself (see `docs/debugging.md`)
   state: PubSubState;
   // `Date.now()` when the client entered `state` (`null` without a client)
   since: number | null;
@@ -466,7 +467,7 @@ export type ChelPubSubStatus = {
   wanted: number;
   // Contracts that Chelonia is subscribed to and the pubsub client neither
   // is subscribed to nor is subscribing to (Chelonia re-subscribes them the
-  // next time it reconciles its subscriptions)
+  // next time it reconciles, unless the client has stopped)
   missing: string[];
   // Contracts that Chelonia is subscribed to whose SUB request awaits a
   // response or a connection

@@ -341,7 +341,8 @@ export default sbp('sbp/selectors/register', {
       saveMessageMetadata: false,
       connectionOptions: {
         maxRetries: Infinity, // See https://github.com/okTurtles/group-income/issues/1183
-        reconnectOnTimeout: true // can be enabled since we are not doing auth via web sockets
+        // Retry a timed-out attempt sooner (its time counts against the delay)
+        reconnectOnTimeout: true
       },
       // Check that the pubsub client hasn't lost any of our subscriptions
       // every minute (and after every reconnection)
@@ -784,11 +785,9 @@ export default sbp('sbp/selectors/register', {
     })
     await sbp('chelonia/contract/waitPublish')
     await sbp('chelonia/contract/wait')
-    // Abort then drain in-flight KV writes before the persistence hook and
-    // state teardown. `chelonia/kv/update` / `chelonia/kv/clear` run inside
-    // the per-contract `chelonia/queueInvocation` lane, so `_waitInFlight`
-    // resolves only once they settle. The trailing `wait` drains follow-up
-    // work a KV continuation enqueued.
+    // The waits above drained the queued KV writes (`kv/update`, `kv/clear`,
+    // `kv/queuedSet`). Before `postCleanupFn` and the teardown, abort what runs
+    // outside those queues (e.g. a raw `kv/set`) and drain what is still queued
     this.abortController.abort()
     this.abortController = new AbortController()
     await sbp('chelonia/kv/_waitInFlight')
