@@ -1146,6 +1146,14 @@ export default sbp('sbp/selectors/register', {
     }
     sbp('chelonia/private/startClockSync')
     const rawKvHandler = options.messageHandlers?.[NOTIFICATION_TYPE.KV]
+    // Checked in the contract's queue, i.e. after a removal queued earlier:
+    // syncing a contract that Chelonia no longer wants would bring it back
+    const syncIfWanted = (channelID: string): Promise<boolean> =>
+      sbp('chelonia/private/queueEvent', channelID, async () => {
+        if (!this.subscriptionSet.has(channelID)) return false
+        await sbp('chelonia/private/in/syncContract', channelID)
+        return true
+      })
     this.pubsub = createClient(pubsubURL, {
       ...this.config.connectionOptions,
       handlers: {
@@ -1154,20 +1162,15 @@ export default sbp('sbp/selectors/register', {
         // 'new' subscriptions as well as every time the connection is reset
         'subscription-succeeded': function (event: CustomEvent<{ channelID: string }>) {
           const { channelID } = event.detail
-          // The check below is needed because we could have unsubscribed since
-          // requesting a subscription from the server. In that case, we don't
-          // need to call `sync`.
-          if (this.subscriptionSet.has(channelID)) {
-            // For new subscriptions, some messages could have been lost
-            // between the time the subscription was requested and it was
-            // actually set up. In these cases, force sync contracts to get them
-            // updated.
-            sbp('chelonia/private/in/sync', channelID, { force: true }).then(() => {
-              sbp('chelonia/kv/_onContractResynced', channelID)
-            }).catch((err: Error) => {
-              console.warn(`[chelonia] Syncing contract ${channelID} failed: ${err.message}`)
-            })
-          }
+          // For new subscriptions, some messages could have been lost
+          // between the time the subscription was requested and it was
+          // actually set up. In these cases, force sync contracts to get them
+          // updated.
+          syncIfWanted(channelID).then((synced) => {
+            if (synced) sbp('chelonia/kv/_onContractResynced', channelID)
+          }).catch((err: Error) => {
+            console.warn(`[chelonia] Syncing contract ${channelID} failed: ${err.message}`)
+          })
           options.handlers?.['subscription-succeeded']?.call(this, event)
         }
       },
@@ -1599,9 +1602,12 @@ export default sbp('sbp/selectors/register', {
   'chelonia/pubsub/update': function (this: CheloniaContext) {
     const client = this.pubsub
     // A channel whose UNSUB is pending is being left: wanting it again needs
-    // a `sub()` (which cancels the UNSUB)
-    const subscribedIDs = [...client.subscriptionSet]
-      .filter((id) => !client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, id))
+    // a `sub()` (which cancels the UNSUB). One whose SUB is pending must be
+    // `unsub()`ed once unwanted, or its answer brings the contract back
+    const subscribedIDs = [
+      ...client.subscriptionSet,
+      ...(client.pendingOperations.get(REQUEST_TYPE.SUB)?.keys() ?? [])
+    ].filter((id) => !client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, id))
     const currentIDs = Array.from(this.subscriptionSet)
     const leaveSubscribed = intersection(subscribedIDs, currentIDs)
     const toUnsubscribe = difference(subscribedIDs, leaveSubscribed)
