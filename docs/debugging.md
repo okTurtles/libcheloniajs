@@ -31,7 +31,7 @@ caller).
 | `sideEffectError(err, msg?)` | Error during `sideEffect`. `sideEffect` shouldn't mutate state (see [`contracts.md`](./contracts.md)) — wire this to your error reporter. |
 | `handleEventError(err, msg?)` | Top-level error handling an incoming event. Usually indicates a bug or a malformed op from the relay. |
 | `syncContractError(err, contractID)` | Initial sync of a contract failed (network, decryption, validation, ...). |
-| `pubsubError(err, socket)` | `chelonia/pubsub/update` failed to subscribe or unsubscribe the pubsub client (`socket`). Socket errors don't call it: the client reconnects by itself, unless it has stopped (see [Pubsub connection](#pubsub-connection)). |
+| `pubsubError(err, client)` | `chelonia/pubsub/update` failed to subscribe or unsubscribe the pubsub client (`client`). Socket errors don't call it: the client reconnects by itself, unless it has stopped (see [Pubsub connection](#pubsub-connection)). |
 
 ```js
 await sbp('chelonia/configure', {

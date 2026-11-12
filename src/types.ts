@@ -103,7 +103,7 @@ export type CheloniaConfig = {
     sideEffectError: { (e: unknown, message?: SPMessage): void } | null;
     handleEventError: { (e: unknown, message?: SPMessage): void } | null;
     syncContractError: { (e: unknown, contractID: string): void } | null;
-    pubsubError: { (e: unknown, socket: PubSubClient): void } | null;
+    pubsubError: { (e: unknown, client: PubSubClient): void } | null;
   }>;
   skipDecryptionAttempts: boolean;
   unwrapMaybeEncryptedData: <T>(data: T | EncryptedData<T>) =>

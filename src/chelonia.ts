@@ -353,11 +353,11 @@ export default sbp('sbp/selectors/register', {
       hooks: {
         preHandleEvent: null, // async (message: SPMessage) => {}
         postHandleEvent: null, // async (message: SPMessage) => {}
-        processError: null, // (e: Error, message: SPMessage) => {}
+        processError: null, // (e: Error, message: SPMessage, meta: object) => {}
         sideEffectError: null, // (e: Error, message: SPMessage) => {}
         handleEventError: null, // (e: Error, message: SPMessage) => {}
         syncContractError: null, // (e: Error, contractID: string) => {}
-        pubsubError: null // (e:Error, socket: Socket)
+        pubsubError: null // (e: Error, client: PubSubClient) => {}
       },
       // Per-contract journal of state changes. See `src/journal.ts`.
       // Opt-in by default: enabling it imposes per-event CPU (deep clones

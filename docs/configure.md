@@ -134,7 +134,7 @@ omitted keys keep their previous values.
 | `sideEffectError` | `(err, msg?) => void` | Error during `sideEffect`. |
 | `handleEventError` | `(err, msg?) => void` | Top-level event-handler error. |
 | `syncContractError` | `(err, contractID) => void` | Failure during contract sync. |
-| `pubsubError` | `(err, socket) => void` | `chelonia/pubsub/update` failed to subscribe or unsubscribe the pubsub client; socket errors don't call it (see [`debugging.md`](./debugging.md#error-hooks)). |
+| `pubsubError` | `(err, client) => void` | `chelonia/pubsub/update` failed to subscribe or unsubscribe the pubsub client; socket errors don't call it (see [`debugging.md`](./debugging.md#error-hooks)). |
 
 You can also register **per-op** hooks at the top level:
 
