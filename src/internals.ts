@@ -311,7 +311,7 @@ export const syncIfBehind = function (
     const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
     if (localHeight == null || localHeight >= height) return
     beforeSync?.()
-    await sbp('chelonia/private/in/syncContract', contractID, { force: true })
+    await sbp('chelonia/private/in/syncContract', contractID)
   })
 }
 
