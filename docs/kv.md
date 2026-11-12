@@ -74,7 +74,7 @@ state, project `{ ...rootState, _kv: undefined }`.
 | `signingKeyName` | `'csk'` | Contract key name used for signing. A missing named key rejects the write. |
 | `autoSubscribe` | `true` | Subscribe to pubsub for this slot automatically. |
 | `autoLoad` | `'on-sync'` | `'on-sync'` loads on contract sync; `'on-demand'` waits for `chelonia/kv/sync` (or a successful `update`); `'never'` skips. |
-| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect, and when Chelonia subscribes the pubsub client again to a contract that the client lost. |
+| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect, when Chelonia subscribes the pubsub client again to a contract that the client lost, and when `chelonia/connect` replaces a client that had connected. |
 | `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the plain-`value` form of `chelonia/kv/update`. |
 | `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw; must not synchronously call a same-contract KV write (rejected with `ChelErrorKvReentrant`; see the rejection taxonomy below). |
 

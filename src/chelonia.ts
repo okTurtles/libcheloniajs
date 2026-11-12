@@ -1132,6 +1132,8 @@ export default sbp('sbp/selectors/register', {
   ): PubSubClient {
     if (!this.config.connectionURL) throw new Error('config.connectionURL missing')
     if (!this.config.connectionOptions) throw new Error('config.connectionOptions missing')
+    // A client that never opened got no KV pushes, so it missed none
+    const replacing = !!this.pubsub && !this.pubsub.isNew
     if (this.pubsub) {
       this.pubsub.destroy()
     }
@@ -1316,6 +1318,16 @@ export default sbp('sbp/selectors/register', {
       for (const [contractID, keys] of this.kvActiveFilters) {
         this.pubsub.kvFilter.set(contractID, [...keys])
       }
+    }
+    try {
+      // The SUBs stay pending until the first `open` sends them, so no
+      // contract counts as missing (or lost) meanwhile
+      sbp('chelonia/pubsub/update')
+      // The old client's KV pushes stopped before the new one subscribes
+      if (replacing) sbp('chelonia/kv/_markForRefresh', this.kvSlotsByContractID.keys())
+    } catch (e) {
+      // `hooks.pubsubError` may throw: the listeners below must be set up anyway
+      console.error('[chelonia] subscribing the new pubsub client threw', e)
     }
     if (!this.contractsModifiedListener) {
       // Keep pubsub in sync (logged into the right "rooms") with 'state.contracts'

@@ -17,7 +17,7 @@ import './internals.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
   actionMessage, captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay,
-  loseInPubsub, retainedContract, subscribed, waitFor
+  loseInPubsub, retainedContract, sleep, subscribed, waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
 import type { JSONType } from './types.js'
@@ -123,8 +123,8 @@ describe('KV slots of a contract that the pubsub client lost', () => {
   })
 })
 
-describe('KV slots on the first connection of a new pubsub client', () => {
-  it('do not reload again (the contract was not lost)', async () => {
+describe('KV slots when chelonia/connect replaces the pubsub client', () => {
+  it('reload once (the old client may have missed KV pushes)', async () => {
     await setUp(0)
     const contract = await retainedContract(relay, pubsub)
     const { contractID } = contract
@@ -136,6 +136,27 @@ describe('KV slots on the first connection of a new pubsub client', () => {
     assert.ok(await waitFor(subscribed(pubsub, [contractID])), 'not subscribed')
     await sbp('chelonia/contract/wait', contractID)
     await sbp('chelonia/kv/_waitInFlight')
-    assert.equal(slotLoads(contractID, from), 0)
+    assert.equal(slotLoads(contractID, from), 1)
+  })
+
+  it('reload once when publishing before the new client opens (nothing is missing)', async () => {
+    await setUp(0)
+    const contract = await retainedContract(relay, pubsub)
+    const { contractID } = contract
+    assert.ok(await waitFor(() => slotLoads(contractID) > 0), 'slot not loaded')
+    await sbp('chelonia/kv/_waitInFlight')
+    const from = relay.requests.length
+    server.stallNewConnections()
+    pubsub = sbp('chelonia/connect')
+    const logged = logs.fromNow()
+    await sbp('chelonia/private/out/publishEvent', actionMessage(contract, { text: 'hello' }))
+    await sbp('chelonia/contract/wait', contractID)
+    assert.deepEqual(logged.grep(/pubsub reconcile/), [])
+    server.pass()
+    assert.ok(await waitFor(subscribed(pubsub, [contractID])), 'not subscribed')
+    assert.ok(await waitFor(() => slotLoads(contractID, from) > 0), 'the slot did not reload')
+    await sleep(100)
+    await sbp('chelonia/kv/_waitInFlight')
+    assert.equal(slotLoads(contractID, from), 1)
   })
 })
