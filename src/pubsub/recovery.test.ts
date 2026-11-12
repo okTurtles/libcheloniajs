@@ -3,7 +3,9 @@
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert/strict'
 import { after, afterEach, before, describe, it } from 'node:test'
-import { NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SCHEDULED, REQUEST_TYPE } from './index.js'
+import {
+  createClient, NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SCHEDULED, REQUEST_TYPE
+} from './index.js'
 import type { PubSubClient } from './index.js'
 import {
   captureConsole, createCloseEvent, createFakePubsubServer, createFakeRelay, createTestClients,
@@ -616,6 +618,23 @@ describe('requests that exhaust the retry budget', () => {
     assert.equal(client.unansweredReplacements, 0)
   })
 
+  for (const answer of ['OK', 'ERROR'] as const) {
+    it(`ends the back-off once the last pending SUB is cancelled and the UNSUB answered (${answer})`, async () => {
+      server.onRequest = (_conn, msg) => {
+        if (msg.channelID !== 'x') return
+        if (msg.type === REQUEST_TYPE.SUB) return 'ignore'
+        if (msg.type === REQUEST_TYPE.UNSUB && answer === 'ERROR') return { error: 'refused' }
+      }
+      const { client } = setup(BACKOFF)
+      assert.ok(await waitFor(isOpen(client)))
+      client.unansweredReplacements = 2
+      client.sub('x')
+      client.unsub('x')
+      assert.ok(await waitFor(() => !client.pendingOperations.tHas(REQUEST_TYPE.UNSUB, 'x')))
+      assert.equal(client.unansweredReplacements, 0)
+    })
+  }
+
   it('ends the back-off when the browser comes back online', async () => {
     const nav = emulateNavigator()
     try {
@@ -634,6 +653,53 @@ describe('requests that exhaust the retry budget', () => {
         scheduled.stop()
       }
     } finally {
+      nav.restore()
+    }
+  })
+
+  it('ends the back-off when the browser comes back online with a socket stuck closing', async () => {
+    const nav = emulateNavigator()
+    try {
+      const { client } = setup(BACKOFF)
+      assert.ok(await waitFor(isOpen(client)))
+      client.unansweredReplacements = 3
+      const stuck = client.socket!
+      server.blackhole()
+      // The closing handshake never completes
+      stuck.close()
+      server.pass()
+      const scheduled = scheduledDelays(client)
+      try {
+        nav.online(client)
+        // The attempt that abandoning the socket scheduled with the old
+        // counters is replaced
+        const last = scheduled.delays[scheduled.delays.length - 1]
+        assert.ok(last <= 40, JSON.stringify(scheduled.delays)) // not 160 to 320
+        assert.ok(await waitFor(() => client.socket !== stuck && isOpen(client)()), 'not reconnected')
+      } finally {
+        scheduled.stop()
+      }
+    } finally {
+      nav.restore()
+    }
+  })
+
+  it('ends the back-off when the browser comes back online, with a local server', async () => {
+    const nav = emulateNavigator()
+    // With a local server, `offline` schedules an attempt (with the old back-off)
+    const client = createClient('ws://localhost:3000', BACKOFF)
+    const scheduled = scheduledDelays(client)
+    try {
+      assert.ok(await waitFor(isOpen(client)))
+      client.unansweredReplacements = 3
+      nav.offline(client)
+      assert.equal(scheduled.delays.length, 1, 'offline scheduled no attempt')
+      nav.online(client)
+      assert.equal(scheduled.delays.length, 2, 'not rescheduled')
+      assert.ok(scheduled.delays[1] <= 40, JSON.stringify(scheduled.delays)) // not 160 to 320
+    } finally {
+      scheduled.stop()
+      client.destroy()
       nav.restore()
     }
   })

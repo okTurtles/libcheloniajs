@@ -326,7 +326,8 @@ export function oldestPendingSubSince (
 
 // A connection works once every pending SUB and KV filter is answered (an
 // ERROR is an answer too), or if it has none to send: only then may
-// replacements over unanswered requests stop backing off
+// replacements over unanswered requests stop backing off. Checked on `open`
+// and on every SUB, UNSUB and KV filter answer
 const noteAnsweredRequests = (client: PubSubClient) => {
   if (
     !client.pendingOperations.get(REQUEST_TYPE.SUB)?.size &&
@@ -771,7 +772,8 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     // reconnection loop when we are back online.
     client.failedConnectionAttempts = 0
     // Without a network, the closing handshake may not complete for a long
-    // time; don't wait for it. No reconnection is scheduled while offline.
+    // time; don't wait for it. No reconnection is scheduled while offline,
+    // unless the server is local.
     abandonSocket(client, client.socket, 'offline')
     updateState(client)
   },
@@ -798,8 +800,11 @@ const defaultClientEventHandlers: ClientEventHandlers = {
         // The network changed, so both back-offs start over
         client.failedConnectionAttempts = 0
         client.unansweredReplacements = 0
-        // Abandoning the socket may have scheduled the attempt already
-        if (!client.nextConnectionAttemptDelayID) client.scheduleConnectionAttempt()
+        // An attempt may be scheduled already, with the old back-off (by
+        // abandoning the socket, or by going offline with a local server)
+        clearTimeout(client.nextConnectionAttemptDelayID)
+        client.nextConnectionAttemptDelayID = undefined
+        client.scheduleConnectionAttempt()
       }
     }
     updateState(client)
@@ -912,7 +917,9 @@ const defaultMessageHandlers: MessageHandlers = {
       }
       case REQUEST_TYPE.UNSUB: {
         console.warn(`[pubsub] Could not unsubscribe from ${channelID}: ${reason}`)
-        client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)
+        if (client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)) {
+          noteAnsweredRequests(client)
+        }
         break
       }
       case REQUEST_TYPE.PUSH_ACTION: {
@@ -968,6 +975,7 @@ const defaultMessageHandlers: MessageHandlers = {
           console.debug(`[pubsub] Unsubscribed from ${channelID}`)
           client.pendingOperations.tDelete(REQUEST_TYPE.UNSUB, channelID)
           client.subscriptionSet.delete(channelID)
+          noteAnsweredRequests(client)
         } else {
           console.debug(`[pubsub] Received unexpected unsub for ${channelID}`)
         }

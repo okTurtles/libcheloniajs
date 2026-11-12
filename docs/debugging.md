@@ -138,9 +138,11 @@ How the pubsub client recovers on its own:
   answer either (e.g. an overloaded relay), each replacement waits longer
   than the previous one, like failed connection attempts, until a
   connection answers every pending SUB and KV filter (an `ERROR` counts)
-  or has none to send, or the browser comes back online. A request that
-  the relay never answers (a relay bug) keeps the cycle going: with the
-  defaults, every 80 to 90 s once the delay reaches
+  or has none left to send (also once `unsub()` cancelled the last one and
+  the UNSUB is answered), or the browser comes back online (which also
+  replaces a reconnection already scheduled with the longer delay). A
+  request that the relay never answers (a relay bug) keeps the cycle
+  going: with the defaults, every 80 to 90 s once the delay reaches
   `maxReconnectionDelay`, and every new connection re-syncs every
   contract. The `Abandoning socket` lines then name the same request
   each time. With `reconnectOnDisconnection: false`, nothing would
