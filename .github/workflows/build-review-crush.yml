@@ -363,7 +363,7 @@ jobs:
             # them (keep in sync with the negations in the package.json
             # `files` field).
             find "$BUILD_REPO/built" -type f \( -name '*.d.mts' -o -name '*.d.cts' -o -name '*.d.ts' \
-              -o -name '*.test.*' -o -name 'test-utils.*' \) -delete
+              -o -name '*.test.*' -o -name 'test-utils.*' -o -name 'test-harness.*' \) -delete
           }
 
           git init -q -b base-build "$BUILD_REPO"

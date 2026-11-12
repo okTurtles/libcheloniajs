@@ -9,7 +9,8 @@
   "files": [
     "dist",
     "!dist/**/*.test.*",
-    "!dist/**/test-utils.*"
+    "!dist/**/test-utils.*",
+    "!dist/**/test-harness.*"
   ],
   "exports": {
     ".": {

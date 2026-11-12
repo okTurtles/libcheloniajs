@@ -38,8 +38,8 @@ Dual ESM/CJS output with TypeScript declarations:
 
 `dist/` is build output and is not in git. `prepack` runs `npm run build`, so `npm pack` and
 `npm publish` always ship a fresh build. The `files` field in `package.json` limits the package
-to `dist/` without tests and `test-utils.*`. An install from a git URL gets no `dist/`: npm
-runs only `prepare`, not `prepack`, for git dependencies.
+to `dist/` without tests, `test-utils.*` and `test-harness.*`. An install from a git URL gets no
+`dist/`: npm runs only `prepare`, not `prepack`, for git dependencies.
 
 ### Build Process (`buildHelper.ts`)
 
