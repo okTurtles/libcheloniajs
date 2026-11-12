@@ -92,6 +92,11 @@ export type CheloniaConfig = {
   // that is not a positive finite number) disables the timed check.
   // Default: 5000.
   publishReceiptTimeout?: number;
+  // How long (in ms) `chelonia/reset` waits for the contracts' queues before
+  // it aborts the requests still in flight (otherwise, it does once they are
+  // empty). `0` (or any value that is not a positive finite number) waits as
+  // long as they take. Default: 30000.
+  resetDrainTimeout?: number;
   preOp?: (message: SPMessage, state: ChelContractState) => boolean;
   postOp?: (message: SPMessage, state: ChelContractState) => boolean;
   hooks: Partial<{

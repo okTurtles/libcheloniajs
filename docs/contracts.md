@@ -754,10 +754,13 @@ await sbp('chelonia/contract/release', [contractID]) // refcount-aware
 await sbp('chelonia/reset')
 ```
 
-`chelonia/reset(newState?, postCleanupFn?)` drains pending publishes,
-aborts in-flight messages, clears `rootState.contracts` and
-`rootState.secretKeys`, drops all subscriptions, and emits
-`CHELONIA_RESET` + `CONTRACTS_MODIFIED`.
+`chelonia/reset(newState?, postCleanupFn?)` drains pending publishes
+and the contracts' queues (for up to
+[`resetDrainTimeout`](./configure.md#connection) ms; then it aborts the
+publishes, syncs and KV writes still waiting for an answer, which reject
+with an `AbortError`), aborts in-flight messages, clears
+`rootState.contracts` and `rootState.secretKeys`, drops all
+subscriptions, and emits `CHELONIA_RESET` + `CONTRACTS_MODIFIED`.
 
 - The single-argument form accepts **either** `newState` (a
   `ChelRootState` to seed into the root state after the wipe) **or**

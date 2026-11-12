@@ -310,5 +310,8 @@ omitted here; the source is authoritative.
   `chelonia/kv/set`, which then stops before it syncs) and waits again,
   all before `postCleanupFn` and before clearing the KV runtime maps. So
   persistence hooks observe a quiescent mirror and continuations never
-  run against torn-down state. A queued write whose request never settles
-  holds up the reset with it.
+  run against torn-down state. If the queues haven't drained after
+  [`resetDrainTimeout`](./configure.md#connection) ms (default `30000`),
+  e.g. because a request hangs on a dead link, the reset aborts the
+  requests still in flight at once: a queued write whose request hasn't
+  settled rejects with an `AbortError` and leaves the mirror as it was.

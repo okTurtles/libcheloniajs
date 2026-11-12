@@ -350,6 +350,8 @@ export default sbp('sbp/selectors/register', {
       // Sync a contract if an event published to it hasn't come back over
       // pubsub after 5 seconds
       publishReceiptTimeout: 5000,
+      // Abort the requests that still hold up `chelonia/reset` after 30 seconds
+      resetDrainTimeout: 30000,
       hooks: {
         preHandleEvent: null, // async (message: SPMessage) => {}
         postHandleEvent: null, // async (message: SPMessage) => {}
@@ -772,6 +774,13 @@ export default sbp('sbp/selectors/register', {
     if (this.pubsub) {
       sbp('chelonia/private/stopClockSync')
     }
+    // A request that never settles (e.g. a queued KV write on a dead link)
+    // would hold up the waits below for good
+    const { abortController } = this
+    const drainTimeout = timerDelay(this.config.resetDrainTimeout)
+    const drainTimer = drainTimeout === undefined
+      ? undefined
+      : unrefTimer(setTimeout(() => abortController.abort(), drainTimeout))
     // wait for any pending sync operations to finish before saving
     Object.keys(this.postSyncOperations).forEach((cID) => {
       sbp('chelonia/private/enqueuePostSyncOps', cID)
@@ -785,6 +794,7 @@ export default sbp('sbp/selectors/register', {
     })
     await sbp('chelonia/contract/waitPublish')
     await sbp('chelonia/contract/wait')
+    clearTimeout(drainTimer)
     // The waits above drained the queued KV writes (`kv/update`, `kv/clear`,
     // `kv/queuedSet`). Before `postCleanupFn` and the teardown, abort what runs
     // outside those queues (e.g. a raw `kv/set`) and drain what is still queued
