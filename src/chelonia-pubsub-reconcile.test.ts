@@ -4,10 +4,10 @@
 // after every (re)connection and every `pubsubReconcileInterval` ms, and
 // `chelonia/pubsub/status` reports any mismatch.
 //
-// The loss is produced with `pubsub.unsub(id)` (or a SUB ERROR) while
-// Chelonia still wants the contract. The pubsub server is the in-process fake
-// from `./pubsub/test-harness.ts` and contracts are seeded so that syncing
-// them takes the "already synchronized" path.
+// The loss is produced with the harness's `loseInPubsub()` (or a SUB ERROR)
+// while Chelonia still wants the contract. The pubsub server is the
+// in-process fake from `./pubsub/test-harness.ts` and contracts are seeded so
+// that syncing them takes the "already synchronized" path.
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert/strict'
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test'
@@ -18,7 +18,7 @@ import { createClient, PUBSUB_RECONNECTION_FAILED, REQUEST_TYPE } from './pubsub
 import type { PubSubClient } from './pubsub/index.js'
 import {
   captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay, fakeEntryData, isOpen,
-  onNextOpen, RELAY_URL, sleep, subscribed, waitFor
+  loseInPubsub, onNextOpen, RELAY_URL, sleep, subscribed, waitFor
 } from './pubsub/test-harness.js'
 import type { ChelPubSubStatus, ChelRootState } from './types.js'
 
@@ -85,17 +85,10 @@ async function want (contractID: string) {
 }
 
 // The pubsub client loses `contractID` while Chelonia still wants it.
-// Resolves with the time at which the UNSUB was sent.
-async function loseInPubsub (contractID: string): Promise<number> {
+// Returns the time of the loss.
+function lose (contractID: string): number {
   const since = Date.now()
-  pubsub.unsub(contractID)
-  assert.ok(
-    await waitFor(() =>
-      server.framesOf(REQUEST_TYPE.UNSUB, contractID, since).length > 0 &&
-      !pubsub.pendingOperations.tHas(REQUEST_TYPE.UNSUB, contractID)
-    ),
-    'UNSUB acknowledged'
-  )
+  loseInPubsub(pubsub, contractID)
   return since
 }
 
@@ -144,7 +137,7 @@ describe('chelonia/pubsub/status', () => {
     // Plain data
     assert.deepEqual(JSON.parse(JSON.stringify(healthy)), healthy)
 
-    await loseInPubsub('contract-S1')
+    lose('contract-S1')
     const lost = status()
     assert.equal(lost.state, 'open')
     assert.deepEqual(lost.missing, ['contract-S1'], `status: ${JSON.stringify(lost)}`)
@@ -216,7 +209,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
     await connect(0)
     await want('contract-A')
     await want('contract-B')
-    await loseInPubsub('contract-A')
+    lose('contract-A')
     assert.ok(
       !(await eventIsReceived('contract-A', 200)),
       'precondition: events are not received while the contract is lost'
@@ -273,7 +266,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
     await want('contract-C')
     const socket = pubsub.socket
     const newLogs = logs.fromNow()
-    const lostAt = await loseInPubsub('contract-C')
+    const lostAt = lose('contract-C')
     assert.ok(
       await waitFor(() => (
         server.framesOf(REQUEST_TYPE.SUB, 'contract-C', lostAt).length > 0 &&
@@ -409,7 +402,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
     )
 
     await want('contract-G')
-    const lostAt = await loseInPubsub('contract-G')
+    const lostAt = lose('contract-G')
     assert.ok(
       await waitFor(() => (
         server.framesOf(REQUEST_TYPE.SUB, 'contract-G', lostAt).length > 0 &&
@@ -424,7 +417,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
 describe('connectionOptions given to chelonia/configure', () => {
   it('reach the pubsub client as given, so maxRetries: Infinity keeps reconnecting', async () => {
     pubsub = await connectChelonia(relay, {
-      connectionOptions: { minReconnectionDelay: 20, maxRetries: Infinity }
+      connectionOptions: { maxRetries: Infinity }
     })
     assert.equal(pubsub.options.maxRetries, Infinity)
     let failures = 0
@@ -450,7 +443,7 @@ describe('connectionOptions given to chelonia/configure', () => {
   it('keep the client\'s default for a field set to undefined', async () => {
     // E.g. built with `{ reconnectOnDisconnection: cfg.reconnect }`
     pubsub = await connectChelonia(relay, {
-      connectionOptions: { minReconnectionDelay: 20, reconnectOnDisconnection: undefined }
+      connectionOptions: { reconnectOnDisconnection: undefined }
     })
     assert.equal(pubsub.options.reconnectOnDisconnection, true)
     const reopened = onNextOpen(pubsub)

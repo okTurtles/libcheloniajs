@@ -14,11 +14,10 @@ import { after, afterEach, before, describe, it } from 'node:test'
 
 import './chelonia.js'
 import './internals.js'
-import { REQUEST_TYPE } from './pubsub/index.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
   actionMessage, captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay,
-  retainedContract, subscribed, waitFor
+  loseInPubsub, retainedContract, subscribed, waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
 import type { JSONType } from './types.js'
@@ -71,11 +70,7 @@ async function lostWithNewValue (data: JSONType): Promise<TestContract> {
   const { contractID } = contract
   assert.ok(await waitFor(() => slotLoads(contractID) > 0), 'slot not loaded')
   await sbp('chelonia/kv/_waitInFlight')
-  pubsub.unsub(contractID)
-  assert.ok(await waitFor(() => (
-    !pubsub.subscriptionSet.has(contractID) &&
-    !pubsub.pendingOperations.tHas(REQUEST_TYPE.UNSUB, contractID)
-  )), 'unsubscribed in pubsub')
+  loseInPubsub(pubsub, contractID)
   await sbp('chelonia/kv/set', contractID, KEY, data, { signingKeyId: contract.CSKid })
   return contract
 }

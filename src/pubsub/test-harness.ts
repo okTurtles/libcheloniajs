@@ -513,6 +513,16 @@ export async function retainedContract (
   return contract
 }
 
+// `pubsub` loses `contractID` while Chelonia still wants it: the client and
+// the server forget the subscription at once. With `unsub()`, a reconcile
+// before the UNSUB's answer would cancel the UNSUB, and nothing would be lost.
+export function loseInPubsub (pubsub: PubSubClient, contractID: string): void {
+  pubsub.subscriptionSet.delete(contractID)
+  const connection = (pubsub.socket as unknown as FakeSocket | null)?.connection
+  connection?.subscriptions.delete(contractID)
+  connection?.kvFilters.delete(contractID)
+}
+
 // A retained contract that `pubsub` then lost while Chelonia still wants it,
 // and that another participant has posted to since (so Chelonia's copy is
 // stale)
@@ -520,31 +530,25 @@ export async function staleContract (
   relay: FakeRelay, pubsub: PubSubClient
 ): Promise<{ contract: TestContract; reply: SPMessage }> {
   const contract = await retainedContract(relay, pubsub)
-  const { contractID } = contract
-  pubsub.unsub(contractID)
-  assert.ok(
-    await waitFor(() => (
-      !pubsub.subscriptionSet.has(contractID) &&
-      !pubsub.pendingOperations.tHas(REQUEST_TYPE.UNSUB, contractID)
-    )),
-    'unsubscribed in pubsub'
-  )
+  loseInPubsub(pubsub, contract.contractID)
   const reply = relay.postAction(contract, { text: 'reply from the other party' })
   return { contract, reply }
 }
 
 // Configures Chelonia (after `chelonia/_init`) to use `relay`, connects it to
 // the installed fake pubsub server and waits for the connection to open.
-// `config` adds to (or overrides) the defaults.
+// `config` adds to (or overrides) the defaults, `connectionOptions` field by
+// field.
 export async function connectChelonia (
   relay: FakeRelay, config: Record<string, unknown> = {}
 ): Promise<PubSubClient> {
+  const { connectionOptions, ...rest } = config
   await sbp('chelonia/configure', {
     connectionURL: RELAY_URL,
     fetch: relay.fetch,
+    ...rest,
     // Reconnect within tens of milliseconds
-    connectionOptions: { minReconnectionDelay: 20 },
-    ...config
+    connectionOptions: { minReconnectionDelay: 20, ...(connectionOptions as object | undefined) }
   })
   const pubsub: PubSubClient = sbp('chelonia/connect')
   assert.ok(await waitFor(isOpen(pubsub)), 'connected')
@@ -586,7 +590,8 @@ export const keepQueueBusy = (contractID: string, ms: number): void => {
 //   `POST /kv/<id>/<key>`, which, like the server, answers 412 unless
 //   `if-match` has the stored value's etag (`""` if there is none), then
 //   409 unless the value is signed with the contract's current height; both
-//   with the stored value and its etag (`x-cid`).
+//   with the stored value and its etag (`x-cid`). Unlike the server, it
+//   never pushes a KV notification for a write.
 // Like the server, requests with a shelter authorization header get a 401 if
 // its timestamp is more than 60 s off the server's clock (`new Date()`).
 // Anything else is a 404 unless `onRequest` answers it.
@@ -683,9 +688,10 @@ export function createFakeRelay ({ pubsub }: { pubsub?: FakePubsubServer } = {})
     requests,
     headInfo,
     // Number of syncs of `contractID` among the requests from position `from`
-    // (positions, unlike timestamps, can't count a request from the same ms)
-    syncsOf (contractID: string, from = 0): number {
-      return requests.slice(from)
+    // up to (not including) position `to` (positions, unlike timestamps,
+    // can't count a request from the same ms)
+    syncsOf (contractID: string, from = 0, to = requests.length): number {
+      return requests.slice(from, to)
         .filter(({ path }) => path === `/latestHEADinfo/${contractID}`).length
     },
     // Appends an event without going through `fetch` (e.g. for another
@@ -721,9 +727,9 @@ export function createFakeRelay ({ pubsub }: { pubsub?: FakePubsubServer } = {})
       const response = await new Promise<Response>((resolve, reject) => {
         const onAbort = () => reject(signal!.reason)
         signal?.addEventListener('abort', onAbort, { once: true })
-        Promise.resolve(relay.onRequest?.(request, init) ?? respond(request, init))
-          .then(resolve, reject)
-          .finally(() => signal?.removeEventListener('abort', onAbort))
+        // `async`: a synchronous throw of `onRequest` or `respond` rejects too
+        const answer = (async () => relay.onRequest?.(request, init) ?? respond(request, init))()
+        answer.then(resolve, reject).finally(() => signal?.removeEventListener('abort', onAbort))
       })
       request.status = response.status
       return response
@@ -837,6 +843,8 @@ export function emulateNavigator () {
 // With `monotonic: true`, `wake()` holds back `performance.now()` by the time
 // slept instead, like browsers on macOS, whose `performance.now()` stands
 // still during sleep; `Date.now()` and `new Date()` keep the real time.
+// So a `performance.now()` interval across `wake(ms)` comes out `ms` too
+// short (possibly negative).
 export function emulateSleep ({ monotonic = false }: { monotonic?: boolean } = {}) {
   const realNow = Date.now
   const realPerformanceNow = performance.now

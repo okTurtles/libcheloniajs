@@ -142,8 +142,19 @@ describe('fake pubsub server (harness self-checks)', () => {
     controller.abort(reason)
     await assert.rejects(pending, (e) => e === reason)
     // A request aborted before it starts is never sent
-    await assert.rejects(relay.fetch(`${RELAY_URL}/time`, { signal: controller.signal }))
+    await assert.rejects(
+      relay.fetch(`${RELAY_URL}/time`, { signal: controller.signal }), (e) => e === reason
+    )
     assert.equal(relay.requests.length, 1)
+  })
+
+  it('removes its abort listener when onRequest throws', async (t) => {
+    const relay = createFakeRelay()
+    relay.onRequest = () => { throw new Error('onRequest failed') }
+    const { signal } = new AbortController()
+    const removed = t.mock.method(signal, 'removeEventListener')
+    await assert.rejects(relay.fetch(`${RELAY_URL}/time`, { signal }), /onRequest failed/)
+    assert.equal(removed.mock.callCount(), 1, 'still listening')
   })
 
   it('keeps the timeout of waitFor() when an emulated sleep holds back performance.now()', async () => {
@@ -454,22 +465,19 @@ describe('requests that exhaust the retry budget', () => {
     assert.ok(!connectionOf(client)!.subscriptions.has('w'))
   })
 
-  it('does not keep a Node.js process alive with its retry timers', async () => {
+  it('does not keep a Node.js process alive with its retry timers', async (t) => {
     const { client } = setup({ opRetryInterval: 1000 })
     assert.ok(await waitFor(isOpen(client)))
     ignoreOnCurrentConnection(REQUEST_TYPE.SUB)
-    const timers: ReturnType<typeof setTimeout>[] = []
-    const realSetTimeout = globalThis.setTimeout
-    globalThis.setTimeout = ((callback: () => void, ms?: number) => {
-      const id = realSetTimeout(callback, ms)
-      if (callback.name === 'send') timers.push(id)
-      return id
-    }) as unknown as typeof setTimeout
+    const timeouts = t.mock.method(globalThis, 'setTimeout')
     try {
       client.sub('r')
     } finally {
-      globalThis.setTimeout = realSetTimeout
+      timeouts.mock.restore()
     }
+    const timers = timeouts.mock.calls
+      .filter(({ arguments: args }) => (args[0] as () => void).name === 'send')
+      .map(({ result }) => result as ReturnType<typeof setTimeout>)
     assert.equal(timers.length, 1, 'retry scheduled')
     assert.equal(timers[0].hasRef(), false)
   })
@@ -579,7 +587,7 @@ describe('requests that exhaust the retry budget', () => {
       msg.type === REQUEST_TYPE.KV_FILTER ? { error: 'refused' } : undefined
     client.sub('k')
     assert.ok(await waitFor(subscribed(client, ['k'])))
-    client.unansweredReplacements = 1
+    client.unansweredReplacements = 2
     client.setKvFilter('k', ['a'])
     assert.ok(await waitFor(() => !client.pendingOperations.tHas(REQUEST_TYPE.KV_FILTER, 'k')))
     assert.equal(client.unansweredReplacements, 0)
@@ -614,9 +622,17 @@ describe('requests that exhaust the retry budget', () => {
       const { client } = setup(BACKOFF)
       assert.ok(await waitFor(isOpen(client)))
       client.unansweredReplacements = 3
-      nav.offline(client)
-      nav.online(client)
-      assert.equal(client.unansweredReplacements, 0)
+      // `offline` schedules nothing (the URL isn't local), `online` one attempt
+      const scheduled = scheduledDelays(client)
+      try {
+        nav.offline(client)
+        nav.online(client)
+        assert.equal(client.unansweredReplacements, 0)
+        assert.equal(scheduled.delays.length, 1)
+        assert.ok(scheduled.delays[0] <= 40, JSON.stringify(scheduled.delays)) // not 160 to 320
+      } finally {
+        scheduled.stop()
+      }
     } finally {
       nav.restore()
     }

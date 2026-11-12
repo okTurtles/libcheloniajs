@@ -40,7 +40,7 @@ before(async () => {
   sbp('chelonia/_init')
   pubsub = await connectChelonia(relay, {
     skipActionProcessing: true,
-    // No periodic reconcile: a contract lost with `pubsub.unsub()` stays
+    // No periodic reconcile: a contract that the pubsub client lost stays
     // lost until a `kv/set` that syncs it subscribes to it again, or the next
     // `chelonia/pubsub/update` (e.g. the next retain)
     pubsubReconcileInterval: 0
@@ -49,6 +49,7 @@ before(async () => {
 
 afterEach(() => {
   relay.onRequest = undefined
+  server.onRequest = undefined
 })
 
 after(() => {
@@ -90,12 +91,31 @@ function unwantedContract (): TestContract {
 const writeAgain = (data: JSONType) =>
   async ({ etag }: { etag: string | null | undefined }) => [data, etag ?? undefined]
 
+// The statuses of the KV writes among the requests from position `from`, in
+// order
+const writeStatuses = (from: number) => relay.requests.slice(from)
+  .filter(({ method, path }) => method === 'POST' && path.startsWith('/kv/'))
+  .map(({ status }) => status)
+
+// The position in `relay.requests` when the pubsub client sends its next SUB
+// for `contractID`: `kv/set` syncs before it subscribes again, and the sync
+// that the new subscription starts comes after it
+function subscribedAgainAt (contractID: string): () => number {
+  let at: number | undefined
+  server.onRequest = (_conn, msg) => {
+    if (msg.type === REQUEST_TYPE.SUB && msg.channelID === contractID) at ??= relay.requests.length
+    return undefined
+  }
+  return () => at ?? relay.requests.length
+}
+
 // `chelonia/kv/set`, with the outcome, the statuses of the writes and the
 // number of syncs of the contract
 async function kvSet (
   contract: TestContract, data: JSONType, options: Record<string, unknown> = {}
 ) {
   const from = relay.requests.length
+  const subAt = subscribedAgainAt(contract.contractID)
   let error: unknown
   try {
     await sbp('chelonia/kv/set', contract.contractID, KEY, data, {
@@ -106,15 +126,12 @@ async function kvSet (
   } catch (e) {
     error = e
   }
-  const requests = relay.requests.slice(from)
   return {
     error,
-    // Statuses of the writes, in order
-    statuses: requests
-      .filter(({ method, path }) => method === 'POST' && path.startsWith('/kv/'))
-      .map(({ status }) => status),
-    // Number of syncs of the contract
-    syncs: relay.syncsOf(contract.contractID, from)
+    statuses: writeStatuses(from),
+    // Number of syncs of the contract before the pubsub client subscribes to
+    // it again
+    syncs: relay.syncsOf(contract.contractID, from, subAt())
   }
 }
 
@@ -264,6 +281,7 @@ describe('chelonia/kv/queuedSet on a contract whose subscription was lost', () =
   it('succeeds (the sync runs on the internal queue, the write on the public one)', { timeout: 5000 }, async () => {
     const { contract } = await staleContract(relay, pubsub)
     const from = relay.requests.length
+    const subAt = subscribedAgainAt(contract.contractID)
     const data = { messageHash: 'q' }
     await sbp('chelonia/kv/queuedSet', {
       contractID: contract.contractID,
@@ -275,7 +293,7 @@ describe('chelonia/kv/queuedSet on a contract whose subscription was lost', () =
       encryptionKeyName: 'none',
       onconflict: writeAgain(data)
     })
-    assert.equal(relay.syncsOf(contract.contractID, from), 1)
+    assert.equal(relay.syncsOf(contract.contractID, from, subAt()), 1)
     assert.deepEqual(await kvValue(contract.contractID), data)
   })
 })
@@ -297,13 +315,11 @@ describe('chelonia/kv/update (slot API) on a contract whose subscription was los
   it('syncs the contract once and writes', async () => {
     const { contract } = await staleContract(relay, pubsub)
     const from = relay.requests.length
+    const subAt = subscribedAgainAt(contract.contractID)
     await sbp('chelonia/kv/update', {
       contractID: contract.contractID, key: SLOT, updater: () => ({ n: 1 })
     })
-    const requests = relay.requests.slice(from)
-    assert.deepEqual(requests
-      .filter(({ method, path }) => method === 'POST' && path.startsWith('/kv/'))
-      .map(({ status }) => status), [409, 204])
-    assert.equal(relay.syncsOf(contract.contractID, from), 1)
+    assert.deepEqual(writeStatuses(from), [409, 204])
+    assert.equal(relay.syncsOf(contract.contractID, from, subAt()), 1)
   })
 })
