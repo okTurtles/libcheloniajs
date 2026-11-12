@@ -135,13 +135,19 @@ an `onconflict` handler and `maxAttempts` above 1), slots included: **a
 before it retries. A `409` means that the value was signed with a stale
 contract height, i.e. this client missed some of the contract's events
 (e.g. its pubsub subscription was lost); every retry used to fail the
-same way, ending in `kv/set conflict setting KV value`. The sync only
-happens if Chelonia is subscribed to the contract and no event arrived
-during the back-off, and a failing sync is logged and the write retried
-anyway. After the sync, `kv/set` also subscribes the pubsub client to the
-contract again if the client lost it, as publishing does. Because of the
-sync, never await `chelonia/kv/set` from inside the contract's internal
-queue (e.g. from a side effect), as the sync would wait for that queue.
+same way, ending in `kv/set conflict setting KV value`. Before it retries
+a `409`, `kv/set` waits for the contract's internal queue and checks there
+that Chelonia is subscribed to the contract and that none of its events
+was processed since the value was signed (before the `409` came back,
+during the back-off or while waiting for the queue); only then does it
+sync. A failing sync is logged and the write retried anyway. After the
+sync, failed or not, `kv/set` also subscribes the pubsub client again to
+the contracts it lost, as publishing does. An abort during the back-off
+(the caller's `signal`, or `chelonia/reset`) ends the write before it
+syncs, with the signal's reason (an `AbortError` if the reason isn't an
+`Error`). Because of the wait, never await `chelonia/kv/set` from inside
+the contract's internal queue (e.g. from a side effect), even for a
+contract Chelonia isn't subscribed to: a `409` would deadlock it.
 `chelonia/kv/queuedSet`, `chelonia/queueInvocation` and the slot API use
 the public queue, so they are safe to call (but not to await) from a side
 effect: the public queue waits for the internal one.
@@ -297,9 +303,12 @@ omitted here; the source is authoritative.
   revalidation. Callbacks must not assume they are still the active slot
   for the contract/key.
 
-- **`chelonia/reset` drains in-flight KV writes.** `reset` aborts
-  stuck/offline network work, then waits for in-flight
-  `chelonia/kv/update` / `chelonia/kv/clear` writes to settle before
-  `postCleanupFn` and before clearing the KV runtime maps (matching
-  `chelonia/contract/wait`), so persistence hooks observe a quiescent
-  mirror and continuations never run against torn-down state.
+- **`chelonia/reset` drains in-flight KV writes.** `reset` first waits
+  for the contracts' queues (`chelonia/contract/wait`), where
+  `chelonia/kv/update`, `chelonia/kv/clear` and `chelonia/kv/queuedSet`
+  writes run, then aborts the network work still in flight (e.g. a raw
+  `chelonia/kv/set`, which then stops before it syncs) and waits again,
+  all before `postCleanupFn` and before clearing the KV runtime maps. So
+  persistence hooks observe a quiescent mirror and continuations never
+  run against torn-down state. A queued write whose request never settles
+  holds up the reset with it.

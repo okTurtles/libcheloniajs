@@ -97,6 +97,17 @@ const writeStatuses = (from: number) => relay.requests.slice(from)
   .filter(({ method, path }) => method === 'POST' && path.startsWith('/kv/'))
   .map(({ status }) => status)
 
+// The relay answers the next KV write with a 409, and the ones after it as
+// usual
+function conflictOnce () {
+  let first = true
+  relay.onRequest = ({ method, path }) => {
+    if (!first || method !== 'POST' || !path.startsWith('/kv/')) return
+    first = false
+    return kvConflict()
+  }
+}
+
 // The position in `relay.requests` when the pubsub client sends its next SUB
 // for `contractID`: `kv/set` syncs before it subscribes again, and the sync
 // that the new subscription starts comes after it
@@ -321,5 +332,53 @@ describe('chelonia/kv/update (slot API) on a contract whose subscription was los
     })
     assert.deepEqual(writeStatuses(from), [409, 204])
     assert.equal(relay.syncsOf(contract.contractID, from, subAt()), 1)
+  })
+})
+
+describe('a signal that aborts during the back-off after a 409', () => {
+  const SLOT = 'abortedValue'
+
+  before(() => {
+    sbp('chelonia/kv/defineSlot', {
+      contractType: 'test/contract',
+      key: SLOT,
+      defaultValue: {},
+      encryptionKeyName: null,
+      signingKeyName: '#csk',
+      autoLoad: 'never'
+    })
+  })
+
+  it('stops kv/update before it syncs, with an AbortError also for a reason that is not an Error', async (t) => {
+    const contract = await retainedContract(relay, pubsub)
+    conflictOnce()
+    t.mock.method(Math, 'random', () => 0.5) // 750 ms back-off
+    const from = relay.requests.length
+    const controller = new AbortController()
+    const update = sbp('chelonia/kv/update', {
+      contractID: contract.contractID,
+      key: SLOT,
+      updater: () => ({ n: 1 }),
+      signal: controller.signal
+    })
+    assert.ok(await waitFor(() => writeStatuses(from)[0] === 409), 'no 409')
+    controller.abort('stop')
+    await assert.rejects(update, (e) => (e as Error)?.name === 'AbortError')
+    assert.equal(relay.syncsOf(contract.contractID, from), 0, 'synced after the abort')
+  })
+})
+
+// Last: the reset clears the state that the tests above share
+describe('chelonia/reset during the back-off of a raw kv/set', () => {
+  it('does not sync once chelonia/reset aborted it during the back-off', async (t) => {
+    const contract = await retainedContract(relay, pubsub)
+    conflictOnce()
+    t.mock.method(Math, 'random', () => 0.5) // 750 ms back-off
+    const from = relay.requests.length
+    const write = kvSet(contract, { messageHash: 'r' })
+    assert.ok(await waitFor(() => writeStatuses(from)[0] === 409), 'no 409')
+    await sbp('chelonia/reset', () => sleep(1500))
+    assert.equal(((await write).error as Error | undefined)?.name, 'AbortError')
+    assert.equal(relay.syncsOf(contract.contractID, from), 0, 'synced after the abort')
   })
 })

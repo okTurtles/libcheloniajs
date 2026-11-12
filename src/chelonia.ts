@@ -3195,6 +3195,13 @@ export default sbp('sbp/selectors/register', {
               )
             }
             await delay(randomIntFromRange(0, 1500))
+            // Aborted during the back-off (e.g., by `chelonia/reset`): the next
+            // request fails anyway, and a sync started now could outlive the reset
+            if (fetchSignal.aborted) {
+              throw fetchSignal.reason instanceof Error
+                ? fetchSignal.reason
+                : new DOMException('Aborted', 'AbortError')
+            }
             // A 409 means that the value wasn't signed with the contract's
             // current height: some events haven't reached us. They may still
             // arrive over pubsub during the delay above, but if they didn't
