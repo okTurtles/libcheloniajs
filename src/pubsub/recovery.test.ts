@@ -61,19 +61,19 @@ describe('fake pubsub server (harness self-checks)', () => {
     client.sub('c2')
     await sleep(100)
     assert.equal(socket.readyState, WebSocket.OPEN)
-    assert.ok(server.framesOf(REQUEST_TYPE.SUB, 'c2', since).length >= 1, 'SUB sent')
-    assert.ok(!client.subscriptionSet.has('c2'), 'SUB unanswered')
+    assert.ok(server.framesOf(REQUEST_TYPE.SUB, 'c2', since).length >= 1, 'no SUB sent')
+    assert.ok(!client.subscriptionSet.has('c2'), 'SUB answered')
 
     socket.close()
     await sleep(100)
     assert.equal(socket.readyState, WebSocket.CLOSING)
-    assert.equal(client.socket, socket, 'no close event yet')
+    assert.equal(client.socket, socket, 'the close event came too early')
 
     server.pass()
     server.killClients()
     assert.equal(socket.readyState, WebSocket.CLOSED)
-    assert.notEqual(client.socket, socket, 'the close event was handled')
-    assert.ok(await waitFor(subscribed(client, ['c2'])), 'subscribed on the next connection')
+    assert.notEqual(client.socket, socket, 'the close event was not handled')
+    assert.ok(await waitFor(subscribed(client, ['c2'])), 'not subscribed on the next connection')
   })
 
   it('stalls new connection attempts until pass()', async () => {
@@ -92,7 +92,7 @@ describe('fake pubsub server (harness self-checks)', () => {
     const start = performance.now()
     client.sub('c3')
     assert.ok(await waitFor(subscribed(client, ['c3']), { timeout: 1000 }))
-    assert.ok(performance.now() - start >= 180, 'the OK was delayed')
+    assert.ok(performance.now() - start >= 180, 'the OK was not delayed')
   })
 
   it('closes connections abruptly with killClients()', async () => {
@@ -404,11 +404,11 @@ describe('requests that exhaust the retry budget', () => {
     client.sub('u')
     await reopened
     assert.ok(pendingOnReconnect, 'the SUB was dropped with the connection')
-    assert.ok(await waitFor(subscribed(client, ['u'])), 'subscribed on a later connection')
+    assert.ok(await waitFor(subscribed(client, ['u'])), 'not subscribed on a later connection')
     assert.notEqual(connectionOf(client), first)
     assert.equal(server.framesOf(REQUEST_TYPE.SUB, 'u', since)
       .filter(({ connection }) => connection === first).length, 5)
-    assert.ok(first.socket.readyState >= WebSocket.CLOSING, 'the abandoned socket was closed')
+    assert.ok(first.socket.readyState >= WebSocket.CLOSING, 'the abandoned socket was not closed')
     assert.equal(logs.grep(/Abandoning socket: no response to sub for u/, since).length, 1)
   })
 
@@ -418,7 +418,7 @@ describe('requests that exhaust the retry budget', () => {
     assert.ok(await waitFor(subscribed(client, ['d'])))
     const first = ignoreOnCurrentConnection(REQUEST_TYPE.SUB)
     client.sub('u')
-    assert.ok(await waitFor(subscribed(client, ['d', 'u'])), 'subscribed on a later connection')
+    assert.ok(await waitFor(subscribed(client, ['d', 'u'])), 'not subscribed on a later connection')
     const current = client.socket
     const attempts = client.failedConnectionAttempts
     // Anything the old socket might still emit must be ignored
@@ -440,8 +440,8 @@ describe('requests that exhaust the retry budget', () => {
     assert.ok(await waitFor(isOpen(client)))
     const first = ignoreOnCurrentConnection(REQUEST_TYPE.SUB)
     client.sub(channelID)
-    assert.ok(await waitFor(subscribed(client, [channelID])), 'subscribed on a later connection')
-    assert.ok(first.socket.readyState >= WebSocket.CLOSING, 'the abandoned socket was closed')
+    assert.ok(await waitFor(subscribed(client, [channelID])), 'not subscribed on a later connection')
+    assert.ok(first.socket.readyState >= WebSocket.CLOSING, 'the abandoned socket was not closed')
   })
 
   it('settles an unanswered UNSUB by replacing the connection', async () => {
@@ -456,7 +456,7 @@ describe('requests that exhaust the retry budget', () => {
       const current = connectionOf(client)
       return current && current !== first && current.subscriptions.has('keep') &&
         client.subscriptionSet.has('keep')
-    }), 'reconnected and re-subscribed')
+    }), 'not reconnected and re-subscribed')
     assert.equal(first.frames.filter(({ msg }) => msg.type === REQUEST_TYPE.UNSUB).length, 5)
     assert.equal(newLogs.grep(/Abandoning socket: no response to unsub for w$/).length, 1)
     assert.ok(!client.subscriptionSet.has('w'))
@@ -478,7 +478,7 @@ describe('requests that exhaust the retry budget', () => {
     const timers = timeouts.mock.calls
       .filter(({ arguments: args }) => (args[0] as () => void).name === 'send')
       .map(({ result }) => result as ReturnType<typeof setTimeout>)
-    assert.equal(timers.length, 1, 'retry scheduled')
+    assert.equal(timers.length, 1, 'not exactly one retry scheduled')
     assert.equal(timers[0].hasRef(), false)
   })
 
@@ -492,7 +492,7 @@ describe('requests that exhaust the retry budget', () => {
     assert.ok(await waitFor(() => {
       const current = connectionOf(client)
       return current && current !== first && client.subscriptionSet.has('k')
-    }), 'reconnected and re-subscribed')
+    }), 'not reconnected and re-subscribed')
     assert.equal(first.frames.filter(({ msg }) => msg.type === REQUEST_TYPE.KV_FILTER).length, 5)
     assert.equal(newLogs.grep(/Abandoning socket: no response to kv_filter for k$/).length, 1)
     assert.deepEqual(connectionOf(client)!.kvFilters.get('k'), ['a'])

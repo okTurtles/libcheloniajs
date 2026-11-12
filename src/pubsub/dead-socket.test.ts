@@ -281,7 +281,7 @@ describe('replacing dead sockets', () => {
     })
     assert.ok(await waitFor(() => (
       client.failedConnectionAttempts === 2 && client.socket?.readyState === WebSocket.CONNECTING
-    ), { timeout: 3000 }), 'third attempt in progress')
+    ), { timeout: 3000 }), 'third attempt not in progress')
     const errors: unknown[] = []
     const onError = (target: PubSubClient, error: unknown) => {
       if (target === client) errors.push(error)
@@ -455,7 +455,7 @@ describe('connection state', () => {
     const mark = stateEvents.length
     server.stallNewConnections()
     server.killClients()
-    assert.ok(await waitFor(() => client.socket?.readyState === WebSocket.CONNECTING), 'reconnecting')
+    assert.ok(await waitFor(() => client.socket?.readyState === WebSocket.CONNECTING), 'not reconnecting')
     // The connection attempt fails too
     server.killClients()
     assert.equal(client.shouldReconnect, false, 'baseline: gave up')
@@ -472,7 +472,7 @@ describe('connection state', () => {
     assert.equal(client.state, 'open', 'baseline: no event yet')
     assert.equal(client.getStatus().state, 'reconnecting')
     assert.equal(client.state, 'reconnecting')
-    assert.ok(await waitFor(() => client.state === 'connecting'), 'next connection attempt')
+    assert.ok(await waitFor(() => client.state === 'connecting'), 'no next connection attempt')
   })
 
   it('goes offline while waiting to reconnect, and back to reconnecting when online', async () => {

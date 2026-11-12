@@ -177,7 +177,7 @@ describe('publishing on a healthy connection', () => {
   it('does not sync when pubsub delivers the published event', async () => {
     const contract = await retainedContract(relay, pubsub)
     const published = await publish(contract, 'hello')
-    assert.ok(await waitFor(() => published.processedAt() !== undefined), 'processed')
+    assert.ok(await waitFor(() => published.processedAt() !== undefined), 'not processed')
     await sleep(400)
     assert.equal(relay.syncsOf(contract.contractID, published.from), 0)
     assert.equal(published.logged.grep(/did not receive/).length, 0)

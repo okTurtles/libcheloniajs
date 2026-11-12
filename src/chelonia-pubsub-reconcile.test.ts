@@ -81,7 +81,7 @@ async function seed (contractID: string) {
 // Chelonia wants `contractID` and the pubsub client subscribes to it
 async function want (contractID: string) {
   await seed(contractID)
-  assert.ok(await waitFor(subscribed(pubsub, [contractID])), `subscribed to ${contractID}`)
+  assert.ok(await waitFor(subscribed(pubsub, [contractID])), `not subscribed to ${contractID}`)
 }
 
 // The pubsub client loses `contractID` while Chelonia still wants it.
@@ -146,7 +146,7 @@ describe('chelonia/pubsub/status', () => {
     const reopened = onNextOpen(pubsub)
     server.killClients()
     await reopened
-    assert.ok(await waitFor(subscribed(pubsub, ['contract-S1', 'contract-S2'])), 're-subscribed')
+    assert.ok(await waitFor(subscribed(pubsub, ['contract-S1', 'contract-S2'])), 'not re-subscribed')
     const healed = status()
     assert.equal(healed.state, 'open')
     assert.equal(healed.wanted, 2)
@@ -164,7 +164,7 @@ describe('chelonia/pubsub/status', () => {
     await seed('contract-S4')
     assert.ok(
       await waitFor(() => server.framesOf(REQUEST_TYPE.SUB, 'contract-S4').length > 0),
-      'SUB sent'
+      'no SUB sent'
     )
     let current = status()
     assert.equal(current.state, 'open')
@@ -195,7 +195,7 @@ describe('chelonia/pubsub/status', () => {
     pubsub.sub('app-channel')
     assert.ok(
       await waitFor(() => server.framesOf(REQUEST_TYPE.SUB, 'app-channel').length > 0),
-      'SUB sent'
+      'no SUB sent'
     )
     assert.notEqual(pubsub.getStatus().oldestPendingSince, null, 'precondition')
     const current = status()
@@ -223,7 +223,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
       await waitFor(subscribed(pubsub, ['contract-A']), { timeout: 5000 }),
       'not subscribed in the pubsub client 5 s after the reconnect'
     )
-    assert.ok(await eventIsReceived('contract-A'), 'events are received again')
+    assert.ok(await eventIsReceived('contract-A'), 'events not received again')
     assert.ok(await eventIsReceived('contract-B'))
     await sleep(50)
     // `open` re-sent the SUB for B; reconciling adds the missing one only
@@ -274,7 +274,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
       ), { timeout: INTERVAL + 1000 }),
       `still not subscribed ${INTERVAL + 1000} ms later`
     )
-    assert.equal(pubsub.socket, socket, 'no reconnection')
+    assert.equal(pubsub.socket, socket, 'reconnected')
     assert.ok(await eventIsReceived('contract-C'))
     // ...and logs it
     const reconciled = newLogs.grep(
@@ -294,7 +294,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
       }
     }
     await seed('contract-D')
-    assert.ok(await waitFor(() => rejected === 1), 'first SUB rejected')
+    assert.ok(await waitFor(() => rejected === 1), 'first SUB not rejected')
     assert.ok(
       await waitFor(subscribed(pubsub, ['contract-D']), { timeout: INTERVAL + 1000 }),
       `still not subscribed ${INTERVAL + 1000} ms later`
@@ -338,14 +338,14 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
     updates = 0
     await sleep(300)
     assert.equal(updates, 0)
-    assert.equal(pubsub.socket?.readyState, WebSocket.CONNECTING, 'still connecting')
+    assert.equal(pubsub.socket?.readyState, WebSocket.CONNECTING, 'no longer connecting')
 
     server.pass()
-    assert.ok(await waitFor(subscribed(pubsub, ['contract-E'])), 're-subscribed')
+    assert.ok(await waitFor(subscribed(pubsub, ['contract-E'])), 'not re-subscribed')
     // Not the reconcile that follows every reconnection: the next periodic one
     await sleep(20)
     updates = 0
-    assert.ok(await waitFor(() => updates > 0, { timeout: 500 }), 'reconciling again')
+    assert.ok(await waitFor(() => updates > 0, { timeout: 500 }), 'not reconciling again')
   })
 
   it('replaces the periodic reconcile on chelonia/connect, and stops it once the client is destroyed', async (t) => {
@@ -362,7 +362,7 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
     pubsub = sbp('chelonia/connect')
     assert.equal(armed().length, 2)
     assert.ok(wasCleared(armed()[0]), 'the first timer is still running')
-    assert.ok(await waitFor(isOpen(pubsub)), 'connected')
+    assert.ok(await waitFor(isOpen(pubsub)), 'not connected')
     // Not the reconcile that follows the connection: the periodic ones
     await sleep(20)
     updates = 0
@@ -395,10 +395,10 @@ describe('Chelonia reconciles its subscriptions with the pubsub client', () => {
     await want('contract-F')
     const socket = pubsub.socket
     await sbp('chelonia/reset')
-    assert.equal(pubsub.socket, socket, 'same connection')
+    assert.equal(pubsub.socket, socket, 'reconnected')
     assert.ok(
       await waitFor(() => !pubsub.subscriptionSet.has('contract-F')),
-      'unsubscribed after the reset'
+      'still subscribed after the reset'
     )
 
     await want('contract-G')
@@ -429,7 +429,7 @@ describe('connectionOptions given to chelonia/configure', () => {
       server.killClients()
       assert.ok(
         await waitFor(() => pubsub.socket?.readyState === WebSocket.CONNECTING),
-        'reconnecting'
+        'not reconnecting'
       )
       server.killClients()
       server.pass()

@@ -507,7 +507,7 @@ export async function retainedContract (
   assert.equal(relay.append(contract.first), 200)
   storeSecretKeys(contract)
   await sbp('chelonia/contract/retain', contract.contractID)
-  assert.ok(await waitFor(subscribed(pubsub, [contract.contractID])), 'subscribed')
+  assert.ok(await waitFor(subscribed(pubsub, [contract.contractID])), 'not subscribed')
   // Let the sync that follows every new subscription finish
   await sbp('chelonia/contract/wait', contract.contractID)
   return contract
@@ -551,7 +551,7 @@ export async function connectChelonia (
     connectionOptions: { minReconnectionDelay: 20, ...(connectionOptions as object | undefined) }
   })
   const pubsub: PubSubClient = sbp('chelonia/connect')
-  assert.ok(await waitFor(isOpen(pubsub)), 'connected')
+  assert.ok(await waitFor(isOpen(pubsub)), 'not connected')
   return pubsub
 }
 

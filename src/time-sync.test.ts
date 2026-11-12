@@ -78,7 +78,7 @@ before(async () => {
   assert.equal(relay.append(contract.first), 200)
   storeSecretKeys(contract)
   await sbp('chelonia/contract/retain', contract.contractID)
-  assert.ok(await resynced(0), 'initial clock sync')
+  assert.ok(await resynced(0), 'no initial clock sync')
   assert.equal(await kvGet(), 'ok', 'baseline: shelter-auth kv/get works')
 })
 
@@ -136,7 +136,7 @@ describe('after another sleep, while /time requests fail', () => {
     const from = relay.requests.length
     sbp('chelonia/private/stopClockSync')
     sbp('chelonia/private/startClockSync')
-    assert.ok(await resynced(from), 'resynced')
+    assert.ok(await resynced(from), 'not resynced')
   })
 
   it('accepts shelter-auth requests', () => {
@@ -190,7 +190,7 @@ describe('a /time reply from before a sleep that arrives after it', () => {
     relay.onRequest = undefined
     const from = relay.requests.length
     clock.changeClock(-SLEEP)
-    assert.ok(await resynced(from), 'resynced')
+    assert.ok(await resynced(from), 'not resynced')
   })
 
   it('does not set chelonia/time back', () => {
@@ -232,7 +232,7 @@ describe('a sleep while the body of a /time reply is read', () => {
     const from = relay.requests.length
     sbp('chelonia/private/stopClockSync')
     sbp('chelonia/private/startClockSync')
-    assert.ok(await resynced(from), 'resynced')
+    assert.ok(await resynced(from), 'not resynced')
   })
 
   it('notices the sleep, and corrects chelonia/time', () => {
@@ -256,7 +256,7 @@ describe('after the system clock is set back by an hour', () => {
   after(async () => {
     const from = relay.requests.length
     clock.changeClock(HOUR)
-    assert.ok(await resynced(from), 'resynced')
+    assert.ok(await resynced(from), 'not resynced')
   })
 
   it('keeps chelonia/time on the real time', () => {
@@ -289,7 +289,7 @@ describe('after the system clock is set forward by an hour', () => {
   after(async () => {
     const from = relay.requests.length
     clock.changeClock(-HOUR)
-    assert.ok(await resynced(from), 'resynced')
+    assert.ok(await resynced(from), 'not resynced')
   })
 
   // Trade-off: this looks the same as waking up from an hour of sleep
@@ -331,7 +331,7 @@ describe('the 10 s watchdog', () => {
     mock.timers.enable({ apis: ['setInterval'] })
     const from = relay.requests.length
     sbp('chelonia/private/startClockSync')
-    assert.ok(await resynced(from), 'resynced')
+    assert.ok(await resynced(from), 'not resynced')
   })
 
   after(async () => {
@@ -340,7 +340,7 @@ describe('the 10 s watchdog', () => {
     mock.timers.reset()
     const from = relay.requests.length
     sbp('chelonia/private/startClockSync')
-    assert.ok(await resynced(from), 'resynced')
+    assert.ok(await resynced(from), 'not resynced')
   })
 
   it('re-syncs on a small clock change, which chelonia/time ignores', async () => {
