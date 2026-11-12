@@ -24,7 +24,7 @@ import {
   handledEvents, keepQueueBusy, kvConflict, localHeight, retainedContract, sleep, staleContract,
   storeSecretKeys, subscribed, waitFor
 } from './pubsub/test-harness.js'
-import type { TestContract } from './pubsub/test-harness.js'
+import type { RelayRequest, TestContract } from './pubsub/test-harness.js'
 import type { ChelKvGetResult, ChelRootState, JSONType } from './types.js'
 
 const KEY = 'readUntil'
@@ -91,18 +91,20 @@ function unwantedContract (): TestContract {
 const writeAgain = (data: JSONType) =>
   async ({ etag }: { etag: string | null | undefined }) => [data, etag ?? undefined]
 
+const isKvWrite = ({ method, path }: RelayRequest) => method === 'POST' && path.startsWith('/kv/')
+
 // The statuses of the KV writes among the requests from position `from`, in
 // order
 const writeStatuses = (from: number) => relay.requests.slice(from)
-  .filter(({ method, path }) => method === 'POST' && path.startsWith('/kv/'))
+  .filter(isKvWrite)
   .map(({ status }) => status)
 
 // The relay answers the next KV write with a 409, and the ones after it as
 // usual
 function conflictOnce () {
   let first = true
-  relay.onRequest = ({ method, path }) => {
-    if (!first || method !== 'POST' || !path.startsWith('/kv/')) return
+  relay.onRequest = (request) => {
+    if (!first || !isKvWrite(request)) return
     first = false
     return kvConflict()
   }
@@ -197,8 +199,8 @@ describe('kv/set on a contract that Chelonia is up to date with', () => {
   it('does not sync if pubsub delivers the missed event before the retry', async () => {
     const contract = await retainedContract(relay, pubsub)
     let first = true
-    relay.onRequest = ({ method, path }) => {
-      if (!first || method !== 'POST' || !path.startsWith('/kv/')) return
+    relay.onRequest = (request) => {
+      if (!first || !isKvWrite(request)) return
       first = false
       // Another participant posted right before us; the 409 arrives once
       // pubsub has delivered (and Chelonia has processed) that event
@@ -218,8 +220,8 @@ describe('kv/set when syncing does not help', () => {
   it('syncs at most once per call', async () => {
     const contract = await retainedContract(relay, pubsub)
     // The server keeps answering 409 (e.g. it keeps getting new events)
-    relay.onRequest = ({ method, path }) => {
-      if (method === 'POST' && path.startsWith('/kv/')) return kvConflict()
+    relay.onRequest = (request) => {
+      if (isKvWrite(request)) return kvConflict()
     }
     const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 3 })
     assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
@@ -230,9 +232,9 @@ describe('kv/set when syncing does not help', () => {
   it('keeps the outcome when the sync fails, and logs it', async () => {
     const contract = await retainedContract(relay, pubsub)
     const logged = logs.fromNow()
-    relay.onRequest = ({ method, path }) => {
-      if (method === 'POST' && path.startsWith('/kv/')) return kvConflict()
-      if (path === `/latestHEADinfo/${contract.contractID}`) {
+    relay.onRequest = (request) => {
+      if (isKvWrite(request)) return kvConflict()
+      if (request.path === `/latestHEADinfo/${contract.contractID}`) {
         return new Response('', { status: 500 })
       }
     }
@@ -245,8 +247,8 @@ describe('kv/set when syncing does not help', () => {
 
   it('does not sync on a 412 (the If-Match etag is stale, not the height)', async () => {
     const { contract } = await staleContract(relay, pubsub)
-    relay.onRequest = ({ method, path }) => {
-      if (method === 'POST' && path.startsWith('/kv/')) return new Response('', { status: 412 })
+    relay.onRequest = (request) => {
+      if (isKvWrite(request)) return new Response('', { status: 412 })
     }
     const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 2 })
     assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
@@ -273,8 +275,8 @@ describe('kv/set on a contract that Chelonia does not want', () => {
     // No back-off, so that the 409 is handled while the removal waits
     t.mock.method(Math, 'random', () => 0)
     let first = true
-    relay.onRequest = ({ method, path }) => {
-      if (!first || method !== 'POST' || !path.startsWith('/kv/')) return
+    relay.onRequest = (request) => {
+      if (!first || !isKvWrite(request)) return
       first = false
       keepQueueBusy(contractID, 300)
       sbp('chelonia/contract/release', contractID).catch(() => {})
