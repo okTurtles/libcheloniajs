@@ -28,6 +28,7 @@ import {
 } from './errors.js'
 import { CONTRACT_IS_PENDING_KEY_REQUESTS } from './events.js'
 import { b64ToStr } from './functions.js'
+import { queueEventOrReject } from './queue-event.js'
 import type { SignedData } from './signedData.js'
 import { isSignedData } from './signedData.js'
 import {
@@ -541,7 +542,7 @@ export const keyAdditionProcessor = function (
         // do this while no other operations are running for that
         // contract
         internalSideEffectStack.push(() => {
-          sbp('chelonia/private/queueEvent', keyRequestContractID, () => {
+          queueEventOrReject(keyRequestContractID, () => {
             const rootState = sbp(this.config.stateSelector) as ChelRootState
 
             const originatingContractState = rootState[contractID] as ChelContractState
