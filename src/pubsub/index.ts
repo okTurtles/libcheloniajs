@@ -966,6 +966,9 @@ const publicMethods: {
     // Note: do not clear 'client.options'.
     client.pendingOperations.clear()
     client.pendingRsiOperations.clear()
+    // Rejects any pending promise before forgetting them.
+    const err = new Error('[pubsub] Client destroyed')
+    for (const rejecter of client.promiseRejectersByMessageID.values()) rejecter(err)
     client.promiseRejectersByMessageID.clear()
     client.promiseResolversByMessageID.clear()
     client.subscriptionSet.clear()
