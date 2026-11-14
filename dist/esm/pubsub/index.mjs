@@ -632,6 +632,8 @@ const publicMethods = {
         clearTimeout(client.connectionTimeoutID);
         clearTimeout(client.nextConnectionAttemptDelayID);
         clearTimeout(client.pingTimeoutID);
+        for (const timeout of client.promiseTimeoutsByMessageID.values())
+            clearTimeout(timeout);
         client.connectionTimeoutID = undefined;
         client.nextConnectionAttemptDelayID = undefined;
         client.pingTimeoutID = undefined;
@@ -775,6 +777,7 @@ const publicMethods = {
                 client.pendingRsiOperations.delete(op.id);
                 client.promiseResolversByMessageID.delete(op.id);
                 client.promiseRejectersByMessageID.delete(op.id);
+                client.promiseTimeoutsByMessageID.delete(op.id);
                 reject(new Error(`RSI ${op.id} timed out`));
             }, client.options.rsiTimeout));
             client.promiseResolversByMessageID.set(op.id, resolve);
