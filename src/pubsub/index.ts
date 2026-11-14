@@ -800,7 +800,7 @@ const defaultMessageHandlers: MessageHandlers = {
     }
   },
 
-  async [RESPONSE_TYPE.RSI_ERROR] ({ to, data }: RsiErrorMessage) {
+  [RESPONSE_TYPE.RSI_ERROR] ({ to, data }: RsiErrorMessage) {
     const client = this
     const { pendingRsiOperations } = client
     console.warn('[pubsub] Received RSI_ERROR:', { to, data })
@@ -819,13 +819,13 @@ const defaultMessageHandlers: MessageHandlers = {
         ? new Error(data)
         : typeof data === 'object' && data !== null
             // Assign only safe fields since the data comes from a remote source.
-          ? Object.assign(new Error(), pick(data, ["cause", "message", "name"]))
+          ? Object.assign(new Error(), pick(data, ['cause', 'message', 'name']))
           : data
     )
     reject(reason)
   },
 
-  async [RESPONSE_TYPE.RSI_OK] ({ to, data }: RsiOkMessage) {
+  [RESPONSE_TYPE.RSI_OK] ({ to, data }: RsiOkMessage) {
     const client = this
     const { pendingRsiOperations } = client
     console.debug('[pubsub] Received RSI_OK:', { to, data })
