@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-this-alias */
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
-import { randomHexString, randomIntFromRange } from 'turtledash'
+import { pick, randomHexString, randomIntFromRange } from 'turtledash'
 import type { JSONObject, JSONType } from '../types.js'
 
 // ====== Enums ====== //
@@ -816,7 +816,8 @@ const defaultMessageHandlers: MessageHandlers = {
       typeof data === 'string'
         ? new Error(data)
         : typeof data === 'object' && data !== null
-          ? Object.assign(new Error(), data)
+            // Assign only safe fields since the data comes from a remote source.
+          ? Object.assign(new Error(), pick(data, ["cause", "message", "name"]))
           : data
     )
     reject(reason)
