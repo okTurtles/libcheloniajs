@@ -821,13 +821,12 @@ const defaultMessageHandlers: MessageHandlers = {
           : data
     )
     reject(reason)
-    console.debug('[pubsub] RSI promise was rejected:', { reason })
   },
 
   async [RESPONSE_TYPE.RSI_OK] ({ to, data }: RsiOkMessage) {
     const client = this
     const { pendingRsiOperations } = client
-    console.log('[pubsub] Received RSI_OK:', { to, data })
+    console.debug('[pubsub] Received RSI_OK:', { to, data })
     if (typeof to !== 'string' || to === '') throw new Error('Field "to" must be a non-empty string.')
     const originalMessage = pendingRsiOperations.get(to)
     pendingRsiOperations.delete(to)
@@ -838,7 +837,6 @@ const defaultMessageHandlers: MessageHandlers = {
     if (!originalMessage) return console.warn('[pubsub] Message %s not found', to)
     if (!resolve) throw new Error('Missing promise resolver.')
     resolve(data)
-    console.debug('[pubsub] RSI promise was resolved:', { data })
   }
 }
 
