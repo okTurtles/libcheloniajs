@@ -571,7 +571,6 @@ const defaultMessageHandlers = {
         client.promiseResolversByMessageID.delete(to);
         if (!originalMessage)
             return console.warn('[pubsub] Message %s not found', to);
-        console.debug('[pubsub]', { originalMessage });
         if (!reject)
             throw new Error('Missing promise rejecter.');
         const reason = (typeof data === 'string'
@@ -599,7 +598,7 @@ const defaultMessageHandlers = {
             throw new Error('Missing promise resolver.');
         resolve(data);
         console.debug('[pubsub] RSI promise was resolved:', { data });
-    },
+    }
 };
 const globalEventNames = ['offline', 'online'];
 const socketEventNames = ['close', 'error', 'message', 'open'];
@@ -774,9 +773,9 @@ const publicMethods = {
     async rsi(data) {
         const op = this.createRsiMessage(data);
         this.tryRsiOperation(op);
-        return await new Promise((resolver, rejecter) => {
-            this.promiseResolversByMessageID.set(op.id, resolver);
-            this.promiseRejectersByMessageID.set(op.id, rejecter);
+        return await new Promise((resolve, reject) => {
+            this.promiseResolversByMessageID.set(op.id, resolve);
+            this.promiseRejectersByMessageID.set(op.id, reject);
         });
     },
     /**

@@ -78,6 +78,44 @@ export type Message = {
   type: string;
 };
 
+/* Message types */
+
+export type PubMessage = {
+  type: 'pub';
+  channelID: string;
+  data: JSONType;
+};
+
+export type RsiMessage = {
+  type: 'rsi';
+  id: string;
+  data: JsonSbpInvocation
+};
+
+export type RsiErrorMessage = {
+  type: 'rsi-error';
+  to: string;
+  data: JSONType;
+};
+
+export type RsiOkMessage = {
+  type: 'rsi-ok';
+  to: string;
+  data: JSONType;
+};
+
+export type SubMessage = {
+  [key: string]: JSONType;
+  type: 'sub';
+  channelID: string;
+} & { kvFilter?: Array<string> };
+
+export type UnsubMessage = {
+  [key: string]: JSONType;
+  type: 'unsub';
+  channelID: string;
+};
+
 export type PubSubClient = {
   connectionTimeoutID: TimeoutID | undefined;
   connectionTimeUsed?: number;
@@ -98,7 +136,7 @@ export type PubSubClient = {
   pendingOperations: TieredMap<RequestTypeEnum, string, object>;
   pendingRsiOperations: Map<string, RsiMessage>;
   pingTimeoutID: TimeoutID | undefined;
-  promiseRejectersByMessageID: Map<string, (reason?: any) => void>;
+  promiseRejectersByMessageID: Map<string, (reason?: unknown) => void>;
   promiseResolversByMessageID: Map<string, (value: unknown) => void>;
   shouldReconnect: boolean;
   socket: WebSocket | null;
@@ -171,42 +209,6 @@ type MessageHandlers = {
   }): void;
   [RESPONSE_TYPE.RSI_ERROR](this: PubSubClient, msg: RsiErrorMessage): void;
   [RESPONSE_TYPE.RSI_OK](this: PubSubClient, msg: RsiOkMessage): void;
-};
-
-export type PubMessage = {
-  type: 'pub';
-  channelID: string;
-  data: JSONType;
-};
-
-export type RsiMessage = {
-  type: 'rsi';
-  id: string;
-  data: JsonSbpInvocation
-};
-
-export type RsiErrorMessage = {
-  type: 'rsi-error';
-  to: string;
-  data: JSONType;
-};
-
-export type RsiOkMessage = {
-  type: 'rsi-ok';
-  to: string;
-  data: JSONType;
-};
-
-export type SubMessage = {
-  [key: string]: JSONType;
-  type: 'sub';
-  channelID: string;
-} & { kvFilter?: Array<string> };
-
-export type UnsubMessage = {
-  [key: string]: JSONType;
-  type: 'unsub';
-  channelID: string;
 };
 
 // TODO: verify these are good defaults
@@ -804,14 +806,13 @@ const defaultMessageHandlers: MessageHandlers = {
     client.promiseRejectersByMessageID.delete(to)
     client.promiseResolversByMessageID.delete(to)
     if (!originalMessage) return console.warn('[pubsub] Message %s not found', to)
-    console.debug('[pubsub]', { originalMessage });
     if (!reject) throw new Error('Missing promise rejecter.')
     const reason = (
       typeof data === 'string'
-      ? new Error(data)
-      : typeof data === 'object' && data !== null
-      ? Object.assign(new Error(), data)
-      : data
+        ? new Error(data)
+        : typeof data === 'object' && data !== null
+          ? Object.assign(new Error(), data)
+          : data
     )
     reject(reason)
     console.debug('[pubsub] RSI promise was rejected:', { reason })
@@ -831,7 +832,7 @@ const defaultMessageHandlers: MessageHandlers = {
     if (!resolve) throw new Error('Missing promise resolver.')
     resolve(data)
     console.debug('[pubsub] RSI promise was resolved:', { data })
-  },
+  }
 }
 
 const globalEventNames = ['offline', 'online'] as const
@@ -1055,9 +1056,9 @@ const publicMethods: {
   async rsi (data: JsonSbpInvocation) {
     const op = this.createRsiMessage(data)
     this.tryRsiOperation(op)
-    return await new Promise((resolver, rejecter) => {
-      this.promiseResolversByMessageID.set(op.id, resolver)
-      this.promiseRejectersByMessageID.set(op.id, rejecter)
+    return await new Promise((resolve, reject) => {
+      this.promiseResolversByMessageID.set(op.id, resolve)
+      this.promiseRejectersByMessageID.set(op.id, reject)
     })
   },
 
