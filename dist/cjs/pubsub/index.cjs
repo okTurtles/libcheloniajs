@@ -59,6 +59,7 @@ const defaultOptions = {
     // respond because of a failed authentication.
     reconnectOnTimeout: false,
     reconnectionDelayGrowFactor: 2,
+    rsiTimeout: 10000,
     timeout: 60000,
     maxOpRetries: 4,
     opRetryInterval: 2000
@@ -202,6 +203,7 @@ function createClient(url, options = {}) {
         pingTimeoutID: undefined,
         promiseRejectersByMessageID: new Map(),
         promiseResolversByMessageID: new Map(),
+        promiseTimeoutsByMessageID: new Map(),
         shouldReconnect: true,
         // The underlying WebSocket object.
         // A new one is necessary for every connection or reconnection attempt.
@@ -569,6 +571,8 @@ const defaultMessageHandlers = {
         const reject = client.promiseRejectersByMessageID.get(to);
         client.promiseRejectersByMessageID.delete(to);
         client.promiseResolversByMessageID.delete(to);
+        clearTimeout(client.promiseTimeoutsByMessageID.get(to));
+        client.promiseTimeoutsByMessageID.delete(to);
         if (!originalMessage)
             return console.warn('[pubsub] Message %s not found', to);
         if (!reject)
@@ -576,15 +580,15 @@ const defaultMessageHandlers = {
         const reason = (typeof data === 'string'
             ? new Error(data)
             : typeof data === 'object' && data !== null
-                ? Object.assign(new Error(), data)
+                // Assign only safe fields since the data comes from a remote source.
+                ? Object.assign(new Error(), (0, turtledash_1.pick)(data, ["cause", "message", "name"]))
                 : data);
         reject(reason);
-        console.debug('[pubsub] RSI promise was rejected:', { reason });
     },
     async [exports.RESPONSE_TYPE.RSI_OK]({ to, data }) {
         const client = this;
         const { pendingRsiOperations } = client;
-        console.log('[pubsub] Received RSI_OK:', { to, data });
+        console.debug('[pubsub] Received RSI_OK:', { to, data });
         if (typeof to !== 'string' || to === '')
             throw new Error('Field "to" must be a non-empty string.');
         const originalMessage = pendingRsiOperations.get(to);
@@ -592,12 +596,13 @@ const defaultMessageHandlers = {
         const resolve = client.promiseResolversByMessageID.get(to);
         client.promiseRejectersByMessageID.delete(to);
         client.promiseResolversByMessageID.delete(to);
+        clearTimeout(client.promiseTimeoutsByMessageID.get(to));
+        client.promiseTimeoutsByMessageID.delete(to);
         if (!originalMessage)
             return console.warn('[pubsub] Message %s not found', to);
         if (!resolve)
             throw new Error('Missing promise resolver.');
         resolve(data);
-        console.debug('[pubsub] RSI promise was resolved:', { data });
     }
 };
 const globalEventNames = ['offline', 'online'];
@@ -701,6 +706,10 @@ const publicMethods = {
         // Note: do not clear 'client.options'.
         client.pendingOperations.clear();
         client.pendingRsiOperations.clear();
+        // Rejects any pending promise before forgetting them.
+        const err = new Error('[pubsub] Client destroyed');
+        for (const rejecter of client.promiseRejectersByMessageID.values())
+            rejecter(err);
         client.promiseRejectersByMessageID.clear();
         client.promiseResolversByMessageID.clear();
         client.subscriptionSet.clear();
@@ -771,11 +780,18 @@ const publicMethods = {
     },
     // Not idempotent!
     async rsi(data) {
+        const client = this;
         const op = this.createRsiMessage(data);
-        this.tryRsiOperation(op);
         return await new Promise((resolve, reject) => {
-            this.promiseResolversByMessageID.set(op.id, resolve);
-            this.promiseRejectersByMessageID.set(op.id, reject);
+            client.promiseTimeoutsByMessageID.set(op.id, setTimeout(() => {
+                client.pendingRsiOperations.delete(op.id);
+                client.promiseResolversByMessageID.delete(op.id);
+                client.promiseRejectersByMessageID.delete(op.id);
+                reject(new Error(`RSI ${op.id} timed out`));
+            }, client.options.rsiTimeout));
+            client.promiseResolversByMessageID.set(op.id, resolve);
+            client.promiseRejectersByMessageID.set(op.id, reject);
+            client.tryRsiOperation(op);
         });
     },
     /**

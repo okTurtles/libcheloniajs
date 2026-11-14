@@ -810,6 +810,8 @@ const defaultMessageHandlers: MessageHandlers = {
     const reject = client.promiseRejectersByMessageID.get(to)
     client.promiseRejectersByMessageID.delete(to)
     client.promiseResolversByMessageID.delete(to)
+    clearTimeout(client.promiseTimeoutsByMessageID.get(to))
+    client.promiseTimeoutsByMessageID.delete(to)
     if (!originalMessage) return console.warn('[pubsub] Message %s not found', to)
     if (!reject) throw new Error('Missing promise rejecter.')
     const reason = (
@@ -833,6 +835,7 @@ const defaultMessageHandlers: MessageHandlers = {
     const resolve = client.promiseResolversByMessageID.get(to)
     client.promiseRejectersByMessageID.delete(to)
     client.promiseResolversByMessageID.delete(to)
+    clearTimeout(client.promiseTimeoutsByMessageID.get(to))
     client.promiseTimeoutsByMessageID.delete(to)
     if (!originalMessage) return console.warn('[pubsub] Message %s not found', to)
     if (!resolve) throw new Error('Missing promise resolver.')

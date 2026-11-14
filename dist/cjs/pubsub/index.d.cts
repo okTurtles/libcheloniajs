@@ -47,6 +47,7 @@ export type Options = {
     reconnectOnOnline: boolean;
     reconnectOnTimeout: boolean;
     reconnectionDelayGrowFactor: number;
+    rsiTimeout: number;
     timeout: number;
     maxOpRetries: number;
     opRetryInterval: number;
@@ -108,6 +109,7 @@ export type PubSubClient = {
     pingTimeoutID: TimeoutID | undefined;
     promiseRejectersByMessageID: Map<string, (reason?: unknown) => void>;
     promiseResolversByMessageID: Map<string, (value: unknown) => void>;
+    promiseTimeoutsByMessageID: Map<string, TimeoutID>;
     shouldReconnect: boolean;
     socket: WebSocket | null;
     subscriptionSet: Set<string>;

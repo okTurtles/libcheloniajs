@@ -47,6 +47,7 @@ export type Options = {
     reconnectOnOnline: boolean;
     reconnectOnTimeout: boolean;
     reconnectionDelayGrowFactor: number;
+    rsiTimeout: number;
     timeout: number;
     maxOpRetries: number;
     opRetryInterval: number;
@@ -57,6 +58,38 @@ export type Options = {
 export type Message = {
     [key: string]: JSONType;
     type: string;
+};
+export type PubMessage = {
+    type: 'pub';
+    channelID: string;
+    data: JSONType;
+};
+export type RsiMessage = {
+    type: 'rsi';
+    id: string;
+    data: JsonSbpInvocation;
+};
+export type RsiErrorMessage = {
+    type: 'rsi-error';
+    to: string;
+    data: JSONType;
+};
+export type RsiOkMessage = {
+    type: 'rsi-ok';
+    to: string;
+    data: JSONType;
+};
+export type SubMessage = {
+    [key: string]: JSONType;
+    type: 'sub';
+    channelID: string;
+} & {
+    kvFilter?: Array<string>;
+};
+export type UnsubMessage = {
+    [key: string]: JSONType;
+    type: 'unsub';
+    channelID: string;
 };
 export type PubSubClient = {
     connectionTimeoutID: TimeoutID | undefined;
@@ -74,8 +107,9 @@ export type PubSubClient = {
     pendingOperations: TieredMap<RequestTypeEnum, string, object>;
     pendingRsiOperations: Map<string, RsiMessage>;
     pingTimeoutID: TimeoutID | undefined;
-    promiseRejectersByMessageID: Map<string, (reason?: any) => void>;
+    promiseRejectersByMessageID: Map<string, (reason?: unknown) => void>;
     promiseResolversByMessageID: Map<string, (value: unknown) => void>;
+    promiseTimeoutsByMessageID: Map<string, TimeoutID>;
     shouldReconnect: boolean;
     socket: WebSocket | null;
     subscriptionSet: Set<string>;
@@ -155,38 +189,6 @@ type MessageHandlers = {
     }): void;
     [RESPONSE_TYPE.RSI_ERROR](this: PubSubClient, msg: RsiErrorMessage): void;
     [RESPONSE_TYPE.RSI_OK](this: PubSubClient, msg: RsiOkMessage): void;
-};
-export type PubMessage = {
-    type: 'pub';
-    channelID: string;
-    data: JSONType;
-};
-export type RsiMessage = {
-    type: 'rsi';
-    id: string;
-    data: JsonSbpInvocation;
-};
-export type RsiErrorMessage = {
-    type: 'rsi-error';
-    to: string;
-    data: JSONType;
-};
-export type RsiOkMessage = {
-    type: 'rsi-ok';
-    to: string;
-    data: JSONType;
-};
-export type SubMessage = {
-    [key: string]: JSONType;
-    type: 'sub';
-    channelID: string;
-} & {
-    kvFilter?: Array<string>;
-};
-export type UnsubMessage = {
-    [key: string]: JSONType;
-    type: 'unsub';
-    channelID: string;
 };
 export declare const PUBSUB_ERROR = "pubsub-error";
 export declare const PUBSUB_RECONNECTION_ATTEMPT = "pubsub-reconnection-attempt";
