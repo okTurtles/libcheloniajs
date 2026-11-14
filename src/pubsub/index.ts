@@ -61,6 +61,8 @@ export type Options = {
   reconnectOnOnline: boolean;
   reconnectOnTimeout: boolean;
   reconnectionDelayGrowFactor: number;
+  // How long to wait before RSI requests time out, in milliseconds.
+  rsiTimeout: number;
   timeout: number;
   // Maximum retry attempts after initial send (maxOpRetries + 1 total attempts)
   maxOpRetries: number;
@@ -138,6 +140,7 @@ export type PubSubClient = {
   pingTimeoutID: TimeoutID | undefined;
   promiseRejectersByMessageID: Map<string, (reason?: unknown) => void>;
   promiseResolversByMessageID: Map<string, (value: unknown) => void>;
+  promiseTimeoutsByMessageID: Map<string, TimeoutID>;
   shouldReconnect: boolean;
   socket: WebSocket | null;
   subscriptionSet: Set<string>;
@@ -224,6 +227,7 @@ const defaultOptions: Options = {
   // respond because of a failed authentication.
   reconnectOnTimeout: false,
   reconnectionDelayGrowFactor: 2,
+  rsiTimeout: 10000,
   timeout: 60000,
   maxOpRetries: 4,
   opRetryInterval: 2000
@@ -393,6 +397,7 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
     pingTimeoutID: undefined,
     promiseRejectersByMessageID: new Map(),
     promiseResolversByMessageID: new Map(),
+    promiseTimeoutsByMessageID: new Map(),
     shouldReconnect: true,
     // The underlying WebSocket object.
     // A new one is necessary for every connection or reconnection attempt.
@@ -828,6 +833,7 @@ const defaultMessageHandlers: MessageHandlers = {
     const resolve = client.promiseResolversByMessageID.get(to)
     client.promiseRejectersByMessageID.delete(to)
     client.promiseResolversByMessageID.delete(to)
+    client.promiseTimeoutsByMessageID.delete(to)
     if (!originalMessage) return console.warn('[pubsub] Message %s not found', to)
     if (!resolve) throw new Error('Missing promise resolver.')
     resolve(data)
@@ -1057,11 +1063,18 @@ const publicMethods: {
 
   // Not idempotent!
   async rsi (data: JsonSbpInvocation) {
+    const client = this
     const op = this.createRsiMessage(data)
-    this.tryRsiOperation(op)
     return await new Promise((resolve, reject) => {
-      this.promiseResolversByMessageID.set(op.id, resolve)
-      this.promiseRejectersByMessageID.set(op.id, reject)
+      client.promiseTimeoutsByMessageID.set(op.id, setTimeout(() => {
+        client.pendingRsiOperations.delete(op.id)
+        client.promiseResolversByMessageID.delete(op.id)
+        client.promiseRejectersByMessageID.delete(op.id)
+        reject(new Error(`RSI ${op.id} timed out`))
+      }, client.options.rsiTimeout))
+      client.promiseResolversByMessageID.set(op.id, resolve)
+      client.promiseRejectersByMessageID.set(op.id, reject)
+      client.tryRsiOperation(op)
     })
   },
 
