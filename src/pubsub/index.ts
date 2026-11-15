@@ -818,7 +818,7 @@ const defaultMessageHandlers: MessageHandlers = {
       typeof data === 'string'
         ? new Error(data)
         : typeof data === 'object' && data !== null
-            // Assign only safe fields since the data comes from a remote source.
+        // Assign only safe fields since the data comes from a remote source.
           ? Object.assign(new Error(), pick(data, ['cause', 'message', 'name']))
           : data
     )
@@ -902,7 +902,7 @@ const publicMethods: {
     clearTimeout(client.connectionTimeoutID)
     clearTimeout(client.nextConnectionAttemptDelayID)
     clearTimeout(client.pingTimeoutID)
-    for (const timeout of client.promiseTimeoutsByMessageID.values()) clearTimeout(timeout)
+    // Do not clear RSI timeouts.
     client.connectionTimeoutID = undefined
     client.nextConnectionAttemptDelayID = undefined
     client.pingTimeoutID = undefined
@@ -980,6 +980,7 @@ const publicMethods: {
     for (const rejecter of client.promiseRejectersByMessageID.values()) rejecter(err)
     client.promiseRejectersByMessageID.clear()
     client.promiseResolversByMessageID.clear()
+    for (const timeout of client.promiseTimeoutsByMessageID.values()) clearTimeout(timeout)
     client.subscriptionSet.clear()
     // Remove global event listeners.
     if (typeof self === 'object' && self instanceof EventTarget) {

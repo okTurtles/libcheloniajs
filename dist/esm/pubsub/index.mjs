@@ -632,8 +632,7 @@ const publicMethods = {
         clearTimeout(client.connectionTimeoutID);
         clearTimeout(client.nextConnectionAttemptDelayID);
         clearTimeout(client.pingTimeoutID);
-        for (const timeout of client.promiseTimeoutsByMessageID.values())
-            clearTimeout(timeout);
+        // Do not clear RSI timeouts.
         client.connectionTimeoutID = undefined;
         client.nextConnectionAttemptDelayID = undefined;
         client.pingTimeoutID = undefined;
@@ -702,6 +701,8 @@ const publicMethods = {
             rejecter(err);
         client.promiseRejectersByMessageID.clear();
         client.promiseResolversByMessageID.clear();
+        for (const timeout of client.promiseTimeoutsByMessageID.values())
+            clearTimeout(timeout);
         client.subscriptionSet.clear();
         // Remove global event listeners.
         if (typeof self === 'object' && self instanceof EventTarget) {
