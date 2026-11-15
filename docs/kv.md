@@ -74,7 +74,7 @@ state, project `{ ...rootState, _kv: undefined }`.
 | `signingKeyName` | `'csk'` | Contract key name used for signing. A missing named key rejects the write. |
 | `autoSubscribe` | `true` | Subscribe to pubsub for this slot automatically. |
 | `autoLoad` | `'on-sync'` | `'on-sync'` loads on contract sync; `'on-demand'` waits for `chelonia/kv/sync` (or a successful `update`); `'never'` skips. |
-| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect, when Chelonia subscribes the pubsub client again to a contract that the client lost, and when `chelonia/connect` replaces a client that had connected. |
+| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect, on re-subscription of a lost contract, and when `chelonia/connect` replaces a client that had connected. |
 | `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the plain-`value` form of `chelonia/kv/update`. |
 | `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw; must not synchronously call a same-contract KV write (rejected with `ChelErrorKvReentrant`; see the rejection taxonomy below). |
 
@@ -129,28 +129,29 @@ direct callers (the high-level slot API hides them):
   where previously it was only representable at the type level as a
   tuple. No runtime behaviour change for existing callers.
 
-One runtime change applies to every caller that retries a conflict (with
-an `onconflict` handler and `maxAttempts` above 1), slots included: **a
-`409` makes `chelonia/kv/set` sync the contract** (at most once per call)
-before it retries. A `409` means that the value was signed with a stale
-contract height, i.e. this client missed some of the contract's events
-(e.g. its pubsub subscription was lost); every retry used to fail the
-same way, ending in `kv/set conflict setting KV value`. Before it retries
-a `409`, `kv/set` waits for the contract's internal queue and checks there
-that Chelonia is subscribed to the contract and that none of its events
-was processed since the value was signed (before the `409` came back,
-during the back-off or while waiting for the queue); only then does it
-sync. A failing sync is logged and the write retried anyway. After the
-sync, failed or not, `kv/set` also subscribes the pubsub client again to
-the contracts it lost, as publishing does. An abort during the back-off
-(the caller's `signal`, or `chelonia/reset`) ends the write before it
-syncs, with the signal's reason (an `AbortError` if the reason isn't an
-`Error`). Because of the wait, never await `chelonia/kv/set` from inside
-the contract's internal queue (e.g. from a side effect), even for a
-contract Chelonia isn't subscribed to: a `409` would deadlock it.
-`chelonia/kv/queuedSet`, `chelonia/queueInvocation` and the slot API use
-the public queue, so they are safe to call (but not to await) from a side
-effect: the public queue waits for the internal one.
+One runtime change applies to every caller that retries a conflict (an
+`onconflict` handler and `maxAttempts` above 1), slots included: **a `409`
+makes `chelonia/kv/set` sync the contract** (at most once per call) before
+it retries. A `409` means the value was signed with a stale contract
+height: this client missed some of the contract's events (e.g. its pubsub
+subscription was lost), so every retry used to fail the same way, ending
+in `kv/set conflict setting KV value`.
+
+- Before retrying, `kv/set` waits for the contract's internal queue, and
+  syncs only if Chelonia is subscribed to the contract and none of its
+  events was processed since the value was signed. A failing sync is
+  logged and the write retried anyway. After the sync, failed or not,
+  `kv/set` also subscribes the pubsub client again to the contracts it
+  lost.
+- An abort during the back-off (the caller's `signal`, or
+  `chelonia/reset`) ends the write before it syncs, with the signal's
+  reason (an `AbortError` if the reason isn't an `Error`).
+- Because of the queue wait, never await `chelonia/kv/set` from inside the
+  contract's internal queue (e.g. a side effect), even for a contract
+  Chelonia isn't subscribed to: a `409` would deadlock.
+  `chelonia/kv/queuedSet`, `chelonia/queueInvocation` and the slot API use
+  the public queue, which waits for the internal one, so they are safe to
+  call (not to await) from a side effect.
 
 ## Schema-driven default normalization
 

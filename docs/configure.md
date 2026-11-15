@@ -78,12 +78,19 @@ that needs the context).
 |---|---|---|---|
 | `connectionURL` | `string` | _(none — required before connecting)_ | Pubsub/HTTP base URL of the relay server. Accessing it before it is set throws. |
 | `connectionOptions.maxRetries` | `number` | `Infinity` | Pubsub reconnection budget. |
-| `connectionOptions.reconnectOnTimeout` | `boolean` | `true` | When a connection attempt times out, count the time it took against the delay before the next attempt. (A ping timeout always replaces the connection, whatever this value.) |
-| `connectionOptions.*` | pubsub client `Options` | see `src/pubsub/index.ts` | Every other field is passed to the pubsub client as is (except `handlers` and `messageHandlers`, which `chelonia/connect` sets), e.g. `pingTimeout` (`45000` ms without a message before the connection is replaced; also checked against the wall clock, so a connection that died during sleep is replaced within a few seconds of waking up; `0` disables it), `opRetryInterval` (`2000`) and `maxOpRetries` (`4`). A SUB/UNSUB/KV filter request that gets no answer after `maxOpRetries` retries (about 10 to 15 x `opRetryInterval` with the defaults) makes the client replace the connection, unless `reconnectOnDisconnection` is `false`: then it drops that request (`[pubsub] Giving up <request> for channel <channelID>`) and keeps the connection. SUBs (with their KV filters) are sent again on the new connection; pending UNSUBs are settled by the close, since the server drops that connection's subscriptions. Connections replaced in a row this way back off like failed connection attempts. Read by `chelonia/connect`. |
-| `pubsubReconcileInterval` | `number` | `60000` | How often (in ms) Chelonia checks that the pubsub client is subscribed to every contract Chelonia is subscribed to, and subscribes it again to any it lost (logged at info as `[chelonia] pubsub reconcile (periodic): ...`). Chelonia also checks after every reconnection (`(reconnected)`) and on a new client's first connection (not logged), whatever this value. `0`, or anything that isn't a positive finite number, disables the periodic check, and values above 2^31 - 1 (about 24.8 days) count as 2^31 - 1. Read by `chelonia/connect`, so a change applies from the next `chelonia/connect`. The check also unsubscribes the pubsub client from channels that Chelonia isn't subscribed to (as `chelonia/pubsub/update` always did on subscription changes). |
-| `publishReceiptTimeout` | `number` | `5000` | How long (in ms) to wait, after the relay accepted an event published to a contract Chelonia is subscribed to, for that event to come back over pubsub before syncing the contract to process it (e.g. the socket is half-open). If the pubsub client is neither subscribed nor subscribing to the contract (or there is no pubsub client), Chelonia syncs right away instead. `0`, or anything that isn't a positive finite number, disables the timed check only, and values above 2^31 - 1 (about 24.8 days) count as 2^31 - 1. See [Making sure a published event is processed](./contracts.md#making-sure-a-published-event-is-processed). |
-| `resetDrainTimeout` | `number` | `30000` | How long (in ms) `chelonia/reset` waits for the contracts' queues (publishes, syncs, queued KV writes) before it aborts the requests still in flight, which it otherwise does once the queues are empty. So a request that hangs (e.g. on a dead link) doesn't hold up the reset for good: the work waiting for it rejects with an `AbortError`. A sync cut this way is reported to `syncContractError` and logged as an error, like any failed sync. `0`, or anything that isn't a positive finite number, waits as long as the queues take, and values above 2^31 - 1 (about 24.8 days) count as 2^31 - 1. See [`kv.md`](./kv.md). |
+| `connectionOptions.reconnectOnTimeout` | `boolean` | `true` | Count a timed-out connection attempt's duration against the next reconnection delay. (A ping timeout always replaces the connection.) |
+| `connectionOptions.*` | pubsub client `Options` | see `src/pubsub/index.ts` | Other pubsub client options (not `handlers`, `messageHandlers`: Chelonia sets them), e.g. `pingTimeout` (`45000`; `0` disables), `opRetryInterval` (`2000`), `maxOpRetries` (`4`); [details](./debugging.md#pubsub-connection). |
+| `pubsubReconcileInterval` | `number` | `60000` | How often (ms) Chelonia subscribes the pubsub client again to contracts it lost (and unsubscribes it from those Chelonia isn't subscribed to). It also checks after every reconnection. |
+| `publishReceiptTimeout` | `number` | `5000` | How long (ms) to wait for a published event to come back over pubsub before syncing the contract. See [contracts.md](./contracts.md#making-sure-a-published-event-is-processed). |
+| `resetDrainTimeout` | `number` | `30000` | How long (ms) `chelonia/reset` waits for the contracts' queues before aborting the requests in flight: waiting work rejects with an `AbortError` (a cut sync goes to `syncContractError` and is logged). See [`kv.md`](./kv.md#consumer-caveats). |
 | `fetch` | `typeof fetch` | global `fetch` | HTTP transport. Override in environments that need a custom fetch (e.g. service workers with credentials). |
+
+For `pubsubReconcileInterval`, `publishReceiptTimeout` and
+`resetDrainTimeout`, `0` or any value that isn't a positive finite number
+turns the timer off: no periodic check; no timed publish check (a
+contract missing from the pubsub client is still synced at once);
+`chelonia/reset` waits as long as the queues take. Values above 2^31 - 1
+ms (about 24.8 days) count as 2^31 - 1.
 
 ### State integration
 
@@ -135,7 +142,7 @@ omitted keys keep their previous values.
 | `sideEffectError` | `(err, msg?) => void` | Error during `sideEffect`. |
 | `handleEventError` | `(err, msg?) => void` | Top-level event-handler error. |
 | `syncContractError` | `(err, contractID) => void` | Failure during contract sync. |
-| `pubsubError` | `(err, client) => void` | `chelonia/pubsub/update` failed to subscribe or unsubscribe the pubsub client; socket errors don't call it (see [`debugging.md`](./debugging.md#error-hooks)). |
+| `pubsubError` | `(err, client) => void` | `chelonia/pubsub/update` failed to subscribe or unsubscribe the pubsub client. Not called for socket errors. |
 
 You can also register **per-op** hooks at the top level:
 
@@ -209,6 +216,14 @@ config:
 - `connectionOptions` and `pubsubReconcileInterval` are read by
   `chelonia/connect`: a change applies to the next pubsub client, not to
   the current one.
+- `chelonia/config` returns a copy you can pass back. It keeps only these
+  functions: `fetch`, `reactiveSet`, `reactiveDel`, the journal's
+  (`redactions[].redact`, `diff`, `applyPatch`) and those in
+  `contracts.defaults.modules` and `exposedGlobals` (by reference). Passing
+  it back leaves the missing ones (`hooks`, `preOp`/`postOp`,
+  `preOp_<op>`/`postOp_<op>`, `whitelisted`) as they are, but sets
+  `unwrapMaybeEncryptedData` again from `skipDecryptionAttempts`,
+  replacing a custom one.
 - For `journal`, the rules are slightly stricter — see below.
 
 The selector also eagerly preloads any new manifests in

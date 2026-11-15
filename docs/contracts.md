@@ -636,7 +636,7 @@ optional; Chelonia calls them around the publish lifecycle:
 | `beforeRequest(newEntry, oldEntry)` | Before every HTTP attempt, after Chelonia recreates the message (height/previousHEAD updated). | Fires once per retry. `oldEntry` is the previously-serialized entry from the prior attempt. |
 | `preSendCheck(msg, state)` | Inside the per-contract queue before the wire send. | Return `false` to silently cancel the publish (e.g. \"another writer raced us\"). |
 | `postpublish(msg)` | After the relay accepts the message. | Useful for fire-and-forget follow-up work; runs before local processing. |
-| `onprocessed(msg)` | After the message has run through `process` + `sideEffect` locally: normally when it comes back over pubsub, or after the sync Chelonia runs when it doesn't (see [Making sure a published event is processed](#making-sure-a-published-event-is-processed)). | Subscribed via `EVENT_HANDLED`; the listener is automatically detached after firing once. |
+| `onprocessed(msg)` | After the message has run through `process` + `sideEffect` locally (normally on its pubsub echo; see [below](#making-sure-a-published-event-is-processed)). | Subscribed via `EVENT_HANDLED`; the listener is automatically detached after firing once. |
 
 `chelonia/out/registerContract` additionally accepts `prepublishContract`
 and `postpublishContract` (`src/chelonia.ts`), which apply to
@@ -648,11 +648,17 @@ the initial `OP_CONTRACT` rather than to the follow-up action.
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
-| `maxAttempts` | `number` | `5` | How many times to attempt the publish when the relay answers HTTP `409` (HEAD raced). Before each retry Chelonia waits up to 1.5 s and then, unless the event it was missing arrived meanwhile, syncs the contract so that the retry goes on top of the relay's HEAD. It skips that sync for a contract it isn't subscribed to and for a contract's first event (`OP_CONTRACT`). A contract released or deleted meanwhile ends the retries without an error. After this many failures `publishEvent` throws. |
+| `maxAttempts` | `number` | `5` | How many times to attempt the publish when the relay answers HTTP `409` (HEAD raced); see the note below. After this many failures `publishEvent` throws. |
 | `headers` | `Record<string, string>` | none | Extra HTTP headers merged into the `POST /event` request (e.g. tracing IDs). |
 | `billableContractID` | `string` | none | Sets the `Shelter` Authorization header. The relay charges this contract's quota for the operation. Mutually exclusive with `bearer`. |
 | `bearer` | `string` | none | Sets `Authorization: Bearer <token>` instead. |
 | `disableAutoDedup` | `boolean` | `false` | Skip Chelonia's automatic \"already-processed\" detection. Rarely needed; set when intentionally re-publishing a known-duplicate op. |
+
+On a `409`, Chelonia waits up to 1.5 s before each retry and then, unless
+the missing event arrived meanwhile, syncs the contract so the retry builds
+on the relay's HEAD. It skips that sync for a contract it isn't subscribed
+to and for a contract's first event (`OP_CONTRACT`). A contract released or
+deleted meanwhile ends the retries without an error.
 
 ```js
 await sbp('chelonia/out/actionEncrypted', {
@@ -703,20 +709,17 @@ it reaches the message and the logs.
 
 ### Making sure a published event is processed
 
-Chelonia doesn't apply a published event to the local state when the relay
-accepts it: it waits for the event to come back over pubsub, like everyone
-else's. If the pubsub client lost the subscription, or the socket is
-half-open, that never happens, so for a contract Chelonia is subscribed to,
-it checks after every successful publish:
+Chelonia doesn't apply a published event when the relay accepts it, but
+when it comes back over pubsub, like everyone else's. If the pubsub client
+lost the subscription, or the socket is half-open, that never happens, so
+after each successful publish to a contract Chelonia is subscribed to:
 
-- if the pubsub client is neither subscribed nor subscribing to the
-  contract (including when `chelonia/connect` was never called), it syncs
-  the contract right away, and subscribes the pubsub client (if any) to it
-  again;
-- otherwise, if the event hasn't been processed within
-  `publishReceiptTimeout` ms (default `5000`; `0` turns this check off,
-  see [`configure.md`](./configure.md#connection)), it syncs the contract
-  then.
+- if the pubsub client is neither subscribed nor subscribing to it (e.g.
+  `chelonia/connect` was never called), Chelonia syncs the contract at once
+  and subscribes the pubsub client (if any) to it again;
+- otherwise it syncs the contract if the event isn't processed within
+  `publishReceiptTimeout` ms (default `5000`, `0` turns this check off; see
+  [`configure.md`](./configure.md#connection)).
 
 Either way it warns `[chelonia] Published <event> but did not receive it
 (<reason>); syncing <contractID>`, and `onprocessed` fires after that sync.
@@ -754,13 +757,12 @@ await sbp('chelonia/contract/release', [contractID]) // refcount-aware
 await sbp('chelonia/reset')
 ```
 
-`chelonia/reset(newState?, postCleanupFn?)` drains pending publishes
-and the contracts' queues (for up to
-[`resetDrainTimeout`](./configure.md#connection) ms; then it aborts the
-publishes, syncs and KV writes still waiting for an answer, which reject
-with an `AbortError`), aborts in-flight messages, clears
-`rootState.contracts` and `rootState.secretKeys`, drops all
-subscriptions, and emits `CHELONIA_RESET` + `CONTRACTS_MODIFIED`.
+`chelonia/reset(newState?, postCleanupFn?)` drains pending publishes and
+the contracts' queues (after [`resetDrainTimeout`](./configure.md#connection)
+ms it aborts what is still waiting, which rejects with an `AbortError`),
+aborts in-flight messages, clears `rootState.contracts` and
+`rootState.secretKeys`, drops all subscriptions, and emits
+`CHELONIA_RESET` + `CONTRACTS_MODIFIED`.
 
 - The single-argument form accepts **either** `newState` (a
   `ChelRootState` to seed into the root state after the wipe) **or**
@@ -794,15 +796,13 @@ await sbp('chelonia/reset', async () => {
 ## Common pitfalls
 
 - **Forgetting `chelonia/connect`.** `chelonia/configure` does not
-  open the pubsub socket. Outgoing `/out/*` selectors still POST to
-  the relay via `config.fetch`, but **incoming** pubsub events never
-  arrive until you call `sbp('chelonia/connect')`. Your own actions
-  are still processed, because Chelonia syncs the contract after each
-  publish when there is no pubsub client (see
-  [Making sure a published event is processed](#making-sure-a-published-event-is-processed)),
-  but everyone else's only arrive with those syncs. Symptom: local
-  state only changes after your own publishes, and Chelonia warns
-  `Published ... but did not receive it (not subscribed)` every time.
+  open the pubsub socket. Outgoing `/out/*` selectors still POST via
+  `config.fetch`, and Chelonia syncs the contract after each publish to
+  process it ([details](#making-sure-a-published-event-is-processed)), but
+  other participants' events only arrive with those syncs until you call
+  `sbp('chelonia/connect')`. Symptom: local state only changes after your
+  own publishes, each with a `Published ... but did not receive it (not
+  subscribed)` warning.
 - **Forgetting `chelonia/storeSecretKeys` before publishing.**
   `registerContract` and `actionEncrypted` look up signing keys in
   `transientSecretKeys`. Calling them with a `signingKeyId` Chelonia
