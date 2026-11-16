@@ -48,7 +48,7 @@ export type ResponseTypeEnum = (typeof RESPONSE_TYPE)[keyof typeof RESPONSE_TYPE
 
 // ====== Types ====== //
 
-type JsonSbpInvocation = [selector: string, ...args: JSONType[]]
+export type JsonSbpInvocation = [selector: string, ...args: JSONType[]]
 type TimeoutID = ReturnType<typeof setTimeout>;
 
 export type Options = {
@@ -153,6 +153,7 @@ export type PubSubClient = {
   destroy(this: PubSubClient): void;
   generateMessageID(this: PubSubClient): string;
   pub(this: PubSubClient, channelID: string, data: JSONType): void;
+  rsi(this: PubSubClient, data: JsonSbpInvocation): Promise<unknown>;
   scheduleConnectionAttempt(this: PubSubClient): void;
   sub(this: PubSubClient, channelID: string): void;
   unsub(this: PubSubClient, channelID: string): void;
@@ -626,7 +627,6 @@ const defaultClientEventHandlers: ClientEventHandlers = {
 
     client.connectionTimeUsed = undefined
     client.clearAllTimers()
-    sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SUCCEEDED, client)
 
     // Set it to -1 so that it becomes 0 on the next `close` event.
     client.failedConnectionAttempts = -1
@@ -643,6 +643,7 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     for (const op of client.pendingRsiOperations.values()) {
       client.tryRsiOperation(op)
     }
+    sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SUCCEEDED, client)
     // Send any pending subscription request.
     for (const [channelID] of client.pendingOperations.get(REQUEST_TYPE.SUB) || []) {
       runWithRetry(client, channelID, REQUEST_TYPE.SUB, pubPayloadFactory(client, channelID))
@@ -814,13 +815,14 @@ const defaultMessageHandlers: MessageHandlers = {
     client.promiseTimeoutsByMessageID.delete(to)
     if (!originalMessage) return console.warn('[pubsub] Message %s not found', to)
     if (!reject) throw new Error('Missing promise rejecter.')
+    // Wraps the error payload in an Error object.
     const reason = (
       typeof data === 'string'
         ? new Error(data)
         : typeof data === 'object' && data !== null
         // Assign only safe fields since the data comes from a remote source.
           ? Object.assign(new Error(), pick(data, ['cause', 'message', 'name']))
-          : data
+          : new Error(String(data))
     )
     reject(reason)
   },
@@ -981,6 +983,7 @@ const publicMethods: {
     client.promiseRejectersByMessageID.clear()
     client.promiseResolversByMessageID.clear()
     for (const timeout of client.promiseTimeoutsByMessageID.values()) clearTimeout(timeout)
+    client.promiseTimeoutsByMessageID.clear()
     client.subscriptionSet.clear()
     // Remove global event listeners.
     if (typeof self === 'object' && self instanceof EventTarget) {
@@ -1049,7 +1052,13 @@ const publicMethods: {
     sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SCHEDULED, client, { delay, nth })
   },
 
-  // Should be idempotent, but it's up to the server.
+  /**
+   * Sends out a given RSI message if the socket is open.
+   * Also marks the message ID as pending.
+   *
+   * This should be idempotent,
+   * as the server is meant to ignore retries once a given request ID has been processed.
+   */
   tryRsiOperation (op: RsiMessage) {
     this.pendingRsiOperations.set(op.id, op)
     if (this.socket?.readyState === WebSocket.OPEN) {
@@ -1065,7 +1074,16 @@ const publicMethods: {
     }
   },
 
-  // Not idempotent!
+  /**
+   * Issues a remote SBP invocation to the server.
+   * The returned promise will resolve with the response payload if successful,
+   * - The request is automatically retried until a response is received, or until it times out.
+   * - The timeout delay comes from the 'rsiTimeout' option.
+   *
+   * This method is not idempotent!
+   * Every call starts a new, distinct request, with its own ID.
+   * Use '.tryRsiOperation()' if you want to retry a *still pending* request.
+   */
   async rsi (data: JsonSbpInvocation) {
     const client = this
     const op = this.createRsiMessage(data)
