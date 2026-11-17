@@ -630,7 +630,6 @@ const defaultClientEventHandlers: ClientEventHandlers = {
 
     // Set it to -1 so that it becomes 0 on the next `close` event.
     client.failedConnectionAttempts = -1
-    client.isNew = false
     // Setup a ping timeout if required.
     // It will close the connection if we don't get any message from the server.
     if (options.pingTimeout > 0 && options.pingTimeout < Infinity) {
@@ -643,7 +642,10 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     for (const op of client.pendingRsiOperations.values()) {
       client.tryRsiOperation(op)
     }
+    // Ordering matters so that listeners see the correct value of 'isNew'.
     sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SUCCEEDED, client)
+    client.isNew = false
+
     // Send any pending subscription request.
     for (const [channelID] of client.pendingOperations.get(REQUEST_TYPE.SUB) || []) {
       runWithRetry(client, channelID, REQUEST_TYPE.SUB, pubPayloadFactory(client, channelID))
