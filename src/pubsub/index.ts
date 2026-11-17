@@ -52,6 +52,15 @@ export type JsonSbpInvocation = [selector: string, ...args: JSONType[]]
 type TimeoutID = ReturnType<typeof setTimeout>;
 
 export type Options = {
+  /**
+   * The WebSocket implementation to use, the global one by default.
+   * It must implement the standard WebSocket interface.
+   *
+   * Use cases:
+   * - Unit tests where fake sockets can stand in for a server connection.
+   * - Possibly, runtimes that don't have a compliant `WebSocket` global.
+   */
+  WebSocket: typeof WebSocket;
   logPingMessages: boolean;
   pingTimeout: number;
   maxReconnectionDelay: number;
@@ -217,6 +226,7 @@ type MessageHandlers = {
 
 // TODO: verify these are good defaults
 const defaultOptions: Options = {
+  WebSocket,
   logPingMessages: process.env.NODE_ENV === 'development' && !process.env.CI,
   pingTimeout: 45000,
   maxReconnectionDelay: 60000,
@@ -915,6 +925,7 @@ const publicMethods: {
   // Performs a connection or reconnection attempt.
   connect () {
     const client = this
+    const { WebSocket } = client.options
 
     if (client.socket !== null) {
       throw new Error('connect() can only be called if there is no current socket.')
