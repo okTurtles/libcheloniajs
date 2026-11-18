@@ -9,6 +9,11 @@ export const waitMicrotasks = async (): Promise<void> => {
   }
 }
 
+// Bound when this module loads, so that the harness's `emulateSleep()` can't
+// move it: its `changeClock()` and default `wake()` shift `Date.now()`, and
+// with `monotonic: true` it replaces `performance.now` later, when called
+const now = performance.now.bind(performance)
+
 // `until` and `within` make a regression fail the test instead of hanging
 // the whole file.
 export const until = async (
@@ -16,9 +21,9 @@ export const until = async (
   label: string,
   timeoutMs = 5000
 ): Promise<void> => {
-  const deadline = Date.now() + timeoutMs
+  const deadline = now() + timeoutMs
   while (!cond()) {
-    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`)
+    if (now() > deadline) throw new Error(`Timed out waiting for ${label}`)
     await new Promise<void>((resolve) => setTimeout(resolve, 5))
   }
 }
