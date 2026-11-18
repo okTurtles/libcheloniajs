@@ -1547,11 +1547,9 @@ export default sbp('sbp/selectors/register', {
                   // Using console.error instead of logEvtError because this
                   // is a side-effect and not relevant for outgoing messages
                   console.error(
-                    `[chelonia] Error during sync for ${v.contractID} during OP_KEY_SHARE for ${contractID}`
+                    `[chelonia] Error during sync for ${v.contractID} during OP_KEY_SHARE for ${contractID}`,
+                    e
                   )
-                  if (v.contractID === contractID) {
-                    throw e
-                  }
                 })
 
               // If the keys received were for the current contract, we can't
@@ -1590,6 +1588,13 @@ export default sbp('sbp/selectors/register', {
                 e
               )
             })
+          }).catch((e: unknown) => {
+            // Using console.error instead of logEvtError because this
+            // is a side-effect and not relevant for outgoing messages
+            console.error(
+              `[chelonia] Error during postKeyShare for ${v.contractID} during OP_KEY_SHARE for ${contractID}`,
+              e
+            )
           })
         })
       },
