@@ -1374,9 +1374,13 @@ export const updateKey = (key: ChelContractKey, updatedKey: ChelContractKey): Ch
   }
 }
 
-// An SBP filter can veto `chelonia/private/queueEvent`, which then returns
-// `undefined`. Reject instead, so that no caller takes work that never ran
-// for done.
+/**
+ * An SBP filter can veto `chelonia/private/queueEvent`, which then returns
+ * `undefined`. Reject instead, so that no caller mistakes a vetoed call for
+ * finished work.
+ * Public only because the package re-exports all of `utils`. Apps should use
+ * `chelonia/queueInvocation`, which rejects the same way.
+ */
 export function queueEventOrReject (
   queueName: string,
   invocation: Parameters<typeof sbp> | (() => unknown)
