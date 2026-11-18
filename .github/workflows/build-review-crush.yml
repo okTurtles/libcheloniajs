@@ -1,0 +1,481 @@
+name: Build Review (Crush)
+
+# Reusable workflow: audits the build of a release for code that the build
+# toolchain added. The job builds the tag under audit and the previous
+# version tag, diffs the files of the two builds, and has crush review the
+# diff with the taoeffect/code-review skill. The skill splits a large diff
+# into slices and reviews them in batches of at most three crush workers.
+# The job fails when the audit finds suspect code or cannot finish.
+#
+# The build output is not in git, so this audit replaces reading the built
+# files in PRs. Nothing is posted to GitHub: the review is in the job summary
+# and in the build-review-<tag> artifact.
+#
+# Caller requirements:
+#   - Trigger on the push of version tags (`push: tags: ['v[0-9]*']`). To
+#     run an audit again, also trigger on workflow_dispatch with the inputs
+#     `tag` and `base-tag`. Pass `inputs.tag || github.ref_name` as `tag`.
+#     GitHub offers workflow_dispatch only once the caller is on the default
+#     branch.
+#   - Grant the calling job `contents: read`.
+#   - Pass the API key secret of each provider you use: OPENROUTER_API_KEY,
+#     ZAI_API_KEY and/or KIMI_API_KEY.
+#   - Describe the build with the inputs from `package-name` on. The scripts
+#     trust these values, because they come from the caller's workflow file.
+#   - Keep the build reproducible: two builds of the same tag must give the
+#     same files. The first limit below relies on it.
+#   - Do not give the calling job the concurrency group used below.
+#
+# Example caller: copy .github/workflows/build-review.yml from this repo, set
+#   uses: okTurtles/libcheloniajs/.github/workflows/build-review-crush.yml@main
+# and set the build inputs of your repo. The caller reads the other inputs
+# from these optional repo variables (Settings → Secrets and variables →
+# Actions → Variables): REVIEW_PROVIDER, REVIEW_MODEL and PROJECT_CTX, which
+# pr-review.yml also uses, and BUILD_REVIEW_TIMEOUT_MINUTES.
+#
+# The non-trivial steps run Node scripts from .github/build-review/ of this
+# repo, which the job checks out at the commit of this workflow. Their
+# comments describe what each step does and why. Steps whose comment names a
+# step of pull-review-crush.yml are copies of that step, and
+# .github/build-review/run-review.mjs copies its sandbox. Apply a fix in one
+# of them to the other too.
+#
+# Limits:
+#   - The audit vets the build that this job makes. A maintainer still
+#     publishes from a local machine, and that build is not compared with this
+#     one. Builds are reproducible, so a later change can publish from CI or
+#     compare the npm tarball with this build.
+#   - The base build is trusted: each release is compared only with the
+#     previous one. A toolchain change shows in the audit of the release that
+#     brings it in, if the lock files are in source-paths.
+#   - Built files that match excluded-files are not audited.
+#   - An LLM audit can miss code or be prompt-injected by the built files. The
+#     sandbox limits what the agent can do, and "Check verdict" fails unless
+#     the review ends with the CLEAN verdict and lists no finding.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Version tag to audit, e.g. v2.2.0.
+        type: string
+        required: true
+      base-tag:
+        description: Tag to compare with. Empty means the nearest earlier v* tag.
+        type: string
+        required: false
+      provider:
+        description: 'LLM provider: openrouter, zai-coding-plan or kimi. Empty means openrouter.'
+        type: string
+        required: false
+      model:
+        description: >-
+          Model ID for the provider. Empty means the provider default
+          (openrouter: stepfun/step-3.5-flash, zai-coding-plan: glm-5,
+          kimi: k3.1-pro-highspeed).
+        type: string
+        required: false
+      project-context:
+        description: >-
+          First paragraph of the review prompt, e.g. what the project is.
+          Empty means "You are auditing a release of an npm package."
+        type: string
+        required: false
+      timeout-minutes:
+        description: Job timeout in minutes.
+        type: number
+        required: false
+        default: 60
+      package-name:
+        description: Name of the package in the audit rules, e.g. @chelonia/lib.
+        type: string
+        required: true
+      output-dir:
+        description: >-
+          Top-level dir that the build writes its output to. The audit
+          reviews the files in it.
+        type: string
+        required: false
+        default: dist
+      deno-version:
+        description: Deno version to set up, e.g. v2.9.5. Empty means no Deno.
+        type: string
+        required: false
+      install-command:
+        description: >-
+          Command that installs the dependencies in the source dir. Bash runs
+          it with -e and -o pipefail in the build sandbox, but with network.
+        type: string
+        required: false
+        default: npm ci --ignore-scripts --no-audit --no-fund
+      install-dirs:
+        description: >-
+          Names of the dirs that the install command fills, separated by
+          spaces. The check that the build changed no file outside output-dir
+          leaves out all files and dirs with these names.
+        type: string
+        required: false
+        default: node_modules
+      build-command:
+        description: >-
+          Command that builds the source dir into output-dir. Bash runs it
+          with -e and -o pipefail in the build sandbox, without network.
+        type: string
+        required: false
+        default: npm run build
+      source-paths:
+        description: >-
+          Git pathspecs of the build inputs, separated by spaces, e.g.
+          `src package.json package-lock.json`. Their diff tells the auditor
+          which build changes to expect.
+        type: string
+        required: true
+      excluded-files:
+        description: >-
+          `find -name` patterns of built files that the audit leaves out,
+          separated by spaces, e.g. `*.test.*`. Give the reason in build-notes.
+        type: string
+        required: false
+      copied-files:
+        description: >-
+          `find -path` patterns, relative to output-dir and separated by
+          spaces, of built files that the build copies byte for byte from
+          files in git, e.g. fonts. The job fails unless each match equals a
+          file that git tracks at the same tag outside output-dir. The audit
+          then leaves the matches out.
+        type: string
+        required: false
+      build-notes:
+        description: >-
+          Markdown paragraph that the audit rules add about the build output,
+          e.g. why excluded-files are left out.
+        type: string
+        required: false
+      dependency-list-command:
+        description: >-
+          Command that prints the top-level dependencies of a source dir into
+          toolchain.txt. It runs outside the build sandbox, so it must not run
+          code of the repo or of its dependencies. Empty means no list.
+        type: string
+        required: false
+        default: npm ls --depth=0
+    secrets:
+      OPENROUTER_API_KEY:
+        description: API key for the openrouter provider.
+        required: false
+      ZAI_API_KEY:
+        description: API key for the zai-coding-plan provider.
+        required: false
+      KIMI_API_KEY:
+        description: API key for the kimi provider.
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  # Node must use the system CA bundle that fix-ubuntu-ca-roots fixes. See
+  # .github/actions/fix-ubuntu-ca-roots/action.yml.
+  NODE_OPTIONS: --use-openssl-ca
+
+defaults:
+  run:
+    # An explicit `bash` adds `-o pipefail`, so a failed command in a pipe
+    # fails the step.
+    shell: bash
+
+jobs:
+  audit:
+    name: Audit release build
+    # The sandbox in "Run build review" assumes a throwaway GitHub-hosted VM.
+    # Read the self-hosted runner warning in pull-review-crush.yml before you
+    # change runs-on.
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      group: build-review-crush-${{ inputs.tag }}
+      cancel-in-progress: false
+    env:
+      OUTPUT_DIR: ${{ inputs.output-dir }}
+      # Where "Check out the build review scripts" puts the step scripts.
+      SCRIPTS_DIR: ${{ github.workspace }}/build-review-tools/.github/build-review
+
+    steps:
+      - uses: okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main
+        id: ca-roots
+
+      # Tag names reach the scripts only through GITHUB_ENV, after the name
+      # check, never through ${{ }} inside a script. WORK_DIR is under $HOME
+      # because the review sandbox hides /tmp and $RUNNER_TEMP, and the
+      # sandboxed agent must read the files there.
+      - name: Resolve release tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          TAG=$INPUT_TAG
+          if [[ ! "$TAG" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]; then
+            echo "::error::The release tag is not a version tag (v, a digit, then letters, digits, '.', '_' or '-')"
+            exit 1
+          fi
+          WORK_DIR="$HOME/build-review"
+          {
+            echo "TAG=$TAG"
+            echo "WORK_DIR=$WORK_DIR"
+            echo "BUILD_REPO=$WORK_DIR/repo"
+            echo "CONTEXT_DIR=$WORK_DIR/context"
+            echo "RESULT_DIR=$WORK_DIR/result"
+            echo "CRUSH_LOG_DIR=$WORK_DIR/crush-log"
+            echo "REVIEW_OUTPUT_FILE=$WORK_DIR/review-output/REVIEW.md"
+          } >> "$GITHUB_ENV"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          # All tags and history, for `git describe` and `git archive`.
+          fetch-depth: 0
+          # The workspace is readable inside the review sandbox, so no token
+          # may be stored in .git/config.
+          persist-credentials: false
+
+      # A reusable workflow gets only the caller's repo in the workspace, so
+      # check out the step scripts from the repo and commit of this workflow.
+      # The path is inside the workspace because actions/checkout writes only
+      # there, and after "Checkout release tag" because that step empties the
+      # workspace. actionlint 1.7.12 does not know the job.workflow_*
+      # properties yet (rhysd/actionlint#647).
+      - name: Check out the build review scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: build-review-tools
+          sparse-checkout: .github/build-review
+          # As in "Checkout release tag".
+          persist-credentials: false
+
+      - name: Resolve base tag
+        env:
+          INPUT_BASE_TAG: ${{ inputs.base-tag }}
+        run: |
+          if [ -n "$INPUT_BASE_TAG" ]; then
+            BASE_TAG=$INPUT_BASE_TAG
+          elif ! BASE_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "refs/tags/$TAG^"); then
+            echo "::error::No earlier v* tag to compare $TAG with. Run this workflow by hand and set base-tag."
+            exit 1
+          fi
+          if [[ ! "$BASE_TAG" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]; then
+            echo "::error::The base tag is not a version tag (v, a digit, then letters, digits, '.', '_' or '-')"
+            exit 1
+          fi
+          if ! git rev-parse --verify --quiet "refs/tags/$BASE_TAG^{commit}" > /dev/null; then
+            echo "::error::The base tag $BASE_TAG does not exist"
+            exit 1
+          fi
+          echo "BASE_TAG=$BASE_TAG" >> "$GITHUB_ENV"
+          echo "Auditing the build of $TAG against the build of $BASE_TAG"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Set up Deno
+        if: inputs.deno-version != ''
+        uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2.0.3
+        with:
+          deno-version: ${{ inputs.deno-version }}
+
+      # Copied from the bubblewrap part of "Install crush and bubblewrap" in
+      # pull-review-crush.yml. bubblewrap (bwrap) sandboxes "Build both tags"
+      # and "Run build review". ripgrep speeds up crush's code search. Neither
+      # is preinstalled on ubuntu-latest.
+      - name: Install bubblewrap and ripgrep
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap ripgrep
+
+          # Ubuntu 24.04 restricts unprivileged user namespaces through
+          # AppArmor (see actions/runner-images#10015), so bwrap can fail out
+          # of the box. Lift the restriction only if bwrap does not work as-is.
+          if ! bwrap --unshare-all --die-with-parent --ro-bind / / --dev /dev --proc /proc -- true; then
+            echo "bwrap blocked by AppArmor userns restriction; lifting kernel.apparmor_restrict_unprivileged_userns"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            bwrap --unshare-all --die-with-parent --ro-bind / / --dev /dev --proc /proc -- true
+          fi
+
+      # Builds each tag in a sandbox, because the build runs code of the tag
+      # under audit. build-tags.mjs describes the sandbox.
+      - name: Build both tags
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+          INSTALL_DIRS: ${{ inputs.install-dirs }}
+          BUILD_COMMAND: ${{ inputs.build-command }}
+        run: node "$SCRIPTS_DIR/build-tags.mjs"
+
+      # Writes the source diff, the commits and the toolchain for the auditor,
+      # and audit-rules.md, the audit contract.
+      - name: Write audit context
+        env:
+          PACKAGE_NAME: ${{ inputs.package-name }}
+          SOURCE_PATHS: ${{ inputs.source-paths }}
+          EXCLUDED_FILES: ${{ inputs.excluded-files }}
+          COPIED_FILES: ${{ inputs.copied-files }}
+          BUILD_NOTES: ${{ inputs.build-notes }}
+          DENO_VERSION: ${{ inputs.deno-version }}
+          DEPENDENCY_LIST_COMMAND: ${{ inputs.dependency-list-command }}
+        run: node "$SCRIPTS_DIR/write-context.mjs"
+
+      # Puts the two builds in a git repo, for the code-review skill.
+      - name: Assemble build repo
+        id: builds
+        env:
+          EXCLUDED_FILES: ${{ inputs.excluded-files }}
+          COPIED_FILES: ${{ inputs.copied-files }}
+        run: node "$SCRIPTS_DIR/assemble-builds.mjs"
+
+      # Copied from "Install code-review skill" in pull-review-crush.yml (read
+      # its comment). No step env blanks secrets here, because no step before
+      # "Run build review" has any.
+      - name: Install code-review skill
+        if: steps.builds.outputs.changed == 'true'
+        run: |
+          cd "$HOME"
+          env -i PATH="$PATH" HOME="$HOME" DISABLE_TELEMETRY=1 NODE_OPTIONS="$NODE_OPTIONS" \
+            npx --yes skills add taoeffect/code-review --skill code-review -g -a crush --copy -y
+
+          SKILL_FILE="$HOME/.config/crush/skills/code-review/SKILL.md"
+          if [ ! -f "$SKILL_FILE" ]; then
+            echo "::error::code-review skill install failed: $SKILL_FILE is missing"
+            exit 1
+          fi
+
+          SKILL_HASH=$(jq -r '.skills["code-review"].skillFolderHash // empty' "$HOME/.agents/.skill-lock.json" 2>/dev/null) || true
+          echo "Installed code-review skill (skillFolderHash: ${SKILL_HASH:-unknown})"
+
+      # Fails unless the diff of the code-review skill shows every changed
+      # built file.
+      - name: Check review coverage
+        if: steps.builds.outputs.changed == 'true'
+        run: node "$SCRIPTS_DIR/check-coverage.mjs"
+
+      # Adapted from "Resolve provider settings" in pull-review-crush.yml,
+      # without the comment override and the API settings that only its issue
+      # summaries use. Keep the providers and default models the same.
+      - name: Resolve provider settings
+        if: steps.builds.outputs.changed == 'true'
+        env:
+          REVIEW_PROVIDER: ${{ inputs.provider || 'openrouter' }}
+          REVIEW_MODEL: ${{ inputs.model }}
+        run: |
+          case "$REVIEW_PROVIDER" in
+            openrouter)
+              REVIEW_MODEL="${REVIEW_MODEL:-stepfun/step-3.5-flash}"
+              CRUSH_MODEL="openrouter/$REVIEW_MODEL"
+              SMALL_MODEL="openrouter/deepseek/deepseek-v4-flash-0731"
+              ;;
+            zai-coding-plan)
+              REVIEW_MODEL="${REVIEW_MODEL:-glm-5}"
+              CRUSH_MODEL="zai/$REVIEW_MODEL"
+              SMALL_MODEL="zai/glm-5.1"
+              ;;
+            kimi)
+              if [[ -n "$REVIEW_MODEL" && "$REVIEW_MODEL" != "k3.1-pro-highspeed" ]]; then
+                echo "::error::Unsupported Kimi model '$REVIEW_MODEL' (supported: k3.1-pro-highspeed)"
+                exit 1
+              fi
+              REVIEW_MODEL="k3.1-pro-highspeed"
+              CRUSH_MODEL="kimi-custom/$REVIEW_MODEL"
+              SMALL_MODEL="kimi-custom/k3.1-pro-highspeed"
+              ;;
+            *)
+              echo "::error::Unknown REVIEW_PROVIDER '$REVIEW_PROVIDER' (supported: openrouter, zai-coding-plan, kimi)"
+              exit 1
+              ;;
+          esac
+          {
+            echo "REVIEW_MODEL=$REVIEW_MODEL"
+            echo "CRUSH_MODEL=$CRUSH_MODEL"
+            echo "SMALL_MODEL=$SMALL_MODEL"
+          } >> "$GITHUB_ENV"
+
+      # Copied from the crush part of "Install crush and bubblewrap" in
+      # pull-review-crush.yml. The comment above that step explains the
+      # settings in crush.json.
+      - name: Install crush
+        if: steps.builds.outputs.changed == 'true'
+        run: |
+          npm install -g @charmland/crush
+          mkdir -p ~/.config/crush
+          cat > ~/.config/crush/crush.json << 'EOF'
+          {
+            "$schema": "https://charm.land/crush.json",
+            "providers": {
+              "kimi-custom": {
+                "type": "anthropic",
+                "base_url": "https://api.kimi.com/coding/",
+                "api_key": "$KIMI_API_KEY",
+                "default_large_model_id": "k3.1-pro-highspeed",
+                "default_small_model_id": "k3.1-pro-highspeed",
+                "models": [
+                  {
+                    "id": "k3.1-pro-highspeed",
+                    "name": "Kimi K3.1 Pro Highspeed",
+                    "context_window": 1048576,
+                    "supports_attachments": true,
+                    "can_reason": true,
+                    "reasoning_levels": ["low", "high", "max"],
+                    "default_reasoning_effort": "max",
+                    "default_max_tokens": 131072
+                  }
+                ]
+              }
+            },
+            "options": {
+              "context_paths": ["AGENTS.md", "CRUSH.md", "CLAUDE.md", "README.md"],
+              "disable_metrics": true,
+              "disabled_tools": ["edit", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "list_mcp_resources", "read_mcp_resource", "crush_logs"]
+            },
+            "permissions": {
+              "allowed_tools": ["agent", "agentic_fetch", "bash", "crush_info", "download", "fetch", "glob", "grep", "job_kill", "job_output", "ls", "sourcegraph", "todos", "view", "write"]
+            }
+          }
+          EOF
+
+      - name: Build review prompt
+        if: steps.builds.outputs.changed == 'true'
+        env:
+          PROJECT_CTX: ${{ inputs.project-context }}
+        run: node "$SCRIPTS_DIR/write-prompt.mjs"
+
+      # Runs crush in a sandbox. run-review.mjs describes it.
+      - name: Run build review
+        if: steps.builds.outputs.changed == 'true'
+        env:
+          # The only step with secrets. crush reads the key of its provider
+          # from the environment.
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+        run: node "$SCRIPTS_DIR/run-review.mjs"
+
+      # Fails closed: the audit passes only with a complete review whose last
+      # line is the CLEAN verdict and that lists no finding.
+      - name: Check verdict
+        if: steps.builds.outputs.changed == 'true'
+        run: node "$SCRIPTS_DIR/check-verdict.mjs"
+
+      # always(): the files also explain a failed audit. The upload sends the
+      # runner's token over HTTPS, so it needs a fixed CA bundle (see
+      # fix-ubuntu-ca-roots). crush logs stay out: unlike the step log, an
+      # artifact does not mask secrets.
+      - name: Upload audit files
+        if: always() && steps.ca-roots.outcome == 'success' && env.WORK_DIR != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-review-${{ env.TAG }}
+          path: |
+            ${{ env.CONTEXT_DIR }}
+            ${{ env.RESULT_DIR }}
+          if-no-files-found: ignore

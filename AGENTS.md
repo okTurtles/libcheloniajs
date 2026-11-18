@@ -20,11 +20,11 @@ Every contract is represented as an append-only log of operations (op codes). So
 ```bash
 npm install        # Install dependencies
 npm test           # Run tests (node:test; every .test.ts file auto-discovered, each in its own process)
-npm run build      # Build both ESM and CJS outputs
+npm run build      # Delete dist/, then build both ESM and CJS outputs into it
 npm run build:esm  # Build ESM only (.mjs files)
 npm run build:cjs  # Build CJS only (.cjs files)
 npm run lint       # Run ESLint
-npm run clean      # Remove dist/ artifacts
+npm run clean      # Delete dist/
 ```
 
 ## Build System
@@ -36,6 +36,11 @@ Dual ESM/CJS output with TypeScript declarations:
 | ESM | `dist/esm/` | `.mjs`, `.d.mts` | `tsconfig.json` (target ES2022, module esnext) |
 | CJS | `dist/cjs/` | `.cjs`, `.d.cts` | `tsconfig.cjs.json` (module nodenext) |
 
+`dist/` is build output and is not in git. `prepack` runs `npm run build`, so `npm pack` and
+`npm publish` always ship a fresh build. The `files` field in `package.json` limits the package
+to `dist/` without tests, `test-utils.*` and `test-harness.*`. An install from a git URL gets no
+`dist/`: npm runs only `prepare`, not `prepack`, for git dependencies.
+
 ### Build Process (`buildHelper.ts`)
 
 1. Temporarily changes `package.json` `"type"` field (to `"module"` or `"commonjs"`)
@@ -43,7 +48,41 @@ Dual ESM/CJS output with TypeScript declarations:
 3. Runs `renameFiles.mjs` to rename `.js` → `.mjs`/`.cjs` and rewrite import paths within files
 4. Restores `package.json`
 
-**Note**: CJS build excludes test files via `tsconfig.cjs.json`.
+**Note**: CJS build excludes test files and the test helpers `src/test-utils.ts` and `src/pubsub/test-harness.ts` via `tsconfig.cjs.json`.
+
+## CI
+
+GitHub Actions files in `.github/`:
+
+| Path | Purpose |
+|---|---|
+| `workflows/ci.yml` | Runs `npm ci`, `npm test` and `npm run build` on pushes and PRs to `main` |
+| `workflows/pr-review.yml` | Runs `pull-review-crush.yml` when a member comments `/review` on a PR |
+| `workflows/pull-review-crush.yml` | Reusable AI PR review workflow. Other okTurtles repos call it through `@main` |
+| `workflows/build-review.yml` | Runs `build-review-crush.yml` on a `v*` tag push, or by hand for a given tag |
+| `workflows/build-review-crush.yml` | Reusable build audit workflow: builds a tag and the previous one, and has crush audit the diff of the two builds for code that the build added. Other okTurtles repos call it through `@main` |
+| `build-review/` | Node step scripts and templates of `build-review-crush.yml`, which it checks out at its own commit |
+| `actions/fix-ubuntu-ca-roots/` | Shared action that removes distrusted CA roots on the runner. All okTurtles repos call it through `@main` |
+
+Rules:
+
+- Every job that has `steps:` runs
+  `okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main` as its first step.
+- Every workflow with such a job sets `NODE_OPTIONS: --use-openssl-ca` in its workflow-level
+  `env:`. A job that only calls a reusable workflow (`pr-review.yml`, `build-review.yml`) needs
+  neither.
+- Other repos use the action, `pull-review-crush.yml`, `build-review-crush.yml` and its
+  `build-review/` scripts from `main`. A change to them affects those repos when it merges, and
+  the PR's own CI still runs the copy on `main`. Keep repo-specific values out of the reusable
+  workflows: callers pass them as inputs.
+- `build-review-crush.yml` and `build-review/run-review.mjs` copy some steps of
+  `pull-review-crush.yml` (the comment above each copy names its source). Apply a fix in one file
+  to the other too.
+- `npm run lint` skips `build-review/`. Lint it with
+  `npx eslint --no-ignore --ext .mjs .github/build-review/`.
+
+The header of `.github/actions/fix-ubuntu-ca-roots/action.yml` gives the reasons and the full
+rules for callers.
 
 ## Key Dependencies
 
@@ -76,7 +115,7 @@ src/
 ├── db.ts                 # Database abstraction (in-memory default)
 ├── files.ts              # Encrypted file upload/download/delete
 ├── functions.ts          # CID creation, blake32Hash, base64 utilities
-├── utils.ts              # Key lookup, permissions, event stream utilities
+├── utils.ts              # Key lookup, permissions, event stream, abort and close event utilities
 ├── errors.ts             # Custom error classes via ChelErrorGenerator factory
 ├── events.ts             # Event name constants
 ├── constants.ts          # INVITE_STATUS enum
@@ -84,13 +123,17 @@ src/
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
 ├── presets.ts            # Server preset for configuring Chelonia
-├── time-sync.ts          # Server time synchronization via monotonic offsets
+├── time-sync.ts          # Server time sync: performance.now()-driven, Date.now() jumps (sleep) trigger correction + resync
+├── timer-utils.ts        # timerDelay()/unrefTimer(): timers that can be disabled, clamped, and don't keep Node alive
 ├── chelonia-utils.ts     # Optional utility selectors (e.g., chelonia/kv/queuedSet)
 ├── zkpp.ts               # Zero-knowledge password proof primitives
 ├── zkppConstants.ts      # ZKPP constants (AUTHSALT, CONTRACTSALT, etc.)
 ├── pubsub/
 │   ├── index.ts          # WebSocket PubSub client with reconnection logic
-│   └── index.test.ts     # Tests for reconnection delay
+│   ├── test-harness.ts   # Test-only fake pubsub server (fake global WebSocket, fault injection) + fake relay
+│   ├── index.test.ts     # Tests for reconnection delay
+│   ├── recovery.test.ts  # Unanswered requests, retry budget, diagnostic logs
+│   └── dead-socket.test.ts # Dead sockets, sleep/wake, offline/online, connection state
 └── local-selectors/
     └── index.ts          # External state sync (e.g., Chelonia in service worker → Vuex in tab)
 ```
@@ -141,6 +184,7 @@ chelonia/_init              — Initialize Chelonia context (call automatically 
 chelonia/configure          — Apply CheloniaConfig
 chelonia/reset              — Reset state
 chelonia/connect            — Connect to server
+chelonia/pubsub/status      — Pubsub connection state + contracts missing from the pubsub client
 chelonia/defineContract     — Register a contract definition
 chelonia/contract/sync      — Sync contract state from server
 chelonia/contract/retain    — Increment contract reference count
@@ -161,6 +205,18 @@ chelonia/out/atomic              — Execute multiple operations atomically
 
 1. **Outgoing**: Create `SPMessage` → Sign/Encrypt → Publish via `chelonia/private/out/publishEvent`
 2. **Incoming**: Receive via PubSub WebSocket or RESTful server endpoint → Deserialize → Validate signatures → Decrypt → Process → Update state → Run side effects
+
+### Pubsub recovery
+
+Chelonia must keep the pubsub client (`src/pubsub/index.ts`) subscribed to
+every contract in its `subscriptionSet`. Three layers make sure of it: the
+client replaces a connection that stops answering instead of dropping
+requests, Chelonia re-subscribes whatever the client lost (after every
+reconnection and periodically), and publishing and KV writes sync the
+contract instead of relying on pubsub alone.
+
+Full documentation: [docs/debugging.md](docs/debugging.md#pubsub-connection)
+(behaviour, status and log lines) and the comments in `src/pubsub/index.ts`.
 
 ### Shelter Protocol Operations
 
@@ -331,15 +387,23 @@ registration of a selector, and `src/chelonia.ts` locks the `chelonia` SBP domai
 scope, so a stub registered by one file (e.g. the `chelonia/contract/fullState` stub in
 `src/local-selectors/index.test.ts`) would shadow the real selectors for the whole process.
 
-Shared helpers live in `src/test-utils.ts`, a plain module that registers no selectors. A
-test must fail rather than hang when the behaviour it checks regresses: poll with
-`until(cond, label)` and bound a promise that might never settle with `within(promise, label)`.
+Pubsub and network tests use the in-process fakes in `src/pubsub/test-harness.ts` (there is
+no WebSocket server in the repo; the file's header comment lists what it fakes). Shared pubsub
+and relay test helpers go there too. Examples: `src/pubsub/recovery.test.ts`,
+`src/chelonia-publish-receipt.test.ts`.
+
+Generic test helpers (e.g. `waitMicrotasks`, `until`, `within`) live in `src/test-utils.ts`, a
+plain module that registers no selectors. A test must fail rather than hang when the behaviour
+it checks regresses: poll with `until(cond, label)` and bound a promise that might never settle
+with `within(promise, label)`. Tests that use the harness poll with its `waitFor` and capture
+logs with its `captureConsole`, because `emulateSleep()` shifts the `Date.now()` that `until`
+reads.
 
 ## Common Gotchas
 
 1. **Import extensions**: Always use `.js` extension in imports, even for TypeScript files. The build process does not transform these.
 2. **SBP context**: Many functions use `this: CheloniaContext` - they must be called through SBP to have proper context binding.
-3. **`dist/` under version control**: Ignore the files in `dist/`, don't review them or read them or update them.
+3. **`dist/` is build output**: It is not in git. Never edit, read or review it; change `src/` and run `npm run build`.
 4. **Test isolation**: Tests use SBP selectors which are globally registered. Each test file runs in its own process; keep files self-contained and never import one test file from another. Mock functions carefully to avoid cross-test contamination within a file.
 5. **Secret keys**: Secret keys are stored in `rootState.secretKeys` as serialized strings and accessed via `transientSecretKeys` proxy.
 6. **Reference counting for contracts** — Use `chelonia/contract/retain` and `chelonia/contract/release` for contract lifecycle. At refcount 0, the contract is unsubscribed.

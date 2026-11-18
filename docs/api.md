@@ -23,12 +23,13 @@ For the authoritative signatures, follow the source links.
 | Selector | Source | Purpose |
 |---|---|---|
 | `chelonia/_init` | `src/chelonia.ts` | Initialize the Chelonia context. Runs automatically the first time a selector that needs it is invoked. |
-| `chelonia/config` | `src/chelonia.ts` | Return the live `CheloniaConfig` object. Useful for introspection in tests. |
+| `chelonia/config` | `src/chelonia.ts` | Return a copy of the current `CheloniaConfig` that `chelonia/configure` accepts back. Most functions are left out ([details](./configure.md#reconfigure-semantics)). |
 | `chelonia/configure` | `src/chelonia.ts` | Apply a `CheloniaConfig`. See [`configure.md`](./configure.md). |
-| `chelonia/reset` | `src/chelonia.ts` | Drain publishes, abort in-flight messages, clear state. `(newState?, postCleanupFn?)`. |
-| `chelonia/connect` | `src/chelonia.ts` | Open the pubsub WebSocket. Returns a `PubSubClient`. |
+| `chelonia/reset` | `src/chelonia.ts` | Drain publishes and the contracts' queues (up to [`resetDrainTimeout`](./configure.md#connection) ms), abort in-flight messages, clear state. `(newState?, postCleanupFn?)`. |
+| `chelonia/connect` | `src/chelonia.ts` | Open the pubsub WebSocket (destroying any previous client), subscribe it to Chelonia's subscribed contracts and start the periodic [subscription check](./configure.md#connection). Returns a `PubSubClient`. |
 | `chelonia/defineContract` | `src/chelonia.ts` | Register a contract definition (actions / getters / methods / metadata). |
-| `chelonia/pubsub/update` | `src/chelonia.ts` | Reconcile pubsub subscriptions against the current subscription set. Auto-called after subscription changes; call manually if you swap `stateSelector` at runtime. |
+| `chelonia/pubsub/update` | `src/chelonia.ts` | Reconcile pubsub subscriptions (pending SUBs included) with the subscription set. Auto-called after subscription changes, (re)connections and periodically; call manually if you swap `stateSelector` at runtime. |
+| `chelonia/pubsub/status` | `src/chelonia.ts` | `() => ChelPubSubStatus`: plain-data snapshot of the pubsub connection and of the subscribed contracts it lacks (`missing`) or awaits (`pending`). See [`debugging.md`](./debugging.md#pubsub-connection). |
 | `chelonia/handleEvent` | `src/chelonia.ts` | Hand a raw incoming event string to Chelonia's processing queue. Used by the pubsub client; rarely called directly. |
 | `chelonia/in/processMessage` | `src/chelonia.ts` | Try-applying an `SPMessage`: deep-clones the supplied per-contract `state`, runs `chelonia/private/in/processMessage` against the clone, and returns the mutated copy on success or the original `state` unchanged on failure (errors are caught and logged via `console.warn`). Useful in tests / dry-runs; root state is never touched. (The outgoing-validation path in `publishEvent` calls the private `chelonia/private/in/processMessage` directly.) |
 | `chelonia/queueInvocation` | `src/chelonia.ts` | Queue an SBP invocation on a contract's event queue. Use to ensure work runs after the current sync drains. Rejects with `ChelErrorUnexpected` (`/vetoed/`) if an SBP filter blocks either queue. |
@@ -126,7 +127,12 @@ All publish to the relay via `chelonia/private/out/publishEvent` once
 
 | Selector | Source | Purpose |
 |---|---|---|
-| `chelonia/time` | `src/time-sync.ts` | Returns the relay-synchronized timestamp (Date.now() offset by the server delta). |
+| `chelonia/time` | `src/time-sync.ts` | Returns the relay-synchronized timestamp in ms, advanced with `performance.now()` so that system clock changes don't affect it. |
+
+A jump of `Date.now()` relative to `performance.now()` (a sleep or a clock
+change) is detected on the next call or within 10 s and starts a resync; a
+forward jump over 1 s is also added to the estimate at once, since some
+browsers stop `performance.now()` during sleep.
 
 ### Not-yet-implemented op selectors
 
@@ -198,8 +204,8 @@ See [`files.md`](./files.md) for the prose guide and full signatures.
 
 | Selector | Source | Purpose |
 |---|---|---|
-| `chelonia/kv/set` | `src/chelonia.ts` | `POST /kv/:contractID/:key`. Encrypts, signs, and retries conflicts on `409`/`412`. Resolves to `{ etag: string | null }`. |
-| `chelonia/kv/get` | `src/chelonia.ts` | `GET /kv/:contractID/:key`. Returns `ChelKvGetResult | null`: the parsed encrypted/unencrypted message with `.data` and `.etag`, or `null` on 404. |
+| `chelonia/kv/set` | `src/chelonia.ts` | `POST /kv/:contractID/:key`. Encrypts, signs, and retries conflicts on `409`/`412`. Never await it inside the contract's internal queue ([why](./kv.md#migration-notes-for-direct-cheloniakvset-callers)). Resolves to `{ etag: string \| null }`. |
+| `chelonia/kv/get` | `src/chelonia.ts` | `GET /kv/:contractID/:key`. Returns `ChelKvGetResult \| null`: the parsed encrypted/unencrypted message with `.data` and `.etag`, or `null` on 404. |
 | `chelonia/kv/setFilter` | `src/chelonia.ts` | Restrict the set of KV keys subscribed to over pubsub. |
 | `chelonia/kv/queuedSet` | `src/chelonia-utils.ts` | Wrapper around `chelonia/kv/set` that serializes concurrent updates via `okTurtles.eventQueue`. Prefer this over `kv/set` for typical writes. |
 
@@ -221,7 +227,7 @@ All slot selectors live in `src/kv.ts`.
 | `chelonia/kv/read` | Synchronous read of the local mirror for `(contractID, key)`. Returns the cloned default if no mirror entry exists or the slot is in `'error'` status. Non-primitive mirror values are deep-cloned on every call, so reads of large slot values are O(size); cache the result instead of reading on every frame. Check `chelonia/kv/status` to distinguish "empty" from "failed to load". |
 | `chelonia/kv/sync` | Force-fetch a single slot (with `key`) or every active slot for a contract and refresh the mirror. |
 | `chelonia/kv/clear` | Reset a slot to its declared `defaultValue` by writing the internal clear sentinel (`null`); the mirror value becomes a cloned default and status returns to `'non-init'`. |
-| `chelonia/kv/status` | Report the `KvLoadStatus` of a single slot (`'non-init' | 'loading' | 'loaded' | 'error'`) or the aggregate status of all slots for a contract. |
+| `chelonia/kv/status` | Report the `KvLoadStatus` of a single slot (`'non-init' \| 'loading' \| 'loaded' \| 'error'`) or the aggregate status of all slots for a contract. |
 | `chelonia/kv/refreshFilters` | Re-evaluate every slot's `match` predicate against the current root state. Call after login / logout transitions. |
 
 ## External state sync
@@ -292,6 +298,35 @@ import { CHELONIA_RESET } from '@chelonia/lib/events'
 sbp('okTurtles.events/on', CHELONIA_RESET, () => { /* ... */ })
 ```
 
+### Pubsub events
+
+The pubsub client emits its own events, also via `okTurtles.events/emit`,
+with the `PubSubClient` as the first argument. The constants are exported
+from `@chelonia/lib/pubsub` (and the package root). See
+[`debugging.md`](./debugging.md#pubsub-connection).
+
+| Event | Payload | Fires |
+|---|---|---|
+| `PUBSUB_STATE_CHANGED` | `(client, { state, previous })` | Whenever `client.state` (a `PubSubState`) changes. See the note below for the first one. |
+| `PUBSUB_RECONNECTION_SCHEDULED` | `(client, { delay, nth })` | A reconnection attempt was scheduled `delay` ms from now. |
+| `PUBSUB_RECONNECTION_ATTEMPT` | `(client)` | A reconnection attempt starts. |
+| `PUBSUB_RECONNECTION_SUCCEEDED` | `(client)` | A (re)connection opened. Chelonia then reconciles its subscriptions. |
+| `PUBSUB_RECONNECTION_FAILED` | `(client)` | The client gave up reconnecting (`maxRetries` exhausted). |
+| `PUBSUB_SUBSCRIPTION_SUCCEEDED` | `(client, { channelID })` | The relay confirmed a pending SUB. |
+| `PUBSUB_SUBSCRIPTION_FAILED` | `(client, { channelID, reason })` | The relay rejected a pending SUB (now no longer pending); Chelonia requests it again at its next reconciliation. |
+| `PUBSUB_ERROR` | `(client, error)` | A handler threw, e.g. on an unknown message type (`error` is the message string), or the relay sent a malformed or binary message (`error` is `{ message }`; the client is then destroyed). |
+
+The first `PUBSUB_STATE_CHANGED` (`closed -> connecting`, or
+`offline -> connecting` if the client is created offline; none with
+`manual: true`) fires inside `createClient`, before `chelonia/connect`
+returns the client, so a listener comparing `client` with Chelonia's
+current client misses it. `client.getStatus()` (so also
+`chelonia/pubsub/status`) can emit it too, when the socket changed state
+without an event.
+
+The client also exposes `client.state`, `client.stateSince` (`Date.now()`
+when it entered `state`) and `client.getStatus()` (a `PubSubStatus`).
+
 ## Types
 
 The most useful exported types and values (re-exported from the package root):
@@ -299,6 +334,8 @@ The most useful exported types and values (re-exported from the package root):
 | Type | Source | Purpose |
 |---|---|---|
 | `CheloniaConfig` | `src/types.ts` | Top-level configuration object passed to `chelonia/configure`. |
+| `ChelPubSubStatus` | `src/types.ts` | Result of `chelonia/pubsub/status`: `{ state, since: number \| null, wanted: number, missing: string[], pending: string[], oldestPendingSince: number \| null }`. |
+| `PubSubState` / `PubSubStatus` | `src/pubsub/index.ts` | `'connecting' \| 'open' \| 'reconnecting' \| 'offline' \| 'closed'`, and the result of `client.getStatus()`. |
 | `PublishOptions` | `src/internals.ts` (re-exported from `src/chelonia.ts`, reachable from the package root and the `./chelonia` subpath) | Per-call `/out/*` options: `maxAttempts`, `headers`, `billableContractID`, `bearer`, `disableAutoDedup`. |
 | `ChelRegParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/registerContract`. |
 | `ChelActionParams` | `src/chelonia.ts` | Argument shape for `chelonia/out/actionEncrypted` / `actionUnencrypted`. |
@@ -323,10 +360,10 @@ The most useful exported types and values (re-exported from the package root):
 | `EncryptedData<T>` | `src/encryptedData.ts` | Tagged wrapper around encrypted payloads. |
 | `SignedData<T>` | `src/signedData.ts` | Tagged wrapper around signed payloads. |
 | `KvSlotDefinition` | `src/types.ts` | Argument shape for `chelonia/kv/defineSlot`. |
-| `KvUpdater<T>` | `src/types.ts` | `(prev: T | undefined) => T | typeof KV_NOOP`. `prev` is `undefined` when the slot has neither a mirror value nor a `defaultValue`; return `KV_NOOP` to abort the write. Used by `chelonia/kv/update`. |
+| `KvUpdater<T>` | `src/types.ts` | `(prev: T \| undefined) => T \| typeof KV_NOOP`. `prev` is `undefined` when the slot has neither a mirror value nor a `defaultValue`; return `KV_NOOP` to abort the write. Used by `chelonia/kv/update`. |
 | `KvUpdateCtx` | `src/types.ts` | Context object passed to `onUpdate`; `CHELONIA_KV_UPDATED` emits the same fields plus `value` as a flat payload. |
-| `KvLoadStatus` | `src/types.ts` | `'non-init' | 'loading' | 'loaded' | 'error'` — status of a slot's mirror entry. |
-| `KvMirrorEntry` | `src/types.ts` | Shape of a single mirror entry at `rootState._kv[contractID][key]`: `{ value: JSONType | undefined, etag: string | null, status: KvLoadStatus, lastError?: { name, message } }`. `value` is canonical (always a server-confirmed payload or `undefined`); see [Consumer caveats](./kv.md#consumer-caveats). |
+| `KvLoadStatus` | `src/types.ts` | `'non-init' \| 'loading' \| 'loaded' \| 'error'` — status of a slot's mirror entry. |
+| `KvMirrorEntry` | `src/types.ts` | Shape of a single mirror entry at `rootState._kv[contractID][key]`: `{ value: JSONType \| undefined, etag: string \| null, status: KvLoadStatus, lastError?: { name, message } }`. `value` is canonical (always a server-confirmed payload or `undefined`); see [Consumer caveats](./kv.md#consumer-caveats). |
 | `KV_NOOP` | `src/kv.ts` | `Symbol.for('@chelonia/lib/KV_NOOP')` — return from an updater to abort the write. |
 | `DEFAULT_SNAPSHOT_INTERVAL` / `defaultJournalConfig` | `src/journal.ts` | Default snapshot cadence, and a fresh copy of the journal block Chelonia starts from. See [`configure.md`](./configure.md#journal-configuration). |
 | `REDACTION_ERROR_SENTINEL` / `REDACTION_NON_JSON_SAFE_SENTINEL` | `src/journal.ts` | Stored in place of a redactor result when the redactor threw, or returned a value JSON cannot round-trip losslessly. See [Redactions](./journal.md#redactions). |
