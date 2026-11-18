@@ -3,23 +3,29 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 import sbp from '@sbp/sbp'
 import { ChelErrorSignatureKeyUnauthorized } from './errors.js'
 import { signedIncomingData } from './signedData.js'
+import { captureConsole } from './test-utils.js'
 
 const STORE = 'state/vuex/state'
 sbp('sbp/selectors/unsafe', [STORE])
 
 const setStore = (state: (() => unknown) | null) => {
   if (sbp('sbp/selectors/fn', STORE)) sbp('sbp/selectors/unregister', [STORE])
-  if (state) sbp('sbp/selectors/register', { [STORE]: state })
+  if (!state) return
+  // SBP warns about every registration of an unsafe selector
+  const logs = captureConsole(['warn'])
+  try {
+    sbp('sbp/selectors/register', { [STORE]: state })
+  } finally {
+    logs.restore()
+  }
 }
 
 // Captures the loud-fail side effects (the rejection would fail this test
 // file if it were left unhandled)
 const verifyUnauthorized = () => {
-  const logged: unknown[][] = []
   const rejected: unknown[] = []
-  const { error } = console
   const { reject } = Promise
-  console.error = (...args: unknown[]) => { logged.push(args) }
+  const logs = captureConsole(['error'])
   Promise.reject = ((reason: unknown) => {
     rejected.push(reason)
     return Promise.resolve()
@@ -36,10 +42,10 @@ const verifyUnauthorized = () => {
   } catch (e) {
     thrown = e
   } finally {
-    console.error = error
+    logs.restore()
     Promise.reject = reject
   }
-  return { thrown, logged, rejected }
+  return { thrown, logged: logs.entries.map(({ args }) => args), rejected }
 }
 
 describe('Unauthorized signing key in CI', () => {
