@@ -62,7 +62,7 @@ A full contract definition has this shape
 | `name` | `string` | yes | Contract type (e.g. `my.app/chatroom`). Must match the `ACTION_REGEX` (`<namespace>/<name>` form). |
 | `getters` | `Record<string, (state, getters) => unknown>` | no | Vue-style computed views over `state`. Auto-exposed at `${manifest}/${name}/getters`. |
 | `actions` | `Record<actionName, { validate, process, sideEffect? }>` | yes | One entry per action selector. Each action name must start with the contract `name`. |
-| `methods` | `Record<string, Function>` | no | Free-standing helpers registered at `${manifest}/${methodName}`. Useful for contract-internal logic that isn’t a state mutation. |
+| `methods` | `Record<string, Function>` | no | Free-standing helpers registered at `${manifest}/${methodName}`. Useful for contract-internal logic that isn’t a state mutation. An entry named `${name}/_cleanup` is the [destructor](#3-sync--reference-counting). |
 | `metadata` | `{ validate(meta, ctx), create() }` | no | Per-message metadata factory. Defaults to no-op + `() => ({})`. Common pattern: stamp `createdDate`. |
 | `state` | _set by Chelonia_ | — | Chelonia overwrites this with `(contractID) => rootState[contractID]`. Don’t set it yourself. |
 | `manifest` | _set by Chelonia_ | — | Populated by the manifest loader. Don’t set it yourself. |
@@ -366,6 +366,17 @@ and don't survive a `chelonia/reset` cycle.
 You can introspect sync state via `chelonia/contract/isSyncing(id)`,
 `chelonia/contract/isResyncing(id)`, and
 `chelonia/contract/currentSyncs()`.
+
+A contract type may define a destructor: a `methods` entry named
+`<contract name>/_cleanup` (registered as
+`<manifest>/<contract name>/_cleanup`). Chelonia calls it as
+`_cleanup({ contractID, resync, state })` before clearing a contract's
+state: with `resync: true` when a re-sync starts over, and with
+`resync: false` at the final removal (refcount 0 or permanent). The
+final call happens even if a re-sync failed, with whatever state that
+re-sync left. Chelonia remembers the type of such a contract in memory
+only, so after a restart its removal calls no destructor;
+`chelonia/reset` calls none either.
 
 ### Booting with a persisted root state
 
@@ -771,6 +782,11 @@ aborts in-flight messages, clears `rootState.contracts` and
 - The two-argument form is `(newState, postCleanupFn)`.
 - The return value is whatever `postCleanupFn` returned (or
   `undefined`).
+- The drain is best effort. If an SBP filter vetoes a contract's queue,
+  `reset` logs it (`[chelonia/reset] Draining ... failed; resetting
+  anyway`), still waits for the other contracts' queues, and then clears
+  everything as usual. A veto doesn't make it reject, so a logout can't
+  leave the secret keys in memory.
 - `chelonia/reset` does **not** close the pubsub socket — call
   `pubsub.destroy()` (or just let GC handle it) if you want a hard
   shutdown.

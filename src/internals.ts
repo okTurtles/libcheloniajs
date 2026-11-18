@@ -84,6 +84,7 @@ import {
   httpErrorMessage,
   keyAdditionProcessor,
   logEvtError,
+  queueEventOrReject,
   recreateEvent,
   updateKey,
   validateKeyAddPermissions,
@@ -308,7 +309,7 @@ export const syncIfBehind = function (
   this: CheloniaContext, contractID: string, height: number, beforeSync?: () => void,
   signal?: AbortSignal
 ): Promise<void> {
-  return sbp('chelonia/private/queueEvent', contractID, async () => {
+  return queueEventOrReject(contractID, async () => {
     if (signal?.aborted) return
     if (!this.subscriptionSet.has(contractID)) return
     const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
@@ -715,23 +716,49 @@ export default sbp('sbp/selectors/register', {
     const state = sbp(this.config.stateSelector)
     // Drop any pending re-ingest entries and any scheduled forced
     // re-sync for this contract up-front, unconditionally. We do this
-    // before the contract-name early-return below because if the
+    // before the early returns below because if the
     // contract row is missing the entries can never be re-delivered
     // here, and a pending debounce timer would fire a force-sync
     // against a contract we've already given up on.
     clearReingestTrackerForContract(contractID)
     clearReprocessDebounceForContract(contractID)
-    const contractName = state.contracts[contractID]?.type
-    if (!contractName) {
+    // Drop per-contract KV runtime state on every removal; the
+    // `CONTRACTS_MODIFIED` listener also performs this cleanup via
+    // `_onContractsModified`, so the direct call is an idempotent fast path.
+    const cleanupKvRuntime = () => {
+      try {
+        sbp('chelonia/kv/_cleanupContractRuntime', contractID)
+      } catch (e) {
+        console.error('[chelonia] KV cleanup on contract removal failed', e)
+      }
+    }
+    const entry = state.contracts[contractID]
+    const contractName = entry?.type
+    // No type and not subscribed: the first sync or a re-sync didn't apply
+    // any event (e.g., it failed or was vetoed), or the contract isn't in
+    // the state at all
+    const unsynced = !contractName && !this.subscriptionSet.has(contractID)
+    // Already removed for good, or nothing to clear before a re-sync
+    if (entry === null || (unsynced && params?.resync)) {
+      cleanupKvRuntime()
+      return
+    }
+    if (!contractName && !unsynced) {
       console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
         contractID
       })
+      cleanupKvRuntime()
       return
     }
 
-    const manifestHash = this.config.contracts.manifests[contractName]
+    // A failed re-sync leaves no type, but its final removal still owes the
+    // destructor call (memory only: after a restart, there is none)
+    const type = contractName || this.contractTypesBeforeResync[contractID]
+    if (params?.resync) this.contractTypesBeforeResync[contractID] = type
+    else delete this.contractTypesBeforeResync[contractID]
+    const manifestHash = type && this.config.contracts.manifests[type]
     if (manifestHash) {
-      const destructor = `${manifestHash}/${contractName}/_cleanup`
+      const destructor = `${manifestHash}/${type}/_cleanup`
       // Check if a destructor is defined
       if (sbp('sbp/selectors/fn', destructor)) {
         // And call it
@@ -772,15 +799,13 @@ export default sbp('sbp/selectors/register', {
       this.config.reactiveDel(state, contractID)
     }
 
-    // Drop per-contract KV runtime state on every removal; the
-    // `CONTRACTS_MODIFIED` listener also performs this cleanup via
-    // `_onContractsModified`, so the direct call is an idempotent fast path.
-    try {
-      sbp('chelonia/kv/_cleanupContractRuntime', contractID)
-    } catch (e) {
-      console.error('[chelonia] KV cleanup on contract removal failed', e)
-    }
+    cleanupKvRuntime()
 
+    // Nothing to announce: a first sync that applied no event never
+    // announced it as added, and a re-sync's teardown already announced its
+    // removal. A permanent removal is announced, so that copies of
+    // `state.contracts` also record `null`.
+    if (unsynced && !params?.permanent) return
     this.subscriptionSet.delete(contractID)
     // (Tracker + debounce cancellation moved to the top of this selector
     // so the early-return path on a missing contract row also clears.
@@ -812,7 +837,7 @@ export default sbp('sbp/selectors/register', {
           // could be wrong due to newly received encryption keys), sync it anyhow
           // (i.e., disregard the force flag and proceed to sync the contract)
           if (!rootState[contractID]?._volatile?.dirty) {
-            return sbp('chelonia/private/queueEvent', contractID, ['chelonia/private/noop'])
+            return queueEventOrReject(contractID, ['chelonia/private/noop'])
           }
         }
         // enqueue this invocation in a serial queue to ensure
@@ -820,7 +845,7 @@ export default sbp('sbp/selectors/register', {
         // but after it's finished. This is used in tandem with
         // queuing the 'chelonia/private/in/handleEvent' selector, defined below.
         // This prevents handleEvent getting called with the wrong previousHEAD for an event.
-        return sbp('chelonia/private/queueEvent', contractID, [
+        return queueEventOrReject(contractID, [
           'chelonia/private/in/syncContract',
           contractID,
           params
@@ -840,7 +865,7 @@ export default sbp('sbp/selectors/register', {
     const contractID = entry.contractID()
     const originalEntry = entry
 
-    return sbp('chelonia/private/queueEvent', `publish:${contractID}`, async () => {
+    return queueEventOrReject(`publish:${contractID}`, async () => {
       let attempt = 1
       // prepublish is asynchronous to allow for cleanly sending messages to
       // different contracts
@@ -864,7 +889,7 @@ export default sbp('sbp/selectors/register', {
         // 'latest' state may be for that contract (in case we were receiving
         // something over the web socket)
         // This also ensures that the state doesn't change while reading it
-        const newEntry = await sbp('chelonia/private/queueEvent', contractID, async () => {
+        const newEntry = await queueEventOrReject(contractID, async () => {
           const rootState = sbp(this.config.stateSelector)
           const state = rootState[contractID]
           const isFirstMessage = entry.isFirstMessage()
@@ -1499,7 +1524,7 @@ export default sbp('sbp/selectors/register', {
             // sharing the same state. This is more of a general issue in this
             // situation, not limited to the following sequence of events
             if (self.subscriptionSet.has(v.contractID)) {
-              const resync = sbp('chelonia/private/queueEvent', v.contractID, [
+              const resync = queueEventOrReject(v.contractID, [
                 'chelonia/private/in/syncContract',
                 v.contractID
               ])
@@ -1525,11 +1550,9 @@ export default sbp('sbp/selectors/register', {
                   // Using console.error instead of logEvtError because this
                   // is a side-effect and not relevant for outgoing messages
                   console.error(
-                    `[chelonia] Error during sync for ${v.contractID} during OP_KEY_SHARE for ${contractID}`
+                    `[chelonia] Error during sync for ${v.contractID} during OP_KEY_SHARE for ${contractID}`,
+                    e
                   )
-                  if (v.contractID === contractID) {
-                    throw e
-                  }
                 })
 
               // If the keys received were for the current contract, we can't
@@ -1541,7 +1564,7 @@ export default sbp('sbp/selectors/register', {
           }
 
           const previousVolatileState = targetState?._volatile
-          sbp('chelonia/private/queueEvent', v.contractID, [
+          queueEventOrReject(v.contractID, [
             'chelonia/private/postKeyShare',
             v.contractID,
             mustResync ? previousVolatileState : null,
@@ -1551,7 +1574,7 @@ export default sbp('sbp/selectors/register', {
             // the current contract so that calling
             // 'chelonia/contract/waitingForKeyShareTo' will give correct results
             // (i.e., the event is processed after the state is written)
-            sbp('chelonia/private/queueEvent', contractID, () => {
+            queueEventOrReject(contractID, () => {
               sbp('okTurtles.events/emit', CONTRACT_HAS_RECEIVED_KEYS, {
                 contractID: v.contractID,
                 sharedWithContractID: contractID,
@@ -1568,6 +1591,13 @@ export default sbp('sbp/selectors/register', {
                 e
               )
             })
+          }).catch((e: unknown) => {
+            // Using console.error instead of logEvtError because this
+            // is a side-effect and not relevant for outgoing messages
+            console.error(
+              `[chelonia] Error during postKeyShare for ${v.contractID} during OP_KEY_SHARE for ${contractID}`,
+              e
+            )
           })
         })
       },
@@ -1831,7 +1861,7 @@ export default sbp('sbp/selectors/register', {
             if (!foreignContract || !foreignKeyName) { throw new Error('Invalid foreign key: missing contract or key name') }
 
             internalSideEffectStack?.push(() => {
-              sbp('chelonia/private/queueEvent', foreignContract, () => {
+              queueEventOrReject(foreignContract, () => {
                 const rootState = sbp(config.stateSelector) as ChelRootState
                 if (Array.isArray(rootState[foreignContract]?._volatile?.watch)) {
                   // Stop watching events for this key
@@ -1976,7 +2006,7 @@ export default sbp('sbp/selectors/register', {
         // If we're able to rotate foreign keys and we need to, do so
         if (Number.isFinite(canMirrorOperationsUpToRingLevel) && hasOutOfSyncKeys) {
           internalSideEffectStack?.push(() => {
-            sbp('chelonia/private/queueEvent', contractID, [
+            queueEventOrReject(contractID, [
               'chelonia/private/deleteOrRotateRevokedKeys',
               contractID
             ]).catch((e: unknown) => {
@@ -2092,7 +2122,7 @@ export default sbp('sbp/selectors/register', {
     // make sure handleEvent is called AFTER any currently-running invocations
     // to 'chelonia/private/in/sync', to prevent gi.db from throwing
     // "bad previousHEAD" errors
-    return sbp('chelonia/private/queueEvent', contractID, async () => {
+    return queueEventOrReject(contractID, async () => {
       await sbp('chelonia/private/in/handleEvent', contractID, event)
       // Before the next operation is enqueued, enqueue post sync ops. This
       // makes calling `/wait` more reliable
@@ -2109,6 +2139,9 @@ export default sbp('sbp/selectors/register', {
       throw new ChelErrorResourceGone('Cannot sync permanently deleted contract ' + contractID)
     }
 
+    // Owned by this sync and dropped when it ends, so that a sync that fails
+    // early can't leave the contract accepting outside events
+    const pendingEntry = { contractID }
     try {
       this.currentSyncs[contractID] = { firstSync: !state.contracts[contractID]?.type }
       sbp('okTurtles.events/emit', CONTRACT_IS_SYNCING, contractID, true)
@@ -2131,12 +2164,9 @@ export default sbp('sbp/selectors/register', {
       const { HEAD: recentHEAD, height: recentHeight } = state.contracts[contractID] || {}
       const isSubscribed = this.subscriptionSet.has(contractID)
       if (!isSubscribed) {
-        const entry = this.pending.find((entry) => entry?.contractID === contractID)
         // we're syncing a contract for the first time, make sure to add to pending
         // so that handleEvents knows to expect events from this contract
-        if (!entry) {
-          this.pending.push({ contractID })
-        }
+        this.pending.push(pendingEntry)
       }
       this.postSyncOperations[contractID] =
         this.postSyncOperations[contractID] ?? Object.create(null)
@@ -2184,10 +2214,6 @@ export default sbp('sbp/selectors/register', {
           added: [contractID],
           removed: []
         })
-        const entryIndex = this.pending.findIndex((entry) => entry?.contractID === contractID)
-        if (entryIndex !== -1) {
-          this.pending.splice(entryIndex, 1)
-        }
         console.debug(`[chelonia] added already synchronized ${contractID} to subscription set`)
       } else {
         console.debug(`[chelonia] contract ${contractID} was already synchronized`)
@@ -2201,6 +2227,8 @@ export default sbp('sbp/selectors/register', {
       this.config.hooks.syncContractError?.(e, contractID)
       throw e
     } finally {
+      const pendingIndex = this.pending.indexOf(pendingEntry)
+      if (pendingIndex !== -1) this.pending.splice(pendingIndex, 1)
       if (state[contractID]?._volatile?.resyncing) {
         this.config.reactiveDel(state[contractID]._volatile, 'resyncing')
       }
@@ -2220,7 +2248,7 @@ export default sbp('sbp/selectors/register', {
       // Queue the current operation for execution.
       // Note that we do _not_ await because it could be unsafe to do so.
       // If the operation fails for some reason, just log the error.
-      sbp('chelonia/private/queueEvent', contractID, op).catch((e: unknown) => {
+      queueEventOrReject(contractID, op).catch((e: unknown) => {
         console.error(`Post-sync operation for ${contractID} failed`, { contractID, op, error: e })
       })
     })
@@ -2278,7 +2306,7 @@ export default sbp('sbp/selectors/register', {
         return
       }
 
-      sbp('chelonia/private/queueEvent', contractID, [
+      queueEventOrReject(contractID, [
         'chelonia/private/in/syncContractAndWatchKeys',
         contractID,
         externalContractID
@@ -2398,7 +2426,7 @@ export default sbp('sbp/selectors/register', {
         this.config.reactiveSet(externalContractState._volatile!.pendingKeyRevocations!, id, true)
       )
 
-      sbp('chelonia/private/queueEvent', externalContractID, [
+      queueEventOrReject(externalContractID, [
         'chelonia/private/deleteOrRotateRevokedKeys',
         externalContractID
       ]).catch((e: unknown) => {
@@ -2618,7 +2646,7 @@ export default sbp('sbp/selectors/register', {
 
       const [, , , [originatingContractID]] = entry
 
-      return sbp('chelonia/private/queueEvent', originatingContractID, [
+      return queueEventOrReject(originatingContractID, [
         'chelonia/private/respondToKeyRequest',
         contractID,
         signingKeyId,
@@ -3525,6 +3553,8 @@ const handleEvent = {
         this.config.reactiveSet(state.contracts, contractID, Object.create(null))
       }
       this.config.reactiveSet(state.contracts[contractID], 'type', type)
+      // Back in the state: a removal no longer needs the copy
+      delete this.contractTypesBeforeResync[contractID]
       console.debug(`contract ${type} registered for ${contractID}`)
     }
     if (message.isKeyOp()) {

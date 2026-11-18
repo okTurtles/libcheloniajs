@@ -23,6 +23,7 @@ import type { EncryptedData } from './encryptedData.js'
 import {
   ChelErrorForkedChain,
   ChelErrorResourceGone,
+  ChelErrorUnexpected,
   ChelErrorUnexpectedHttpResponseCode,
   ChelErrorWarning
 } from './errors.js'
@@ -541,7 +542,7 @@ export const keyAdditionProcessor = function (
         // do this while no other operations are running for that
         // contract
         internalSideEffectStack.push(() => {
-          sbp('chelonia/private/queueEvent', keyRequestContractID, () => {
+          queueEventOrReject(keyRequestContractID, () => {
             const rootState = sbp(this.config.stateSelector) as ChelRootState
 
             const originatingContractState = rootState[contractID] as ChelContractState
@@ -1371,4 +1372,21 @@ export const updateKey = (key: ChelContractKey, updatedKey: ChelContractKey): Ch
       : {}),
     ...(updatedKey.meta ? { meta: updatedKey.meta } : {})
   }
+}
+
+/**
+ * An SBP filter can veto `chelonia/private/queueEvent`, which then returns
+ * `undefined`. Reject instead, so that no caller mistakes a vetoed call for
+ * finished work.
+ * Public only because the package re-exports all of `utils`. Apps should use
+ * `chelonia/queueInvocation`, which rejects the same way.
+ */
+export function queueEventOrReject (
+  queueName: string,
+  invocation: Parameters<typeof sbp> | (() => unknown)
+): ReturnType<typeof sbp> {
+  const queued = sbp('chelonia/private/queueEvent', queueName, invocation)
+  return queued === undefined
+    ? Promise.reject(new ChelErrorUnexpected(`[chelonia] queueing on ${queueName} was vetoed`))
+    : queued
 }

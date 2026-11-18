@@ -389,9 +389,16 @@ scope, so a stub registered by one file (e.g. the `chelonia/contract/fullState` 
 
 Pubsub and network tests use the in-process fakes in `src/pubsub/test-harness.ts` (there is
 no WebSocket server in the repo; the file's header comment lists what it fakes). Shared pubsub
-and relay test helpers go there too; generic ones (e.g. `waitMicrotasks`) live in
-`src/test-utils.ts`. Examples: `src/pubsub/recovery.test.ts`,
+and relay test helpers go there too. Examples: `src/pubsub/recovery.test.ts`,
 `src/chelonia-publish-receipt.test.ts`.
+
+Generic test helpers (e.g. `waitMicrotasks`, `until`, `within`, `captureConsole`) live in
+`src/test-utils.ts`, a plain module that registers no selectors; `test-harness.ts` re-exports
+`captureConsole`. A test must fail rather than hang when the behaviour it checks regresses:
+poll with `until(cond, label)` and bound a promise that might never settle with
+`within(promise, label)`. `until` throws a labelled timeout error (5 s by default); prefer
+the harness's `waitFor(cond)` when the test should inspect a timeout rather than fail on it:
+it resolves with the truthy value of `cond()`, or with `undefined` after 2 s by default.
 
 ## Common Gotchas
 

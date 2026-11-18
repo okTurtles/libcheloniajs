@@ -88,6 +88,7 @@ import {
   getContractIDfromKeyId,
   handleFetchResult,
   httpErrorMessage,
+  queueEventOrReject,
   raceAbort,
   reactiveClearObject
 } from './utils.js'
@@ -426,6 +427,7 @@ export default sbp('sbp/selectors/register', {
       ownKeys: secretKeyList
     })
     this.ephemeralReferenceCount = Object.create(null)
+    this.contractTypesBeforeResync = Object.create(null)
     // subscriptionSet includes all the contracts in state.contracts for which
     // we can process events (contracts for which we have called /sync)
     // The reason we can't use, e.g., Object.keys(state.contracts), is that
@@ -783,90 +785,124 @@ export default sbp('sbp/selectors/register', {
     const drainTimer = drainTimeout === undefined
       ? undefined
       : unrefTimer(setTimeout(() => abortController.abort(), drainTimeout))
-    // wait for any pending sync operations to finish before saving
-    Object.keys(this.postSyncOperations).forEach((cID) => {
-      sbp('chelonia/private/enqueuePostSyncOps', cID)
-    })
-    await sbp('chelonia/contract/waitPublish')
-    await sbp('chelonia/contract/wait')
-    // do this again to catch operations that are the result of side-effects
-    // or post sync ops
-    Object.keys(this.postSyncOperations).forEach((cID) => {
-      sbp('chelonia/private/enqueuePostSyncOps', cID)
-    })
-    await sbp('chelonia/contract/waitPublish')
-    await sbp('chelonia/contract/wait')
-    clearTimeout(drainTimer)
-    // The waits above drained the queued KV writes (`kv/update`, `kv/clear`,
-    // `kv/queuedSet`). Before `postCleanupFn` and the teardown, abort what runs
-    // outside those queues (e.g. a raw `kv/set`) and drain what is still queued
-    this.abortController.abort()
-    this.abortController = new AbortController()
-    await sbp('chelonia/kv/_waitInFlight')
-    await sbp('chelonia/contract/wait')
-    const result = await postCleanupFn?.()
-    // The following are all synchronous operations
-    const rootState = sbp(this.config.stateSelector)
-    // Cancel all outgoing messages by replacing this._instance
-    this._instance = Object.create(null)
-    // Remove all contracts, including all contracts from pending
-    reactiveClearObject(rootState, this.config.reactiveDel)
-    this.config.reactiveSet(rootState, 'contracts', Object.create(null))
-    this.config.reactiveSet(rootState, 'secretKeys', Object.create(null))
-    // Re-seed the KV mirror — `reactiveClearObject` above stripped it
-    // along with everything else. Slot definitions (`kvSlots`) and the
-    // per-manifest cache (`defContractKvByManifest`) survive reset
-    // because they are code-level state; the five per-subscription maps
-    // are cleared alongside `subscriptionSet` below. In-flight KV writes
-    // were already drained via `chelonia/kv/_waitInFlight` above, so
-    // clearing `kvLocalEchoCIDs` / `kvPendingWrites` here cannot strand a
-    // continuation mid-write.
-    this.config.reactiveSet(rootState, '_kv', Object.create(null))
-    this.kvSlotsByContractID.clear()
-    this.kvActiveFilters.clear()
-    this.kvFilterDirty.clear()
-    this.kvFilterRetry.clear()
-    if (this.kvFilterRetryTimer != null) {
-      clearTimeout(this.kvFilterRetryTimer)
-      this.kvFilterRetryTimer = undefined
+    // The drain is best effort, like the timer above. An SBP filter can veto
+    // a contract's queue, and waiting on it then rejects. Stopping the reset
+    // would keep the state and the secret keys in memory, so log the failure
+    // and still wait for the other contracts' queues
+    const logDrainError = (what: string, e: unknown) => {
+      console.error(`[chelonia/reset] Draining ${what} failed; resetting anyway`, e)
     }
-    this.kvFlushInFlight = false
-    this.kvLocalEchoCIDs.clear()
-    this.kvReconnectRefresh.clear()
-    this.kvPendingWrites.clear()
-    this.kvPendingLoads.clear()
-    this.kvOnUpdateActive.clear()
-    clearObject(this.ephemeralReferenceCount)
-    this.pending.splice(0)
-    clearObject(this.currentSyncs)
-    clearObject(this.postSyncOperations)
-    clearObject(this.sideEffectStacks)
-    const removedContractIDs = Array.from(this.subscriptionSet)
-    this.subscriptionSet.clear()
-    // Drop every pending re-ingest entry. The tracker is module-level
-    // state that would otherwise survive `chelonia/reset` and poison
-    // the next session with "Already attempted to reingest" on hashes
-    // that belong to a contract timeline we've now torn down.
-    clearReingestTrackerAll()
-    // Cancel any pending forced-resync timers. Otherwise a timer
-    // scheduled before the reset would fire `chelonia/private/in/sync`
-    // against a contract whose state has been torn down.
-    clearReprocessDebounceAll()
-    sbp('chelonia/clearTransientSecretKeys')
-    sbp('okTurtles.events/emit', CHELONIA_RESET)
-    sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {
-      added: [],
-      removed: removedContractIDs
-    })
-    if (this.pubsub) {
-      sbp('chelonia/private/startClockSync')
-    }
-    if (newState) {
-      Object.entries(newState).forEach(([key, value]) => {
-        this.config.reactiveSet(rootState, key, value)
+    const drain = async (selector: string) => {
+      const contractIDs = Object.keys(sbp(this.config.stateSelector).contracts)
+      const results = await Promise.allSettled(
+        contractIDs.map(async (cID) => { await sbp(selector, cID) })
+      )
+      results.forEach((result, i) => {
+        if (result.status === 'rejected') {
+          logDrainError(`${selector} for ${contractIDs[i]}`, result.reason)
+        }
       })
     }
-    return result
+    try {
+      // wait for any pending sync operations to finish before saving
+      Object.keys(this.postSyncOperations).forEach((cID) => {
+        sbp('chelonia/private/enqueuePostSyncOps', cID)
+      })
+      await drain('chelonia/contract/waitPublish')
+      await drain('chelonia/contract/wait')
+      // do this again to catch operations that are the result of side-effects
+      // or post sync ops
+      Object.keys(this.postSyncOperations).forEach((cID) => {
+        sbp('chelonia/private/enqueuePostSyncOps', cID)
+      })
+      await drain('chelonia/contract/waitPublish')
+      await drain('chelonia/contract/wait')
+      // Not only in `finally`: the timer bounds the drain and must not abort
+      // anything later (e.g. if `chelonia/_init` replaced the controller)
+      clearTimeout(drainTimer)
+      // The waits above drained the queued KV writes (`kv/update`, `kv/clear`,
+      // `kv/queuedSet`). Before `postCleanupFn` and the teardown, abort what runs
+      // outside those queues (e.g. a raw `kv/set`) and drain what is still queued
+      this.abortController.abort()
+      this.abortController = new AbortController()
+      try {
+        await sbp('chelonia/kv/_waitInFlight')
+      } catch (e) {
+        logDrainError('chelonia/kv/_waitInFlight', e)
+      }
+      await drain('chelonia/contract/wait')
+      const result = await postCleanupFn?.()
+      // The following are all synchronous operations
+      const rootState = sbp(this.config.stateSelector)
+      // Cancel all outgoing messages by replacing this._instance
+      this._instance = Object.create(null)
+      // Remove all contracts, including all contracts from pending
+      reactiveClearObject(rootState, this.config.reactiveDel)
+      this.config.reactiveSet(rootState, 'contracts', Object.create(null))
+      this.config.reactiveSet(rootState, 'secretKeys', Object.create(null))
+      // Re-seed the KV mirror — `reactiveClearObject` above stripped it
+      // along with everything else. Slot definitions (`kvSlots`) and the
+      // per-manifest cache (`defContractKvByManifest`) survive reset
+      // because they are code-level state; the five per-subscription maps
+      // are cleared alongside `subscriptionSet` below. In-flight KV writes
+      // were already drained via `chelonia/kv/_waitInFlight` above, so
+      // clearing `kvLocalEchoCIDs` / `kvPendingWrites` here cannot strand a
+      // continuation mid-write.
+      this.config.reactiveSet(rootState, '_kv', Object.create(null))
+      this.kvSlotsByContractID.clear()
+      this.kvActiveFilters.clear()
+      this.kvFilterDirty.clear()
+      this.kvFilterRetry.clear()
+      if (this.kvFilterRetryTimer != null) {
+        clearTimeout(this.kvFilterRetryTimer)
+        this.kvFilterRetryTimer = undefined
+      }
+      this.kvFlushInFlight = false
+      this.kvLocalEchoCIDs.clear()
+      this.kvReconnectRefresh.clear()
+      this.kvPendingWrites.clear()
+      this.kvPendingLoads.clear()
+      this.kvOnUpdateActive.clear()
+      clearObject(this.ephemeralReferenceCount)
+      clearObject(this.contractTypesBeforeResync)
+      this.pending.splice(0)
+      clearObject(this.currentSyncs)
+      clearObject(this.postSyncOperations)
+      clearObject(this.sideEffectStacks)
+      const removedContractIDs = Array.from(this.subscriptionSet)
+      this.subscriptionSet.clear()
+      // Drop every pending re-ingest entry. The tracker is module-level
+      // state that would otherwise survive `chelonia/reset` and poison
+      // the next session with "Already attempted to reingest" on hashes
+      // that belong to a contract timeline we've now torn down.
+      clearReingestTrackerAll()
+      // Cancel any pending forced-resync timers. Otherwise a timer
+      // scheduled before the reset would fire `chelonia/private/in/sync`
+      // against a contract whose state has been torn down.
+      clearReprocessDebounceAll()
+      sbp('chelonia/clearTransientSecretKeys')
+      sbp('okTurtles.events/emit', CHELONIA_RESET)
+      sbp('okTurtles.events/emit', CONTRACTS_MODIFIED, Array.from(this.subscriptionSet), {
+        added: [],
+        removed: removedContractIDs
+      })
+      if (newState) {
+        Object.entries(newState).forEach(([key, value]) => {
+          this.config.reactiveSet(rootState, key, value)
+        })
+      }
+      return result
+    } finally {
+      clearTimeout(drainTimer)
+      if (this.abortController === abortController && abortController.signal.aborted) {
+        this.abortController = new AbortController()
+      }
+      // Stop first: an overlapping reset may have restarted it already
+      if (this.pubsub) {
+        sbp('chelonia/private/stopClockSync')
+        sbp('chelonia/private/startClockSync')
+      }
+    }
   },
   'chelonia/storeSecretKeys': function (
     this: CheloniaContext,
@@ -1168,7 +1204,7 @@ export default sbp('sbp/selectors/register', {
     // Checked in the contract's queue, i.e. after a removal queued earlier:
     // syncing a contract that Chelonia no longer wants would bring it back
     const syncIfWanted = (channelID: string): Promise<boolean> =>
-      sbp('chelonia/private/queueEvent', channelID, async () => {
+      queueEventOrReject(channelID, async () => {
         if (!this.subscriptionSet.has(channelID)) return false
         await sbp('chelonia/private/in/syncContract', channelID)
         return true
@@ -1327,7 +1363,16 @@ export default sbp('sbp/selectors/register', {
           // to prevent gi.db from throwing "bad previousHEAD" errors.
           // Calling via SBP also makes it simple to implement 'test/backend.js'
           const { contractID } = SPMessage.deserializeHEAD(msg.data as string)
-          sbp('chelonia/private/in/enqueueHandleEvent', contractID, msg.data)
+          // Nothing waits for this promise, so log its failures here: an
+          // unhandled rejection can stop a Node process. It rejects when a
+          // filter vetoes queueing on the contract's queue, or when
+          // handleEvent throws (handleEvent has already logged that error).
+          // If a filter vetoes this selector itself, `sbp` returns `undefined`.
+          sbp('chelonia/private/in/enqueueHandleEvent', contractID, msg.data)?.catch(
+            (e: unknown) => {
+              console.error(`[chelonia] Error processing entry event for ${contractID}`, e)
+            }
+          )
         }
       }
     })
@@ -1617,8 +1662,8 @@ export default sbp('sbp/selectors/register', {
     //        return this.config.fetch(profilePictureUrl).then(doSomeWorkWithTheFile)
     //      })
     //    }
-    return sbp('chelonia/private/queueEvent', contractID, ['chelonia/private/noop']).then(() =>
-      sbp('chelonia/private/queueEvent', 'public:' + contractID, sbpInvocation)
+    return queueEventOrReject(contractID, ['chelonia/private/noop']).then(() =>
+      queueEventOrReject('public:' + contractID, sbpInvocation)
     )
   },
   'chelonia/begin': async (...invocations: Parameters<typeof sbp>[]) => {
@@ -1715,7 +1760,7 @@ export default sbp('sbp/selectors/register', {
       : Object.keys(sbp(this.config.stateSelector).contracts)
     return Promise.all(
       listOfIds.flatMap((cID) => {
-        return sbp('chelonia/private/queueEvent', `publish:${cID}`, ['chelonia/private/noop'])
+        return queueEventOrReject(`publish:${cID}`, ['chelonia/private/noop'])
       })
     )
   },
@@ -1777,11 +1822,13 @@ export default sbp('sbp/selectors/register', {
     const listOfIds = typeof contractIDs === 'string' ? [contractIDs] : contractIDs
     return Promise.all(
       listOfIds.map((contractID) => {
-        if (!rootState?.contracts?.[contractID]) {
+        // Only skip contracts already removed for good: one whose first sync
+        // failed may have no entry (ephemeral), but still needs cleaning up
+        if (!rootState?.contracts || rootState.contracts[contractID] === null) {
           return undefined
         }
 
-        return sbp('chelonia/private/queueEvent', contractID, () => {
+        return queueEventOrReject(contractID, () => {
           // This allows us to double-check that the contract is meant to be
           // removed, as circumstances could have changed from the time remove
           // was called and this function is executed. For example, `/release`
@@ -1956,14 +2003,33 @@ export default sbp('sbp/selectors/register', {
       : undefined
   },
   // Higher level function to automatically retain / release a contract
-  'chelonia/contract/withRetained': async function (contractIDs: string | string[], callback: () => unknown | Promise<unknown>) {
-    await sbp('chelonia/contract/retain', contractIDs, { ephemeral: true })
+  'chelonia/contract/withRetained': async function (
+    this: CheloniaContext,
+    contractIDs: string | string[],
+    callback: () => unknown | Promise<unknown>
+  ) {
+    const release = (ids: string | string[]) =>
+      sbp('chelonia/contract/release', ids, { ephemeral: true }).catch((e: unknown) => {
+        console.error('[withRetained] Error releasing contract:', e)
+      })
+    const countsBefore = { ...this.ephemeralReferenceCount }
+    // `retain` takes its references before its first await, so the ones it
+    // took are known here even if it then rejects (e.g., a failed first sync)
+    const retaining = sbp('chelonia/contract/retain', contractIDs, { ephemeral: true })
+    const taken: string[] = []
+    for (const [id, count] of Object.entries(this.ephemeralReferenceCount)) {
+      for (let i = countsBefore[id] ?? 0; i < count; i++) taken.push(id)
+    }
+    try {
+      await retaining
+    } catch (e) {
+      if (taken.length) await release(taken)
+      throw e
+    }
     try {
       return await callback()
     } finally {
-      await sbp('chelonia/contract/release', contractIDs, { ephemeral: true }).catch((e: unknown) => {
-        console.error('[withRetained] Error releasing contract:', e)
-      })
+      await release(contractIDs)
     }
   },
   'chelonia/contract/disconnect': async function (
