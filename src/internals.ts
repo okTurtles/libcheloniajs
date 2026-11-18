@@ -734,15 +734,16 @@ export default sbp('sbp/selectors/register', {
     }
     const entry = state.contracts[contractID]
     const contractName = entry?.type
-    // Applying the first message sets the type and subscribes, so this
-    // contract never finished its first sync (or was never retained here)
-    const neverSynced = !contractName && !this.subscriptionSet.has(contractID)
+    // No type and not subscribed: the first sync or a re-sync didn't apply
+    // any event (e.g., it failed or was vetoed), or the contract isn't in
+    // the state at all
+    const unsynced = !contractName && !this.subscriptionSet.has(contractID)
     // Already removed for good, or nothing to clear before a re-sync
-    if (entry === null || (neverSynced && params?.resync)) {
+    if (entry === null || (unsynced && params?.resync)) {
       cleanupKvRuntime()
       return
     }
-    if (!contractName && !neverSynced) {
+    if (!contractName && !unsynced) {
       console.error('[chelonia/private/removeImmediately] Missing contract name for contract', {
         contractID
       })
@@ -800,9 +801,11 @@ export default sbp('sbp/selectors/register', {
 
     cleanupKvRuntime()
 
-    // It was never announced as added. A permanent removal is, so that
-    // copies of `state.contracts` also record `null`.
-    if (neverSynced && !params?.permanent) return
+    // Nothing to announce: a first sync that applied no event never
+    // announced it as added, and a re-sync's teardown already announced its
+    // removal. A permanent removal is announced, so that copies of
+    // `state.contracts` also record `null`.
+    if (unsynced && !params?.permanent) return
     this.subscriptionSet.delete(contractID)
     // (Tracker + debounce cancellation moved to the top of this selector
     // so the early-return path on a missing contract row also clears.

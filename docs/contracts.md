@@ -62,7 +62,7 @@ A full contract definition has this shape
 | `name` | `string` | yes | Contract type (e.g. `my.app/chatroom`). Must match the `ACTION_REGEX` (`<namespace>/<name>` form). |
 | `getters` | `Record<string, (state, getters) => unknown>` | no | Vue-style computed views over `state`. Auto-exposed at `${manifest}/${name}/getters`. |
 | `actions` | `Record<actionName, { validate, process, sideEffect? }>` | yes | One entry per action selector. Each action name must start with the contract `name`. |
-| `methods` | `Record<string, Function>` | no | Free-standing helpers registered at `${manifest}/${methodName}`. Useful for contract-internal logic that isn’t a state mutation. |
+| `methods` | `Record<string, Function>` | no | Free-standing helpers registered at `${manifest}/${methodName}`. Useful for contract-internal logic that isn’t a state mutation. An entry named `${name}/_cleanup` is the [destructor](#3-sync--reference-counting). |
 | `metadata` | `{ validate(meta, ctx), create() }` | no | Per-message metadata factory. Defaults to no-op + `() => ({})`. Common pattern: stamp `createdDate`. |
 | `state` | _set by Chelonia_ | — | Chelonia overwrites this with `(contractID) => rootState[contractID]`. Don’t set it yourself. |
 | `manifest` | _set by Chelonia_ | — | Populated by the manifest loader. Don’t set it yourself. |
@@ -367,8 +367,9 @@ You can introspect sync state via `chelonia/contract/isSyncing(id)`,
 `chelonia/contract/isResyncing(id)`, and
 `chelonia/contract/currentSyncs()`.
 
-A contract type may define a destructor, the
-`<manifest>/<contract name>/_cleanup` selector. Chelonia calls it as
+A contract type may define a destructor: a `methods` entry named
+`<contract name>/_cleanup` (registered as
+`<manifest>/<contract name>/_cleanup`). Chelonia calls it as
 `_cleanup({ contractID, resync, state })` before clearing a contract's
 state: with `resync: true` when a re-sync starts over, and with
 `resync: false` at the final removal (refcount 0 or permanent). The

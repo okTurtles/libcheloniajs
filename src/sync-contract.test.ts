@@ -273,6 +273,31 @@ describe('Contract sync and removal', () => {
       })
     }
 
+    // The documented recovery: the count already dropped, so the contract
+    // stays, unreferenced, until something removes it
+    const finishRemoval: Array<[string, (cid: string) => Promise<unknown>]> = [
+      ['release with try', (cid) => sbp('chelonia/contract/release', cid, { try: true })],
+      ['remove', (cid) => sbp('chelonia/contract/remove', cid)]
+    ]
+    for (const [name, finish] of finishRemoval) {
+      it(`${name} removes the contract after a vetoed last release`, async () => {
+        const cid = server.contract!.hash()
+        await within(sbp('chelonia/contract/retain', cid), 'retain')
+        vetoedQueue = cid
+        await assert.rejects(within(sbp('chelonia/contract/release', cid), 'release'), vetoError)
+        const entry = rootState().contracts[cid]!
+        assert.strictEqual(entry.HEAD, cid)
+        assert.ok(!('references' in entry))
+        assert.deepStrictEqual(removed, [])
+
+        vetoedQueue = undefined
+        await within(finish(cid), name)
+        assert.strictEqual(rootState().contracts[cid], undefined)
+        assert.strictEqual(rootState()[cid], undefined)
+        assert.deepStrictEqual(removed, [cid])
+      })
+    }
+
     it('publishing rejects', async () => {
       const entry = makeContract()
       vetoedQueue = entry.hash()

@@ -51,7 +51,7 @@ For the authoritative signatures, follow the source links.
 | Selector | Source | Purpose |
 |---|---|---|
 | `chelonia/contract/retain` | `src/chelonia.ts` | Increment the (persistent or `ephemeral`) refcount and sync. |
-| `chelonia/contract/release` | `src/chelonia.ts` | Decrement the refcount. At 0 the contract is unsubscribed and removed. |
+| `chelonia/contract/release` | `src/chelonia.ts` | Decrement the refcount. At 0 the contract is unsubscribed and removed. With `{ try: true }` it changes no refcount: it only removes the contract if nothing references it and no subscribed contract uses its keys as foreign keys. |
 | `chelonia/contract/sync` | `src/chelonia.ts` | Force re-sync. Requires a positive refcount. |
 | `chelonia/contract/withRetained` | `src/chelonia.ts` | Retain (`ephemeral: true`) → callback → release. If the retain rejects, gives back the references it took and rethrows without running the callback. |
 | `chelonia/contract/wait` | `src/chelonia.ts` | Wait for the contract's internal event queue to drain. |
@@ -79,9 +79,20 @@ If an SBP filter vetoes a contract's queue (`chelonia/private/queueEvent`),
 the selectors that needed it reject with `ChelErrorUnexpected` (`/vetoed/`)
 instead of resolving as if the work had run: `retain`, `release`, `sync`,
 `remove`, `wait`, `waitPublish`, `chelonia/handleEvent`,
-`chelonia/queueInvocation` and the `chelonia/out/*` selectors that publish
-an event. The work didn't run: after a vetoed last `release`, for example,
-the contract is still subscribed.
+`chelonia/queueInvocation`, the `chelonia/out/*` selectors that publish
+an event, and selectors built on these, such as `withRetained`.
+`chelonia/reset` logs a vetoed queue and goes on. An event that pubsub
+pushes into a vetoed queue is logged and dropped, not retried. Queued
+work that `chelonia/reset` drops before it runs doesn't reject: its
+result is `undefined`.
+
+Only the queued work is skipped: `retain` and `release` still change the
+reference count. After a vetoed `retain`, release the reference as usual.
+After a vetoed last `release`, the contract isn't removed (it stays
+subscribed) and has no references left. Remove it with
+`release(id, { try: true })` or `remove`. A plain `release` throws, as
+no reference is left. A vetoed release at the end of `withRetained` is
+only logged, and can leave the contract the same way.
 
 `chelonia/contract/fullState` returns `{ contractState, cheloniaState,
 kvState, kvEntry }` — one tuple per id, or a map of tuples keyed by id
@@ -273,7 +284,7 @@ in `src/events.ts`; the most commonly observed:
 |---|---|---|
 | `CHELONIA_RESET` | `src/events.ts` | After `chelonia/reset` has drained and cleared state. |
 | `CONTRACT_IS_SYNCING` | `src/events.ts` | When a contract enters / leaves the syncing state. Payload: `(contractID, isSyncing)`. |
-| `CONTRACTS_MODIFIED` | `src/events.ts` | After any subscription set change. Payload: `(subscriptionSet, { added, removed, permanent?, resync? })`. A contract whose first sync never finished is announced only when removed for good (`permanent: true`). |
+| `CONTRACTS_MODIFIED` | `src/events.ts` | After any subscription set change. Payload: `(subscriptionSet, { added, removed, permanent?, resync? })`. When a first sync or a re-sync fails before applying any event, the contract has no type and isn't subscribed. Its later removal is announced only if permanent (`permanent: true`): the first sync never announced it in `added`, and the re-sync already announced its removal (`resync: true`). |
 | `CONTRACTS_MODIFIED_READY` | `src/events.ts` | Mirror of the above, fired after subscriptions have actually opened/closed on the wire. |
 | `EVENT_HANDLED` | `src/events.ts` | After an incoming event has been processed and side-effects run. Payload: `(contractID, message)`. |
 | `EVENT_HANDLED_READY` | `src/events.ts` | Drains-only signal for sync-completion observers; fires after the per-contract queue is empty. |
