@@ -302,11 +302,14 @@ const keyRotationHelper = <T>(
 // Force-syncs `contractID` unless Chelonia no longer wants it or its state has
 // reached `height`. Checked in the contract's queue, i.e. after a removal
 // queued earlier: syncing a released contract would subscribe to it again.
-// `beforeSync` runs right before the sync.
+// Also skipped if `signal` aborted while this waited in the queue (a sync that
+// started runs to completion). `beforeSync` runs right before the sync.
 export const syncIfBehind = function (
-  this: CheloniaContext, contractID: string, height: number, beforeSync?: () => void
+  this: CheloniaContext, contractID: string, height: number, beforeSync?: () => void,
+  signal?: AbortSignal
 ): Promise<void> {
   return sbp('chelonia/private/queueEvent', contractID, async () => {
+    if (signal?.aborted) return
     if (!this.subscriptionSet.has(contractID)) return
     const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
     if (localHeight == null || localHeight >= height) return

@@ -12,7 +12,7 @@ import './internals.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
   actionMessage, captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay,
-  retainedContract, sleep, waitFor
+  retainedContract, sleep, staleContract, waitFor
 } from './pubsub/test-harness.js'
 import type { RelayRequest, TestContract } from './pubsub/test-harness.js'
 import type { ChelRootState } from './types.js'
@@ -116,6 +116,46 @@ describe('chelonia/reset with a request that never settles', () => {
       }
     })
   }
+
+  // A raw `kv/set` runs outside the queues, but after a 409 it waits for the
+  // sync of the contract, which hangs here
+  it('ends a raw kv/set that waits for the sync after a 409, without retrying or subscribing again', async (t) => {
+    t.mock.method(Math, 'random', () => 0) // No back-off
+    const { contract } = await staleContract(relay, pubsub)
+    const { contractID } = contract
+    let answer!: (response: Response) => void
+    const hung = new Promise<Response>((resolve) => { answer = resolve })
+    let syncing = false
+    relay.onRequest = ({ path }) => {
+      if (path !== `/latestHEADinfo/${contractID}`) return
+      syncing = true
+      return hung
+    }
+    const data = { n: 1 }
+    let conflicts = 0
+    const work = sbp('chelonia/kv/set', contractID, 'raw', data, {
+      signingKeyId: contract.CSKid,
+      onconflict: async ({ etag }: { etag?: string | null }) => {
+        conflicts++
+        return [data, etag ?? undefined]
+      }
+    }).then(() => 'no error', (e: unknown) => (e as Error)?.name)
+    assert.ok(await waitFor(() => syncing), 'did not sync')
+    const logged = logs.fromNow()
+    const reset = sbp('chelonia/reset')
+    try {
+      assert.equal(await work, 'AbortError', 'the write did not reject with an AbortError')
+      assert.equal(conflicts, 0, 'tried to write again')
+    } finally {
+      answer(new Response('', { status: 500 }))
+      relay.onRequest = undefined
+      await reset
+    }
+    // Neither "retrying anyway" after the failed sync, nor a pubsub reconcile
+    // for a contract that the reset drops
+    const lines = logged.grep(/\[kv\/set\]|pubsub reconcile/).map(({ text }) => text)
+    assert.deepEqual(lines, [])
+  })
 
   // Like the other timeouts of the config (`timerDelay`)
   it('waits as long as it takes for 0, null, a negative, Infinity or a non-number', async () => {

@@ -4,7 +4,7 @@ import sbp from '@sbp/sbp'
 import { randomIntFromRange } from 'turtledash'
 import type { JSONObject, JSONType } from '../types.js'
 import { timerDelay, unrefTimer } from '../timer-utils.js'
-import { createCloseEvent } from './close-event.js'
+import { createCloseEvent } from '../utils.js'
 
 // ====== Enums ====== //
 

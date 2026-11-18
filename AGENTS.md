@@ -115,7 +115,7 @@ src/
 ├── db.ts                 # Database abstraction (in-memory default)
 ├── files.ts              # Encrypted file upload/download/delete
 ├── functions.ts          # CID creation, blake32Hash, base64 utilities
-├── utils.ts              # Key lookup, permissions, event stream utilities
+├── utils.ts              # Key lookup, permissions, event stream, abort and close event utilities
 ├── errors.ts             # Custom error classes via ChelErrorGenerator factory
 ├── events.ts             # Event name constants
 ├── constants.ts          # INVITE_STATUS enum
@@ -130,7 +130,6 @@ src/
 ├── zkppConstants.ts      # ZKPP constants (AUTHSALT, CONTRACTSALT, etc.)
 ├── pubsub/
 │   ├── index.ts          # WebSocket PubSub client with reconnection logic
-│   ├── close-event.ts    # createCloseEvent(), shared by the client and test-harness.ts
 │   ├── test-harness.ts   # Test-only fake pubsub server (fake global WebSocket, fault injection) + fake relay
 │   ├── index.test.ts     # Tests for reconnection delay
 │   ├── recovery.test.ts  # Unanswered requests, retry budget, diagnostic logs

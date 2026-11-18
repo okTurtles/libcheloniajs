@@ -3,7 +3,6 @@ import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
 import {
   cloneDeep,
-  delay,
   difference,
   has,
   intersection,
@@ -75,6 +74,8 @@ import {
 } from './signedData.js'
 import './time-sync.js'
 import {
+  abortableDelay,
+  abortReason,
   buildShelterAuthorizationHeader,
   checkCanBeGarbageCollected,
   clearObject,
@@ -87,6 +88,7 @@ import {
   getContractIDfromKeyId,
   handleFetchResult,
   httpErrorMessage,
+  raceAbort,
   reactiveClearObject
 } from './utils.js'
 import {
@@ -3210,25 +3212,17 @@ export default sbp('sbp/selectors/register', {
             // Honour caller-side abort at every retry boundary so a
             // cancellation that lands between requests is respected
             // without waiting for the next fetch.
-            if (callerSignal?.aborted) {
-              throw callerSignal.reason instanceof Error
-                ? callerSignal.reason
-                : new DOMException('Aborted', 'AbortError')
-            }
+            if (callerSignal?.aborted) throw abortReason(callerSignal)
             if (!hasOnconflict) {
               // Can't resolve automatically if there's no conflict handler
               throw new Error(
                 `kv/set failed with status ${response.status} and no onconflict handler was provided`
               )
             }
-            await delay(randomIntFromRange(0, 1500))
-            // Aborted during the back-off (e.g., by `chelonia/reset`): the next
-            // request fails anyway, and a sync started now could outlive the reset
-            if (fetchSignal.aborted) {
-              throw fetchSignal.reason instanceof Error
-                ? fetchSignal.reason
-                : new DOMException('Aborted', 'AbortError')
-            }
+            // An abort (e.g., by `chelonia/reset`) ends the back-off at once: the
+            // next request would fail anyway, and a sync started now could
+            // outlive the reset
+            await abortableDelay(randomIntFromRange(0, 1500), fetchSignal)
             // A 409 means that the value wasn't signed with the contract's
             // current height: some events haven't reached us. They may still
             // arrive over pubsub during the delay above, but if they didn't
@@ -3236,19 +3230,33 @@ export default sbp('sbp/selectors/register', {
             // fail the same way, so sync (once per call). Only contracts that
             // Chelonia wants are synced, as syncing subscribes to a contract.
             if (response.status === 409 && !syncedAfterConflict) {
+              const instance = this._instance
+              const globalSignal = this.abortController.signal
+              let synced = false
+              // Unless an event past `signedHeight` arrived meanwhile
+              const sync = syncIfBehind.call(this, contractID, signedHeight + 1, () => {
+                synced = true
+              }, fetchSignal).finally(() => {
+                // Like publishing, re-subscribe to the contract if the pubsub
+                // client lost it, also if an abort ended the wait for the sync.
+                // Not during or after a reset (which aborts `globalSignal` first).
+                if (
+                  synced && this.pubsub && instance === this._instance && !globalSignal.aborted
+                ) {
+                  reconcilePubsub.call(this, 'kv/set')
+                }
+              })
               try {
-                // Unless an event past `signedHeight` arrived meanwhile
-                await syncIfBehind.call(this, contractID, signedHeight + 1, () => {
-                  syncedAfterConflict = true
-                })
+                // An abort ends the wait at once but not the sync, which other
+                // work queued for the contract may be waiting for
+                await raceAbort(sync, fetchSignal)
               } catch (e) {
+                if (fetchSignal.aborted) throw abortReason(fetchSignal)
                 console.warn(
                   `[kv/set] Error syncing ${contractID} after a conflict setting ${key}; retrying anyway: ${(e as Error)?.message || e}`
                 )
               }
-              // Like publishing, re-subscribe to the contract if the pubsub
-              // client lost it
-              if (syncedAfterConflict && this.pubsub) reconcilePubsub.call(this, 'kv/set')
+              syncedAfterConflict = synced
             }
             if (await resolveData()) {
               continue

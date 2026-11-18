@@ -151,6 +151,30 @@ async function kvSet (
 const describeError = (e: unknown) =>
   e ? `${(e as Error).name}: ${(e as Error).message}` : 'no error'
 
+// Holds the next `GET /latestHEADinfo/<contractID>` (i.e. the next sync of the
+// contract) until `release()`
+function holdSync (contractID: string) {
+  let release!: () => void
+  const released = new Promise<void>((resolve) => { release = resolve })
+  let held = false
+  relay.onRequest = (request) => {
+    if (held || request.path !== `/latestHEADinfo/${contractID}`) return
+    held = true
+    return released.then(() => Response.json(relay.headInfo(contractID)))
+  }
+  return { release, isHeld: () => held }
+}
+
+// How `promise` has settled so far
+function settlement (promise: Promise<unknown>) {
+  const state: { settled: boolean; error?: unknown } = { settled: false }
+  promise.then(() => { state.settled = true }, (e) => {
+    state.settled = true
+    state.error = e
+  })
+  return state
+}
+
 const kvValue = async (contractID: string) =>
   ((await sbp('chelonia/kv/get', contractID, KEY)) as ChelKvGetResult | null)?.data
 
@@ -351,7 +375,7 @@ describe('a signal that aborts during the back-off after a 409', () => {
     })
   })
 
-  it('stops kv/update before it syncs, with an AbortError also for a reason that is not an Error', async (t) => {
+  it('stops kv/update at once, with an AbortError also for a reason that is not an Error', async (t) => {
     const contract = await retainedContract(relay, pubsub)
     conflictOnce()
     t.mock.method(Math, 'random', () => 0.5) // 750 ms back-off
@@ -364,9 +388,174 @@ describe('a signal that aborts during the back-off after a 409', () => {
       signal: controller.signal
     })
     assert.ok(await waitFor(() => writeStatuses(from)[0] === 409), 'no 409')
+    const abortedAt = performance.now()
     controller.abort('stop')
     await assert.rejects(update, (e) => (e as Error)?.name === 'AbortError')
+    const took = performance.now() - abortedAt
+    assert.ok(took < 300, `rejected ${took} ms after the abort, not at once`)
     assert.equal(relay.syncsOf(contract.contractID, from), 0, 'synced after the abort')
+  })
+
+  it('ends raw kv/set at once, and it neither syncs nor writes again', async (t) => {
+    const contract = await retainedContract(relay, pubsub)
+    conflictOnce()
+    t.mock.method(Math, 'random', () => 0.5) // 750 ms back-off
+    const from = relay.requests.length
+    const controller = new AbortController()
+    let outcome: Awaited<ReturnType<typeof kvSet>> | undefined
+    kvSet(contract, { messageHash: 'b' }, { signal: controller.signal }).then((result) => {
+      outcome = result
+    })
+    assert.ok(await waitFor(() => writeStatuses(from)[0] === 409), 'no 409')
+    const reason = new DOMException('caller abort', 'AbortError')
+    const abortedAt = performance.now()
+    controller.abort(reason)
+    const result = await waitFor(() => outcome)
+    const took = performance.now() - abortedAt
+    assert.equal(result?.error, reason, describeError(result?.error))
+    assert.ok(took < 300, `rejected ${took} ms after the abort, not at once`)
+    // Nor does anything happen once the back-off would have ended
+    await sleep(850 - took)
+    assert.deepEqual(writeStatuses(from), [409])
+    assert.equal(relay.syncsOf(contract.contractID, from), 0, 'synced after the abort')
+  })
+})
+
+describe('a signal that aborts while kv/set waits for the sync after a 409', () => {
+  const SLOT = 'queuedValue'
+
+  before(() => {
+    sbp('chelonia/kv/defineSlot', {
+      contractType: 'test/contract',
+      key: SLOT,
+      defaultValue: {},
+      encryptionKeyName: null,
+      signingKeyName: '#csk',
+      autoLoad: 'never'
+    })
+  })
+
+  // A raw `kv/set` on a stale contract, aborted with `reason` while its sync
+  // is held. Checks that it ends at once, and that the sync goes on and
+  // subscribes the pubsub client again. Returns the error of the write.
+  async function abortDuringSync (reason: unknown): Promise<unknown> {
+    const { contract } = await staleContract(relay, pubsub)
+    const { contractID } = contract
+    const hold = holdSync(contractID)
+    const from = relay.requests.length
+    const controller = new AbortController()
+    let outcome: Awaited<ReturnType<typeof kvSet>> | undefined
+    kvSet(contract, { messageHash: 'a' }, { signal: controller.signal }).then((result) => {
+      outcome = result
+    })
+    let error: unknown
+    try {
+      assert.ok(await waitFor(hold.isHeld), 'did not sync')
+      controller.abort(reason)
+      const result = await waitFor(() => outcome, { timeout: 500 })
+      assert.ok(result, 'still waiting for the sync')
+      assert.deepEqual(result.statuses, [409])
+      error = result.error
+    } finally {
+      hold.release()
+    }
+    await sbp('chelonia/contract/wait', contractID)
+    assert.equal(localHeight(contractID), relay.headInfo(contractID)!.height, 'not synced')
+    assert.deepEqual(writeStatuses(from), [409], 'wrote again after the abort')
+    assert.ok(await waitFor(subscribed(pubsub, [contractID])), 'not re-subscribed')
+    return error
+  }
+
+  it('rejects kv/set before the sync ends, with the signal\'s reason', async (t) => {
+    t.mock.method(Math, 'random', () => 0) // No back-off
+    const reason = new DOMException('caller abort', 'AbortError')
+    const error = await abortDuringSync(reason)
+    assert.equal(error, reason, describeError(error))
+  })
+
+  it('rejects with an AbortError for a reason that is not an Error', async (t) => {
+    t.mock.method(Math, 'random', () => 0)
+    const error = await abortDuringSync('stop')
+    assert.equal((error as Error)?.name, 'AbortError', describeError(error))
+    assert.equal((error as Error)?.message, 'Aborted')
+  })
+
+  it('frees the public queue for the next kv/update', async (t) => {
+    t.mock.method(Math, 'random', () => 0)
+    const { contract } = await staleContract(relay, pubsub)
+    const { contractID } = contract
+    const hold = holdSync(contractID)
+    const from = relay.requests.length
+    const controller = new AbortController()
+    const first = settlement(sbp('chelonia/kv/update', {
+      contractID, key: SLOT, updater: () => ({ n: 1 }), signal: controller.signal
+    }))
+    const second = settlement(sbp('chelonia/kv/update', {
+      contractID, key: SLOT, updater: () => ({ n: 2 })
+    }))
+    try {
+      assert.ok(await waitFor(hold.isHeld), 'did not sync')
+      controller.abort()
+      assert.ok(await waitFor(() => first.settled, { timeout: 500 }), 'still waiting for the sync')
+      assert.equal((first.error as Error)?.name, 'AbortError', describeError(first.error))
+      // The next update runs (its write gets a 409 too: the sync is held)
+      assert.ok(
+        await waitFor(() => writeStatuses(from).length === 2, { timeout: 500 }),
+        `the next update did not write: ${JSON.stringify(writeStatuses(from))}`
+      )
+    } finally {
+      hold.release()
+    }
+    assert.ok(await waitFor(() => second.settled), 'the next update did not end')
+    assert.equal(second.error, undefined, describeError(second.error))
+    assert.deepEqual(writeStatuses(from), [409, 409, 204])
+  })
+
+  it('does not sync if the signal aborts while the sync waits in the queue', async (t) => {
+    t.mock.method(Math, 'random', () => 0)
+    const contract = await retainedContract(relay, pubsub)
+    const { contractID } = contract
+    let queueFree = false
+    let first = true
+    relay.onRequest = (request) => {
+      if (!first || !isKvWrite(request)) return
+      first = false
+      keepQueueBusy(contractID, 300)
+      sbp('chelonia/private/queueEvent', contractID, () => { queueFree = true })
+      return kvConflict()
+    }
+    const from = relay.requests.length
+    const controller = new AbortController()
+    let outcome: Awaited<ReturnType<typeof kvSet>> | undefined
+    kvSet(contract, { messageHash: 'q' }, { signal: controller.signal }).then((result) => {
+      outcome = result
+    })
+    assert.ok(await waitFor(() => writeStatuses(from)[0] === 409), 'no 409')
+    controller.abort()
+    const result = await waitFor(() => outcome)
+    assert.equal((result?.error as Error)?.name, 'AbortError', describeError(result?.error))
+    assert.ok(!queueFree, 'waited for the queue')
+    await sbp('chelonia/contract/wait', contractID)
+    assert.equal(relay.syncsOf(contractID, from), 0)
+  })
+
+  it('still logs and retries when the sync fails, with a signal', async (t) => {
+    t.mock.method(Math, 'random', () => 0)
+    const contract = await retainedContract(relay, pubsub)
+    const logged = logs.fromNow()
+    relay.onRequest = (request) => {
+      if (isKvWrite(request)) return kvConflict()
+      if (request.path === `/latestHEADinfo/${contract.contractID}`) {
+        return new Response('', { status: 500 })
+      }
+    }
+    const result = await kvSet(contract, { messageHash: 'x' }, {
+      maxAttempts: 3, signal: new AbortController().signal
+    })
+    assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
+    assert.deepEqual(result.statuses, [409, 409, 409])
+    assert.equal(result.syncs, 1)
+    assert.equal(logged.grep(/\[kv\/set\] .*sync/).length, 1)
   })
 })
 
@@ -377,10 +566,18 @@ describe('chelonia/reset during the back-off of a raw kv/set', () => {
     conflictOnce()
     t.mock.method(Math, 'random', () => 0.5) // 750 ms back-off
     const from = relay.requests.length
-    const write = kvSet(contract, { messageHash: 'r' })
+    let settledAt = Infinity
+    const write = kvSet(contract, { messageHash: 'r' }).then((result) => {
+      settledAt = performance.now()
+      return result
+    })
     assert.ok(await waitFor(() => writeStatuses(from)[0] === 409), 'no 409')
+    const resetAt = performance.now()
     await sbp('chelonia/reset', () => sleep(1500))
     assert.equal(((await write).error as Error | undefined)?.name, 'AbortError')
+    // The reset aborts before `postCleanupFn`, and the write ends at once
+    const took = settledAt - resetAt
+    assert.ok(took < 300, `rejected ${took} ms after the reset started, not at once`)
     assert.equal(relay.syncsOf(contract.contractID, from), 0, 'synced after the abort')
   })
 })

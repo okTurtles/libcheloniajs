@@ -143,9 +143,12 @@ in `kv/set conflict setting KV value`.
   logged and the write retried anyway. After the sync, failed or not,
   `kv/set` also subscribes the pubsub client again to the contracts it
   lost.
-- An abort during the back-off (the caller's `signal`, or
-  `chelonia/reset`) ends the write before it syncs, with the signal's
-  reason (an `AbortError` if the reason isn't an `Error`).
+- An abort (the caller's `signal`, or `chelonia/reset`) ends the write at
+  once, with the signal's reason (an `AbortError` if the reason isn't an
+  `Error`). During the back-off, it also skips the sync. During the wait
+  for the sync, it skips a sync still in the queue; a sync that started
+  runs to completion (unless the reset aborts it), and the pubsub client
+  still subscribes again after it (but not during a reset).
 - Because of the queue wait, never await `chelonia/kv/set` from inside the
   contract's internal queue (e.g. a side effect), even for a contract
   Chelonia isn't subscribed to: a `409` would deadlock.

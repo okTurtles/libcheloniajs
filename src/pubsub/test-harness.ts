@@ -19,7 +19,7 @@ import { EVENT_HANDLED } from '../events.js'
 import { createCID } from '../functions.js'
 import { signedOutgoingDataWithRawKey } from '../signedData.js'
 import type { ChelRootState, JSONType } from '../types.js'
-import { createCloseEvent } from './close-event.js'
+import { createCloseEvent } from '../utils.js'
 import {
   createClient, NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, REQUEST_TYPE, RESPONSE_TYPE
 } from './index.js'

@@ -51,6 +51,7 @@ import type {
   SlotDefinition,
   SlotDefinitionSource
 } from './types.js'
+import { abortReason } from './utils.js'
 
 // Internal sentinel thrown by the onconflict callback when the reducer
 // returns KV_NOOP. The outer catch checks for the Symbol.for marker via
@@ -708,10 +709,7 @@ function decrementPendingLoad (ctx: CheloniaContext, contractID: string): void {
 }
 
 function throwIfSignalAborted (signal?: AbortSignal): void {
-  if (!signal?.aborted) return
-  throw signal.reason instanceof Error
-    ? signal.reason
-    : new DOMException('Aborted', 'AbortError')
+  if (signal?.aborted) throw abortReason(signal)
 }
 
 type KvConflictCause = { currentData?: JSONType; etag?: string | null }
