@@ -65,7 +65,6 @@ import {
   clearReprocessDebounceAll, reconcilePubsub, syncIfBehind, type PublishOptions
 } from './internals.js'
 import './kv.js'
-import { queueEventOrReject } from './queue-event.js'
 import {
   isSignedData,
   type RawSignedData,
@@ -89,6 +88,7 @@ import {
   getContractIDfromKeyId,
   handleFetchResult,
   httpErrorMessage,
+  queueEventOrReject,
   raceAbort,
   reactiveClearObject
 } from './utils.js'

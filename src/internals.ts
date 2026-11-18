@@ -51,7 +51,6 @@ import {
 import { multicodes } from './functions.js'
 import { REQUEST_TYPE } from './pubsub/index.js'
 import type { PubSubClient } from './pubsub/index.js'
-import { queueEventOrReject } from './queue-event.js'
 import {
   clearReingestTrackerForContract,
   noteFutureEvent,
@@ -85,6 +84,7 @@ import {
   httpErrorMessage,
   keyAdditionProcessor,
   logEvtError,
+  queueEventOrReject,
   recreateEvent,
   updateKey,
   validateKeyAddPermissions,

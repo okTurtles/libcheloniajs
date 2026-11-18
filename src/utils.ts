@@ -23,12 +23,12 @@ import type { EncryptedData } from './encryptedData.js'
 import {
   ChelErrorForkedChain,
   ChelErrorResourceGone,
+  ChelErrorUnexpected,
   ChelErrorUnexpectedHttpResponseCode,
   ChelErrorWarning
 } from './errors.js'
 import { CONTRACT_IS_PENDING_KEY_REQUESTS } from './events.js'
 import { b64ToStr } from './functions.js'
-import { queueEventOrReject } from './queue-event.js'
 import type { SignedData } from './signedData.js'
 import { isSignedData } from './signedData.js'
 import {
@@ -1372,4 +1372,17 @@ export const updateKey = (key: ChelContractKey, updatedKey: ChelContractKey): Ch
       : {}),
     ...(updatedKey.meta ? { meta: updatedKey.meta } : {})
   }
+}
+
+// An SBP filter can veto `chelonia/private/queueEvent`, which then returns
+// `undefined`. Reject instead, so that no caller takes work that never ran
+// for done.
+export function queueEventOrReject (
+  queueName: string,
+  invocation: Parameters<typeof sbp> | (() => unknown)
+): ReturnType<typeof sbp> {
+  const queued = sbp('chelonia/private/queueEvent', queueName, invocation)
+  return queued === undefined
+    ? Promise.reject(new ChelErrorUnexpected(`[chelonia] queueing on ${queueName} was vetoed`))
+    : queued
 }
