@@ -785,28 +785,52 @@ export default sbp('sbp/selectors/register', {
     const drainTimer = drainTimeout === undefined
       ? undefined
       : unrefTimer(setTimeout(() => abortController.abort(), drainTimeout))
+    // The drain is best effort, like the timer above. An SBP filter can veto
+    // a contract's queue, and waiting on it then rejects. Stopping the reset
+    // would keep the state and the secret keys in memory, so log the failure
+    // and still wait for the other contracts' queues
+    const logDrainError = (what: string, e: unknown) => {
+      console.error(`[chelonia/reset] Draining ${what} failed; resetting anyway`, e)
+    }
+    const drain = async (selector: string) => {
+      const contractIDs = Object.keys(sbp(this.config.stateSelector).contracts)
+      const results = await Promise.allSettled(
+        contractIDs.map(async (cID) => { await sbp(selector, cID) })
+      )
+      results.forEach((result, i) => {
+        if (result.status === 'rejected') {
+          logDrainError(`${selector} for ${contractIDs[i]}`, result.reason)
+        }
+      })
+    }
     try {
       // wait for any pending sync operations to finish before saving
       Object.keys(this.postSyncOperations).forEach((cID) => {
         sbp('chelonia/private/enqueuePostSyncOps', cID)
       })
-      await sbp('chelonia/contract/waitPublish')
-      await sbp('chelonia/contract/wait')
+      await drain('chelonia/contract/waitPublish')
+      await drain('chelonia/contract/wait')
       // do this again to catch operations that are the result of side-effects
       // or post sync ops
       Object.keys(this.postSyncOperations).forEach((cID) => {
         sbp('chelonia/private/enqueuePostSyncOps', cID)
       })
-      await sbp('chelonia/contract/waitPublish')
-      await sbp('chelonia/contract/wait')
+      await drain('chelonia/contract/waitPublish')
+      await drain('chelonia/contract/wait')
+      // Not only in `finally`: the timer bounds the drain and must not abort
+      // anything later (e.g. if `chelonia/_init` replaced the controller)
       clearTimeout(drainTimer)
       // The waits above drained the queued KV writes (`kv/update`, `kv/clear`,
       // `kv/queuedSet`). Before `postCleanupFn` and the teardown, abort what runs
       // outside those queues (e.g. a raw `kv/set`) and drain what is still queued
       this.abortController.abort()
       this.abortController = new AbortController()
-      await sbp('chelonia/kv/_waitInFlight')
-      await sbp('chelonia/contract/wait')
+      try {
+        await sbp('chelonia/kv/_waitInFlight')
+      } catch (e) {
+        logDrainError('chelonia/kv/_waitInFlight', e)
+      }
+      await drain('chelonia/contract/wait')
       const result = await postCleanupFn?.()
       // The following are all synchronous operations
       const rootState = sbp(this.config.stateSelector)

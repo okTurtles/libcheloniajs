@@ -1978,20 +1978,31 @@ export default (sbp('sbp/selectors/register', {
   // `kvLocalEchoCIDs`. `_loadSlot` syncs are drained through source #1;
   // if the contract is released before a queued load runs, `_loadSlot`'s
   // subscription guard bails out before mutating state.
-  'chelonia/kv/_waitInFlight': function (
+  // A lane that fails (e.g. an SBP filter vetoed it) doesn't stop the wait
+  // for the others; once all have settled, this rejects with an
+  // `AggregateError` of the failures, and `chelonia/reset` logs it.
+  'chelonia/kv/_waitInFlight': async function (
     this: CheloniaContext
-  ): Promise<unknown> {
+  ): Promise<void> {
     const ids = new Set<string>(this.kvSlotsByContractID.keys())
     this.kvLocalEchoCIDs.forEach((_cids, echoKey) => {
       const idx = echoKey.indexOf(KV_KEY_SEPARATOR)
       if (idx > 0) ids.add(echoKey.slice(0, idx))
     })
     this.kvPendingWrites.forEach((_n, cID) => ids.add(cID))
-    return Promise.all(
-      Array.from(ids).map((cID) =>
-        sbp('chelonia/queueInvocation', cID, ['chelonia/private/noop'])
-      )
+    const contractIDs = Array.from(ids)
+    const results = await Promise.allSettled(
+      contractIDs.map(async (cID) => {
+        await sbp('chelonia/queueInvocation', cID, ['chelonia/private/noop'])
+      })
     )
+    const failed = contractIDs.filter((_cID, i) => results[i].status === 'rejected')
+    if (failed.length) {
+      throw new AggregateError(
+        results.flatMap((result) => result.status === 'rejected' ? [result.reason] : []),
+        `[chelonia/kv/_waitInFlight] Waiting failed for ${failed.join(', ')}`
+      )
+    }
   },
 
   // Private. See KV-REVAMPED §11.4 bullet 3 (reconnect hook).

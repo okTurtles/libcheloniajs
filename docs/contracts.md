@@ -781,6 +781,11 @@ aborts in-flight messages, clears `rootState.contracts` and
 - The two-argument form is `(newState, postCleanupFn)`.
 - The return value is whatever `postCleanupFn` returned (or
   `undefined`).
+- The drain is best effort. If an SBP filter vetoes a contract's queue,
+  `reset` logs it (`[chelonia/reset] Draining ... failed; resetting
+  anyway`), still waits for the other contracts' queues, and then clears
+  everything as usual. A veto doesn't make it reject, so a logout can't
+  leave the secret keys in memory.
 - `chelonia/reset` does **not** close the pubsub socket — call
   `pubsub.destroy()` (or just let GC handle it) if you want a hard
   shutdown.

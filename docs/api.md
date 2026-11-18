@@ -25,7 +25,7 @@ For the authoritative signatures, follow the source links.
 | `chelonia/_init` | `src/chelonia.ts` | Initialize the Chelonia context. Runs automatically the first time a selector that needs it is invoked. |
 | `chelonia/config` | `src/chelonia.ts` | Return a copy of the current `CheloniaConfig` that `chelonia/configure` accepts back. Most functions are left out ([details](./configure.md#reconfigure-semantics)). |
 | `chelonia/configure` | `src/chelonia.ts` | Apply a `CheloniaConfig`. See [`configure.md`](./configure.md). |
-| `chelonia/reset` | `src/chelonia.ts` | Drain publishes and the contracts' queues (up to [`resetDrainTimeout`](./configure.md#connection) ms), abort in-flight messages, clear state. `(newState?, postCleanupFn?)`. |
+| `chelonia/reset` | `src/chelonia.ts` | Drain publishes and the contracts' queues (up to [`resetDrainTimeout`](./configure.md#connection) ms), abort in-flight messages, clear state. `(newState?, postCleanupFn?)`. A queue that an SBP filter vetoes is logged and skipped: the reset still clears the state and the secret keys. |
 | `chelonia/connect` | `src/chelonia.ts` | Open the pubsub WebSocket (destroying any previous client), subscribe it to Chelonia's subscribed contracts and start the periodic [subscription check](./configure.md#connection). Returns a `PubSubClient`. |
 | `chelonia/defineContract` | `src/chelonia.ts` | Register a contract definition (actions / getters / methods / metadata). |
 | `chelonia/pubsub/update` | `src/chelonia.ts` | Reconcile pubsub subscriptions (pending SUBs included) with the subscription set. Auto-called after subscription changes, (re)connections and periodically; call manually if you swap `stateSelector` at runtime. |
