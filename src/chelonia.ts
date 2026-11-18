@@ -1339,7 +1339,16 @@ export default sbp('sbp/selectors/register', {
           // to prevent gi.db from throwing "bad previousHEAD" errors.
           // Calling via SBP also makes it simple to implement 'test/backend.js'
           const { contractID } = SPMessage.deserializeHEAD(msg.data as string)
-          sbp('chelonia/private/in/enqueueHandleEvent', contractID, msg.data)
+          // Nothing waits for this promise, so log its failures here: an
+          // unhandled rejection can stop a Node process. It rejects when a
+          // filter vetoes queueing on the contract's queue, or when
+          // handleEvent throws (handleEvent has already logged that error).
+          // If a filter vetoes this selector itself, `sbp` returns `undefined`.
+          sbp('chelonia/private/in/enqueueHandleEvent', contractID, msg.data)?.catch(
+            (e: unknown) => {
+              console.error(`[chelonia] Error processing entry event for ${contractID}`, e)
+            }
+          )
         }
       }
     })

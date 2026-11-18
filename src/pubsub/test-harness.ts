@@ -572,6 +572,9 @@ export const localHeight = (contractID: string): number | undefined =>
 // so that whatever is queued meanwhile (e.g., a released contract's removal)
 // waits
 export const keepQueueBusy = (contractID: string, ms: number): void => {
+  // Not `queueEventOrReject`: its rejection would end up in the `.catch` below
+  // and leave the queue idle. A vetoed call throws a TypeError here instead,
+  // which fails the test.
   sbp('chelonia/private/queueEvent', contractID, () => sleep(ms)).catch(() => {})
 }
 
