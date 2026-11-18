@@ -916,7 +916,7 @@ const publicMethods: {
     clearTimeout(client.connectionTimeoutID)
     clearTimeout(client.nextConnectionAttemptDelayID)
     clearTimeout(client.pingTimeoutID)
-    // Do not clear RSI timeouts.
+    for (const timeoutID of client.promiseTimeoutsByMessageID.values()) clearTimeout(timeoutID)
     client.connectionTimeoutID = undefined
     client.nextConnectionAttemptDelayID = undefined
     client.pingTimeoutID = undefined
@@ -1073,9 +1073,21 @@ const publicMethods: {
    * as the server is meant to ignore retries once a given request ID has been processed.
    */
   tryRsiOperation (op: RsiMessage) {
-    this.pendingRsiOperations.set(op.id, op)
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify(op))
+    const client = this
+    const { options, socket } = client
+    client.pendingRsiOperations.set(op.id, op)
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(op))
+      if (options.rsiTimeout) {
+        clearTimeout(client.promiseTimeoutsByMessageID.get(op.id))
+        client.promiseTimeoutsByMessageID.set(op.id, setTimeout(() => {
+          client.promiseRejectersByMessageID.get(op.id)?.(new Error(`RSI ${op.id} timed out`))
+          client.promiseRejectersByMessageID.delete(op.id)
+          client.promiseResolversByMessageID.delete(op.id)
+          client.pendingRsiOperations.delete(op.id)
+          client.promiseTimeoutsByMessageID.delete(op.id)
+        }, options.rsiTimeout))
+      }
     }
   },
 
@@ -1101,13 +1113,6 @@ const publicMethods: {
     const client = this
     const op = this.createRsiMessage(data)
     return await new Promise((resolve, reject) => {
-      client.promiseTimeoutsByMessageID.set(op.id, setTimeout(() => {
-        client.pendingRsiOperations.delete(op.id)
-        client.promiseResolversByMessageID.delete(op.id)
-        client.promiseRejectersByMessageID.delete(op.id)
-        client.promiseTimeoutsByMessageID.delete(op.id)
-        reject(new Error(`RSI ${op.id} timed out`))
-      }, client.options.rsiTimeout))
       client.promiseResolversByMessageID.set(op.id, resolve)
       client.promiseRejectersByMessageID.set(op.id, reject)
       client.tryRsiOperation(op)
