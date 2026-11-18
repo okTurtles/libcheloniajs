@@ -392,12 +392,12 @@ no WebSocket server in the repo; the file's header comment lists what it fakes).
 and relay test helpers go there too. Examples: `src/pubsub/recovery.test.ts`,
 `src/chelonia-publish-receipt.test.ts`.
 
-Generic test helpers (e.g. `waitMicrotasks`, `until`, `within`) live in `src/test-utils.ts`, a
-plain module that registers no selectors. A test must fail rather than hang when the behaviour
-it checks regresses: poll with `until(cond, label)` and bound a promise that might never settle
-with `within(promise, label)`. Tests that use the harness poll with its `waitFor` and capture
-logs with its `captureConsole`, because `emulateSleep()` shifts the `Date.now()` that `until`
-reads.
+Generic test helpers (e.g. `waitMicrotasks`, `until`, `within`, `captureConsole`) live in
+`src/test-utils.ts`, a plain module that registers no selectors; `test-harness.ts` re-exports
+`captureConsole`. A test must fail rather than hang when the behaviour it checks regresses:
+poll with `until(cond, label)` and bound a promise that might never settle with
+`within(promise, label)`. Tests that use the harness poll with its `waitFor` instead, because
+`emulateSleep()` shifts the `Date.now()` that `until` reads.
 
 ## Common Gotchas
 

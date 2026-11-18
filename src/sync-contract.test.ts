@@ -101,7 +101,7 @@ describe('Contract sync and removal', () => {
     const removals = change.permanent ? removedPermanently : removed
     removals.push(...change.removed)
   }
-  const errorsLogged = () => logs.logged.filter(({ method }) => method === 'error')
+  const errorsLogged = () => logs.entries.filter(({ level }) => level === 'error')
 
   beforeEach(() => {
     sbp('chelonia/_init')
@@ -188,7 +188,7 @@ describe('Contract sync and removal', () => {
     )
     const state = rootState()
     state._kv = { ...state._kv, [cid]: {} }
-    logs.logged.length = 0
+    logs.entries.length = 0
   }
 
   for (const ephemeral of [false, true]) {
