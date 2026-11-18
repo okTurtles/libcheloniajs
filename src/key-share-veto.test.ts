@@ -12,11 +12,12 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
 import { encryptedOutgoingDataWithRawKey } from './encryptedData.js'
+import { CONTRACT_HAS_RECEIVED_KEYS } from './events.js'
 import { Secret } from './Secret.js'
 import { SPMessage } from './SPMessage.js'
 import type { SPKey, SPOpContract, SPOpValue, ProtoSPOpKeyShare } from './SPMessage.js'
 import { signedOutgoingDataWithRawKey } from './signedData.js'
-import { captureConsole, waitMicrotasks, within } from './test-utils.js'
+import { captureConsole, until, waitMicrotasks, within } from './test-utils.js'
 import type { ChelRootState, CheloniaConfig } from './types.js'
 
 // Decides, for each `chelonia/private/queueEvent` call, whether to veto it
@@ -85,7 +86,15 @@ const keyShare = (targetContractID: string): SPMessage => {
   })
 }
 
+// Another contract that this client is subscribed to, which the server
+// reports as up to date
+const subscribedOther = 'subscribed-other-contract'
+const subscribedOtherHead = { HEAD: `head-of-${subscribedOther}`, height: 1 }
+
 const stubFetch = async (url: string): Promise<Response> => {
+  if (url.endsWith(`/latestHEADinfo/${subscribedOther}`)) {
+    return Response.json(subscribedOtherHead)
+  }
   if (url.endsWith(`/latestHEADinfo/${cid}`)) {
     return Response.json({ HEAD: cid, height: 0 })
   }
@@ -103,6 +112,11 @@ describe('OP_KEY_SHARE when a filter vetoes the follow-up work', () => {
   let logs: ReturnType<typeof captureConsole>
   const unhandled: unknown[] = []
   const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+  // The CONTRACT_HAS_RECEIVED_KEYS events emitted
+  const keysReceived: { contractID: string; sharedWithContractID: string }[] = []
+  const onKeysReceived = (
+    { contractID, sharedWithContractID }: { contractID: string; sharedWithContractID: string }
+  ) => { keysReceived.push({ contractID, sharedWithContractID }) }
 
   beforeEach(async () => {
     sbp('chelonia/_init')
@@ -113,7 +127,9 @@ describe('OP_KEY_SHARE when a filter vetoes the follow-up work', () => {
     } as Partial<CheloniaConfig>)
     sbp('chelonia/storeSecretKeys', new Secret([{ key: CEK, transient: true }]))
     unhandled.length = 0
+    keysReceived.length = 0
     process.on('unhandledRejection', onUnhandled)
+    sbp('okTurtles.events/on', CONTRACT_HAS_RECEIVED_KEYS, onKeysReceived)
     logs = captureConsole()
     await within(sbp('chelonia/contract/retain', cid), 'retain')
   })
@@ -122,11 +138,15 @@ describe('OP_KEY_SHARE when a filter vetoes the follow-up work', () => {
     veto = () => false
     logs.restore()
     process.off('unhandledRejection', onUnhandled)
+    sbp('okTurtles.events/off', CONTRACT_HAS_RECEIVED_KEYS, onKeysReceived)
     sbp('chelonia/_init')
   })
 
-  const receive = async (message: SPMessage) => {
-    await within(sbp('chelonia/private/in/enqueueHandleEvent', cid, message.serialize()), 'event')
+  // `onQueued` runs once the handling of `message` is queued
+  const receive = async (message: SPMessage, onQueued?: () => void) => {
+    const handled = sbp('chelonia/private/in/enqueueHandleEvent', cid, message.serialize())
+    onQueued?.()
+    await within(handled, 'event')
     await waitMicrotasks()
     assert.strictEqual(rootState().contracts[cid]?.HEAD, message.hash())
   }
@@ -164,5 +184,49 @@ describe('OP_KEY_SHARE when a filter vetoes the follow-up work', () => {
       logs.grep(new RegExp(`postKeyShare for ${cid} during OP_KEY_SHARE.*vetoed`)).length,
       1
     )
+  })
+
+  // Unlike for the current contract, the side effect waits for this re-sync
+  it('logs a vetoed re-sync of another contract and goes on with the key share', async () => {
+    // This client is subscribed to the other contract and couldn't decrypt
+    // part of it without the shared key, so receiving the key re-syncs it
+    rootState().contracts[subscribedOther] = {
+      ...subscribedOtherHead, previousKeyOp: '', type: 'test/other'
+    }
+    await within(sbp('chelonia/private/in/sync', subscribedOther), 'sync')
+    rootState().contracts[subscribedOther]!.missingDecryptionKeyIds = [keyId(OTHER_CEK)]
+    rootState()[subscribedOther] = { _vm: { authorizedKeys: {}, type: 'test/other' } }
+    veto = (queueName, invocation) => queueName === subscribedOther &&
+      isInvocationOf(invocation, 'chelonia/private/in/syncContract')
+    await receive(keyShare(subscribedOther))
+    await until(() => keysReceived.length > 0 || unhandled.length > 0, 'the keys event')
+    assert.deepStrictEqual(unhandled, [])
+    assert.strictEqual(
+      logs.grep(new RegExp(
+        `Error during sync for ${subscribedOther} during OP_KEY_SHARE for ${cid}.*vetoed`
+      )).length,
+      1
+    )
+    // The rest of the side effect still ran
+    assert.deepStrictEqual(keysReceived, [
+      { contractID: subscribedOther, sharedWithContractID: cid }
+    ])
+    // and the contract wasn't re-synced
+    assert.strictEqual(rootState()[subscribedOther]?._volatile?.dirty, true)
+  })
+
+  it('logs a vetoed CONTRACT_HAS_RECEIVED_KEYS event', async () => {
+    const other = 'other-contract'
+    // The event is the only function queued on the current contract's queue
+    // after the handling of the message
+    await receive(keyShare(other), () => {
+      veto = (queueName, invocation) => queueName === cid && typeof invocation === 'function'
+    })
+    const log = new RegExp(`emitting the CONTRACT_HAS_RECEIVED_KEYS event for ${cid}.*vetoed`)
+    await until(() => logs.grep(log).length > 0 || unhandled.length > 0, 'the log')
+    assert.deepStrictEqual(unhandled, [])
+    assert.strictEqual(logs.grep(log).length, 1)
+    assert.deepStrictEqual(logs.grep(/postKeyShare/), [])
+    assert.deepStrictEqual(keysReceived, [])
   })
 })
