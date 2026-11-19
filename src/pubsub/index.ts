@@ -549,18 +549,23 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     client.subscriptionSet.clear()
     client.pendingOperations.tClear(REQUEST_TYPE.UNSUB)
     client.pendingOperations.tClear(REQUEST_TYPE.KV_FILTER)
-    // Do not clear pending RSI operations, they will be retried upon reconnection.
+    // Do not clear the pending RSI operations if we're planning to reconnect,
+    // in order to retry them upon reconnection.
+    // However, their timers should have already been cleared and deleted in .clearAllTimers().
 
     if (client.shouldReconnect && client.options.reconnectOnDisconnection) {
       if (client.failedConnectionAttempts > client.options.maxRetries) {
+        client.destroy()
         sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_FAILED, client)
       } else {
-        // If we are definetely offline then do not try to reconnect now,
+        // If we are definetely offline then do not try to reconnect right now,
         // unless the server is local.
         if (!isDefinetelyOffline() || client.isLocal) {
           client.scheduleConnectionAttempt()
         }
       }
+    } else if (!client.shouldReconnect) {
+      client.destroy()
     }
   },
 
@@ -673,9 +678,6 @@ const defaultClientEventHandlers: ClientEventHandlers = {
 
   'reconnection-failed' () {
     console.warn('[pubsub] Reconnection failed')
-    const client = this
-
-    client.destroy()
   },
 
   'reconnection-scheduled' (event) {
@@ -917,6 +919,7 @@ const publicMethods: {
     clearTimeout(client.nextConnectionAttemptDelayID)
     clearTimeout(client.pingTimeoutID)
     for (const timeoutID of client.promiseTimeoutsByMessageID.values()) clearTimeout(timeoutID)
+    client.promiseTimeoutsByMessageID.clear()
     client.connectionTimeoutID = undefined
     client.nextConnectionAttemptDelayID = undefined
     client.pingTimeoutID = undefined
@@ -1078,6 +1081,7 @@ const publicMethods: {
     client.pendingRsiOperations.set(op.id, op)
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(op))
+      console.log("tryRsiOperation:", op)
       if (options.rsiTimeout) {
         clearTimeout(client.promiseTimeoutsByMessageID.get(op.id))
         client.promiseTimeoutsByMessageID.set(op.id, setTimeout(() => {

@@ -117,13 +117,14 @@ describe('rsi()', function () {
     /* Starts a request while the server has not accepted the connection yet. */
     let promise = client.rsi(sbpInvocation)
     let expectedMessage = { id: `${client.id}-0`, type: 'rsi', data: sbpInvocation }
-    assert.equal(client.pendingRsiOperations.size, 1, '1')
-    assert.equal(client.promiseTimeoutsByMessageID.size, 1, '2')
-    console.log(client.pendingRsiOperations)
-    assert.deepEqual(client.pendingRsiOperations.get(expectedMessage.id), expectedMessage, '3')
+    assert.equal(client.pendingRsiOperations.size, 1, 'Operation should be marked as pending.')
+    assert.equal(client.promiseTimeoutsByMessageID.size, 0, 'Timer should not have started yet.')
+    assert.deepEqual(client.pendingRsiOperations.get(expectedMessage.id), expectedMessage, 'Pending operation should match the request.')
 
     const server = new FakeServer(client)
     server.acceptConnection()
+
+    assert.equal(client.promiseTimeoutsByMessageID.size, 1, 'Timer should have started by now.')
 
     let payload: unknown = { answer: 42 }
     server.reply({ to: expectedMessage.id, type: 'rsi-ok', data: payload })
@@ -152,7 +153,7 @@ describe('rsi()', function () {
     const server = new FakeServer(client)
     client.connect()
     server.acceptConnection()
-    const promise = client.rsi(['foo/bar'])
+    const promise = client.rsi(['foo/placeholder'])
     const id = `${client.id}-0`
 
     server.reply({ to: id, type: 'rsi-error', data: { message: 'boom', name: 'X', stack: 'evil' } })
