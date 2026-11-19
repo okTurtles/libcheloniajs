@@ -1,6 +1,6 @@
 {
   "name": "@chelonia/lib",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Library for building Chelonia applications",
   "main": "dist/cjs/index.cjs",
   "types": "dist/cjs/index.d.cts",
@@ -9,7 +9,8 @@
   "files": [
     "dist",
     "!dist/**/*.test.*",
-    "!dist/**/test-utils.*"
+    "!dist/**/test-utils.*",
+    "!dist/**/test-harness.*"
   ],
   "exports": {
     ".": {

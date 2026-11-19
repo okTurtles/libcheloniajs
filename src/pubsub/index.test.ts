@@ -104,6 +104,18 @@ describe('Test getNextRandomDelay()', function () {
       assert.ok(delay <= maxReconnectionDelay)
     })
   })
+
+  it('stays at the maximal reconnection delay after thousands of attempts in a row', function () {
+    // E.g., a day of failed attempts, or of connections replaced because the
+    // relay never answers a SUB
+    for (const counter of ['failedConnectionAttempts', 'unansweredReplacements'] as const) {
+      client.failedConnectionAttempts = 0
+      client.unansweredReplacements = 0
+      client[counter] = 2000
+      assert.equal(client.getNextRandomDelay(), maxReconnectionDelay, counter)
+    }
+    client.unansweredReplacements = 0
+  })
 })
 
 describe('rsi()', function () {
@@ -179,8 +191,19 @@ describe('rsi()', function () {
     assert.equal(client.promiseTimeoutsByMessageID.size, 0)
     client.destroy()
   })
-})
 
+  it('ignores a late reply after a timeout', async function () {
+    const client = createNewClient()
+    const server = new FakeServer(client)
+    client.connect()
+    server.acceptConnection()
+    await assert.rejects(client.rsi(['foo/bar']), /timed out/)
+
+    assert.doesNotThrow(() => server.reply({ to: `${client.id}-0`, type: 'rsi-ok' }))
+    client.destroy()
+  })
+})
+ 
 describe('open()', function () {
   it('emits reconnection-succeeded with isNew true only on the first open', function () {
     const client = createNewClient()

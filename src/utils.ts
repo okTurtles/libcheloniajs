@@ -23,6 +23,7 @@ import type { EncryptedData } from './encryptedData.js'
 import {
   ChelErrorForkedChain,
   ChelErrorResourceGone,
+  ChelErrorUnexpected,
   ChelErrorUnexpectedHttpResponseCode,
   ChelErrorWarning
 } from './errors.js'
@@ -541,7 +542,7 @@ export const keyAdditionProcessor = function (
         // do this while no other operations are running for that
         // contract
         internalSideEffectStack.push(() => {
-          sbp('chelonia/private/queueEvent', keyRequestContractID, () => {
+          queueEventOrReject(keyRequestContractID, () => {
             const rootState = sbp(this.config.stateSelector) as ChelRootState
 
             const originatingContractState = rootState[contractID] as ChelContractState
@@ -1150,6 +1151,42 @@ export const collectEventStream = async <T>(s: ReadableStream<T>): Promise<T[]> 
   return r
 }
 
+// What to reject with once `signal` aborted: its reason if that is an `Error`,
+// or else an `AbortError`
+export const abortReason = (signal: AbortSignal): Error =>
+  signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError')
+
+// Settles like `promise`, or rejects with `abortReason(signal)` as soon as
+// `signal` aborts. `promise` keeps running (a rejection of it stays handled):
+// this only stops waiting for it.
+export const raceAbort = <T>(promise: Promise<T>, signal: AbortSignal): Promise<T> => {
+  if (signal.aborted) {
+    promise.catch(() => {})
+    return Promise.reject(abortReason(signal))
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal))
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
+// Resolves after `ms` ms, or rejects with `abortReason(signal)` as soon as
+// `signal` aborts (and then clears the timer, which would keep Node.js alive)
+export const abortableDelay = (ms: number, signal: AbortSignal): Promise<void> => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const wait = new Promise<void>((resolve) => { timer = setTimeout(resolve, ms) })
+  return raceAbort(wait, signal).finally(() => clearTimeout(timer))
+}
+
+// A close event for the pubsub client to deliver when it abandons a socket, and
+// for the test harness's fake sockets. `CloseEvent` is only a global from
+// Node.js 23 on (CI runs Node 22): before that, an `Event` with the same fields.
+export const createCloseEvent = (code: number, reason = '', wasClean = false): CloseEvent =>
+  typeof CloseEvent === 'function'
+    ? new CloseEvent('close', { code, reason, wasClean })
+    : Object.assign(new Event('close'), { code, reason, wasClean }) as CloseEvent
+
 // Used inside processing functions for displaying errors at the 'warn' level
 // for outgoing messages to increase the signal-to-noise error. See issue #2773.
 export const logEvtError = (msg: SPMessage, ...args: unknown[]) => {
@@ -1335,4 +1372,21 @@ export const updateKey = (key: ChelContractKey, updatedKey: ChelContractKey): Ch
       : {}),
     ...(updatedKey.meta ? { meta: updatedKey.meta } : {})
   }
+}
+
+/**
+ * An SBP filter can veto `chelonia/private/queueEvent`, which then returns
+ * `undefined`. Reject instead, so that no caller mistakes a vetoed call for
+ * finished work.
+ * Public only because the package re-exports all of `utils`. Apps should use
+ * `chelonia/queueInvocation`, which rejects the same way.
+ */
+export function queueEventOrReject (
+  queueName: string,
+  invocation: Parameters<typeof sbp> | (() => unknown)
+): ReturnType<typeof sbp> {
+  const queued = sbp('chelonia/private/queueEvent', queueName, invocation)
+  return queued === undefined
+    ? Promise.reject(new ChelErrorUnexpected(`[chelonia] queueing on ${queueName} was vetoed`))
+    : queued
 }
