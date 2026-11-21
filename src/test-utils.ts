@@ -11,6 +11,11 @@ export const waitMicrotasks = async (): Promise<void> => {
   }
 }
 
+// Bound when this module loads, so that the harness's `emulateSleep()` can't
+// move it: its `changeClock()` and default `wake()` shift `Date.now()`, and
+// with `monotonic: true` it replaces `performance.now` later, when called
+const now = performance.now.bind(performance)
+
 // `until` and `within` make a regression fail the test instead of hanging
 // the whole file.
 export const until = async (
@@ -18,9 +23,9 @@ export const until = async (
   label: string,
   timeoutMs = 5000
 ): Promise<void> => {
-  const deadline = Date.now() + timeoutMs
+  const deadline = now() + timeoutMs
   while (!cond()) {
-    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`)
+    if (now() > deadline) throw new Error(`Timed out waiting for ${label}`)
     await new Promise<void>((resolve) => setTimeout(resolve, 5))
   }
 }
@@ -41,19 +46,48 @@ export const isPending = async (promise: Promise<unknown>): Promise<boolean> => 
   return pending
 }
 
-type ConsoleMethod = 'debug' | 'info' | 'log' | 'warn' | 'error'
+type ConsoleLevel = 'debug' | 'info' | 'log' | 'warn' | 'error'
 
-export const captureConsole = (
-  methods: ConsoleMethod[] = ['debug', 'info', 'log', 'warn', 'error']
-) => {
-  const logged: { method: ConsoleMethod; args: unknown[] }[] = []
-  const originals = methods.map((method) => [method, console[method]] as const)
-  for (const method of methods) {
-    console[method] = (...args: unknown[]) => { logged.push({ method, args }) }
+// Captures (and silences, unless TEST_VERBOSE is set) console output
+export function captureConsole (
+  levels: ConsoleLevel[] = ['debug', 'info', 'log', 'warn', 'error']
+) {
+  const entries: { t: number; level: ConsoleLevel; text: string; args: unknown[] }[] = []
+  const originals = levels.map((level) => [level, console[level]] as const)
+  const verbose = !!process.env.TEST_VERBOSE
+  const format = (arg: unknown) => {
+    if (typeof arg === 'string') return arg
+    if (arg instanceof Error) return `${arg.name}: ${arg.message}`
+    try {
+      return JSON.stringify(arg)
+    } catch {
+      return String(arg)
+    }
+  }
+  for (const [level, original] of originals) {
+    console[level] = (...args: unknown[]) => {
+      entries.push({ t: Date.now(), level, text: args.map(format).join(' '), args })
+      if (verbose) original.apply(console, args)
+    }
   }
   return {
-    logged,
-    restore: () => { for (const [method, fn] of originals) console[method] = fn }
+    entries,
+    grep (pattern: RegExp, since = -Infinity) {
+      return entries.filter(({ t, text }) => t >= since && pattern.test(text))
+    },
+    // The entries logged from now on (unlike `grep(pattern, since)`, this
+    // does not depend on `Date.now()`, which `emulateSleep()` shifts)
+    fromNow () {
+      const start = entries.length
+      return {
+        grep (pattern: RegExp) {
+          return entries.slice(start).filter(({ text }) => pattern.test(text))
+        }
+      }
+    },
+    restore () {
+      for (const [level, original] of originals) console[level] = original
+    }
   }
 }
 

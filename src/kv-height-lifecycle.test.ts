@@ -182,12 +182,14 @@ describe('A contract resync', () => {
 const OTHER_ID = 'zKvOtherContract'
 const increment = (value: JSONType) => ({ n: (value as { n: number }).n + 1 })
 
-// `chelonia/reset` drains the lanes twice, then aborts and calls
-// `chelonia/kv/_waitInFlight`
+// `chelonia/reset` drains the lanes of each contract twice, then aborts and
+// calls `chelonia/kv/_waitInFlight`
 const resetProbe = { waits: 0, aborted: false, atLastDrain: undefined as (() => void) | undefined }
-sbp('sbp/filters/selector/add', 'chelonia/contract/wait', () => {
-  if (++resetProbe.waits === 2) resetProbe.atLastDrain?.()
-})
+sbp('sbp/filters/selector/add', 'chelonia/contract/wait',
+  (_domain: string, _selector: string, [contractID]: unknown[]) => {
+    if (contractID === OTHER_ID && ++resetProbe.waits === 2) resetProbe.atLastDrain?.()
+  }
+)
 sbp('sbp/filters/selector/add', 'chelonia/kv/_waitInFlight', () => { resetProbe.aborted = true })
 
 // Starts a reset and holds it in its last drain before the abort, on the lane
@@ -388,7 +390,7 @@ describe('A contract removal', () => {
       setupContract()
       await activate()
       const before = syncs.count
-      const refusals = () => logs.logged.filter(({ method, args }) => method === 'warn' &&
+      const refusals = () => logs.entries.filter(({ level, args }) => level === 'warn' &&
         /gave up: its sync failed/.test(String(args[0]))).length
       const refusedBefore = refusals()
       const open = gateLane('internal')

@@ -24,6 +24,9 @@ import type {
   JSONType, KvConflictCause
 } from './types.js'
 
+// Errors: an abort with any other reason rejects with an AbortError
+const STOP = new Error('stop')
+
 type ConflictArgs = Parameters<ChelKvOnConflictCallback>[0]
 
 const setupContract = (): { contractID: string; signingKeyId: string; signingKey: Key } => {
@@ -282,7 +285,7 @@ describe('chelonia/kv/set', () => {
   it('rejects with the abort reason when aborted while reading the final 412', async () => {
     const { contractID, signingKeyId } = setupContract()
     const controller = new AbortController()
-    const reason = { stopped: true }
+    const reason = new Error('stopped')
     const calls = stubFetch((method, init) => {
       if (method === 'POST') return conflict()
       controller.abort(reason)
@@ -299,7 +302,7 @@ describe('chelonia/kv/set', () => {
   })
 
   for (const [label, abort, expected] of [
-    ['the caller aborts', (c: AbortController) => c.abort('stop'), (e: unknown) => e === 'stop'],
+    ['the caller aborts', (c: AbortController) => c.abort(STOP), (e: unknown) => e === STOP],
     ['Chelonia resets', () => sbp('chelonia/reset'),
       (e: unknown) => (e as Error).name === 'AbortError']
   ] as const) {

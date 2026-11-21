@@ -126,7 +126,7 @@ describe('Contract sync and removal', () => {
     const removals = change.permanent ? removedPermanently : removed
     removals.push(...change.removed)
   }
-  const errorsLogged = () => logs.logged.filter(({ method }) => method === 'error')
+  const errorsLogged = () => logs.entries.filter(({ level }) => level === 'error')
 
   beforeEach(() => {
     sbp('chelonia/_init')
@@ -214,7 +214,7 @@ describe('Contract sync and removal', () => {
     )
     const state = rootState()
     state._kv = { ...state._kv, [cid]: {} }
-    logs.logged.length = 0
+    logs.entries.length = 0
   }
 
   for (const ephemeral of [false, true]) {
@@ -297,6 +297,31 @@ describe('Contract sync and removal', () => {
         await within(sbp('chelonia/contract/retain', cid), 'retain')
         vetoedQueue = lane + cid
         await assert.rejects(within(call(cid), name), vetoError)
+      })
+    }
+
+    // The documented recovery: the count already dropped, so the contract
+    // stays, unreferenced, until something removes it
+    const finishRemoval: Array<[string, (cid: string) => Promise<unknown>]> = [
+      ['release with try', (cid) => sbp('chelonia/contract/release', cid, { try: true })],
+      ['remove', (cid) => sbp('chelonia/contract/remove', cid)]
+    ]
+    for (const [name, finish] of finishRemoval) {
+      it(`${name} removes the contract after a vetoed last release`, async () => {
+        const cid = server.contract!.hash()
+        await within(sbp('chelonia/contract/retain', cid), 'retain')
+        vetoedQueue = cid
+        await assert.rejects(within(sbp('chelonia/contract/release', cid), 'release'), vetoError)
+        const entry = rootState().contracts[cid]!
+        assert.strictEqual(entry.HEAD, cid)
+        assert.ok(!('references' in entry))
+        assert.deepStrictEqual(removed, [])
+
+        vetoedQueue = undefined
+        await within(finish(cid), name)
+        assert.strictEqual(rootState().contracts[cid], undefined)
+        assert.strictEqual(rootState()[cid], undefined)
+        assert.deepStrictEqual(removed, [cid])
       })
     }
 
@@ -529,7 +554,7 @@ describe('Contract sync and removal', () => {
       failProcessingAt = 1
       await syncThreeEvents()
       assert.deepStrictEqual(notified, [0, 1, 2])
-      assert.ok(logs.logged.some(({ args }) => /processing failed/.test(String(args[0]))))
+      assert.ok(logs.entries.some(({ args }) => /processing failed/.test(String(args[0]))))
     })
   })
 })

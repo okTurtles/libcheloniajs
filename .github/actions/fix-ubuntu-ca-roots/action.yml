@@ -1,0 +1,138 @@
+# Shared CA fix for the GitHub Actions workflows of all okTurtles repos. They
+# all call this copy, so keep it free of repo-specific content.
+#
+# The compromised eMudhra intermediates chain to emSign ECC Root CA - G3 and
+# to the Comodo AAA root (AAA Certificate Services). Ubuntu's fixed
+# ca-certificates package removes both roots, but runner images can predate
+# it. This action upgrades the packages and deselects both roots in case the
+# upgrade did not. It also deselects emSign ECC Root CA - C3 and emSign Root
+# CA - C1. These two are not part of the compromise, but the CA made the
+# compromised keys incorrectly, so its other keys can have the same fault,
+# and CI does not need an eMudhra root. Then the action rebuilds the bundle
+# and fails if one of the four roots is still trusted.
+# https://emudhra.we-have-a-problem.com/#linux
+#
+# Scope: GitHub-hosted Ubuntu runners. The action needs sudo, apt-get, an
+# installed libnss3 and a Debian-style /etc/ca-certificates.conf.
+#
+# Callers must:
+# - Run it as the first step of every job that has steps, before checkout
+#   and any other HTTPS request. Call it as
+#   okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main, not
+#   with a ./ path: the runner downloads remote actions in "Set up job",
+#   before the first step, but a ./ path needs a checkout. This also keeps a
+#   workflow that checks out untrusted PR code from loading the action from
+#   that checkout.
+# - Set NODE_OPTIONS=--use-openssl-ca in the workflow-level env of every
+#   workflow that has such a job. Node does not read the system bundle. It
+#   uses its built-in CA list, and unpatched Node releases, such as the
+#   runner's own Node for JavaScript actions, still trust the bad chains.
+#   --use-openssl-ca replaces that list with the fixed system bundle. Do
+#   not use --use-system-ca: it adds the system roots to the built-in list,
+#   so the bad roots stay. This action cannot set NODE_OPTIONS for the steps
+#   after it, because GitHub blocks it in GITHUB_ENV. A reusable
+#   (workflow_call) workflow must set it itself, because the env of its
+#   caller does not reach it. A job that only calls a reusable workflow
+#   cannot have steps, so it needs neither this action nor NODE_OPTIONS.
+#   https://github.blog/changelog/2023-10-05-github-actions-node_options-is-now-restricted-from-github_env/
+# - Pass NODE_OPTIONS (and DENO_TLS_CA_STORE and SSL_CERT_FILE, if Deno or
+#   uv runs there) through commands that clear the environment, such as
+#   env -i, bwrap --clearenv and sudo.
+# - Point a tool that has its own root list and does not read SSL_CERT_FILE
+#   at /etc/ssl/certs/ca-certificates.crt. This action does not fix it. For
+#   example, Python requests uses only certifi, and certifi before 2026.10.18
+#   still trusts the bad chains: set REQUESTS_CA_BUNDLE in the jobs that run
+#   it. The action does not set it for every job, because with it requests
+#   ignores Session.verify = False.
+# - If a step runs after a failure (failure(), always(), cancelled()) and
+#   sends a token or other secret over HTTPS, give this action's step an id
+#   and add steps.<id>.outcome == 'success' to that step's if. When this
+#   action fails, the bundle can still trust a removed root.
+# - Set sync-nss-db to true only in jobs that run Playwright or Chromium.
+#
+#   env:
+#     NODE_OPTIONS: --use-openssl-ca
+#   jobs:
+#     test:
+#       runs-on: ubuntu-latest
+#       steps:
+#         - uses: okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main
+#           with:
+#             sync-nss-db: true # only if the job runs Playwright or Chromium
+#         - uses: actions/checkout@v4
+#
+# A change to this action reaches the callers only when it merges to main.
+# The CI of the PR that changes it still runs the copy on main, so that CI
+# does not test the change.
+name: Fix Ubuntu runner CA root bundle
+description: On GitHub-hosted Ubuntu runners, upgrade ca-certificates and libnss3, remove emSign ECC Root CA - G3, emSign ECC Root CA - C3, emSign Root CA - C1 and Comodo AAA from the system CA bundle, and make Deno and uv use that bundle.
+inputs:
+  sync-nss-db:
+    description: Also trust the fixed system bundle and distrust the removed roots in the user's NSS database, which Chromium reads.
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Fix system CA bundle
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --only-upgrade ca-certificates 'libnss3*'
+        dpkg -l ca-certificates 'libnss3*' | grep ^ii
+        sudo sed -i \
+          -e 's|^mozilla/emSign_ECC_Root_CA_-_G3\.crt$|!&|' \
+          -e 's|^mozilla/emSign_ECC_Root_CA_-_C3\.crt$|!&|' \
+          -e 's|^mozilla/emSign_Root_CA_-_C1\.crt$|!&|' \
+          -e 's|^mozilla/Comodo_AAA_Services_root\.crt$|!&|' \
+          /etc/ca-certificates.conf
+        grep -E 'emSign|Comodo_AAA' /etc/ca-certificates.conf || true
+        sudo update-ca-certificates
+        subjects=$(openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt |
+          openssl pkcs7 -print_certs -noout)
+        if grep -E 'emSign ECC Root CA - (G3|C3)|emSign Root CA - C1|AAA Certificate Services' <<<"$subjects"; then
+          echo "::error::/etc/ssl/certs/ca-certificates.crt still trusts a root that this action removes"
+          exit 1
+        fi
+    # Deno and uv use their bundled Mozilla root lists by default. Deno
+    # before 2.9.8 and uv before 0.13.4 still trust the bad chains.
+    # DENO_TLS_CA_STORE=system makes Deno use the fixed system bundle.
+    # SSL_CERT_FILE makes uv, and httpx in place of certifi, use only that
+    # file. OpenSSL, Go and Python's ssl module also read SSL_CERT_FILE, but
+    # on Ubuntu they already use that file. Unlike NODE_OPTIONS, GitHub
+    # allows both variables in GITHUB_ENV, so the callers do not have to set
+    # them.
+    # https://docs.deno.com/runtime/reference/env_variables/
+    # https://docs.astral.sh/uv/concepts/authentication/certificates/
+    - name: Make Deno and uv use the system CA bundle
+      shell: bash
+      run: |
+        echo "DENO_TLS_CA_STORE=system" >> "$GITHUB_ENV"
+        echo "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" >> "$GITHUB_ENV"
+    # Chromium ignores the system CA bundle. It trusts its built-in Chrome
+    # Root Store plus the user's NSS database, and Playwright's Chromium gets
+    # no CRLSet updates, so it still accepts the compromised eMudhra chains.
+    # Trust the fixed system bundle there (newer roots than the built-in
+    # store) and mark the removed roots as distrusted, which overrides the
+    # built-in store. The roots come from distrusted-ca-roots.pem because the
+    # fixed ca-certificates package deletes some of them.
+    # https://chromium.googlesource.com/chromium/src/+/main/net/data/ssl/chrome_root_store/faq.md
+    # https://chromium.googlesource.com/chromium/src/+/main/docs/linux/cert_management.md
+    - name: Sync NSS database with the system bundle
+      if: inputs.sync-nss-db == 'true'
+      shell: bash
+      run: |
+        sudo apt-get install -y -qq libnss3-tools
+        nssdb="sql:$HOME/.pki/nssdb"
+        mkdir -p "$HOME/.pki/nssdb"
+        [ -f "$HOME/.pki/nssdb/cert9.db" ] || certutil -d "$nssdb" -N --empty-password
+        nss_import() {
+          local trust=$1 prefix=$2 bundle=$3 certs
+          certs=$(mktemp -d)
+          awk -v dir="$certs" '/-----BEGIN CERTIFICATE-----/ { if (out) close(out); out = sprintf("%s/%03d.pem", dir, ++n) } out { print > out }' "$bundle"
+          for cert in "$certs"/*.pem; do
+            certutil -d "$nssdb" -A -t "$trust" -n "$prefix-$(basename "$cert" .pem)" -i "$cert"
+          done
+          echo "$prefix: $(certutil -d "$nssdb" -L | grep -c "^$prefix-") certificates"
+        }
+        nss_import C,, system-ca /etc/ssl/certs/ca-certificates.crt
+        nss_import p,p,p distrusted-ca "$GITHUB_ACTION_PATH/distrusted-ca-roots.pem"

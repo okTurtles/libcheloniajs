@@ -17,6 +17,7 @@ import type {
   KvHeightRecoveryAttempt,
   KvHeightRecoveryOptions
 } from './types.js'
+import { abortReason } from './utils.js'
 
 const CANONICAL_HEIGHT = /^(?:0|[1-9][0-9]*)$/
 
@@ -74,9 +75,6 @@ export function heightAheadError (
     { cause: { requiredHeight, exact, localHeight: local, etag, httpStatus } }
   ) as Error & { cause: KvHeightAheadCause }
 }
-
-export const abortReason = (signal: AbortSignal): unknown =>
-  signal.reason ?? new DOMException('Aborted', 'AbortError')
 
 export type ComposedAbortSignal = AbortSignal & { _cleanup?: () => void }
 
@@ -304,6 +302,8 @@ function recoverySync (ctx: CheloniaContext, contractID: string): Promise<void> 
   const running = ctx.kvRecoveries.get(contractID)
   if (running) return running
   const recoveries = ctx.kvRecoveries
+  // `chelonia/reset` aborts it before it waits for the queues
+  const { signal } = ctx.abortController
   const sync = (async () => {
     let ran = false
     await sbp('chelonia/private/queueEvent', contractID, async () => {
@@ -312,7 +312,19 @@ function recoverySync (ctx: CheloniaContext, contractID: string): Promise<void> 
       if (!ctx.subscriptionSet.has(contractID)) {
         throw new ChelErrorUnexpected(`[chelonia/kv] ${contractID} is no longer subscribed`)
       }
-      await sbp('chelonia/private/in/syncContract', contractID)
+      try {
+        await sbp('chelonia/private/in/syncContract', contractID)
+      } finally {
+        // Like publishing, re-subscribe to the contract if the pubsub client
+        // lost it (a reason for being behind). Not once a reset has started.
+        if (ctx.kvRecoveries === recoveries && !ctx.kvResetsInProgress && !signal.aborted) {
+          try {
+            sbp('chelonia/private/kv/reconcilePubsub')
+          } catch (e) {
+            console.error(`[chelonia/kv] Re-subscribing after the recovery sync of ${contractID} failed`, e)
+          }
+        }
+      }
     })
     // An SBP filter vetoed it
     if (!ran) throw new ChelErrorUnexpected(`[chelonia/kv] The recovery sync of ${contractID} never ran`)

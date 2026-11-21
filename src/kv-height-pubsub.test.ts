@@ -19,8 +19,8 @@ sbp('sbp/filters/selector/add', 'chelonia/private/queueEvent',
 )
 
 const AHEAD = START_HEIGHT + 2
-const logged = (method: string, text: string) => logs.logged.filter((entry) =>
-  entry.method === method && String(entry.args[0]).includes(text))
+const logged = (method: string, text: string) => logs.entries.filter((entry) =>
+  entry.level === method && String(entry.args[0]).includes(text))
 const frameErrors = () => logged('error', 'Error processing kv event')
 const statusesDuring = async (body: () => Promise<void>) => {
   const statuses: KvLoadStatus[] = []

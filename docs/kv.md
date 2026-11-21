@@ -92,7 +92,8 @@ Read them through the selectors rather than the raw entry:
   `ChelErrorKvSlotUnknown` when no slot can become active for the key
   (none is defined for it, or the contract's slots were reconciled
   without it) or stops being able to (slot deactivated or unregistered,
-  contract removed); with `signal.reason` on abort; and with an
+  contract removed); on abort, with `signal.reason` if it is an `Error`
+  (else an `AbortError`); and with an
   `AbortError` on `chelonia/reset` or `chelonia/_init`. A resync
   doesn't end the wait
   ([full rules](specs/KV-REVAMPED.md#35-settled-status)). It never
@@ -150,10 +151,11 @@ still holds), but have their own names.
 - **`update`, `clear`, `queuedSet` and single-key `sync`** recover from
   `ChelErrorKvHeightAhead`: they sync the contract and retry. A write
   gives up its place in the contract's queue while the sync runs, and
-  concurrent callers share one sync. A slot write that still fails on a
-  value ahead defers a reload, like a load. A recovery sync that fails,
-  or that an SBP filter vetoes, ends the recovery after one short wait
-  for incoming events.
+  concurrent callers share one sync. After the sync, the pubsub client
+  subscribes again to the contracts it lost (not during a reset). A
+  slot write that still fails on a value ahead defers a reload, like a
+  load. A recovery sync that fails, or that an SBP filter vetoes, ends
+  the recovery after one short wait for incoming events.
 - **`chelonia/kv/set`** waits briefly for incoming events to bring the
   contract to a conflicting value's height before giving up. After a
   `409` it re-signs the same data once the contract catches up (waiting
@@ -175,7 +177,7 @@ and `withHeightRecovery`; invalid values reject with
 |---|---|---|
 | `onHeightAhead` | `'sync'` | `'reject'`: reject with `ChelErrorKvHeightAhead` at once (no wait, no sync). |
 | `maxHeightRecoveries` | `2` | Syncs before giving up. `0`: one short wait for incoming events, no sync. |
-| `signal` | none | Aborting rejects with `signal.reason`, even while the POST is in flight, when the server may still store the write (its echo or the next load brings it in). Once the server has confirmed the write, the call resolves. |
+| `signal` | none | Aborting rejects with `signal.reason` if it is an `Error` (else an `AbortError`), even while the POST is in flight, when the server may still store the write (its echo or the next load brings it in). Once the server has confirmed the write, the call resolves. |
 
 Whatever the options, a slot found ahead still reloads once the
 contract reaches the height. The writers' `maxAttempts` (conflict
@@ -295,7 +297,7 @@ Caveats:
 | `signingKeyName` | `'csk'` | Contract key name used for signing. A missing named key rejects the write. |
 | `autoSubscribe` | `true` | Subscribe to pubsub for this slot automatically. |
 | `autoLoad` | `'on-sync'` | `'on-sync'` loads on contract sync; `'on-demand'` waits for `chelonia/kv/sync` (or a successful `update`); `'never'` skips. |
-| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect. |
+| `refreshOnReconnect` | `true` | Re-fetch the slot on pubsub reconnect, on re-subscription of a lost contract, and when `chelonia/connect` replaces a client that had connected. |
 | `defaultUpdater` | none | Factory `(value) => (prev) => next` enabling the plain-`value` form of `chelonia/kv/update`. |
 | `onUpdate` | none | Callback `(value, ctx: KvUpdateCtx) => void` fired after every mirror change. Must not throw; must not synchronously call a same-contract KV write (rejected with `ChelErrorKvReentrant`; see the rejection taxonomy below). |
 
@@ -355,6 +357,11 @@ Behaviour changes (see [Contract heights](#contract-heights)):
 - **A `409` (stale height stamp) is no longer a conflict.** It doesn't
   call `onconflict` or count against `maxAttempts`: `kv/set` re-signs,
   or rejects with `ChelErrorKvHeightAhead` (`exact: false`).
+- **`kv/set` no longer syncs after a `409`** (it did, at most once per
+  call). A `409` means that this client missed some of the contract's
+  events (e.g. its pubsub subscription was lost). Wrap the call in `chelonia/kv/withHeightRecovery` (as
+  `queuedSet` and the slot API do) to sync the contract and retry: see
+  [Raw `kv/get` and `kv/set`](#raw-kvget-and-kvset).
 - **Unverifiable values reject** with `ChelErrorKvHeightAhead` /
   `ChelErrorKvHeightMalformed` (from `kv/get`, and from `kv/set` instead
   of reaching `onconflict`), not with `ChelErrorInvalidMessageHeight`.
@@ -523,7 +530,11 @@ omitted here; the source is authoritative.
   rejects pending `whenSettled` calls with an `AbortError` and ends the
   slots' waits for contract heights. Persistence hooks therefore observe
   a quiescent mirror, and continuations never run against torn-down
-  state.
+  state. If the queues haven't drained after
+  [`resetDrainTimeout`](./configure.md#connection) ms (default `30000`),
+  e.g. because a request hangs on a dead link, the reset aborts the
+  requests still in flight at once: a queued write whose request hasn't
+  settled rejects with an `AbortError` and leaves the mirror as it was.
 
 - **A resync keeps the mirror.** While a contract re-syncs, its slots
   are inactive (`read` / `update` / single-key `sync` reject with

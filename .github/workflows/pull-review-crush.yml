@@ -1,8 +1,67 @@
 name: AI PR Review (Crush)
 
+# Reusable workflow: a member comments `/review` (optionally
+# `/review {{provider, model, small_model}}`) on a pull request.
+#
+# Caller requirements:
+#   - Trigger on `issue_comment: types: [created]`. The job reads
+#     github.event.comment and github.event.issue, which come from the caller.
+#   - Grant the calling job `contents: read`, `pull-requests: write` and
+#     `issues: write`. This job can only lower the caller's token permissions.
+#   - Pass the API key secret of each provider you use: OPENROUTER_API_KEY,
+#     ZAI_API_KEY and/or KIMI_API_KEY.
+#   - The calling repo must be public (see "Checkout repository").
+#   - Do not give the calling job the concurrency group used below.
+#
+# Example caller: copy .github/workflows/pr-review.yml from this repo and set
+#   uses: okTurtles/libcheloniajs/.github/workflows/pull-review-crush.yml@main
+# It reads its inputs from these optional repo variables (Settings → Secrets
+# and variables → Actions → Variables): REVIEW_PROVIDER, REVIEW_MODEL,
+# PROJECT_CTX and REVIEW_TIMEOUT_MINUTES.
+#
+# build-review-crush.yml copies the steps "Resolve provider settings",
+# "Install crush and bubblewrap" and "Install code-review skill", and
+# .github/build-review/run-review.mjs copies the sandbox of "Run agentic
+# review". Apply a fix in one of them to the other too.
+
 on:
-  issue_comment:
-    types: [created]
+  workflow_call:
+    inputs:
+      provider:
+        description: 'LLM provider: openrouter, zai-coding-plan or kimi. Empty means openrouter.'
+        type: string
+        required: false
+      model:
+        description: >-
+          Model ID for the provider. Empty means the provider default
+          (openrouter: stepfun/step-3.5-flash, zai-coding-plan: glm-5,
+          kimi: k3.1-pro-highspeed).
+        type: string
+        required: false
+      project-context:
+        description: First paragraph of the review prompt, e.g. what the project is.
+        type: string
+        required: false
+      timeout-minutes:
+        description: Job timeout in minutes.
+        type: number
+        required: false
+        default: 30
+    secrets:
+      OPENROUTER_API_KEY:
+        description: API key for the openrouter provider.
+        required: false
+      ZAI_API_KEY:
+        description: API key for the zai-coding-plan provider.
+        required: false
+      KIMI_API_KEY:
+        description: API key for the kimi provider.
+        required: false
+
+env:
+  # Node must use the system CA bundle that fix-ubuntu-ca-roots fixes. See
+  # .github/actions/fix-ubuntu-ca-roots/action.yml.
+  NODE_OPTIONS: --use-openssl-ca
 
 jobs:
   review:
@@ -29,10 +88,9 @@ jobs:
     concurrency:
       group: pr-review-crush-${{ github.event.issue.number }}
       cancel-in-progress: true
-    # Configurable via the REVIEW_TIMEOUT_MINUTES repo variable (default: 30).
     # The 'Report timeout on trigger comment' step derives its TIMEOUT_SECONDS
-    # from the same variable, so the two stay in sync automatically.
-    timeout-minutes: ${{ fromJSON(vars.REVIEW_TIMEOUT_MINUTES || '30') }}
+    # from the same input, so the two stay in sync automatically.
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
       pull-requests: write
@@ -45,15 +103,17 @@ jobs:
       # directory read-write into the review sandbox and reads it back.
       REVIEW_OUTPUT_FILE: /tmp/review-output/REVIEW.md
       # ── Provider configuration ─────────────────────────────
-      # Set via Settings → Secrets and variables → Actions → Variables:
-      #   REVIEW_PROVIDER: openrouter | zai-coding-plan
-      #   REVIEW_MODEL:    stepfun/step-3.5-flash | glm-5
-      REVIEW_PROVIDER: ${{ vars.REVIEW_PROVIDER || 'openrouter' }}
-      REVIEW_MODEL: ${{ vars.REVIEW_MODEL || 'stepfun/step-3.5-flash' }}
+      # Set by the caller through the `provider` and `model` inputs.
+      REVIEW_PROVIDER: ${{ inputs.provider || 'openrouter' }}
+      REVIEW_MODEL: ${{ inputs.model }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+      KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
 
     steps:
+      - uses: okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main
+        id: ca-roots
+
       - name: Update comment with status
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
@@ -80,17 +140,25 @@ jobs:
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          # Check for {{provider, model}} or {{provider, model, small_model}} override syntax after the /review command
-          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/review[[:space:]]+\{\{[[:space:]]*([^,]+)[[:space:]]*,[[:space:]]*([^,}]+)[[:space:]]*(,[[:space:]]*([^}]+)[[:space:]]*)?\}\} ]]; then
+          # Check for {{provider}}, {{provider, model}}, or
+          # {{provider, model, small_model}} after the /review command.
+          if [[ "$COMMENT_BODY" =~ ^[[:space:]]*/review[[:space:]]+\{\{[[:space:]]*([^,}]+)[[:space:]]*(,[[:space:]]*([^,}]+)[[:space:]]*(,[[:space:]]*([^}]+)[[:space:]]*)?)?\}\} ]]; then
             PROVIDER=$(echo "${BASH_REMATCH[1]}" | xargs)
-            MODEL=$(echo "${BASH_REMATCH[2]}" | xargs)
-            SMALL_MODEL=$(echo "${BASH_REMATCH[4]}" | xargs)
+            MODEL=$(echo "${BASH_REMATCH[3]}" | xargs)
+            SMALL_MODEL=$(echo "${BASH_REMATCH[5]}" | xargs)
             # Validate provider and models contain only safe characters
-            if [[ "$PROVIDER" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "$MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]] && { [[ -z "$SMALL_MODEL" ]] || [[ "$SMALL_MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; }; then
+            if [[ "$PROVIDER" =~ ^[a-zA-Z0-9_-]+$ ]] &&
+              { [[ -z "$MODEL" ]] || [[ "$MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; } &&
+              { [[ -z "$SMALL_MODEL" ]] || [[ "$SMALL_MODEL" =~ ^[a-zA-Z0-9_./-]+$ ]]; }; then
               echo "Overriding provider to: $PROVIDER"
-              echo "Overriding model to: $MODEL"
               echo "REVIEW_PROVIDER=$PROVIDER" >> "$GITHUB_ENV"
-              echo "REVIEW_MODEL=$MODEL" >> "$GITHUB_ENV"
+              if [[ -n "$MODEL" ]]; then
+                echo "Overriding model to: $MODEL"
+                echo "REVIEW_MODEL=$MODEL" >> "$GITHUB_ENV"
+              else
+                # Do not inherit the default model from another provider.
+                echo "REVIEW_MODEL=" >> "$GITHUB_ENV"
+              fi
               if [[ -n "$SMALL_MODEL" ]]; then
                 echo "Overriding small model to: $SMALL_MODEL"
                 echo "REVIEW_SMALL_MODEL=$SMALL_MODEL" >> "$GITHUB_ENV"
@@ -104,30 +172,55 @@ jobs:
         run: |
           case "$REVIEW_PROVIDER" in
             openrouter)
+              REVIEW_MODEL="${REVIEW_MODEL:-stepfun/step-3.5-flash}"
               {
                 echo "PROVIDER_API_URL=https://openrouter.ai/api/v1/chat/completions"
+                echo "PROVIDER_API_TYPE=openai"
                 echo "PROVIDER_API_KEY=$OPENROUTER_API_KEY"
                 echo "CRUSH_MODEL=openrouter/$REVIEW_MODEL"
                 echo "PROVIDER_DISPLAY=OpenRouter"
               } >> "$GITHUB_ENV"
               ;;
             zai-coding-plan)
+              REVIEW_MODEL="${REVIEW_MODEL:-glm-5}"
               {
                 echo "PROVIDER_API_URL=https://api.z.ai/api/coding/paas/v4/chat/completions"
+                echo "PROVIDER_API_TYPE=openai"
                 echo "PROVIDER_API_KEY=$ZAI_API_KEY"
                 echo "CRUSH_MODEL=zai/$REVIEW_MODEL"
                 echo "PROVIDER_DISPLAY=Z.AI"
               } >> "$GITHUB_ENV"
               ;;
+            kimi)
+              if [[ -n "$REVIEW_MODEL" && "$REVIEW_MODEL" != "k3.1-pro-highspeed" ]]; then
+                echo "::error::Unsupported Kimi model '$REVIEW_MODEL' (supported: k3.1-pro-highspeed)"
+                exit 1
+              fi
+              if [[ -n "$REVIEW_SMALL_MODEL" && "$REVIEW_SMALL_MODEL" != "k3.1-pro-highspeed" ]]; then
+                echo "::error::Unsupported Kimi small model '$REVIEW_SMALL_MODEL' (supported: k3.1-pro-highspeed)"
+                exit 1
+              fi
+              REVIEW_MODEL="k3.1-pro-highspeed"
+              {
+                echo "PROVIDER_API_URL=https://api.kimi.com/coding/v1/messages"
+                echo "PROVIDER_API_TYPE=anthropic"
+                echo "PROVIDER_API_KEY=$KIMI_API_KEY"
+                echo "CRUSH_MODEL=kimi-custom/$REVIEW_MODEL"
+                echo "PROVIDER_DISPLAY=Kimi"
+              } >> "$GITHUB_ENV"
+              ;;
             *)
-              echo "::error::Unknown REVIEW_PROVIDER '$REVIEW_PROVIDER' (supported: openrouter, zai-coding-plan)"
+              echo "::error::Unknown REVIEW_PROVIDER '$REVIEW_PROVIDER' (supported: openrouter, zai-coding-plan, kimi)"
               exit 1
               ;;
           esac
+          echo "REVIEW_MODEL=$REVIEW_MODEL" >> "$GITHUB_ENV"
 
           # Set SMALL_MODEL based on provider (with override support)
           if [ -n "$REVIEW_SMALL_MODEL" ]; then
             SMALL_MODEL="$REVIEW_SMALL_MODEL"
+          elif [ "$REVIEW_PROVIDER" = "kimi" ]; then
+            SMALL_MODEL="k3.1-pro-highspeed"
           elif [ "$REVIEW_PROVIDER" = "zai-coding-plan" ]; then
             SMALL_MODEL="glm-5.1"
           else
@@ -138,6 +231,7 @@ jobs:
           case "$REVIEW_PROVIDER" in
             openrouter) echo "SMALL_MODEL=openrouter/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
             zai-coding-plan) echo "SMALL_MODEL=zai/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
+            kimi) echo "SMALL_MODEL=kimi-custom/$SMALL_MODEL" >> "$GITHUB_ENV" ;;
           esac
 
       - name: Get PR number
@@ -184,11 +278,10 @@ jobs:
           # http.https://github.com/.extraheader) — the workspace is
           # readable inside the review sandbox below, so persisted
           # credentials would leak the token to the review agent. The
-          # repo is public, so the anonymous `git fetch origin` in
-          # "Merge master into PR branch" still works; if this repo
-          # ever becomes private, that fetch will need an explicitly
-          # scoped token supplied some other way (NOT re-enabling
-          # persist-credentials).
+          # calling repo must be public, so that the anonymous `git fetch
+          # origin` in "Merge master into PR branch" works; a private repo
+          # would need an explicitly scoped token supplied some other way
+          # (NOT re-enabling persist-credentials).
           persist-credentials: false
 
       # Outputs the base ref the code-review skill reviews against. After a
@@ -279,15 +372,31 @@ jobs:
                   messages: [{role: "user", content: ("Summarize the following GitHub issue conversation. Focus on: 1) What the issue is about, 2) Key discussion points, 3) Any final decision or conclusion reached about what to do (if one exists). Be concise but thorough.\n\n" + $conversation)}]
                 }' > /tmp/context_payload.json
 
+              PROVIDER_HEADERS=(-H "Content-Type: application/json")
+              RESPONSE_CONTENT='.choices[0].message.content'
+              if [ "$PROVIDER_API_TYPE" = "anthropic" ]; then
+                jq '. + {max_tokens: 4096}' /tmp/context_payload.json \
+                  > /tmp/context_payload_anthropic.json
+                mv /tmp/context_payload_anthropic.json /tmp/context_payload.json
+                PROVIDER_HEADERS+=(
+                  -H "x-api-key: $PROVIDER_API_KEY"
+                  -H "anthropic-version: 2023-06-01"
+                )
+                # Reasoning models (Kimi K3.1) reply with a thinking block
+                # before the text block, so content[0] has no text.
+                RESPONSE_CONTENT='first(.content[] | select(.type == "text") | .text)'
+              else
+                PROVIDER_HEADERS+=(-H "Authorization: Bearer $PROVIDER_API_KEY")
+              fi
+
               HTTP_CODE=$(curl -s -w '%{http_code}' \
                 "$PROVIDER_API_URL" \
-                -H "Authorization: Bearer $PROVIDER_API_KEY" \
-                -H "Content-Type: application/json" \
+                "${PROVIDER_HEADERS[@]}" \
                 -d @/tmp/context_payload.json \
                 -o /tmp/context_response.json)
 
-              if [ "$HTTP_CODE" -eq 200 ] && jq -e '.choices[0].message.content' /tmp/context_response.json > /dev/null 2>&1; then
-                SUMMARY=$(jq -r '.choices[0].message.content' /tmp/context_response.json)
+              if [ "$HTTP_CODE" -eq 200 ] && jq -e "$RESPONSE_CONTENT" /tmp/context_response.json > /dev/null 2>&1; then
+                SUMMARY=$(jq -r "$RESPONSE_CONTENT" /tmp/context_response.json)
               else
                 echo "::warning::Issue #$ISSUE_NUMBER summarization failed (HTTP $HTTP_CODE), using raw issue text"
                 SUMMARY=$(cat /tmp/issue_conversation.txt)
@@ -306,7 +415,7 @@ jobs:
       # skill, which also generates the diff itself from the checkout.
       - name: Build review prompt
         env:
-          PROJECT_CTX: ${{ vars.PROJECT_CTX }}
+          PROJECT_CTX: ${{ inputs.project-context }}
           BASE_REF: ${{ steps.pr-details.outputs.base_ref }}
           REVIEW_BASE: ${{ steps.merge.outputs.review_base }}
           MERGE_CONFLICT: ${{ steps.merge.outputs.conflict }}
@@ -349,6 +458,11 @@ jobs:
       # available to improve review quality. The allowlist mirrors the
       # enabled set as a belt-and-braces measure in case a future crush
       # release stops auto-approving in non-interactive mode.
+      # `default_max_tokens` of the Kimi model: without it, crush sends no
+      # output limit for a custom model and its Anthropic client caps every
+      # response at 4096 tokens, thinking included. That cut off the parent
+      # agent while it launched the workers of a massive review. 131072 is
+      # the limit catwalk gives Kimi K3 on the same API.
       - name: Install crush and bubblewrap
         run: |
           # bubblewrap (bwrap) sandboxes the crush invocation in "Run
@@ -377,6 +491,27 @@ jobs:
           cat > ~/.config/crush/crush.json << 'EOF'
           {
             "$schema": "https://charm.land/crush.json",
+            "providers": {
+              "kimi-custom": {
+                "type": "anthropic",
+                "base_url": "https://api.kimi.com/coding/",
+                "api_key": "$KIMI_API_KEY",
+                "default_large_model_id": "k3.1-pro-highspeed",
+                "default_small_model_id": "k3.1-pro-highspeed",
+                "models": [
+                  {
+                    "id": "k3.1-pro-highspeed",
+                    "name": "Kimi K3.1 Pro Highspeed",
+                    "context_window": 1048576,
+                    "supports_attachments": true,
+                    "can_reason": true,
+                    "reasoning_levels": ["low", "high", "max"],
+                    "default_reasoning_effort": "max",
+                    "default_max_tokens": 131072
+                  }
+                ]
+              }
+            },
             "options": {
               "context_paths": ["AGENTS.md", "CRUSH.md", "CLAUDE.md", "README.md"],
               "disable_metrics": true,
@@ -396,20 +531,22 @@ jobs:
       #
       # The skills CLI is a third-party npx package that needs no secrets (the
       # skill repo is public, so an anonymous clone works). `env -i` passes it
-      # only PATH, HOME and DISABLE_TELEMETRY, so no job env reaches it. The
-      # step env also blanks the secrets in this step's own shell, because a
-      # child process can read its parent's environment from /proc. This
-      # stops packages that harvest environment variables, but it is not a
-      # sandbox: the package still runs unsandboxed as the runner user.
+      # only PATH, HOME, DISABLE_TELEMETRY and NODE_OPTIONS, so no other job
+      # env reaches it. The step env also blanks the secrets in this step's
+      # own shell, because a child process can read its parent's environment
+      # from /proc. This stops packages that harvest environment variables,
+      # but it is not a sandbox: the package still runs unsandboxed as the
+      # runner user.
       - name: Install code-review skill
         env:
           GH_TOKEN: ''
           OPENROUTER_API_KEY: ''
           ZAI_API_KEY: ''
+          KIMI_API_KEY: ''
           PROVIDER_API_KEY: ''
         run: |
           cd "$HOME"
-          env -i PATH="$PATH" HOME="$HOME" DISABLE_TELEMETRY=1 \
+          env -i PATH="$PATH" HOME="$HOME" DISABLE_TELEMETRY=1 NODE_OPTIONS="$NODE_OPTIONS" \
             npx --yes skills add taoeffect/code-review --skill code-review -g -a crush --copy -y
 
           SKILL_FILE="$HOME/.config/crush/skills/code-review/SKILL.md"
@@ -459,11 +596,16 @@ jobs:
           #     runners use JIT config and keep credentials in memory, so
           #     no such files may exist on disk — the mask mainly protects
           #     self-hosted or differently provisioned runners;
+          #   - a tmpfs over /run (and so over /var/run, a link to it). The
+          #     runner user is in the docker group, and a read-only mount
+          #     does not stop a connection to /run/docker.sock, which gives
+          #     root on the runner and so access to everything above. Only
+          #     the DNS config file is bound back, read-only;
           #   - network access (required for the inference API).
-          # OPENROUTER_API_KEY / ZAI_API_KEY are deliberately passed in:
-          # crush reads whichever one its active provider needs directly
-          # from the environment, so exfiltration of those keys remains
-          # possible in principle — reviewers should still eyeball PR
+          # OPENROUTER_API_KEY / ZAI_API_KEY / KIMI_API_KEY are deliberately
+          # passed in: crush reads whichever one its active provider needs
+          # directly from the environment, so exfiltration of those keys
+          # remains possible in principle — reviewers should still eyeball PR
           # contents.
           # CRUSH_MODEL / SMALL_MODEL are expanded by the outer shell and
           # arrive as plain command arguments, and the stdio redirections
@@ -514,8 +656,16 @@ jobs:
             --ro-bind / /
             --dev /dev --proc /proc
             --tmpfs /tmp
+            --tmpfs /run
             --tmpfs "$RUNNER_TEMP"
           )
+          # crush needs DNS, and on Ubuntu /etc/resolv.conf links to the
+          # systemd-resolved stub file in /run. Bind that one file back,
+          # read-only.
+          RESOLV_CONF=$(readlink -f /etc/resolv.conf)
+          case "$RESOLV_CONF" in
+            /run/*) BWRAP+=(--ro-bind "$RESOLV_CONF" "$RESOLV_CONF") ;;
+          esac
           for dir in "${RUNNER_AGENT_DIRS[@]}"; do
             BWRAP+=(--tmpfs "$dir")
           done
@@ -529,8 +679,10 @@ jobs:
             --setenv PATH "$PATH"
             --setenv HOME "$HOME"
             --setenv TERM dumb
+            --setenv NODE_OPTIONS "$NODE_OPTIONS"
             --setenv OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
             --setenv ZAI_API_KEY "$ZAI_API_KEY"
+            --setenv KIMI_API_KEY "$KIMI_API_KEY"
             --
           )
 
@@ -641,35 +793,46 @@ jobs:
             --repo "${{ github.repository }}" \
             --body-file /tmp/review_comment.txt
 
+      # Skipped when fix-ubuntu-ca-roots fails: the CA bundle can then still
+      # trust a removed root, and gh would send GH_TOKEN through it. That
+      # failure shows only in the Actions log. A later step can fail before
+      # "Get PR number" and "Extract review command" run, so this step takes
+      # the PR number from the event and gives REVIEW_COMMAND a default.
       - name: Post failure comment
-        if: failure() && steps.pr-info.outputs.number
+        if: failure() && steps.ca-roots.outcome == 'success'
         run: |
-          gh pr comment "${{ steps.pr-info.outputs.number }}" \
+          gh pr comment "${{ github.event.issue.number }}" \
             --repo "${{ github.repository }}" \
             --body "## Advanced AI Review
 
           - Type: Error
           - Model: ${REVIEW_MODEL}
 
-          The review workflow failed. Check the [workflow run](${RUN_URL}) for details. Comment \`${REVIEW_COMMAND}\` to re-run."
+          The review workflow failed. Check the [workflow run](${RUN_URL}) for details. Comment \`${REVIEW_COMMAND:-/review}\` to re-run."
 
       # Runs when the job is cancelled. The elapsed-time check distinguishes
       # the job timeout (timeout-minutes above) from a concurrency
-      # cancel-in-progress cancellation, which must NOT add the note.
+      # cancel-in-progress cancellation, which must NOT add the note. Skipped
+      # when fix-ubuntu-ca-roots did not succeed, for the reason given at
+      # "Post failure comment".
       - name: Report timeout on trigger comment
-        if: cancelled()
+        if: cancelled() && steps.ca-roots.outcome == 'success'
         env:
           COMMENT_ID: ${{ github.event.comment.id }}
-          TIMEOUT_MINUTES: ${{ fromJSON(vars.REVIEW_TIMEOUT_MINUTES || '30') }}
+          TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
         run: |
-          # Derived from the same variable as the job-level `timeout-minutes`.
+          # Derived from the same input as the job-level `timeout-minutes`.
           TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
           if [ -z "$JOB_STARTED_AT" ]; then
             echo "Job start time unknown — skipping timeout report"
             exit 0
           fi
           ELAPSED=$(( $(date +%s) - JOB_STARTED_AT ))
-          if [ "$ELAPSED" -lt $(( TIMEOUT_SECONDS - 60 )) ]; then
+          # timeout-minutes counts from the job start, but JOB_STARTED_AT is set after
+          # "Set up job" and fix-ubuntu-ca-roots (apt-get update and upgrade), so the
+          # slack must cover both. Cost: a concurrency cancellation in the last
+          # 5 minutes is reported as a timeout.
+          if [ "$ELAPSED" -lt $(( TIMEOUT_SECONDS - 300 )) ]; then
             echo "Cancelled after ${ELAPSED}s (< timeout) — likely concurrency cancellation; skipping"
             exit 0
           fi

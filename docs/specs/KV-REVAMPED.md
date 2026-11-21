@@ -306,7 +306,7 @@ request for a `maxAttempts` that isn't a positive safe integer, a
 `heightWaitMs` that isn't finite and ≥ 0 (`null` = default for both),
 or `data === undefined` without `onconflict`. The caller's `signal`
 and `chelonia/reset` end it at any wait or backoff with
-`signal.reason`.
+`signal.reason` if it is an `Error`, or else an `AbortError`.
 
 | Response | Behaviour |
 |---|---|
@@ -496,7 +496,7 @@ if it is active, settled and not `loading`, else `undefined`.
 | Resolves with `settledStatus` | At once if it is defined (even from `onUpdate`); else once it is, waiting through boot, the first contract sync and slot activation. A resync doesn't end the wait (after a failed one it lasts until release or abort). |
 | `ChelErrorKvSlotUnknown`, at once | No slot is defined for the key (for the contract's type, or for any type while it is unknown), or the contract is reconciled and the slot inactive. |
 | `ChelErrorKvSlotUnknown`, later | The slot is deactivated or unregistered; the contract is removed (also if it never activated, e.g. its first sync failed and it was released); its type becomes known without the slot; its first reconcile leaves the slot inactive. |
-| `signal.reason` | `signal` aborts (also if already settled). |
+| `signal.reason` (an `AbortError` if it isn't an `Error`) | `signal` aborts (also if already settled). |
 | Never settles | The slot is never loaded (`autoLoad: 'never'` or `'on-demand'`, without a `sync`, `update`, `clear` or applied frame): pass a `signal`. |
 | `AbortError` | `chelonia/reset`'s teardown, or `chelonia/_init`. |
 
@@ -904,7 +904,8 @@ return type); without a schema it falls back to `JSONType`.
 
 `signal` aborts the in-flight update attempt (including the
 conflict-retry loop and height recovery) and rejects with
-`signal.reason` (an `AbortError` by default), as the `AbortError` row
+`signal.reason` (an `AbortError` by default, or if the reason isn't an
+`Error`), as the `AbortError` row
 above describes.
 
 > Implementation note: the existing `chelonia/kv/set`

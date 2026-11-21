@@ -29,7 +29,6 @@ import { isKvMaxAttempts } from './internal-errors.js'
 import { assertMaxAttempts, assertNotReentrant, resolveKvKeyIds } from './kv-checks.js'
 import {
   abortable,
-  abortReason,
   heightAheadError,
   kvHeightTimings,
   localHeight,
@@ -76,6 +75,7 @@ import type {
   SlotDefinition,
   SlotDefinitionSource
 } from './types.js'
+import { abortReason } from './utils.js'
 
 // Internal sentinel thrown by the onconflict callback when the reducer
 // returns KV_NOOP. The outer catch checks for the Symbol.for marker via
@@ -2401,21 +2401,34 @@ export default (sbp('sbp/selectors/register', {
   // if the contract is released before a queued load runs, `_loadSlot`'s
   // subscription guard bails out before mutating state. Running height
   // recovery syncs (`kvRecoveries`) are awaited too.
-  'chelonia/kv/_waitInFlight': function (
+  // A lane that fails (e.g. an SBP filter vetoed it) doesn't stop the wait
+  // for the others; once all have settled, this rejects with an
+  // `AggregateError` of the failures, and `chelonia/reset` logs it.
+  'chelonia/kv/_waitInFlight': async function (
     this: CheloniaContext
-  ): Promise<unknown> {
+  ): Promise<void> {
     const ids = new Set<string>(this.kvSlotsByContractID.keys())
     this.kvLocalEchoCIDs.forEach((_cids, echoKey) => {
       const idx = echoKey.indexOf(KV_KEY_SEPARATOR)
       if (idx > 0) ids.add(echoKey.slice(0, idx))
     })
     this.kvPendingWrites.forEach((_n, cID) => ids.add(cID))
-    return Promise.all([
-      ...Array.from(ids, (cID) =>
-        sbp('chelonia/queueInvocation', cID, ['chelonia/private/noop'])
+    const contractIDs = Array.from(ids)
+    const [results] = await Promise.all([
+      Promise.allSettled(
+        contractIDs.map(async (cID) => {
+          await sbp('chelonia/queueInvocation', cID, ['chelonia/private/noop'])
+        })
       ),
       ...Array.from(this.kvRecoveries.values(), (sync) => sync.catch(() => {}))
     ])
+    const failed = contractIDs.filter((_cID, i) => results[i].status === 'rejected')
+    if (failed.length) {
+      throw new AggregateError(
+        results.flatMap((result) => result.status === 'rejected' ? [result.reason] : []),
+        `[chelonia/kv/_waitInFlight] Waiting failed for ${failed.join(', ')}`
+      )
+    }
   },
 
   // Private. See KV-REVAMPED §11.4 bullet 3 (reconnect hook).
@@ -2424,7 +2437,20 @@ export default (sbp('sbp/selectors/register', {
   // are marked here and run after the per-subscription forced resync.
   'chelonia/kv/_onReconnect': function (this: CheloniaContext): void {
     this.kvLocalEchoCIDs.clear()
-    for (const [cID, perKey] of this.kvSlotsByContractID) {
+    sbp('chelonia/kv/_markForRefresh', this.kvSlotsByContractID.keys())
+  },
+
+  // Private. Marks the contracts with `refreshOnReconnect` slots, which reload
+  // after the forced resync that follows their next SUB (`_onContractResynced`).
+  // Also called (by `reconcilePubsub`) right before the pubsub client is
+  // subscribed again to contracts that it lost, and by `chelonia/connect` when
+  // it replaces a client that had connected.
+  'chelonia/kv/_markForRefresh': function (
+    this: CheloniaContext, contractIDs: Iterable<string>
+  ): void {
+    for (const cID of contractIDs) {
+      const perKey = this.kvSlotsByContractID.get(cID)
+      if (!perKey) continue
       for (const [, slot] of perKey) {
         if (slot.refreshOnReconnect) {
           this.kvReconnectRefresh.add(cID)

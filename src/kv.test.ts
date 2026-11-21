@@ -38,6 +38,9 @@ import type {
   ParsedEncryptedOrUnencryptedMessage
 } from './types.js'
 
+// Errors: an abort with any other reason rejects with an AbortError
+const STOP = new Error('stop')
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -5880,9 +5883,9 @@ describe('KV slot API', () => {
       await sbp('chelonia/kv/clear', c, KEY)
       assert.strictEqual(await within(whenSettled(c), 'settled after the clear'), 'non-init')
       const controller = new AbortController()
-      controller.abort('stop')
+      controller.abort(STOP)
       await assert.rejects(
-        within(whenSettled(c, KEY, { signal: controller.signal }), 'abort'), (e) => e === 'stop')
+        within(whenSettled(c, KEY, { signal: controller.signal }), 'abort'), (e) => e === STOP)
     })
 
     it('rejects a waiting call once its slot can no longer settle', async () => {
@@ -5931,8 +5934,8 @@ describe('KV slot API', () => {
       const controller = new AbortController()
       const aborted = whenSettled(c, KEY, { signal: controller.signal })
       const other = whenSettled(c)
-      controller.abort('stop')
-      await assert.rejects(within(aborted, 'abort'), (e) => e === 'stop')
+      controller.abort(STOP)
+      await assert.rejects(within(aborted, 'abort'), (e) => e === STOP)
       assert.ok(await isPending(other))
       await sbp('chelonia/reset')
       await assert.rejects(within(other, 'reset'), { name: 'AbortError' })

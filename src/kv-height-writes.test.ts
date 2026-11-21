@@ -19,6 +19,10 @@ import type {
   KvHeightRecoveryOptions, KvMirrorEntry
 } from './types.js'
 
+// Errors: an abort with any other reason rejects with an AbortError
+const STOP = new Error('stop')
+const GONE = new Error('gone')
+
 describe('KV slot writes against the server', () => {
   installKvHarness()
 
@@ -145,8 +149,8 @@ describe('chelonia/kv/withHeightRecovery', () => {
     const first = recover(needs(START_HEIGHT + 1).attempt, { signal: controller.signal })
     const second = recover(needs(START_HEIGHT + 1).attempt)
     await until(() => syncs.count === before + 1, 'the recovery sync')
-    controller.abort('stop')
-    await assert.rejects(within(first, 'the aborted caller'), (e) => e === 'stop')
+    controller.abort(STOP)
+    await assert.rejects(within(first, 'the aborted caller'), (e) => e === STOP)
     release()
     assert.strictEqual(await within(second, 'the other caller'), 'done')
     assert.strictEqual(syncs.count, before + 1)
@@ -251,7 +255,7 @@ describe('chelonia/kv/withHeightRecovery', () => {
     assert.strictEqual(second.calls.length, 2)
     assert.strictEqual(syncs.count, before + 1)
     // No sync error to print after either warning
-    const warnings = logs.logged.filter(({ method, args }) => method === 'warn' &&
+    const warnings = logs.entries.filter(({ level, args }) => level === 'warn' &&
       /gave up|reached the height/.test(String(args[0])))
     assert.deepStrictEqual(warnings.map(({ args }) => args.length), [1, 1])
   })
@@ -261,7 +265,7 @@ describe('chelonia/kv/withHeightRecovery', () => {
     kvHeightTimings.waitMs = 20
     writeAsDeviceB('prefs', { v: 1 }, START_HEIGHT + 2)
     const before = syncs.count
-    const gaveUp = () => logs.logged.filter(({ method, args }) => method === 'warn' &&
+    const gaveUp = () => logs.entries.filter(({ level, args }) => level === 'warn' &&
       /gave up: its sync failed/.test(String(args[0]))).length
     const attempts = {
       'kv/get': () => sbp('chelonia/kv/get', CONTRACT_ID, 'prefs'),
@@ -387,7 +391,7 @@ describe('chelonia/kv/withHeightRecovery', () => {
         { name: 'ChelErrorKvUpdateInvalid' }
       )
     }
-    await assert.rejects(recover(attempt, { signal: AbortSignal.abort('gone') }), (e) => e === 'gone')
+    await assert.rejects(recover(attempt, { signal: AbortSignal.abort(GONE) }), (e) => e === GONE)
     assert.strictEqual(calls, 0)
     // `null` means the default, and unknown keys are ignored
     const options = { onHeightAhead: null, maxHeightRecoveries: null, label: 'x' }
@@ -466,8 +470,8 @@ describe('chelonia/kv/queuedSet', () => {
     const aborted = queuedSet({ key: 'other', data: 'x', signal: controller.signal })
     await waitMicrotasks()
     renameKey(keys.cekId, 'cek')
-    controller.abort('stop')
-    await assert.rejects(within(aborted, 'the aborted write'), (e) => e === 'stop')
+    controller.abort(STOP)
+    await assert.rejects(within(aborted, 'the aborted write'), (e) => e === STOP)
     open()
     await within(write, 'the queued write')
     assert.deepStrictEqual(server.posts().map(({ key, status }) => [key, status]), [['note', 204]])
@@ -547,8 +551,8 @@ describe('chelonia/kv/queuedSet', () => {
         name: 'ChelErrorKvUpdateInvalid', message: /queuedSet: /
       })
     }
-    const gone = queuedSet({ key: 'note', data: 'x', signal: AbortSignal.abort('gone') })
-    await assert.rejects(gone, (e) => e === 'gone')
+    const gone = queuedSet({ key: 'note', data: 'x', signal: AbortSignal.abort(GONE) })
+    await assert.rejects(gone, (e) => e === GONE)
     assert.deepStrictEqual(server.log, [])
     // `null` means the default
     const defaults = { maxAttempts: null, onHeightAhead: null, maxHeightRecoveries: null }
@@ -677,8 +681,8 @@ describe('Slot writes and contract heights', () => {
     const controller = new AbortController()
     const aborted = updateWith('aborted', { signal: controller.signal })
     await until(() => syncs.count === before + 2, 'the recovery sync')
-    controller.abort('stop')
-    await assert.rejects(aborted, (e) => e === 'stop')
+    controller.abort(STOP)
+    await assert.rejects(aborted, (e) => e === STOP)
     for (const key of slotKeys) {
       assert.deepStrictEqual(slotState(key), ['loading', AHEAD, true], key)
     }
@@ -775,8 +779,8 @@ describe('Slot writes and contract heights', () => {
     await until(syncEnded(synced + 1), 'the failed recovery sync')
     const clearing = clear('names', { maxHeightRecoveries: 0 })
     await until(() => server.posts().filter(({ status }) => status === 409).length === 2, '409')
-    controller.abort('stop')
-    await assert.rejects(stopped, (e) => e === 'stop')
+    controller.abort(STOP)
+    await assert.rejects(stopped, (e) => e === STOP)
     assert.deepStrictEqual(slotState('names'), ['loading', AHEAD + 1, true])
     before = gets('names')
     setLocalHeight(AHEAD + 1)
@@ -789,16 +793,16 @@ describe('Slot writes and contract heights', () => {
 
   it('an abort while queued rejects at once; one after the write committed is ignored', async () => {
     const late = new AbortController()
-    defineSlot({ key: 'names', defaultValue: [], onUpdate: () => late.abort('late') })
+    defineSlot({ key: 'names', defaultValue: [], onUpdate: () => late.abort(new Error('late')) })
     await activate()
     const open = gateLane('public')
     const controller = new AbortController()
     const updating = updateWith('names', { signal: controller.signal })
     const clearing = clear('names', { signal: controller.signal })
     await waitMicrotasks()
-    controller.abort('stop')
-    await assert.rejects(updating, (e) => e === 'stop')
-    await assert.rejects(clearing, (e) => e === 'stop')
+    controller.abort(STOP)
+    await assert.rejects(updating, (e) => e === STOP)
+    await assert.rejects(clearing, (e) => e === STOP)
     open()
     await drainLanes()
     assert.deepStrictEqual(server.posts(), [])

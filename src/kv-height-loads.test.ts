@@ -17,6 +17,9 @@ import {
 import { captureConsole, until, waitMicrotasks, within } from './test-utils.js'
 import type { CheloniaContext, KvHeightRecoveryOptions, KvLoadStatus } from './types.js'
 
+// Errors: an abort with any other reason rejects with an AbortError
+const STOP = new Error('stop')
+
 const CID = 'zHeightContract'
 const contracts: Record<string, { height: number }> = {}
 sbp('sbp/selectors/register', { 'test.kvHeight/state': () => ({ contracts }) })
@@ -67,13 +70,18 @@ describe('waitForHeight', () => {
     assert.strictEqual(ctx.kvHeightListeners.size, 0)
   })
 
-  it('rejects with the abort reason, whatever it is', async () => {
-    const controller = new AbortController()
-    const wait = waitForHeight(ctx, CID, 11, { timeoutMs: 60_000, signal: controller.signal })
-    controller.abort('stop')
-    await assert.rejects(within(wait, 'the wait'), (e) => e === 'stop')
-    await assert.rejects(waitForHeight(ctx, CID, 10, { signal: controller.signal }), (e) => e === 'stop')
-    assert.strictEqual(ctx.kvHeightListeners.size, 0)
+  it('rejects with the abort reason if it is an Error, or else an AbortError', async () => {
+    for (const [reason, expected] of [
+      [STOP, (e: unknown) => e === STOP],
+      ['stop', (e: unknown) => e instanceof DOMException && e.name === 'AbortError']
+    ] as const) {
+      const controller = new AbortController()
+      const wait = waitForHeight(ctx, CID, 11, { timeoutMs: 60_000, signal: controller.signal })
+      controller.abort(reason)
+      await assert.rejects(within(wait, 'the wait'), expected)
+      await assert.rejects(waitForHeight(ctx, CID, 10, { signal: controller.signal }), expected)
+      assert.strictEqual(ctx.kvHeightListeners.size, 0)
+    }
   })
 
   it("doesn't wait while the pubsub socket isn't open", async () => {
@@ -109,7 +117,7 @@ describe('waitForHeight', () => {
       const wait = waitForHeight(ctx, CID, 11, { timeoutMs: 60_000, signal: waits.signal })
       commit(11)
       assert.strictEqual(await within(wait, 'the wait'), true)
-      assert.strictEqual(errors.logged.length, 1)
+      assert.strictEqual(errors.entries.length, 1)
     } finally {
       errors.restore()
     }
@@ -189,7 +197,7 @@ describe('Slot loads of values from a newer contract height', () => {
     assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
     assert.strictEqual(settledStatus('prefs'), undefined)
     const logged = (method: string) =>
-      logs.logged.some((entry) => entry.method === method && isKvHeightAhead(entry.args[1]))
+      logs.entries.some((entry) => entry.level === method && isKvHeightAhead(entry.args[1]))
     assert.ok(logged('debug') && !logged('error'), 'a deferral is logged at debug level')
     // Another finding of the same value doesn't add a reload
     await findAhead('prefs', AHEAD)
@@ -462,8 +470,8 @@ describe('Slot loads of values from a newer contract height', () => {
       }
       assert.strictEqual(mirror('prefs')?.lastError?.name, 'ChelErrorUnexpected')
       assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD })
-      assert.ok(logs.logged.some(({ method, args }) =>
-        method === 'error' && String(args[0]).includes('deferred reload')))
+      assert.ok(logs.entries.some(({ level, args }) =>
+        level === 'error' && String(args[0]).includes('deferred reload')))
     })
   }
 })
@@ -652,19 +660,19 @@ describe('Single-key kv/sync of a value from a newer contract height', () => {
     defineSlot({ key: 'prefs', defaultValue: {} })
     await activate()
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
-    const stop = (e: unknown) => e === 'stop'
+    const stop = (e: unknown) => e === STOP
     // While it waits for the height
     const waiting = new AbortController()
     const waited = assert.rejects(sync('prefs', { signal: waiting.signal }), stop)
     await until(() => mirror('prefs')?.heightAhead, 'the finding')
-    waiting.abort('stop')
+    waiting.abort(STOP)
     await waited
     // While its load waits for the lane; the load still runs
     const openLane = gateLane()
     const queued = new AbortController()
     const before = gets('prefs')
     const aborted = assert.rejects(sync('prefs', { signal: queued.signal }), stop)
-    queued.abort('stop')
+    queued.abort(STOP)
     await aborted
     openLane()
     await until(() => gets('prefs') === before + 1, 'the load')

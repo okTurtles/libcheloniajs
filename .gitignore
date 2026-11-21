@@ -1,8 +1,7 @@
 /node_modules/
 /.parcel-cache/
 *.DS_Store
-dist/**/*.test.*
-dist/**/kv-height-harness.*
+/dist/
 /.agent/
 /.tldr*
 /.agents
