@@ -93,11 +93,9 @@ export type Options = {
    * The WebSocket implementation to use, the global one by default.
    * It must implement the standard WebSocket interface.
    *
-   * Use cases:
-   * - Unit tests where fake sockets can stand in for a server connection.
-   * - Possibly, runtimes that don't have a compliant `WebSocket` global.
+   * Useful in unit tests where fake sockets can stand in for a server connection.
    */
-  WebSocket: typeof WebSocket;
+  WebSocket?: typeof WebSocket;
   logPingMessages: boolean;
   // How long to wait for the next message (the server pings regularly)
   // before replacing the connection, in ms. Also checked against the wall
@@ -283,7 +281,7 @@ type MessageHandlers = {
 
 // TODO: verify these are good defaults
 const defaultOptions: Options = {
-  WebSocket,
+  WebSocket: undefined,
   logPingMessages: process.env.NODE_ENV === 'development' && !process.env.CI,
   pingTimeout: 45000,
   maxReconnectionDelay: 60000,
@@ -1217,7 +1215,7 @@ const publicMethods: {
   // Performs a connection or reconnection attempt.
   connect () {
     const client = this
-    const { WebSocket } = client.options
+    const WebSocket = client.options.WebSocket ?? globalThis.WebSocket
 
     if (client.socket !== null) {
       throw new Error('connect() can only be called if there is no current socket.')
@@ -1264,7 +1262,7 @@ const publicMethods: {
     for (const name of socketEventNames) {
       client.socket.addEventListener(name, client.listeners[name] as () => void)
     }
-    sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_ATTEMPT, client)
+    if (!client.isNew) sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_ATTEMPT, client)
     updateState(client)
   },
 

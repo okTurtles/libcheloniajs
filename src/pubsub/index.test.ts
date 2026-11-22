@@ -9,10 +9,6 @@ class FakeWebSocket extends EventTarget {
   readyState: WebSocket['readyState'] = WebSocket.CONNECTING
   sentMessages: RsiMessage[] = []
 
-  constructor () {
-    super()
-  }
-
   _open () {
     this.readyState = WebSocket.OPEN
     this.dispatchEvent(new Event('open'))
@@ -233,18 +229,20 @@ describe('rsi()', function () {
     assert.equal(client.pendingRsiOperations.size, 1)
     assert.equal(client.promiseTimeoutsByMessageID.size, 0)
 
-    sbp('okTurtles.events/on', PUBSUB_RECONNECTION_ATTEMPT, () => {
+    const handler = (c: PubSubClient) => {
+      if (c !== client) return
       server.acceptConnection()
       const resent = (client.socket as unknown as FakeWebSocket).sentMessages
       assert.equal(resent.length, 1)
       assert.equal(resent[0].id, id)
       server.reply({ type: 'rsi-ok', to: id, data: 'done' })
-    })
-    assert.equal(await promise, 'done')
+    }
+    sbp('okTurtles.events/on', PUBSUB_RECONNECTION_ATTEMPT, handler)
+    assert.equal(await promise.finally(() => sbp('okTurtles.events/off', PUBSUB_RECONNECTION_ATTEMPT, handler)), 'done')
     client.destroy()
   })
 })
- 
+
 describe('open()', function () {
   it('emits reconnection-succeeded with isNew true only on the first open', function () {
     const client = createNewClient()
