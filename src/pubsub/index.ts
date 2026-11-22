@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-this-alias */
 import '@sbp/okturtles.events'
 import sbp from '@sbp/sbp'
-import { randomIntFromRange } from 'turtledash'
+import { pick, randomHexString, randomIntFromRange } from 'turtledash'
 import type { JSONObject, JSONType } from '../types.js'
 import { timerDelay, unrefTimer } from '../timer-utils.js'
 import { createCloseEvent } from '../utils.js'
@@ -23,6 +23,7 @@ export const NOTIFICATION_TYPE = Object.freeze({
 
 export const REQUEST_TYPE = Object.freeze({
   PUB: 'pub',
+  RSI: 'rsi',
   SUB: 'sub',
   UNSUB: 'unsub',
   PUSH_ACTION: 'push_action',
@@ -31,7 +32,9 @@ export const REQUEST_TYPE = Object.freeze({
 
 export const RESPONSE_TYPE = Object.freeze({
   ERROR: 'error',
-  OK: 'ok'
+  OK: 'ok',
+  RSI_ERROR: 'rsi-error',
+  RSI_OK: 'rsi-ok'
 })
 
 export const PUSH_SERVER_ACTION_TYPE = Object.freeze({
@@ -47,6 +50,7 @@ export type ResponseTypeEnum = (typeof RESPONSE_TYPE)[keyof typeof RESPONSE_TYPE
 
 // ====== Types ====== //
 
+export type JsonSbpInvocation = [selector: string, ...args: JSONType[]]
 type TimeoutID = ReturnType<typeof setTimeout>;
 type IntervalID = ReturnType<typeof setInterval>;
 
@@ -85,6 +89,13 @@ export type PubSubStatus = {
 type PendingOperation = { since?: number };
 
 export type Options = {
+  /**
+   * The WebSocket implementation to use, the global one by default.
+   * It must implement the standard WebSocket interface.
+   *
+   * Useful in unit tests where fake sockets can stand in for a server connection.
+   */
+  WebSocket?: typeof WebSocket;
   logPingMessages: boolean;
   // How long to wait for the next message (the server pings regularly)
   // before replacing the connection, in ms. Also checked against the wall
@@ -98,6 +109,8 @@ export type Options = {
   reconnectOnOnline: boolean;
   reconnectOnTimeout: boolean;
   reconnectionDelayGrowFactor: number;
+  // How long to wait before RSI requests time out, in milliseconds.
+  rsiTimeout: number;
   timeout: number;
   // Maximum retry attempts after initial send (maxOpRetries + 1 total attempts).
   // A request that gets no response to any of them is not dropped: the
@@ -122,25 +135,69 @@ export type Message = {
   type: string;
 };
 
+/* Message types */
+
+export type PubMessage = {
+  type: 'pub';
+  channelID: string;
+  data: JSONType;
+};
+
+export type RsiMessage = {
+  type: 'rsi';
+  id: string;
+  data: JsonSbpInvocation
+};
+
+export type RsiErrorMessage = {
+  type: 'rsi-error';
+  to: string;
+  data: JSONType;
+};
+
+export type RsiOkMessage = {
+  type: 'rsi-ok';
+  to: string;
+  data: JSONType;
+};
+
+export type SubMessage = {
+  [key: string]: JSONType;
+  type: 'sub';
+  channelID: string;
+} & { kvFilter?: Array<string> };
+
+export type UnsubMessage = {
+  [key: string]: JSONType;
+  type: 'unsub';
+  channelID: string;
+};
+
 export type PubSubClient = {
   connectionTimeoutID: TimeoutID | undefined;
   connectionTimeUsed?: number;
   // eslint-disable-next-line no-use-before-define
   customEventHandlers: Partial<ClientEventHandlers>;
   failedConnectionAttempts: number;
+  id: string;
   isLocal: boolean;
   isNew: boolean;
   // `Date.now()` when the current socket opened or last received a message
   lastMessageAt: number | undefined;
   // eslint-disable-next-line no-use-before-define
   listeners: ClientEventHandlers;
+  messageCounter: number;
   // eslint-disable-next-line no-use-before-define
   messageHandlers: MessageHandlers;
   nextConnectionAttemptDelayID: TimeoutID | undefined;
   options: Options;
   // eslint-disable-next-line no-use-before-define
   pendingOperations: TieredMap<RequestTypeEnum, string, PendingOperation>;
+  pendingRsiOperations: Map<string, RsiMessage>;
   pingTimeoutID: TimeoutID | undefined;
+  promiseRejectersByMessageID: Map<string, (reason?: unknown) => void>;
+  promiseResolversByMessageID: Map<string, (value: unknown) => void>;
+  promiseTimeoutsByMessageID: Map<string, TimeoutID>;
   shouldReconnect: boolean;
   socket: WebSocket | null;
   // Current connection state, and `Date.now()` when the client entered it
@@ -155,14 +212,18 @@ export type PubSubClient = {
   // Methods
   clearAllTimers(this: PubSubClient): void;
   connect(this: PubSubClient): void;
+  createRsiMessage(this: PubSubClient, data: JsonSbpInvocation): RsiMessage;
   destroy(this: PubSubClient): void;
+  generateMessageID(this: PubSubClient): string;
   getStatus(this: PubSubClient): PubSubStatus;
   pub(this: PubSubClient, channelID: string, data: JSONType): void;
+  rsi(this: PubSubClient, data: JsonSbpInvocation): Promise<unknown>;
   scheduleConnectionAttempt(this: PubSubClient): void;
   sub(this: PubSubClient, channelID: string): void;
   unsub(this: PubSubClient, channelID: string): void;
   getNextRandomDelay(this: PubSubClient): number;
   setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void;
+  tryRsiOperation(this: PubSubClient, op: RsiMessage): void;
 };
 
 type ClientEventHandlers = {
@@ -214,28 +275,13 @@ type MessageHandlers = {
   [RESPONSE_TYPE.OK](this: PubSubClient, msg: { data:
     { type: string; channelID: string; kvFilter?: string[] }
   }): void;
-};
-
-export type PubMessage = {
-  type: 'pub';
-  channelID: string;
-  data: JSONType;
-};
-
-export type SubMessage = {
-  [key: string]: JSONType;
-  type: 'sub';
-  channelID: string;
-} & { kvFilter?: Array<string> };
-
-export type UnsubMessage = {
-  [key: string]: JSONType;
-  type: 'unsub';
-  channelID: string;
+  [RESPONSE_TYPE.RSI_ERROR](this: PubSubClient, msg: RsiErrorMessage): void;
+  [RESPONSE_TYPE.RSI_OK](this: PubSubClient, msg: RsiOkMessage): void;
 };
 
 // TODO: verify these are good defaults
 const defaultOptions: Options = {
+  WebSocket: undefined,
   logPingMessages: process.env.NODE_ENV === 'development' && !process.env.CI,
   pingTimeout: 45000,
   maxReconnectionDelay: 60000,
@@ -246,6 +292,7 @@ const defaultOptions: Options = {
   // A timed-out attempt is retried either way; see the JSDoc of `createClient`
   reconnectOnTimeout: false,
   reconnectionDelayGrowFactor: 2,
+  rsiTimeout: 10000,
   timeout: 60000,
   maxOpRetries: 4,
   opRetryInterval: 2000
@@ -545,16 +592,22 @@ export function createClient (url: string, options: Partial<Options> = {}): PubS
     // Reset to 0 upon successful connection.
     // Used to compute how long to wait before the next reconnection attempt.
     failedConnectionAttempts: 0,
+    id: randomHexString(6),
     isLocal: /\/\/(localhost|127\.0\.0\.1)([:?/]|$)/.test(url),
     // True if this client has never been connected yet.
     isNew: true,
     lastMessageAt: undefined,
     listeners: Object.create(null),
+    messageCounter: 0,
     messageHandlers: { ...defaultMessageHandlers, ...options.messageHandlers },
     nextConnectionAttemptDelayID: undefined,
     options: { ...defaultOptions, ...options },
     pendingOperations: new TieredMap(),
+    pendingRsiOperations: new Map(),
     pingTimeoutID: undefined,
+    promiseRejectersByMessageID: new Map(),
+    promiseResolversByMessageID: new Map(),
+    promiseTimeoutsByMessageID: new Map(),
     shouldReconnect: true,
     // The underlying WebSocket object.
     // A new one is necessary for every connection or reconnection attempt.
@@ -704,17 +757,32 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     client.subscriptionSet.clear()
     client.pendingOperations.tClear(REQUEST_TYPE.UNSUB)
     client.pendingOperations.tClear(REQUEST_TYPE.KV_FILTER)
+    // Do not clear the pending RSI operations if we're planning to reconnect,
+    // in order to retry them upon reconnection.
+    // However, their timers should have already been cleared and deleted in .clearAllTimers().
 
     if (client.shouldReconnect && client.options.reconnectOnDisconnection) {
       if (client.failedConnectionAttempts > client.options.maxRetries) {
+        client.shouldReconnect = false
         sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_FAILED, client)
+        client.destroy()
       } else {
-        // If we are definetely offline then do not try to reconnect now,
+        // If we are definetely offline then do not try to reconnect right now,
         // unless the server is local.
         if (!isDefinetelyOffline() || client.isLocal) {
           client.scheduleConnectionAttempt()
         }
       }
+    } else if (!client.shouldReconnect) {
+      client.destroy()
+    } else {
+      // No automatic reconnect, so pending RSI calls can't complete.
+      const err = Object.assign(new Error('[pubsub] Connection lost'), { name: 'RsiConnectionError' })
+      for (const reject of client.promiseRejectersByMessageID.values()) reject(err)
+      client.pendingRsiOperations.clear()
+      client.promiseRejectersByMessageID.clear()
+      client.promiseResolversByMessageID.clear()
+      client.promiseTimeoutsByMessageID.clear()
     }
     updateState(client)
   },
@@ -821,12 +889,17 @@ const defaultClientEventHandlers: ClientEventHandlers = {
     if (times) times.openedAt = Date.now()
     client.connectionTimeUsed = undefined
     client.clearAllTimers()
-    sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SUCCEEDED, client)
-
     // Set it to -1 so that it becomes 0 on the next `close` event.
     client.failedConnectionAttempts = -1
+    // Send any pending RSI request.
+    console.debug(`[pubsub] Resending ${client.pendingRsiOperations.size} RSI requests that are still pending.`)
+    for (const op of client.pendingRsiOperations.values()) {
+      client.tryRsiOperation(op)
+    }
+    // Ordering matters so that listeners see the correct value of 'isNew'.
+    sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SUCCEEDED, client)
     client.isNew = false
-    // Setup a ping timeout if required.
+
     // It will replace the connection if we don't get any message from the server.
     client.lastMessageAt = Date.now()
     armPingTimeout(client)
@@ -851,9 +924,6 @@ const defaultClientEventHandlers: ClientEventHandlers = {
 
   'reconnection-failed' () {
     console.warn('[pubsub] Reconnection failed')
-    const client = this
-
-    client.destroy()
   },
 
   'reconnection-scheduled' (event) {
@@ -1002,6 +1072,49 @@ const defaultMessageHandlers: MessageHandlers = {
         console.error(`[pubsub] Malformed response: invalid request type ${type}`)
       }
     }
+  },
+
+  [RESPONSE_TYPE.RSI_ERROR] ({ to, data }: RsiErrorMessage) {
+    const client = this
+    const { pendingRsiOperations } = client
+    console.warn('[pubsub] Received RSI_ERROR:', { to, data })
+    if (typeof to !== 'string' || to === '') throw new Error('Field "to" must be a non-empty string.')
+    const originalMessage = pendingRsiOperations.get(to)
+    pendingRsiOperations.delete(to)
+    const reject = client.promiseRejectersByMessageID.get(to)
+    client.promiseRejectersByMessageID.delete(to)
+    client.promiseResolversByMessageID.delete(to)
+    clearTimeout(client.promiseTimeoutsByMessageID.get(to))
+    client.promiseTimeoutsByMessageID.delete(to)
+    if (!originalMessage) return console.warn('[pubsub] Message %s not found', to)
+    if (!reject) throw new Error('Missing promise rejecter.')
+    // Wraps the error payload in an Error object.
+    const reason = (
+      typeof data === 'string'
+        ? new Error(data)
+        : typeof data === 'object' && data !== null
+        // Assign only safe fields since the data comes from a remote source.
+          ? Object.assign(new Error(), pick(data, ['cause', 'message', 'name']))
+          : new Error(String(data))
+    )
+    reject(reason)
+  },
+
+  [RESPONSE_TYPE.RSI_OK] ({ to, data }: RsiOkMessage) {
+    const client = this
+    const { pendingRsiOperations } = client
+    console.debug('[pubsub] Received RSI_OK:', { to, data })
+    if (typeof to !== 'string' || to === '') throw new Error('Field "to" must be a non-empty string.')
+    const originalMessage = pendingRsiOperations.get(to)
+    pendingRsiOperations.delete(to)
+    const resolve = client.promiseResolversByMessageID.get(to)
+    client.promiseRejectersByMessageID.delete(to)
+    client.promiseResolversByMessageID.delete(to)
+    clearTimeout(client.promiseTimeoutsByMessageID.get(to))
+    client.promiseTimeoutsByMessageID.delete(to)
+    if (!originalMessage) return console.warn('[pubsub] Message %s not found', to)
+    if (!resolve) throw new Error('Missing promise resolver.')
+    resolve(data)
   }
 }
 
@@ -1071,11 +1184,15 @@ export const messageParser = (data: string): Message => {
 const publicMethods: {
   clearAllTimers(this: PubSubClient): void;
   connect(this: PubSubClient): void;
+  createRsiMessage(this: PubSubClient, data: JsonSbpInvocation): RsiMessage;
   destroy(this: PubSubClient): void;
+  generateMessageID(this: PubSubClient): string;
   getStatus(this: PubSubClient): PubSubStatus;
   pub(this: PubSubClient, channelID: string, data: JSONType): void;
   scheduleConnectionAttempt(this: PubSubClient): void;
+  rsi(this: PubSubClient, data: JsonSbpInvocation): Promise<unknown>;
   sub(this: PubSubClient, channelID: string): void;
+  tryRsiOperation(this: PubSubClient, op: RsiMessage): void;
   setKvFilter(this: PubSubClient, channelID: string, kvFilter?: string[]): void;
   unsub(this: PubSubClient, channelID: string): void;
   getNextRandomDelay(this: PubSubClient): number;
@@ -1086,6 +1203,8 @@ const publicMethods: {
     clearTimeout(client.connectionTimeoutID)
     clearTimeout(client.nextConnectionAttemptDelayID)
     clearTimeout(client.pingTimeoutID)
+    for (const timeoutID of client.promiseTimeoutsByMessageID.values()) clearTimeout(timeoutID)
+    client.promiseTimeoutsByMessageID.clear()
     clearInterval(client.wallClockWatchdogID)
     client.connectionTimeoutID = undefined
     client.nextConnectionAttemptDelayID = undefined
@@ -1096,6 +1215,7 @@ const publicMethods: {
   // Performs a connection or reconnection attempt.
   connect () {
     const client = this
+    const WebSocket = client.options.WebSocket ?? globalThis.WebSocket
 
     if (client.socket !== null) {
       throw new Error('connect() can only be called if there is no current socket.')
@@ -1142,7 +1262,12 @@ const publicMethods: {
     for (const name of socketEventNames) {
       client.socket.addEventListener(name, client.listeners[name] as () => void)
     }
+    if (!client.isNew) sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_ATTEMPT, client)
     updateState(client)
+  },
+
+  createRsiMessage (data: JsonSbpInvocation) {
+    return { type: 'rsi' as const, id: this.generateMessageID(), data }
   },
 
   /**
@@ -1160,11 +1285,21 @@ const publicMethods: {
     // Update property values.
     // Note: do not clear 'client.options'.
     client.pendingOperations.clear()
+    client.pendingRsiOperations.clear()
+    // Rejects any pending promise before forgetting them.
+    const err = new Error('[pubsub] Client destroyed')
+    for (const rejecter of client.promiseRejectersByMessageID.values()) rejecter(err)
+    client.promiseRejectersByMessageID.clear()
+    client.promiseResolversByMessageID.clear()
+    for (const timeout of client.promiseTimeoutsByMessageID.values()) clearTimeout(timeout)
+    client.promiseTimeoutsByMessageID.clear()
     client.subscriptionSet.clear()
-    // Remove global event listeners.
+    // Remove global event listeners for this client.
     if (typeof self === 'object' && self instanceof EventTarget) {
       for (const name of globalEventNames) {
-        globalEventMap.delete(name)
+        if (globalEventMap.get(name) === client.listeners[name]) {
+          globalEventMap.delete(name)
+        }
       }
     }
     // Remove WebSocket event listeners.
@@ -1195,6 +1330,10 @@ const publicMethods: {
       pending: pending ? [...pending.keys()] : [],
       oldestPendingSince: oldestPendingSubSince(client)
     }
+  },
+
+  generateMessageID () {
+    return `${this.id}-${this.messageCounter++}`
   },
 
   getNextRandomDelay (): number {
@@ -1240,12 +1379,37 @@ const publicMethods: {
     const nth = client.failedConnectionAttempts + 1
 
     client.nextConnectionAttemptDelayID = setTimeout(() => {
-      sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_ATTEMPT, client)
       client.nextConnectionAttemptDelayID = undefined
       client.connect()
     }, delay)
     sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_SCHEDULED, client, { delay, nth })
     updateState(client)
+  },
+
+  /**
+   * Sends out a given RSI message if the socket is open.
+   * Also marks the message ID as pending.
+   *
+   * This should be idempotent,
+   * as the server is meant to ignore retries once a given request ID has been processed.
+   */
+  tryRsiOperation (op: RsiMessage) {
+    const client = this
+    const { options, socket } = client
+    client.pendingRsiOperations.set(op.id, op)
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(op))
+      if (options.rsiTimeout) {
+        clearTimeout(client.promiseTimeoutsByMessageID.get(op.id))
+        client.promiseTimeoutsByMessageID.set(op.id, setTimeout(() => {
+          client.promiseRejectersByMessageID.get(op.id)?.(new Error(`RSI ${op.id} timed out`))
+          client.promiseRejectersByMessageID.delete(op.id)
+          client.promiseResolversByMessageID.delete(op.id)
+          client.pendingRsiOperations.delete(op.id)
+          client.promiseTimeoutsByMessageID.delete(op.id)
+        }, options.rsiTimeout))
+      }
+    }
   },
 
   // Can be used to send ephemeral messages outside of any contract log.
@@ -1255,6 +1419,27 @@ const publicMethods: {
       this.socket.send(createPubMessage(channelID, data))
     }
   },
+
+  /**
+   * Issues a remote SBP invocation to the server.
+   * The returned promise will resolve with the response payload if successful,
+   * - The request is automatically retried until a response is received, or until it times out.
+   * - The timeout delay comes from the 'rsiTimeout' option.
+   *
+   * This method is not idempotent!
+   * Every call starts a new, distinct request, with its own ID.
+   * Use '.tryRsiOperation()' if you want to retry a *still pending* request.
+   */
+  async rsi (data: JsonSbpInvocation) {
+    const client = this
+    const op = this.createRsiMessage(data)
+    return await new Promise((resolve, reject) => {
+      client.promiseResolversByMessageID.set(op.id, resolve)
+      client.promiseRejectersByMessageID.set(op.id, reject)
+      client.tryRsiOperation(op)
+    })
+  },
+
   /**
    * Sends a SUB request to the server as soon as possible.
    *
