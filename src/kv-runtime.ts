@@ -18,6 +18,7 @@ const startKvSession = (ctx: CheloniaContext, endedBy: string): void => {
   ctx.kvReconnectRefresh = new Set()
   ctx.kvPendingWrites = new Map()
   ctx.kvPendingLoads = new Map()
+  ctx.kvSlotLoadsRunning = new Map()
   ctx.kvOnUpdateActive = new Map()
   ctx.kvHeightListeners = new Map()
   ctx.kvRecoveries = new Map()

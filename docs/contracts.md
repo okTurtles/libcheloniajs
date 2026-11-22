@@ -371,13 +371,16 @@ A contract type may define a destructor: a `methods` entry named
 `'<contract name>/_cleanup'`, which Chelonia registers as the
 `<manifest hash>/<contract name>/_cleanup` selector. Chelonia calls it
 synchronously as `_cleanup({ contractID, resync, state })` before
-clearing a contract's state (a returned promise isn't awaited): with
-`resync: true` when a re-sync starts over, and with
-`resync: false` at the final removal (refcount 0 or permanent). The
-final call happens even if a re-sync failed, with whatever state that
-re-sync left. Chelonia remembers the type of such a contract in memory
-only, so after a restart its removal calls no destructor;
-`chelonia/reset` calls none either.
+clearing a contract's state: with `resync: true` when a re-sync starts
+over, and with `resync: false` at the final removal (refcount 0 or
+permanent). The final call happens even if a re-sync failed, with
+whatever state that re-sync left. A returned promise isn't awaited and
+its rejection isn't caught, and the state is cleared as soon as the
+call returns (a re-sync empties `state` itself): an `async` destructor
+must read `state` before its first `await` and catch its own errors.
+Chelonia remembers the type of such a contract in memory only, so after
+a restart its removal calls no destructor; `chelonia/reset` calls none
+either.
 
 ### Booting with a persisted root state
 

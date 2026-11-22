@@ -307,7 +307,8 @@ export type KvHeightWait = {
   // Bumped by every finding, so that a load only drops the wait it saw
   gen: number;
   off: () => void;
-  // The fallback; none while reloading, or once it gave up (still listening)
+  // The fallback. None while its sync runs, once it gave up (still listening), and
+  // from a reload's start until a finding or a verified empty outcome arms it
   timer?: ReturnType<typeof setTimeout>;
   // The reload started when the height was reached; cleared when it ends with
   // a newer finding pending
@@ -608,6 +609,12 @@ export type CheloniaContext = {
   // value the superseded load is about to discard at its staleness guard
   // — which would otherwise leave the mirror silently stale.
   kvPendingLoads: Map<string, number>;
+  // Per-slot (`${contractID}${KV_KEY_SEPARATOR}${key}`) count of running
+  // `_loadSlotNow` calls. A load that can't start while one of them shows
+  // an empty slot as `'loading'` leaves the outcome to them: `unstarted`
+  // settles the slot when the last of them ends, if they gave it none
+  // (`settleUnloaded`).
+  kvSlotLoadsRunning: Map<string, { count: number; unstarted?: () => void }>;
   // Per-contract count of `onUpdate` callbacks currently executing
   // inside the contract's `chelonia/queueInvocation` lane. A KV selector
   // that queues on or waits for that lane (`update`, `clear`, `sync`,
@@ -819,8 +826,8 @@ export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<
  *   - `[newData, ifMatch]` to retry the write with `newData` against
  *     etag `ifMatch`. `ifMatch` may be `undefined` when the server
  *     returned neither `x-cid` nor `etag` (typical for 404 / 410
- *     fall-throughs) — the primitive substitutes `''` at the wire so
- *     the POST still goes through.
+ *     fall-throughs): the primitive then sends `if-match: ""` (no value),
+ *     so the POST still goes through.
  *   - **any falsy value** (`false`, `null`, `undefined`, `0`, `''`)
  *     to abort the write without an HTTP call. The slot API
  *     (`chelonia/kv/update`) relies on this to honour `KV_NOOP` and
@@ -889,6 +896,7 @@ export type KvConflictCause = {
 export type KvConflictServerValue =
   | {
       currentStatus: 'present';
+      // Decrypted and verified lazily: reading `.data` throws like `currentData`
       currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType>;
       requiredHeight?: undefined;
     }

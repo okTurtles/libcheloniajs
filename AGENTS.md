@@ -218,8 +218,8 @@ Chelonia must keep the pubsub client (`src/pubsub/index.ts`) subscribed to
 every contract in its `subscriptionSet`. Three layers make sure of it: the
 client replaces a connection that stops answering instead of dropping
 requests, Chelonia re-subscribes whatever the client lost (after every
-reconnection and periodically), and publishing and KV writes sync the
-contract instead of relying on pubsub alone.
+reconnection and periodically), and publishing and KV height recovery
+(not a raw `kv/set`) sync the contract instead of relying on pubsub alone.
 
 Full documentation: [docs/debugging.md](docs/debugging.md#pubsub-connection)
 (behaviour, status and log lines) and the comments in `src/pubsub/index.ts`.
@@ -421,10 +421,14 @@ the harness's `waitFor(cond)` when the test should inspect a timeout rather than
 it resolves with the truthy value of `cond()`, or with `undefined` after 2 s by default.
 
 `makeKvServer` in `src/test-utils.ts` simulates the server's KV store (`if-match` and height
-checks). `src/kv-height-harness.ts` (imports `chelonia.ts`, excluded from the CJS build) runs
-the real KV slot layer against it for the `kv-height*.test.ts` files, and holds the helpers
-they share (`gets`, `read`, `sync`, `update`, `findAhead`, …). Test files may import
-`test-utils.ts`, `pubsub/test-harness.ts` and `kv-height-harness.ts`, never each other.
+checks, in `kvPostStatus`, which the fake relay uses too). `src/kv-height-harness.ts` (imports
+`chelonia.ts`, excluded from the CJS build) runs the real KV slot layer against it for the
+`kv-height*.test.ts` files, and holds the helpers they share (`gets`, `read`, `sync`, `update`,
+`findAhead`, …). Its `vetoQueue`, `vetoSelector` and `filterCalls` filter SBP calls until the
+test ends. Use them, not a module-level `sbp/filters/selector/add` driven by a variable: SBP
+filters can't be removed, and a test that fails or times out before it resets the variable
+leaves the filter armed for the rest of the file. Test files may import `test-utils.ts`,
+`pubsub/test-harness.ts` and `kv-height-harness.ts`, never each other.
 
 `npm test` passes `--test-timeout=60000`. On Node 22, which CI uses, that bounds a whole
 test *file* (newer Node lines bound each test), so keep each file under about 25 s when run

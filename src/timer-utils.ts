@@ -1,6 +1,6 @@
 // The longest delay that timers support: above it, Node.js (with a
 // `TimeoutOverflowWarning`) and browsers fire them at once
-const MAX_TIMER_DELAY = 2 ** 31 - 1
+export const MAX_TIMER_DELAY = 2 ** 31 - 1
 
 // `value` as the delay of a timer that can be disabled: `undefined` (no
 // timer) unless it's a positive finite number, and at most the longest delay

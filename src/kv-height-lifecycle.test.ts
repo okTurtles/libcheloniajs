@@ -347,9 +347,18 @@ describe('chelonia/reset', () => {
       return persisted
     }), 'the reset')
     await until(() => persisting, 'the reset to drain')
-    sbp('chelonia/_init')
-    await configure()
-    open()
+    try {
+      sbp('chelonia/_init')
+      await configure()
+      // The new session can't start a recovery meanwhile
+      const ahead = new ChelErrorKvHeightAhead('ahead')
+      await assert.rejects(
+        within(sbp('chelonia/kv/withHeightRecovery', CONTRACT_ID, () => { throw ahead }), 'the refusal'),
+        { name: 'AbortError', message: /chelonia\/reset is in progress/ }
+      )
+    } finally {
+      open()
+    }
     await reset
 
     // A value that never becomes verifiable: the fallback syncs once, then settles

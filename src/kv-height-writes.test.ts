@@ -6,9 +6,10 @@ import {
   ChelErrorKvHeightAhead, ChelErrorKvReentrant, isKvConflict, isKvHeightAhead, isKvHeightMalformed
 } from './errors.js'
 import {
-  activate, aheadAt, CONTRACT_ID, defineSlot, drainLanes, gateLane, gets, holdSyncs,
-  installKvHarness, keys, logs, mirror, restamp, rootState, server, serverValue, setLocalHeight,
-  sleep, START_HEIGHT, syncs, update, writeAsDeviceB
+  activate, aheadAt, CONTRACT_ID, defineSlot, drainLanes, failGets, filterCalls, gateLane, gets,
+  holdSyncs, installKvHarness, keys, logs, mirror, restamp, rootState, server, serverValue,
+  setLocalHeight, sleep, START_HEIGHT, syncs, update, type UpdateOptions, vetoQueue, vetoSelector,
+  writeAsDeviceB
 } from './kv-height-harness.js'
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import { KV_NOOP } from './kv-constants.js'
@@ -59,6 +60,8 @@ describe('KV slot writes against the server', () => {
   })
 
   it('re-signs a write with a stale stamp only once a running sync ends (409)', async () => {
+    // Not the 1.5 s default: the sync is held for as long as the test takes
+    kvHeightTimings.waitMs = 60_000
     const release = holdSyncs()
     const sync = sbp('chelonia/private/in/sync', CONTRACT_ID) as Promise<void>
     await until(() => sbp('chelonia/contract/isSyncing', CONTRACT_ID), 'the sync to start')
@@ -82,6 +85,39 @@ describe('KV slot writes against the server', () => {
       [409, String(START_HEIGHT)], [204, String(START_HEIGHT + 1)]
     ])
     assert.deepStrictEqual(serverValue('prefs'), { lang: 'en' })
+  })
+
+  it("says a running sync stopped a 409's re-sign when it doesn't wait for it", async () => {
+    const release = holdSyncs()
+    const sync = sbp('chelonia/private/in/sync', CONTRACT_ID) as Promise<void>
+    try {
+      await until(() => sbp('chelonia/contract/isSyncing', CONTRACT_ID), 'the sync to start')
+      server.height = START_HEIGHT + 1
+      server.onPost = () => {
+        server.onPost = undefined
+        setLocalHeight(START_HEIGHT + 1)
+      }
+      await assert.rejects(within(sbp('chelonia/kv/set', CONTRACT_ID, 'prefs', { lang: 'en' }, {
+        signingKeyId: keys.cskId, encryptionKeyId: keys.cekId, heightWaitMs: 0
+      }), 'kv/set'), (e: Error) => {
+        assert.ok(isKvHeightAhead(e))
+        assert.deepStrictEqual(e.cause, {
+          requiredHeight: START_HEIGHT + 1,
+          exact: false,
+          localHeight: START_HEIGHT + 1,
+          etag: '""',
+          httpStatus: 409
+        })
+        assert.strictEqual(e.message, `[chelonia/kv] ${CONTRACT_ID}::prefs: the server needs ` +
+          `contract height ${START_HEIGHT + 1} or later; the local contract is at height ` +
+          `${START_HEIGHT + 1}, and a sync of it is still running; sync the contract and retry`)
+        return true
+      })
+    } finally {
+      release()
+    }
+    await within(sync, 'the sync')
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [409])
   })
 })
 
@@ -112,12 +148,6 @@ const needs = (height: number) => {
 
 const syncEnded = (count: number) => () =>
   syncs.count === count && !sbp('chelonia/contract/isSyncing', CONTRACT_ID)
-
-// The lane whose work the filter below vetoes
-let vetoedLane: string | undefined
-sbp('sbp/filters/selector/add', 'chelonia/private/queueEvent',
-  (_domain: string, _selector: string, [queueName]: unknown[]) => queueName !== vetoedLane
-)
 
 describe('chelonia/kv/withHeightRecovery', () => {
   installKvHarness()
@@ -225,11 +255,16 @@ describe('chelonia/kv/withHeightRecovery', () => {
     await assert.rejects(within(recover(failed.attempt), 'a failed sync'), (e) => e === failed.errors[0])
     assert.strictEqual(failed.calls.length, 1)
 
-    // The passive wait after a failed sync stays within the recovery deadline
+    // The passive wait after a failed sync stays within the recovery deadline.
+    // The sync fails well before the deadline: this is not the "too long" branch.
     kvHeightTimings.waitMs = 60_000
-    kvHeightTimings.recoveryTimeoutMs = 50
+    kvHeightTimings.recoveryTimeoutMs = 250
+    const gaveUp = () => logs.entries.filter(({ level, args }) => level === 'warn' &&
+      /gave up: its sync failed/.test(String(args[0]))).length
+    const warned = gaveUp()
     const late = needs(START_HEIGHT + 1)
-    await assert.rejects(within(recover(late.attempt), 'the deadline'), (e) => e === late.errors[0])
+    await assert.rejects(within(recover(late.attempt), 'the deadline', 2000), (e) => e === late.errors[0])
+    assert.strictEqual(gaveUp() - warned, 1, 'gave up after the failed sync')
     await until(syncEnded(before + 2), 'the second failed sync')
     kvHeightTimings.recoveryTimeoutMs = 60_000
 
@@ -281,15 +316,12 @@ describe('chelonia/kv/withHeightRecovery', () => {
     for (const [via, attempt] of Object.entries(attempts)) {
       let calls = 0
       const warned = gaveUp()
-      vetoedLane = CONTRACT_ID
-      try {
-        await assert.rejects(within(recover((args) => {
-          calls++
-          return attempt(args)
-        }), via), (e) => isKvHeightAhead(e))
-      } finally {
-        vetoedLane = undefined
-      }
+      const lift = vetoQueue(CONTRACT_ID)
+      await assert.rejects(within(recover((args) => {
+        calls++
+        return attempt(args)
+      }), via), (e) => isKvHeightAhead(e))
+      lift()
       assert.deepStrictEqual([calls, gaveUp() - warned], [1, 1], via)
     }
     assert.strictEqual(syncs.count, before)
@@ -339,6 +371,50 @@ describe('chelonia/kv/withHeightRecovery', () => {
     await within(reset, 'the reset')
   })
 
+  // Queues `start()`'s sync behind a contract sync that hangs (a dead link), in
+  // the window before `chelonia/reset` aborts: the reset's second
+  // `chelonia/contract/wait` holds its public noop meanwhile. The abort ends the
+  // hung sync, and the queued one must not start with the new controller.
+  const queueBeforeResetAbort = async (start: () => Promise<unknown>, what: string) => {
+    await activate()
+    holdSyncs()
+    const before = syncs.count
+    let calls = 0
+    let openPublic!: () => void
+    // Each `chelonia/contract/wait` calls this before it queues its noops
+    const draining = new Promise<void>((resolve) => {
+      const lift = filterCalls('chelonia/contract/wait', () => {
+        if (++calls !== 2) return
+        lift()
+        openPublic = gateLane('public')
+        resolve()
+      })
+    })
+    const reset = sbp('chelonia/reset') as Promise<void>
+    await within(draining, "the reset's last drain before its abort")
+    const queued = () => sbp('okTurtles.eventQueue/queuedInvocations', CONTRACT_ID).length
+    await until(() => queued() === 0, 'its internal noop')
+    const other = (sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true }) as Promise<void>)
+      .catch(() => {})
+    await until(() => syncs.count === before + 1, 'the other sync')
+    const work = start()
+    await until(() => queued() === 2, `${what} to be queued`)
+    openPublic()
+    await assert.rejects(within(work, what), { name: 'AbortError' })
+    await within(reset, 'the reset')
+    await within(other, 'the other sync')
+    assert.strictEqual(syncs.count, before + 1)
+  }
+
+  it('skips a recovery sync that a reset aborted while it was queued', () =>
+    queueBeforeResetAbort(() => recover(needs(START_HEIGHT + 1).attempt), 'the recovery sync'))
+
+  // Not specific to KV, but this harness can hold the lanes
+  it('skips a contract sync that a reset aborted while it was queued', () =>
+    queueBeforeResetAbort(
+      () => sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true }), 'the contract sync'
+    ))
+
   it('queues work on the public lane; an abort while queued rejects and skips it', async () => {
     const open = gateLane('public')
     const ran: string[] = []
@@ -379,7 +455,9 @@ describe('chelonia/kv/withHeightRecovery', () => {
   })
 
   it('validates the attempt and options before the first attempt', async () => {
-    await assert.rejects(recover(undefined as unknown as () => void), TypeError)
+    await assert.rejects(recover(undefined as unknown as () => void), {
+      name: 'TypeError', message: /`attempt` must be a function/
+    })
     let calls = 0
     const attempt = () => ++calls
     for (const options of [
@@ -526,6 +604,28 @@ describe('chelonia/kv/queuedSet', () => {
     assert.strictEqual(server.posts().length, 4)
   })
 
+  it("says when a conflict's value can't be read, rather than that attempts ran out", async () => {
+    let etag = ''
+    server.onPost = (key) => { server.onPost = undefined; etag = server.put(key, 'not json') }
+    let calls = 0
+    const onconflict: ChelKvOnConflictCallback = async () => {
+      calls++
+      return [['b'], '"stale"']
+    }
+    await assert.rejects(
+      within(queuedSet({ key: 'names', data: ['b'], maxAttempts: 5, onconflict }), 'queuedSet'),
+      (e: Error) => {
+        assert.ok(isKvConflict(e))
+        assert.strictEqual(e.name, 'ChelErrorKvConflict')
+        assert.strictEqual(e.message,
+          `[chelonia/kv] queuedSet: ${CONTRACT_ID}::names got a conflict whose value can't be read`)
+        assert.deepStrictEqual(e.cause, { etag })
+        return true
+      }
+    )
+    assert.deepStrictEqual([calls, server.posts().length], [0, 1])
+  })
+
   it('gives onconflict a value from a newer height with allowUnverifiedConflict', async () => {
     writeAsDeviceB('names', ['a'], START_HEIGHT + 2)
     const seen: unknown[] = []
@@ -583,9 +683,9 @@ describe('chelonia/kv/queuedSet', () => {
 
 const AHEAD = START_HEIGHT + 2
 const appendX = (value: JSONType) => [...(value as string[]), 'x']
-const updateWith = (key: string, options: Record<string, unknown> = {}) =>
+const updateWith = (key: string, options: UpdateOptions = {}) =>
   update(key, appendX, options)
-const clear = (key: string, options?: Record<string, unknown>) =>
+const clear = (key: string, options?: Omit<UpdateOptions, 'updater' | 'ifMatch'>) =>
   within(sbp('chelonia/kv/clear', CONTRACT_ID, key, options) as Promise<void>, `clear of ${key}`)
 const slotState = (key: string) => {
   const entry = mirror(key)
@@ -722,6 +822,20 @@ describe('Slot writes and contract heights', () => {
       return true
     })
     assert.deepStrictEqual(slotState('names'), ['loading', AHEAD, true])
+
+    // With an attempt left, and as the last recovery attempt (one that may
+    // wait for a height), it writes over the ahead value at once: only the
+    // server's check of its stamp (409) makes it wait for the height
+    const posted = server.posts().length
+    const clearing = clear('names', { maxHeightRecoveries: 0 })
+    await until(() => server.posts().length === posted + 2, 'the write over the ahead value')
+    setLocalHeight(AHEAD)
+    await clearing
+    await drainLanes()
+    const statuses = server.posts().slice(posted).map(({ status }) => status)
+    assert.deepStrictEqual(statuses, [412, 409, 204])
+    assert.strictEqual(serverValue('names'), null)
+    assert.deepStrictEqual(slotState('names'), ['non-init', undefined, true])
     assert.strictEqual(syncs.count, before)
   })
 
@@ -750,6 +864,28 @@ describe('Slot writes and contract heights', () => {
     }
     await assert.rejects(updateWith('names', { maxAttempts: 2 }), (e: Error) =>
       conflict({ currentStatus: 'present', etag })(e))
+  })
+
+  it("says when a conflict's value can't be read, rather than that attempts ran out", async () => {
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    const writes = [
+      ['update', () => updateWith('names', { maxAttempts: 5 })],
+      ['clear', () => clear('names', { maxAttempts: 5 })]
+    ] as const
+    for (const [op, write] of writes) {
+      const posted = server.posts().length
+      let etag = ''
+      server.onPost = (key) => { server.onPost = undefined; etag = server.put(key, 'not json') }
+      await assert.rejects(write(), (e: Error) => {
+        assert.strictEqual(e.name, 'ChelErrorKvConflict')
+        assert.strictEqual(e.message,
+          `[chelonia/kv] ${op}: ${CONTRACT_ID}::names got a conflict whose value can't be read`)
+        assert.deepStrictEqual(e.cause, { etag })
+        return true
+      })
+      assert.strictEqual(server.posts().length, posted + 1, op)
+    }
   })
 
   it('a committed write drops the key\'s wait it saw, but not one for a value found meanwhile', async () => {
@@ -793,7 +929,12 @@ describe('Slot writes and contract heights', () => {
 
   it('an abort while queued rejects at once; one after the write committed is ignored', async () => {
     const late = new AbortController()
-    defineSlot({ key: 'names', defaultValue: [], onUpdate: () => late.abort(new Error('late')) })
+    defineSlot({
+      key: 'names',
+      defaultValue: [],
+      // Only after the write committed
+      onUpdate: (_value, { reason }) => { if (reason === 'local') late.abort(new Error('late')) }
+    })
     await activate()
     const open = gateLane('public')
     const controller = new AbortController()
@@ -818,7 +959,7 @@ describe('Slot writes and contract heights', () => {
     const requests = server.log.length
     for (const options of [
       { maxAttempts: 0 }, { maxAttempts: '3' }, { onHeightAhead: 'never' }, { maxHeightRecoveries: -1 }
-    ]) {
+    ] as UpdateOptions[]) {
       await assert.rejects(updateWith('names', options), {
         name: 'ChelErrorKvUpdateInvalid', message: /update: /
       })
@@ -890,15 +1031,23 @@ describe('Slot writes and contract heights', () => {
   }
 })
 
-// GETs of `key` answer 500 until the returned function is called
-const failGets = (key: string): (() => void) => {
+// GETs of `key` hang until `open()`; like a fetch, each rejects when its request aborts
+const holdGets = (key: string) => {
   const { handle } = server
+  const requests: AbortSignal[] = []
+  let release!: () => void
+  const released = new Promise<void>((resolve) => { release = resolve })
   server.handle = async (url, init) => {
     if (init?.method === 'POST' || !url.endsWith(`/${key}`)) return handle(url, init)
-    server.log.push({ method: 'GET', key, status: 500 })
-    return new Response(null, { status: 500 })
+    const signal = init?.signal ?? new AbortController().signal
+    requests.push(signal)
+    await new Promise<void>((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      released.then(resolve)
+    })
+    return handle(url, init)
   }
-  return () => { server.handle = handle }
+  return { requests, open: () => { server.handle = handle; release() } }
 }
 const httpError = (e: unknown) => (e as Error)?.name === 'ChelErrorUnexpectedHttpResponseCode'
 const listSchema = {
@@ -933,8 +1082,6 @@ const breakSlot = async (key: string, value: JSONType) => {
     { name: 'ChelErrorKvValidation' })
   assert.deepStrictEqual([mirror(key)?.status, mirror(key)?.value], ['error', value])
 }
-let vetoLoads = false
-sbp('sbp/filters/selector/add', 'chelonia/kv/_loadSlotNow', () => !vetoLoads)
 
 describe('update\'s reducer basis', () => {
   installKvHarness()
@@ -1029,15 +1176,12 @@ describe('update\'s reducer basis', () => {
     assert.deepStrictEqual(writes('names'), [[etag, 204]])
 
     // A reload that a filter vetoes fails like any other
-    vetoLoads = true
-    try {
-      const vetoed = counted(appendX)
-      await assert.rejects(updateWith('other', { ifMatch: '*', updater: vetoed.updater }),
-        { name: 'ChelErrorUnexpected', message: /vetoed/ })
-      assert.deepStrictEqual(vetoed.calls, [])
-    } finally {
-      vetoLoads = false
-    }
+    const lift = vetoSelector('chelonia/kv/_loadSlotNow')
+    const vetoed = counted(appendX)
+    await assert.rejects(updateWith('other', { ifMatch: '*', updater: vetoed.updater }),
+      { name: 'ChelErrorUnexpected', message: /vetoed/ })
+    assert.deepStrictEqual(vetoed.calls, [])
+    lift()
     await breakSlot('guarded', ['a'])
     failGets('guarded')
     failGets('other')
@@ -1157,5 +1301,67 @@ describe('update\'s reducer basis', () => {
     failGets('write')
     assert.deepStrictEqual(await updateWith('write'), ['a', 'x'])
     assert.deepStrictEqual(writes('write'), [['""', 412], ['""', 412], [etag, 204]])
+  })
+
+  it('an abort ends a reload whose GET hangs, leaving the slot and the lane as they were', async () => {
+    defineSlot({ key: 'waiting', defaultValue: [] })
+    defineSlot({ key: 'recovered', defaultValue: [] })
+    await activate()
+    // 'waiting' has a height wait; 'recovered' finds its value ahead on its write's 412
+    writeAsDeviceB('waiting', ['a'], AHEAD)
+    await assert.rejects(updateWith('waiting', { onHeightAhead: 'reject' }), aheadAt(AHEAD))
+    for (const key of ['waiting', 'recovered']) {
+      if (key === 'recovered') {
+        writeAsDeviceB(key, ['a'], AHEAD + 1)
+        syncs.catchUp = true
+      }
+      const before = { ...mirror(key) }
+      const posted = writes(key).length
+      const hung = holdGets(key)
+      try {
+        const controller = new AbortController()
+        const reducer = counted(appendX)
+        const aborted = updateWith(key, { updater: reducer.updater, signal: controller.signal })
+        await until(() => hung.requests.length, `the reload of ${key}`)
+        controller.abort(STOP)
+        await assert.rejects(within(aborted, `the aborted update of ${key}`, 1000), (e) => e === STOP)
+        assert.ok(hung.requests[0].aborted)
+        assert.strictEqual(reducer.calls.length, key === 'recovered' ? 1 : 0)
+        assert.deepStrictEqual(writes(key).slice(posted), key === 'recovered' ? [['""', 412]] : [])
+        assert.deepStrictEqual({ ...mirror(key) }, before)
+        await within(sbp('chelonia/queueInvocation', CONTRACT_ID, () => {}), 'the lane', 1000)
+      } finally {
+        hung.open()
+      }
+    }
+  })
+
+  it("a raw kv/get's signal aborts its own GET only, and a reset aborts it too", async () => {
+    writeAsDeviceB('prefs', { theme: 'dark' })
+    await activate()
+    const get = (options: unknown) => sbp('chelonia/kv/get', CONTRACT_ID, 'prefs', options)
+    let hung = holdGets('prefs')
+    try {
+      const controller = new AbortController()
+      const aborted = get({ signal: controller.signal })
+      const others = [get(null), get({ signal: new AbortController().signal })]
+      await until(() => hung.requests.length === 3, 'the GETs')
+      controller.abort(STOP)
+      await assert.rejects(within(aborted, 'the aborted kv/get', 1000), (e) => e === STOP)
+      assert.deepStrictEqual(hung.requests.map(({ aborted }) => aborted), [true, false, false])
+      hung.open()
+      for (const other of others) {
+        const result = await within(other, 'the other kv/get') as ChelKvGetResult
+        assert.deepStrictEqual(result.data, { theme: 'dark' })
+      }
+      hung = holdGets('prefs')
+      const cut = get({ signal: new AbortController().signal })
+      await until(() => hung.requests.length, 'the GET')
+      await within(sbp('chelonia/reset') as Promise<void>, 'the reset')
+      await assert.rejects(within(cut, 'the kv/get cut by the reset', 1000), { name: 'AbortError' })
+      assert.ok(hung.requests[0].aborted)
+    } finally {
+      hung.open()
+    }
   })
 })

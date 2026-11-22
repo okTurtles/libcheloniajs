@@ -300,6 +300,7 @@ describe('kv/set when syncing does not help', () => {
     }
     const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 2 })
     assert.ok(isKvConflict(result.error), describeError(result.error))
+    assert.deepEqual(result.statuses, [412, 412])
     assert.equal(result.syncs, 0)
   })
 })
@@ -327,8 +328,13 @@ describe('kv/set on a contract that Chelonia does not want', () => {
       sbp('chelonia/contract/release', contractID).catch(() => {})
       return kvConflict()
     }
+    const logged = logs.fromNow()
     const result = await kvSet(contract, { messageHash: 'x' }, { heightWaitMs: 0 })
     await sbp('chelonia/contract/wait', contractID)
+    assert.ok(isKvHeightAhead(result.error), describeError(result.error))
+    assert.deepEqual(result.statuses, [409])
+    // The recovery ran, and its sync refused the released contract
+    assert.equal(logged.grep(/Height recovery for .* gave up: its sync failed/).length, 1)
     assert.equal(result.syncs, 0)
     assert.equal(localHeight(contractID), undefined, 'the contract is back')
   })

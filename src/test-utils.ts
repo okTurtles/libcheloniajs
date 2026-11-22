@@ -101,8 +101,28 @@ export type KvServerRequest = {
 
 export type FetchInit = Parameters<typeof fetch>[1]
 
-// One contract's KV store: a POST needs `if-match` (400), matching the stored
-// value (412), stamped with the server's height (409). Etag = quoted body CID.
+// The height stamp of a KV POST body; `undefined` without one (or not JSON)
+const kvStampOf = (body: string): unknown => {
+  try { return JSON.parse(body).height } catch { return undefined }
+}
+
+// What the server (okTurtles/chel `POST /kv/:contractID/:key`) answers a KV
+// POST, checked in its order: it needs `if-match` (400) that is `*` or lists the
+// stored value's etag (412; `*` in a list doesn't count), a JSON body other than
+// `null` (422) stamped with the contract's height (409). The server also checks
+// the signature (422). For `makeKvServer` and the fake relay.
+export const kvPostStatus = ({ ifMatch, etag, body, height }: {
+  ifMatch: string | null; etag: string; body: string; height: number | undefined
+}): 204 | 400 | 409 | 412 | 422 => {
+  if (!ifMatch) return 400
+  if (ifMatch !== '*' && !ifMatch.split(',').map((tag) => tag.trim()).includes(etag)) return 412
+  let value: unknown
+  try { value = JSON.parse(body) } catch { return 422 }
+  if (value === null) return 422
+  return Number((value as { height?: unknown }).height) === height ? 204 : 409
+}
+
+// One contract's KV store (`kvPostStatus`). Etag = quoted body CID.
 export const makeKvServer = (contractID: string, { height = 0 } = {}) => {
   const store = new Map<string, { body: string; etag: string }>()
   const prefix = `/kv/${encodeURIComponent(contractID)}/`
@@ -138,23 +158,16 @@ export const makeKvServer = (contractID: string, { height = 0 } = {}) => {
       }
       const body = String(init.body)
       const ifMatch = new Headers(init.headers).get('if-match')
-      let stamp: unknown
-      try { stamp = JSON.parse(body).height } catch {}
+      const stamp = kvStampOf(body)
       const request: KvServerRequest = { method: 'POST', key, status: 0, ifMatch, height: stamp }
       server.log.push(request)
       await server.onPost?.(key)
       const stored = store.get(key)
       const current = server.etagOf(key)
-      const reject = (status: number) => {
-        request.status = status
-        return respond(status, status === 400 ? null : stored?.body ?? '', current)
-      }
-      if (!ifMatch) return reject(400)
-      const accepted = ifMatch.split(',').map((tag) => tag.trim())
-      if (!accepted.includes('*') && !accepted.includes(current)) return reject(412)
-      if (Number(stamp) !== server.height) return reject(409)
-      request.status = 204
-      return respond(204, null, server.put(key, body))
+      const status = kvPostStatus({ ifMatch, etag: current, body, height: server.height })
+      request.status = status
+      if (status === 204) return respond(204, null, server.put(key, body))
+      return respond(status, status === 409 || status === 412 ? stored?.body ?? '' : null, current)
     }
   }
   return server

@@ -9,6 +9,7 @@ import {
   kvHeightAheadCause
 } from './errors.js'
 import { CONTRACT_IS_SYNCING } from './events.js'
+import { MAX_TIMER_DELAY } from './timer-utils.js'
 import type {
   CheloniaContext,
   KvHeightAheadCause,
@@ -31,10 +32,7 @@ export const kvHeightTimings = {
   recoveryTimeoutMs: 30000
 }
 
-export const DEFAULT_MAX_HEIGHT_RECOVERIES = 2
-
-// `setTimeout` fires at once for delays of 2^31 ms or more
-const MAX_TIMER_MS = 2 ** 31 - 1
+const DEFAULT_MAX_HEIGHT_RECOVERIES = 2
 
 // Re-signs of one `kv/set` call after the server rejected a stale height stamp
 export const MAX_STALE_STAMP_RETRIES = 5
@@ -62,23 +60,31 @@ export function heightAheadError (
   ctx: CheloniaContext,
   contractID: string,
   key: string,
-  { requiredHeight, exact, etag, httpStatus }: Omit<KvHeightAheadCause, 'localHeight'>
+  { requiredHeight, exact, etag, httpStatus }: Omit<KvHeightAheadCause, 'localHeight'>,
+  // `kv/set` gave up on a `409` after `resigns` re-signs, or with a sync of the
+  // contract still running: the local height may have reached `requiredHeight`
+  { resigns, syncing = false }: { resigns?: number; syncing?: boolean } = {}
 ): Error & { cause: KvHeightAheadCause } {
   const local = localHeight(ctx, contractID)
+  const at = local === undefined ? 'is not loaded' : `is at height ${local}`
   const server = exact
     ? `the server value was written at contract height ${requiredHeight}`
     : `the server needs contract height ${requiredHeight} or later`
+  const reason = resigns !== undefined
+    ? `the server still rejected the height stamp after ${resigns} re-signs ` +
+      `(it needs contract height ${requiredHeight} or later; the local contract ${at})`
+    : syncing
+      ? `${server}; the local contract ${at}, and a sync of it is still running`
+      : `${server}, but the local contract ${at}`
   return new ChelErrorKvHeightAhead(
-    `[chelonia/kv] ${contractID}::${key}: ${server}, but the local ` +
-      `contract ${local === undefined ? 'is not loaded' : `is at height ${local}`}; ` +
-      'sync the contract and retry',
+    `[chelonia/kv] ${contractID}::${key}: ${reason}; sync the contract and retry`,
     { cause: { requiredHeight, exact, localHeight: local, etag, httpStatus } }
   ) as Error & { cause: KvHeightAheadCause }
 }
 
 export type ComposedAbortSignal = AbortSignal & { _cleanup?: () => void }
 
-export function composeSignals (signals: AbortSignal[]): ComposedAbortSignal {
+function composeSignals (signals: AbortSignal[]): ComposedAbortSignal {
   if (typeof AbortSignal.any === 'function') return AbortSignal.any(signals) as ComposedAbortSignal
   const controller = new AbortController()
   const cleanupFns: Array<() => void> = []
@@ -155,6 +161,8 @@ export function notifyContractHeight (
   dropIfEmpty(ctx, contractID, listeners)
 }
 
+type HeightWaitOptions = { timeoutMs?: number; signal?: AbortSignal | null }
+
 // `true` once `subscribe` calls back, `false` after `ms`; rejects if `signal` aborts
 function waitFor (
   ms: number,
@@ -176,24 +184,10 @@ function waitFor (
       else resolve(result)
     }
     const onAbort = () => settle(null)
-    const timer = setTimeout(() => settle(false), Math.min(ms, MAX_TIMER_MS))
+    const timer = setTimeout(() => settle(false), Math.min(ms, MAX_TIMER_DELAY))
     signal?.addEventListener('abort', onAbort, { once: true })
     off = subscribe(() => settle(true))
     if (settled) off()
-  })
-}
-
-export async function sleep (ms: number, signal?: AbortSignal | null): Promise<void> {
-  await waitFor(ms, signal, () => () => {})
-}
-
-// Rejects as soon as `signal` aborts; `promise` carries on regardless
-export function abortable<T> (promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const onAbort = () => reject(abortReason(signal))
-    signal.addEventListener('abort', onAbort, { once: true })
-    if (signal.aborted) onAbort()
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
   })
 }
 
@@ -203,9 +197,7 @@ export async function waitForHeight (
   ctx: CheloniaContext,
   contractID: string,
   minHeight: number,
-  { timeoutMs = kvHeightTimings.waitMs, signal }: {
-    timeoutMs?: number; signal?: AbortSignal | null
-  } = {}
+  { timeoutMs = kvHeightTimings.waitMs, signal }: HeightWaitOptions = {}
 ): Promise<boolean> {
   if (signal?.aborted) throw abortReason(signal)
   if ((localHeight(ctx, contractID) ?? -1) >= minHeight) return true
@@ -218,9 +210,7 @@ export async function waitForHeight (
 async function waitForSyncEnd (
   ctx: CheloniaContext,
   contractID: string,
-  { timeoutMs = kvHeightTimings.waitMs, signal }: {
-    timeoutMs?: number; signal?: AbortSignal | null
-  } = {}
+  { timeoutMs = kvHeightTimings.waitMs, signal }: HeightWaitOptions = {}
 ): Promise<boolean> {
   if (signal?.aborted) throw abortReason(signal)
   if (!ctx.currentSyncs[contractID]) return true
@@ -239,9 +229,7 @@ export async function waitForHeightAfterSync (
   ctx: CheloniaContext,
   contractID: string,
   minHeight: number,
-  { timeoutMs = kvHeightTimings.waitMs, signal }: {
-    timeoutMs?: number; signal?: AbortSignal | null
-  } = {}
+  { timeoutMs = kvHeightTimings.waitMs, signal }: HeightWaitOptions = {}
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   if (!(await waitForSyncEnd(ctx, contractID, { timeoutMs, signal }))) return false
@@ -252,7 +240,7 @@ export async function waitForHeightAfterSync (
 
 // Rejects at once if `signal` aborts while `body` is queued, or if it never runs.
 // Once running, `body` alone decides the outcome (a write may have committed).
-export function queueOnLane<T> (
+function queueOnLane<T> (
   contractID: string,
   signal: AbortSignal,
   body: () => T | Promise<T>
@@ -302,12 +290,14 @@ function recoverySync (ctx: CheloniaContext, contractID: string): Promise<void> 
   const running = ctx.kvRecoveries.get(contractID)
   if (running) return running
   const recoveries = ctx.kvRecoveries
-  // `chelonia/reset` aborts it before it waits for the queues
+  // `chelonia/reset` aborts it before it waits for the queues: the abort ends
+  // a sync in flight, and the check below skips one that is still queued
   const { signal } = ctx.abortController
   const sync = (async () => {
     let ran = false
     await sbp('chelonia/private/queueEvent', contractID, async () => {
       ran = true
+      if (signal.aborted) throw abortReason(signal)
       // Syncing a released contract would subscribe it again
       if (!ctx.subscriptionSet.has(contractID)) {
         throw new ChelErrorUnexpected(`[chelonia/kv] ${contractID} is no longer subscribed`)
@@ -317,7 +307,7 @@ function recoverySync (ctx: CheloniaContext, contractID: string): Promise<void> 
       } finally {
         // Like publishing, re-subscribe to the contract if the pubsub client
         // lost it (a reason for being behind). Not once a reset has started.
-        if (ctx.kvRecoveries === recoveries && !ctx.kvResetsInProgress && !signal.aborted) {
+        if (ctx.kvRecoveries === recoveries && ctx.kvResetsInProgress <= 0 && !signal.aborted) {
           try {
             sbp('chelonia/private/kv/reconcilePubsub')
           } catch (e) {
@@ -326,7 +316,7 @@ function recoverySync (ctx: CheloniaContext, contractID: string): Promise<void> 
         }
       }
     })
-    // An SBP filter vetoed it
+    // An SBP filter vetoed it, or `chelonia/_init` replaced the instance before it ran
     if (!ran) throw new ChelErrorUnexpected(`[chelonia/kv] The recovery sync of ${contractID} never ran`)
   })()
   const forget = () => {

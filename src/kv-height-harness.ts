@@ -13,7 +13,7 @@ import { encryptedOutgoingData } from './encryptedData.js'
 import { kvHeightAheadCause } from './errors.js'
 import { CONTRACTS_MODIFIED } from './events.js'
 import type { KV_NOOP } from './kv-constants.js'
-import { abortable, kvHeightTimings } from './kv-height.js'
+import { kvHeightTimings } from './kv-height.js'
 import { NOTIFICATION_TYPE, type PubSubClient } from './pubsub/index.js'
 import { signedOutgoingData } from './signedData.js'
 import {
@@ -23,6 +23,7 @@ import type {
   ChelContractKey, ChelKvGetResult, ChelRootState, CheloniaConfig, JSONType,
   KvHeightRecoveryOptions, KvMirrorEntry, KvSlotDefinition
 } from './types.js'
+import { raceAbort } from './utils.js'
 
 export const CONTRACT_ID = 'zKvHarnessContract'
 export const CONTRACT_TYPE = 'test/kv-harness'
@@ -41,7 +42,8 @@ export const syncs = {
 }
 
 const teardowns: (() => void)[] = []
-let pubsub: PubSubClient
+// Set by `connectPubsub` for the current test only
+let pubsub: PubSubClient | undefined
 // Rebuilds the contract's state, as replaying its events would
 let replay: (() => void) | undefined
 
@@ -77,10 +79,17 @@ export const whenSettled = (key: string): Promise<string> =>
 export const sync = (key: string, options?: KvHeightRecoveryOptions): Promise<void> =>
   within(sbp('chelonia/kv/sync', CONTRACT_ID, key, options), `kv/sync of ${key}`)
 
+type Updater = (value: JSONType) => JSONType | typeof KV_NOOP
+
+// `chelonia/kv/update`'s options; an `updater` replaces the one given
+export type UpdateOptions = KvHeightRecoveryOptions & {
+  updater?: Updater; maxAttempts?: number | null; ifMatch?: string
+}
+
 export const update = (
   key: string,
-  updater: (value: JSONType) => JSONType | typeof KV_NOOP,
-  options: object = {}
+  updater: Updater,
+  options: UpdateOptions = {}
 ): Promise<JSONType | undefined> => within(
   sbp('chelonia/kv/update', { contractID: CONTRACT_ID, key, updater, ...options }),
   `update of ${key}`
@@ -104,7 +113,7 @@ const route = async (url: string, init?: FetchInit): Promise<Response> => {
     return new Response(null, { status: 404 })
   }
   syncs.count++
-  if (syncs.hold) await (init?.signal ? abortable(syncs.hold, init.signal) : syncs.hold)
+  if (syncs.hold) await (init?.signal ? raceAbort(syncs.hold, init.signal) : syncs.hold)
   const meta = rootState().contracts[CONTRACT_ID]
   if (syncs.fail || !meta) return new Response(null, { status: 500 })
   replay?.()
@@ -138,6 +147,58 @@ export const gateLane = (
   teardowns.push(open)
   return open
 }
+
+// GETs of `key` answer 500 until the returned function is called
+export const failGets = (key: string): (() => void) => {
+  const { handle } = server
+  server.handle = async (url, init) => {
+    if (init?.method === 'POST' || !url.endsWith(`/${key}`)) return handle(url, init)
+    server.log.push({ method: 'GET', key, status: 500 })
+    return new Response(null, { status: 500 })
+  }
+  return () => { server.handle = handle }
+}
+
+type CallFilter = (args: unknown[]) => unknown
+
+// The filters that `filterCalls` added, by selector. SBP filters can't be
+// removed, so one SBP filter per selector runs them, added when a test first
+// filters that selector.
+const callFilters = new Map<string, Set<CallFilter>>()
+
+const callFiltersOf = (selector: string): Set<CallFilter> => {
+  const known = callFilters.get(selector)
+  if (known) return known
+  const filters = new Set<CallFilter>()
+  callFilters.set(selector, filters)
+  sbp('sbp/filters/selector/add', selector, (_domain: string, _name: string, args: unknown[]) => {
+    let pass = true
+    for (const filter of [...filters]) if (filter(args) === false) pass = false
+    return pass
+  })
+  return filters
+}
+
+// Runs `filter` with the arguments of each call of `selector`, before the
+// call; `false` vetoes the call (`sbp` returns `undefined`). Until the
+// returned function is called or the test ends.
+export const filterCalls = (selector: string, filter: CallFilter): (() => void) => {
+  const filters = callFiltersOf(selector)
+  // Its own entry, even if the same `filter` is added twice
+  const entry: CallFilter = (args) => filter(args)
+  filters.add(entry)
+  const lift = () => { filters.delete(entry) }
+  teardowns.push(lift)
+  return lift
+}
+
+// Vetoes the work queued on lane `queueName` (`chelonia/private/queueEvent`)
+export const vetoQueue = (queueName: string): (() => void) =>
+  filterCalls('chelonia/private/queueEvent', ([queue]) => queue !== queueName)
+
+// Vetoes every call of `selector`
+export const vetoSelector = (selector: string): (() => void) =>
+  filterCalls(selector, () => false)
 
 // The contract in local state at `height`, with keys for the slots' defaults
 // (`cek`, `csk`) and `#sak` for the server's authorization header
@@ -202,7 +263,9 @@ export const resync = (): Promise<unknown> => {
     Object.assign(state[CONTRACT_ID], contractState)
     sbp('chelonia/kv/_notifyHeight', CONTRACT_ID, meta.height)
   }
-  return sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true, resync: true })
+  return within(
+    sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true, resync: true }), 'the resync'
+  )
 }
 
 // What `kv/set` would post for `data` stamped with `stamp`
@@ -249,6 +312,7 @@ export const connectPubsub = ({ rawHandler = false } = {}): unknown[] => {
     ? { messageHandlers: { [NOTIFICATION_TYPE.KV]: (msg: unknown) => { rawFrames.push(msg) } } }
     : {})
   teardowns.push(() => {
+    if (pubsub === client) pubsub = undefined
     client.destroy()
     sbp('chelonia/private/stopClockSync')
   })
@@ -260,6 +324,7 @@ export const deliverFrame = (
   key: string,
   { body = server.store.get(key)!.body, cid = server.etagOf(key) } = {}
 ): void => {
+  assert.ok(pubsub, 'deliverFrame: call connectPubsub() in this test first')
   pubsub.messageHandlers[NOTIFICATION_TYPE.KV].call(pubsub, {
     type: NOTIFICATION_TYPE.KV, channelID: CONTRACT_ID, key, data: body, cid
   })

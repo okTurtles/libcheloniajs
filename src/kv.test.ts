@@ -29,6 +29,7 @@ import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import { KV_NOOP } from './kv.js'
 import { captureConsole, isPending, until, within } from './test-utils.js'
 import type {
+  ChelContractState,
   ChelKvGetResult,
   ChelRootState,
   CheloniaConfig,
@@ -160,7 +161,8 @@ let stubGet: GetStub
 let stubSet: SetStub
 let stubSetFilter: SetFilterStub
 let stubQueueInvocation: QueueInvocationStub
-let stubCurrentKeyIdByName: (contractID: string, name: string) => string | undefined
+// `resolveKvKeyIds` passes the contract's state
+let stubCurrentKeyIdByName: (contractState: ChelContractState, name: string) => string | undefined
 
 let stubSetFilterCalls: Array<{ contractID: string; keys: string[] }>
 
@@ -182,6 +184,7 @@ sbp('sbp/selectors/register', {
       reactiveSet,
       reactiveDel
     } as unknown as CheloniaConfig
+    this._instance = Object.create(null)
     this.abortController = new AbortController()
     this.subscriptionSet = new Set()
     initKvRuntime(this)
@@ -203,12 +206,12 @@ sbp('sbp/selectors/register', {
     this.abortController = new AbortController()
     await sbp('chelonia/kv/_waitInFlight')
     await postCleanupFn?.()
+    // As the real reset: drops this session's queued work, and every contract's state
+    this._instance = Object.create(null)
     const s = this.state as Record<string, unknown>
-    reactiveDel(s, 'contracts')
+    for (const key of Object.keys(s)) reactiveDel(s, key)
     reactiveSet(s, 'contracts', Object.create(null))
-    reactiveDel(s, 'secretKeys')
     reactiveSet(s, 'secretKeys', Object.create(null))
-    reactiveDel(s, '_kv')
     reactiveSet(s, '_kv', Object.create(null))
     resetKvRuntime(this)
     this.subscriptionSet.clear()
@@ -230,10 +233,10 @@ sbp('sbp/selectors/register', {
   'chelonia/rootState': () => rootState(),
 
   'chelonia/contract/currentKeyIdByName': function (
-    _contractID: string,
+    contractState: ChelContractState,
     name: string
   ) {
-    return stubCurrentKeyIdByName(_contractID, name)
+    return stubCurrentKeyIdByName(contractState, name)
   },
 
   'chelonia/kv/setFilter': function (_contractID: string, _filter?: string[]) {
@@ -410,7 +413,7 @@ describe('KV slot API', () => {
       stubSetFilterCalls.push({ contractID, keys: filter ?? [] })
     }
     stubQueueInvocation = (_cID, fn) => Promise.resolve(runQueued(fn))
-    stubCurrentKeyIdByName = (_cID, name) => name
+    stubCurrentKeyIdByName = (_state, name) => name
   })
 
   afterEach(async () => {
@@ -1122,7 +1125,7 @@ describe('KV slot API', () => {
       assert.strictEqual(opts.signingKeyId, 'csk')
       return { etag: 'plain-etag' }
     }
-    stubCurrentKeyIdByName = (_cID, name) => name === 'cek' ? undefined : name
+    stubCurrentKeyIdByName = (_state, name) => name === 'cek' ? undefined : name
 
     await assert.rejects(
       sbp('chelonia/kv/update', {
@@ -1151,7 +1154,7 @@ describe('KV slot API', () => {
       writes++
       return { etag: 'unused' }
     }
-    stubCurrentKeyIdByName = (_cID, name) => name === 'csk' ? undefined : name
+    stubCurrentKeyIdByName = (_state, name) => name === 'csk' ? undefined : name
 
     await assert.rejects(
       sbp('chelonia/kv/update', {
@@ -2250,6 +2253,55 @@ describe('KV slot API', () => {
     assert.strictEqual(sbp('chelonia/test/pendingLoadCount', c), 0,
       'pending-load counter is balanced after the conflict GET settles')
     stubGet = async () => null
+  })
+
+  // -----------------------------------------------------------------------
+  // 42e: a load of a previous session that ends after `chelonia/reset`
+  // releases its count in that session's map, not in the next one's, so a
+  // pending load of the next session still takes 42c's fresh-load gate.
+  // -----------------------------------------------------------------------
+  it('42e: a load that outlives a reset leaves the next session\'s loads counted', async () => {
+    const held: Array<(v: GetResult | null) => void> = []
+    // Earlier tests' slots for CTYPE load too
+    stubGet = async (_cID, key) => key !== 'crossReset'
+      ? null
+      : await new Promise((resolve) => { held.push(resolve) })
+    const answer = (i: number, x: number) => held[i]({ ...fakeParsed({ x }), etag: `e${x}` })
+    const def = { key: 'crossReset', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema }
+    sbp('chelonia/kv/defineSlot', def)
+    const c = 'cid-42e'
+    const entryOf = () => rootState()._kv?.[c]?.crossReset
+    await setupContract(c)
+    await until(() => held.length === 1, 'first autoload GET')
+    answer(0, 1)
+    await until(() => entryOf()?.status === 'loaded', 'first session loaded')
+    // A load of the first session is still running when the reset ends
+    const old = (sbp('chelonia/kv/sync', c, 'crossReset') as Promise<void>).catch(() => {})
+    await until(() => held.length === 2, 'old GET')
+    await sbp('chelonia/reset')
+
+    await setupContract(c)
+    await until(() => held.length === 3, 'second autoload GET')
+    answer(2, 1)
+    await until(() => entryOf()?.status === 'loaded', 'second session loaded')
+    // A conflict-resolution GET of the new session (status stays 'loaded')
+    sbp('chelonia/test/addEchoCID', `${c}::crossReset`, 'conflict-cid', true)
+    const remote = sbp('chelonia/kv/_handleRemote', c, 'crossReset', fakeParsed({ x: 9 }), 'remote-cid')
+    await until(() => held.length === 4, 'conflict GET')
+    answer(1, 1)
+    await within(old, 'old load')
+    assert.strictEqual(sbp('chelonia/test/pendingLoadCount', c), 1,
+      'the old load must not uncount the new session\'s pending load')
+
+    // Replaced while the conflict GET runs: the replacement fetches the value
+    sbp('chelonia/kv/defineSlot', { ...def, defaultValue: { x: 7 } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.strictEqual(held.length, 5, 'the replacement schedules its own load')
+    answer(3, 2)
+    await within(remote, 'conflict GET')
+    answer(4, 2)
+    await until(() => entryOf()?.etag === 'e2', 'the replacement to load')
+    assert.deepStrictEqual(entryOf()?.value, { x: 2 })
   })
 
   // -----------------------------------------------------------------------
@@ -5791,7 +5843,9 @@ describe('KV slot API', () => {
         for (const c of [empty, held, reloading]) {
           await assert.rejects(sbp('chelonia/kv/sync', c, KEY), vetoed)
         }
-        assert.deepStrictEqual([empty, held, reloading].map(settledOf), ['error', 'loaded', 'error'])
+        // The running reload decides the empty slot's outcome
+        assert.deepStrictEqual([empty, held, reloading].map(settledOf), ['error', 'loaded', undefined])
+        assert.strictEqual(entryOf(reloading)?.status, 'loading')
         assert.strictEqual(entryOf(empty)?.lastError?.name, 'ChelErrorUnexpected')
 
         // A vetoed `queueInvocation` selector returns nothing at all
@@ -5804,7 +5858,82 @@ describe('KV slot API', () => {
       }
       respond(null)
       await within(reload, 'reload')
+      assert.deepStrictEqual([empty, held, reloading].map(settledOf), ['error', 'loaded', 'non-init'])
     })
+
+    it('a load that cannot start leaves an empty slot to the load that shows it loading', async () => {
+      defineSlot({ autoLoad: 'never' })
+      const [first, reloading] = ['cid-unstarted-first', 'cid-unstarted-reloading-empty']
+      for (const c of [first, reloading]) await setupContract(c, TYPE)
+      await sbp('chelonia/kv/sync', reloading, KEY)
+      const responders: Array<(value: GetResult | null) => void> = []
+      stubGet = () => new Promise((resolve) => { responders.push(resolve) })
+      const loads = [first, reloading].map((c) => sbp('chelonia/kv/sync', c, KEY) as Promise<void>)
+      await until(() => responders.length === 2, 'both loads pending')
+      const waits = [first, reloading].map((c) =>
+        sbp('chelonia/kv/whenSettled', c, KEY) as Promise<string>)
+      const { log, offs } = collectEvents()
+      try {
+        stubQueueInvocation = () => Promise.reject(vetoed)
+        for (const c of [first, reloading]) {
+          await assert.rejects(sbp('chelonia/kv/sync', c, KEY), vetoed)
+        }
+      } finally {
+        stubQueueInvocation = normalQueue
+      }
+      assert.deepStrictEqual([first, reloading].map((c) => [entryOf(c)?.status, settledOf(c)]),
+        [['loading', undefined], ['loading', undefined]])
+      assert.deepStrictEqual(await Promise.all(waits.map(isPending)), [true, true])
+      for (const respond of responders) respond(null)
+      await within(Promise.all(loads), 'loads')
+      assert.deepStrictEqual(await within(Promise.all(waits), 'waits'), ['non-init', 'non-init'])
+      offs.forEach((off) => off())
+      assert.deepStrictEqual(statusEvents(log).map((p) => [p.status, p.settled]),
+        [['non-init', true], ['non-init', true]])
+    })
+
+    it('a load that cannot start settles an empty slot the running load leaves without an outcome',
+      async () => {
+        defineSlot({ autoLoad: 'never' })
+        const [replaced, restored] = ['cid-unstarted-after-replaced', 'cid-unstarted-after-restored']
+        // A clear persisted by an earlier session: no value, but an etag
+        persist(restored, { value: undefined, etag: 'e1', status: 'non-init', settled: true })
+        for (const c of [replaced, restored]) await setupContract(c, TYPE)
+        const responders: Array<(value: GetResult | null) => void> = []
+        const failures: Array<(e: unknown) => void> = []
+        stubGet = () => new Promise((resolve, reject) => {
+          responders.push(resolve)
+          failures.push(reject)
+        })
+        // Abandoned for the replacement: restores the prior status
+        const abandoned = (sbp('chelonia/kv/sync', replaced, KEY) as Promise<void>).catch(() => {})
+        await until(() => responders.length === 1, 'the abandoned load pending')
+        defineSlot({ autoLoad: 'never', defaultValue: { x: 2 } })
+        // A no-cid frame fetches the etag-bearing slot, keeping the prior status on failure
+        const fetched = sbp('chelonia/kv/_handleRemote', restored, KEY, fakeParsed({ x: 9 })) as
+          Promise<void>
+        await until(() => responders.length === 2, 'both loads pending')
+        const waits = [replaced, restored].map((c) =>
+          sbp('chelonia/kv/whenSettled', c, KEY) as Promise<string>)
+        try {
+          stubQueueInvocation = () => Promise.reject(vetoed)
+          for (const c of [replaced, restored]) {
+            await assert.rejects(sbp('chelonia/kv/sync', c, KEY), vetoed)
+          }
+        } finally {
+          stubQueueInvocation = normalQueue
+        }
+        assert.deepStrictEqual([replaced, restored].map((c) => [entryOf(c)?.status, settledOf(c)]),
+          [['loading', undefined], ['loading', undefined]])
+        assert.deepStrictEqual(await Promise.all(waits.map(isPending)), [true, true])
+        responders[0](fakeParsed({ x: 1 }))
+        failures[1](new Error('offline'))
+        await within(Promise.all([abandoned, fetched]), 'running loads')
+        // The vetoed loads' outcome, as they ended without one
+        assert.deepStrictEqual(await within(Promise.all(waits), 'waits'), ['error', 'error'])
+        assert.deepStrictEqual([replaced, restored].map((c) => entryOf(c)?.lastError?.name),
+          ['ChelErrorUnexpected', 'ChelErrorUnexpected'])
+      })
 
     it('a load that cannot start for a replaced slot or an ended session settles nothing', async () => {
       defineSlot({ autoLoad: 'never' })
@@ -5898,10 +6027,13 @@ describe('KV slot API', () => {
       const manifestKv = { 'ws-manifest': { defaultValue: 0, autoLoad: 'never' } }
       sbp('chelonia/kv/_registerContractSlots', TYPE, 'manifest-ws', manifestKv)
       for (const c of [deactivated, unregistered, removed]) await setupContract(c, TYPE)
-      const waits = [
+      const pending = [
         whenSettled(deactivated), whenSettled(unmatchedAtFirst), whenSettled(removed),
         whenSettled(otherType), whenSettled(unregistered, 'ws-manifest')
-      ].map((wait) => assert.rejects(within(wait, 'rejection'), slotUnknown))
+      ]
+      const waits = pending.map((wait) => assert.rejects(within(wait, 'rejection'), slotUnknown))
+      // Each one waits until its teardown below
+      for (const wait of pending) assert.ok(await isPending(wait))
       matching = false
       sbp('chelonia/kv/refreshFilters', deactivated)
       matching = true

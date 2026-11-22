@@ -7,16 +7,11 @@ import { CHELONIA_KV_STATUS_CHANGED } from './events.js'
 import {
   activate, CONTRACT_ID, connectPubsub, defineSlot, deliverFrame, drainLanes, frameOf, gets,
   holdSyncs, installKvHarness, logs, mirror, read, restamped, server, setLocalHeight,
-  settledStatus, START_HEIGHT, syncs, whenSettled, writeAsDeviceB
+  settledStatus, START_HEIGHT, syncs, vetoQueue, whenSettled, writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
 import { until, within } from './test-utils.js'
 import type { JSONType, KvLoadStatus } from './types.js'
-
-let vetoedQueue: string | undefined
-sbp('sbp/filters/selector/add', 'chelonia/private/queueEvent',
-  (_domain: string, _selector: string, [queueName]: unknown[]) => queueName !== vetoedQueue
-)
 
 const AHEAD = START_HEIGHT + 2
 const logged = (method: string, text: string) => logs.entries.filter((entry) =>
@@ -34,7 +29,7 @@ const statusesDuring = async (body: () => Promise<void>) => {
   return statuses
 }
 
-describe('Pubsub KV frames the contract cannot verify yet', () => {
+describe("Pubsub KV frames the contract can't verify, yet or at all", () => {
   installKvHarness()
 
   it('keep a loaded value, and reload the key once the height arrives', async () => {
@@ -224,12 +219,9 @@ describe('Vetoed pubsub KV frame work', () => {
     connectPubsub()
     await activate()
     writeAsDeviceB('prefs', { theme: 'dark' })
-    vetoedQueue = CONTRACT_ID
-    try {
-      deliverFrame('prefs')
-    } finally {
-      vetoedQueue = undefined
-    }
+    const lift = vetoQueue(CONTRACT_ID)
+    deliverFrame('prefs')
+    lift()
     await until(() => frameErrors().length === 1, 'the logged veto')
     await drainLanes()
     assert.deepStrictEqual(read('prefs'), { theme: 'light' })
@@ -243,12 +235,9 @@ describe('Vetoed pubsub KV frame work', () => {
     assert.strictEqual(mirror('prefs')?.settled, false)
     deliverFrame('prefs', restamped('prefs', 'not-a-height'))
     // The frame got past this lane; its reload won't
-    vetoedQueue = CONTRACT_ID
-    try {
-      await until(() => settledStatus('prefs') === 'error', 'the vetoed reload to settle')
-    } finally {
-      vetoedQueue = undefined
-    }
+    const lift = vetoQueue(CONTRACT_ID)
+    await until(() => settledStatus('prefs') === 'error', 'the vetoed reload to settle')
+    lift()
     assert.strictEqual(mirror('prefs')?.lastError?.name, 'ChelErrorUnexpected')
     assert.strictEqual(logged('error', 'malformed frame').length, 1)
     assert.strictEqual(gets('prefs'), 0)

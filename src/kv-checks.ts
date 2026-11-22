@@ -14,10 +14,11 @@ export function assertNotReentrant (
   if ((ctx.kvOnUpdateActive.get(contractID) ?? 0) > 0) {
     const target = key === undefined ? contractID : `${contractID}::${key}`
     throw new ChelErrorKvReentrant(
-      `[chelonia/kv] ${operation}: ${target} was called ` +
+      `[chelonia/kv] ${operation} for ${target} was called ` +
       'synchronously from within an onUpdate callback for the same ' +
-      'contract; this would deadlock the contract lane. Schedule the ' +
-      'call off the synchronous stack instead, e.g. ' +
+      'contract, where awaiting it would deadlock the contract lane. ' +
+      "Schedule the call off the synchronous stack instead (and don't " +
+      'await it in the callback), e.g. ' +
       "queueMicrotask(() => sbp('chelonia/kv/" + operation + "', …))."
     )
   }
@@ -46,12 +47,15 @@ export function resolveKvKeyIds (
   }
   const keyId = (name: string): string | null | undefined =>
     sbp('chelonia/contract/currentKeyIdByName', state, name)
-  const encryptionKeyId = encryptionKeyName === null ? null : keyId(encryptionKeyName)
-  if (encryptionKeyName !== null && !encryptionKeyId) {
-    throw new ChelErrorKvUpdateInvalid(
-      `[chelonia/kv] ${label}: encryption key '${encryptionKeyName}' not found on contract; ` +
-      'refusing to write plaintext'
-    )
+  let encryptionKeyId: string | null = null
+  if (encryptionKeyName !== null) {
+    encryptionKeyId = keyId(encryptionKeyName) || null
+    if (!encryptionKeyId) {
+      throw new ChelErrorKvUpdateInvalid(
+        `[chelonia/kv] ${label}: encryption key '${encryptionKeyName}' not found on contract; ` +
+        'refusing to write plaintext'
+      )
+    }
   }
   const signingKeyId = keyId(signingKeyName)
   if (!signingKeyId) {
@@ -59,5 +63,5 @@ export function resolveKvKeyIds (
       `[chelonia/kv] ${label}: signing key '${signingKeyName}' not found on contract`
     )
   }
-  return { encryptionKeyId: encryptionKeyId ?? null, signingKeyId }
+  return { encryptionKeyId, signingKeyId }
 }

@@ -18,7 +18,7 @@ import {
 import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import { kvHeightTimings } from './kv-height.js'
 import { signedOutgoingDataWithRawKey } from './signedData.js'
-import { within, type FetchInit } from './test-utils.js'
+import { captureConsole, within, type FetchInit } from './test-utils.js'
 import type {
   ChelContractState, ChelKvGetResult, ChelKvOnConflictCallback, ChelRootState, CheloniaConfig,
   JSONType, KvConflictCause
@@ -220,7 +220,8 @@ describe('chelonia/kv/set', () => {
         signingKeyId, maxAttempts: 3
       }).catch((e: unknown) => e), `kv/set (${cause.currentStatus})`)
       assert.ok(e instanceof ChelErrorKvMaxAttempts && isKvConflict(e))
-      assert.match(e.message, /failed with status 412 and no onconflict handler was provided/)
+      assert.strictEqual(e.message, `[chelonia/kv] set: ${contractID}::settings got a conflict, ` +
+        'and no onconflict handler was provided')
       assert.deepStrictEqual(e.cause, cause)
       assert.deepStrictEqual(calls, ['POST'])
     }
@@ -315,12 +316,20 @@ describe('chelonia/kv/set', () => {
         const body = phase === 'height wait' || blind
           ? signValue(signingKey, 'settings', { x: 9 }, '5')
           : undefined
-        if (phase.endsWith('conflict backoff')) Math.random = () => 0.999
+        const backoff = phase.endsWith('conflict backoff')
+        // Only the backoff draws a random delay after the response
+        let draws = 0
+        Math.random = () => { draws++; return backoff ? 0.999 : 0 }
         const controller = new AbortController()
         let onconflictCalls = 0
         let aborted: unknown
+        let backedOff: boolean | undefined
         const calls = stubFetch(() => {
-          setTimeout(() => { aborted = abort(controller) }, 10)
+          draws = 0
+          setTimeout(() => {
+            backedOff = draws > 0
+            aborted = abort(controller)
+          }, 10)
           return phase === 'stale-stamp wait' ? staleStamp() : conflict(body, 'etag-1')
         })
 
@@ -334,47 +343,35 @@ describe('chelonia/kv/set', () => {
         assert.ok(expected(e), String(e))
         assert.strictEqual(onconflictCalls, 0)
         assert.deepStrictEqual(calls, ['POST'])
+        assert.strictEqual(backedOff, backoff, 'the phase the abort ended')
         await within(Promise.resolve(aborted), 'the abort')
       })
     }
   }
 
-  it('bounds body-less conflict recovery GETs to one per set call', async () => {
-    const { contractID, signingKeyId } = setupContract()
-    const calls: string[] = []
-    const originalWarn = console.warn
-    const warnings: unknown[][] = []
-    console.warn = (...args: unknown[]) => { warnings.push(args) }
-    sbp('chelonia/configure', {
-      connectionURL: 'https://example.test',
-      fetch: async (_url: string, opts?: { method?: string }) => {
-        const method = opts?.method ?? 'GET'
-        calls.push(method)
-        return new Response('', { status: method === 'POST' ? 412 : 404 })
+  // A 404 or 410 just means the key is absent; another status is worth a warning
+  for (const [status, warnings] of [[404, 0], [410, 0], [500, 1]] as const) {
+    it(`bounds body-less conflict recovery GETs to one per set call (GET ${status})`, async () => {
+      const { contractID, signingKeyId } = setupContract()
+      const calls = stubFetch((method) =>
+        new Response('', { status: method === 'POST' ? 412 : status }))
+      const logs = captureConsole(['warn'])
+      try {
+        await assert.rejects(
+          within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+            signingKeyId, maxAttempts: 3, onconflict: merge
+          }), 'kv/set'),
+          (e: unknown) => e instanceof ChelErrorKvMaxAttempts
+        )
+      } finally {
+        logs.restore()
       }
-    } as Partial<CheloniaConfig>)
-
-    try {
-      await assert.rejects(
-        within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
-          signingKeyId,
-          maxAttempts: 3,
-          onconflict: async (
-            args: { etag: string | null | undefined }
-          ): Promise<[JSONType, string | undefined]> => [
-            { x: 2 },
-            typeof args.etag === 'string' ? args.etag : undefined
-          ]
-        }), 'kv/set'),
-        (e: unknown) => e instanceof ChelErrorKvMaxAttempts
-      )
-    } finally {
-      console.warn = originalWarn
-    }
-
-    assert.deepStrictEqual(calls, ['POST', 'GET', 'POST', 'POST'])
-    assert.strictEqual(warnings.length, 1)
-  })
+      assert.deepStrictEqual(calls, ['POST', 'GET', 'POST', 'POST'])
+      assert.deepStrictEqual(logs.entries.map(({ text }) => text), Array(warnings).fill(
+        `[chelonia/kv] set: ${contractID}::settings recovery GET returned ${status}`
+      ))
+    })
+  }
 
   it('falls back when AbortSignal.any is unavailable and propagates aborts', async () => {
     const { contractID, signingKeyId } = setupContract()
@@ -531,6 +528,58 @@ describe('chelonia/kv/set', () => {
     }).catch((e: unknown) => e), 'kv/set')
     assert.ok(e instanceof ChelErrorKvMaxAttempts && isKvConflict(e))
     assert.deepStrictEqual([e.cause, onconflictCalls, calls], [{ etag: 'etag-1' }, 0, ['POST']])
+  })
+
+  // Like a non-final 412
+  it("rejects a fetch-first GET whose value can't be read with a conflict error", async () => {
+    const { contractID, signingKeyId } = setupContract()
+    const calls = stubFetch(() =>
+      new Response('not json', { status: 200, headers: { etag: 'etag-1' } }))
+    let onconflictCalls = 0
+    const e = await within(sbp('chelonia/kv/set', contractID, 'settings', undefined, {
+      signingKeyId,
+      onconflict: (args: ConflictArgs) => { onconflictCalls++; return merge(args) }
+    }).catch((e: unknown) => e), 'kv/set')
+    assert.ok(e instanceof ChelErrorKvMaxAttempts && isKvConflict(e), String(e))
+    assert.deepStrictEqual([e.cause, onconflictCalls, calls], [{ etag: 'etag-1' }, 0, ['GET']])
+  })
+
+  // The cause can't tell the last two apart
+  it('prefixes its errors with the contract and key, and says why it gave up', async () => {
+    const { contractID, signingKeyId, signingKey } = setupContract()
+    const prefix = `[chelonia/kv] set: ${contractID}::settings`
+    const stranger = keygen(EDWARDS25519SHA512BATCH)
+    const readable = signValue(signingKey, 'settings', { x: 9 }, '1')
+    const undecodable = signValue(stranger, 'settings', { x: 9 }, '1')
+    const status = (code: number, statusText: string) => () =>
+      new Response('', { status: code, statusText })
+    const cases: [JSONType | undefined, object, (n: number) => Response, string, unknown][] = [
+      [{ x: 1 }, { maxAttempts: 0 }, accepted, ': `maxAttempts` must be an integer >= 1', undefined],
+      [{ x: 1 }, { heightWaitMs: -1 }, accepted, ': `heightWaitMs` must be a finite number >= 0',
+        undefined],
+      [undefined, {}, accepted, ': `onconflict` is required when `data` is undefined', undefined],
+      [{ x: 1 }, {}, status(500, 'Internal Server Error'),
+        ': POST failed with 500: Internal Server Error', 500],
+      [undefined, { onconflict: merge }, status(503, 'Service Unavailable'),
+        ': GET failed with 503: Service Unavailable', 503],
+      [{ x: 1 }, {}, () => conflict(readable, 'etag-1'),
+        ' got a conflict, and no onconflict handler was provided',
+        { currentStatus: 'present', currentData: { x: 9 }, etag: 'etag-1' }],
+      [{ x: 1 }, { maxAttempts: 2, onconflict: merge },
+        (n) => conflict(n ? undecodable : readable, `etag-${n}`),
+        ' ran out of attempts resolving conflicts', { etag: 'etag-1' }],
+      [{ x: 1 }, { maxAttempts: 2, onconflict: merge },
+        () => new Response('not json', { status: 412, headers: { etag: 'etag-1' } }),
+        " got a conflict whose value can't be read", { etag: 'etag-1' }]
+    ]
+    for (const [data, options, respond, message, cause] of cases) {
+      let n = 0
+      stubFetch(() => respond(n++))
+      const e = await within(sbp('chelonia/kv/set', contractID, 'settings', data, {
+        signingKeyId, ...options
+      }).catch((e: unknown) => e), message) as Error
+      assert.deepStrictEqual([e.message, e.cause], [prefix + message, cause])
+    }
   })
 
   it("doesn't carry a recovered value into the final body-less 412's cause", async () => {
@@ -692,31 +741,43 @@ describe('chelonia/kv/set', () => {
       assert.deepStrictEqual(kvHeightAheadCause(e), {
         requiredHeight, exact: false, localHeight: 1, etag: 'etag-0', httpStatus: 409
       })
+      assert.match(e.message, new RegExp(
+        `: the server needs contract height ${requiredHeight} or later, but the local ` +
+          'contract is at height 1; sync the contract and retry$'
+      ))
       assert.strictEqual(posts.length, 1)
     }
     assert.strictEqual(onconflictCalls, 0)
   })
 
   it('gives up after five re-signs in one call, whatever maxAttempts is', async () => {
-    const { contractID, signingKeyId } = setupContract()
-    let onconflictCalls = 0
-    // Each write finds the server one event further along
-    const posts = recordPosts((n) => {
-      setLocalHeight(contractID, n + 2)
-      return staleStamp()
-    })
+    // Fewer and more conflict attempts than re-signs
+    for (const maxAttempts of [1, 10]) {
+      const { contractID, signingKeyId } = setupContract()
+      let onconflictCalls = 0
+      // Each write finds the server one event further along
+      const posts = recordPosts((n) => {
+        setLocalHeight(contractID, n + 2)
+        return staleStamp()
+      })
 
-    const e = await within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
-      signingKeyId,
-      maxAttempts: 1,
-      onconflict: () => { onconflictCalls++; return merge({ etag: null }) }
-    }).catch((e: unknown) => e), 'kv/set')
-    assert.ok(isKvHeightAhead(e))
-    assert.deepStrictEqual(kvHeightAheadCause(e), {
-      requiredHeight: 7, exact: false, localHeight: 7, etag: 'etag-0', httpStatus: 409
-    })
-    assert.deepStrictEqual(posts.map(({ height }) => height), ['1', '2', '3', '4', '5', '6'])
-    assert.strictEqual(onconflictCalls, 0)
+      const e = await within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+        signingKeyId,
+        maxAttempts,
+        onconflict: () => { onconflictCalls++; return merge({ etag: null }) }
+      }).catch((e: unknown) => e), `kv/set (maxAttempts ${maxAttempts})`)
+      assert.ok(isKvHeightAhead(e))
+      // The local contract has reached the height the last 409 needs
+      assert.deepStrictEqual(kvHeightAheadCause(e), {
+        requiredHeight: 7, exact: false, localHeight: 7, etag: 'etag-0', httpStatus: 409
+      })
+      assert.match(e.message, new RegExp(
+        'still rejected the height stamp after 5 re-signs \\(it needs contract height 7 ' +
+          'or later; the local contract is at height 7\\); sync the contract and retry$'
+      ))
+      assert.deepStrictEqual(posts.map(({ height }) => height), ['1', '2', '3', '4', '5', '6'])
+      assert.strictEqual(onconflictCalls, 0)
+    }
   })
 
   it('keeps re-signs apart from conflict attempts, re-signing what onconflict chose', async () => {

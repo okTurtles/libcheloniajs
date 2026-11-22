@@ -73,6 +73,7 @@ import {
   SendMessageHooks
 } from './types.js'
 import {
+  abortReason,
   buildShelterAuthorizationHeader,
   deleteKeyHelper,
   findKeyIdByName,
@@ -850,10 +851,12 @@ export default sbp('sbp/selectors/register', {
         // but after it's finished. This is used in tandem with
         // queuing the 'chelonia/private/in/handleEvent' selector, defined below.
         // This prevents handleEvent getting called with the wrong previousHEAD for an event.
+        // The signal lets `syncContract` skip the sync if a reset aborts it meanwhile.
         return queueEventOrReject(contractID, [
           'chelonia/private/in/syncContract',
           contractID,
-          params
+          params,
+          this.abortController.signal
         ]).catch((err: unknown) => {
           console.error(`[chelonia] failed to sync ${contractID}:`, err)
           throw err // re-throw the error
@@ -2137,8 +2140,13 @@ export default sbp('sbp/selectors/register', {
   'chelonia/private/in/syncContract': async function (
     this: CheloniaContext,
     contractID: string,
-    params?: { force?: boolean; resync?: boolean }
+    params?: { force?: boolean; resync?: boolean },
+    // The session's signal when the sync was queued. `chelonia/reset` aborts
+    // it, then waits for the queues: a sync still queued then would fetch with
+    // the new controller's signal, and nothing would end it on a dead link.
+    queuedSignal?: AbortSignal
   ): Promise<void> {
+    if (queuedSignal?.aborted) throw abortReason(queuedSignal)
     const state = sbp(this.config.stateSelector)
     if (state.contracts[contractID] === null) {
       throw new ChelErrorResourceGone('Cannot sync permanently deleted contract ' + contractID)

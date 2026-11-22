@@ -6,9 +6,10 @@ import { ChelErrorGenerator, isKvConflict } from './errors.js'
 import type { KvConflictCause } from './types.js'
 
 // Thrown by the low-level `chelonia/kv/set` primitive when the
-// conflict-retry loop exhausts `maxAttempts`, or on a 412 without
-// `onconflict`. `chelonia/kv/update`, `clear` and `queuedSet` catch this and
-// remap it to the public `ChelErrorKvConflict`.
+// conflict-retry loop exhausts `maxAttempts`, on a 412 without
+// `onconflict`, or on a conflict value that can't be read (`reason`).
+// `chelonia/kv/update`, `clear` and `queuedSet` catch this and remap it to
+// the public `ChelErrorKvConflict`.
 //
 // Internal — not part of the published API. The package's
 // `exports` map intentionally does not expose `./internal-errors`,
@@ -19,8 +20,36 @@ import type { KvConflictCause } from './types.js'
 // use `isKvConflict`, which matches both.
 export const ChelErrorKvMaxAttempts = ChelErrorGenerator('ChelErrorKvMaxAttempts')
 
+// Why `kv/set` gave up. The cause can't tell: a final 412 whose value doesn't
+// decode leaves `currentStatus` out too.
+export type KvMaxAttemptsReason = 'attempts' | 'unreadable' | 'no-onconflict'
+
 export function isKvMaxAttempts (e: unknown): e is Error & {
-  name: 'ChelErrorKvMaxAttempts'; cause?: KvConflictCause
+  name: 'ChelErrorKvMaxAttempts'; cause?: KvConflictCause; reason?: KvMaxAttemptsReason
 } {
   return isKvConflict(e) && e.name === 'ChelErrorKvMaxAttempts'
+}
+
+const KV_CONFLICT_TEXT: Record<KvMaxAttemptsReason, string> = {
+  attempts: 'ran out of attempts resolving conflicts',
+  unreadable: "got a conflict whose value can't be read",
+  'no-onconflict': 'got a conflict, and no onconflict handler was provided'
+}
+
+// `label` is `<selector>: <contractID>::<key>`
+export function kvMaxAttemptsError (
+  label: string, reason: KvMaxAttemptsReason, cause: KvConflictCause
+): Error & { reason: KvMaxAttemptsReason } {
+  return Object.assign(
+    new ChelErrorKvMaxAttempts(`[chelonia/kv] ${label} ${KV_CONFLICT_TEXT[reason]}`, { cause }),
+    { reason }
+  )
+}
+
+// The text for an error that wraps `e`; `fallback` if `e` has no reason
+export function kvConflictText (e: unknown, fallback: KvMaxAttemptsReason = 'attempts'): string {
+  const reason = (e as { reason?: unknown } | null)?.reason
+  return typeof reason === 'string' && Object.hasOwn(KV_CONFLICT_TEXT, reason)
+    ? KV_CONFLICT_TEXT[reason as KvMaxAttemptsReason]
+    : KV_CONFLICT_TEXT[fallback]
 }

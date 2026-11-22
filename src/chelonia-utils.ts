@@ -1,6 +1,6 @@
 import sbp from '@sbp/sbp'
 import { ChelErrorKvConflict } from './errors.js'
-import { isKvMaxAttempts } from './internal-errors.js'
+import { isKvMaxAttempts, kvConflictText } from './internal-errors.js'
 import { assertMaxAttempts, assertNotReentrant, resolveKvKeyIds } from './kv-checks.js'
 import { KV_DEFAULT_ENCRYPTION_KEY_NAME, KV_DEFAULT_SIGNING_KEY_NAME } from './kv-constants.js'
 import { withHeightRecovery } from './kv-height.js'
@@ -69,10 +69,10 @@ export default sbp('sbp/selectors/register', {
       { onHeightAhead, maxHeightRecoveries, signal }, label)
     } catch (e) {
       if (!isKvMaxAttempts(e)) throw e
-      throw new ChelErrorKvConflict(`[chelonia/kv] ${label} ` + (onconflict
-        ? 'ran out of attempts resolving conflicts'
-        : 'got a conflict, and no onconflict handler was provided'
-      ), { cause: e.cause })
+      throw new ChelErrorKvConflict(
+        `[chelonia/kv] ${label} ${kvConflictText(e, onconflict ? 'attempts' : 'no-onconflict')}`,
+        { cause: e.cause }
+      )
     }
   }
 }) as string[]

@@ -20,6 +20,7 @@ import { createCID } from '../functions.js'
 import { signedOutgoingDataWithRawKey } from '../signedData.js'
 import type { ChelRootState, JSONType } from '../types.js'
 import { createCloseEvent } from '../utils.js'
+import { kvPostStatus, type FetchInit } from '../test-utils.js'
 import {
   createClient, NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, REQUEST_TYPE, RESPONSE_TYPE
 } from './index.js'
@@ -409,8 +410,6 @@ export type RelayRequest = {
   t: number; method: string; url: string; path: string; status?: number
 }
 
-type FetchInit = Parameters<typeof fetch>[1]
-
 // `undefined`: default handling. Otherwise, the response to send instead.
 export type RelayOverride = undefined | Response | Promise<Response>
 
@@ -590,11 +589,12 @@ export const keepQueueBusy = (contractID: string, ms: number): void => {
 //   Every appended event is sent as ENTRY to the subscribers of its contract
 //   on `pubsub` (if given).
 // - the KV store (`relay.kv`) of either kind: `GET /kv/<id>/<key>` and
-//   `POST /kv/<id>/<key>`, which, like the server, answers 412 unless
-//   `if-match` has the stored value's etag (`""` if there is none), then
-//   409 unless the value is signed with the contract's current height; both
-//   with the stored value and its etag (`x-cid`). Unlike the server, it
-//   never pushes a KV notification for a write.
+//   `POST /kv/<id>/<key>`, which, like the server (`kvPostStatus`), answers
+//   400 without `if-match`, 412 unless it is `*` or has the stored value's
+//   etag (`""` if there is none), 422 for a body that isn't JSON, then 409
+//   unless the value is signed with the contract's current height; the 412
+//   and 409 with the stored value and its etag (`x-cid`). Unlike the server,
+//   it never pushes a KV notification for a write.
 // Like the server, requests with a shelter authorization header get a 401 if
 // its timestamp is more than 60 s off the server's clock (`new Date()`).
 // Anything else is a 404 unless `onRequest` answers it.
@@ -651,13 +651,15 @@ export function createFakeRelay ({ pubsub }: { pubsub?: FakePubsubServer } = {})
       new Response(stored ?? '', { status, headers: { 'x-cid': kvEtag(stored) } })
     if (method === 'GET') return stored === undefined ? new Response('', { status: 404 }) : answer(200)
     if (method !== 'POST') return new Response('', { status: 405 })
-    const ifMatch = new Headers(init?.headers).get('if-match')
-    if (!ifMatch) return new Response('', { status: 400 })
-    if (ifMatch !== '*' && !ifMatch.split(',').map((etag) => etag.trim()).includes(kvEtag(stored))) {
-      return answer(412)
-    }
     const value = String(init?.body)
-    if (Number(JSON.parse(value).height) !== headInfo(contractID)?.height) return answer(409)
+    const status = kvPostStatus({
+      ifMatch: new Headers(init?.headers).get('if-match'),
+      etag: kvEtag(stored),
+      body: value,
+      height: headInfo(contractID)?.height
+    })
+    if (status === 400 || status === 422) return new Response('', { status })
+    if (status !== 204) return answer(status)
     kv.set(id, value)
     return new Response(null, { status: 204, headers: { 'x-cid': kvEtag(value) } })
   }
