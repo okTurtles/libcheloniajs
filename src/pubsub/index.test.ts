@@ -2,7 +2,7 @@
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { PUBSUB_RECONNECTION_SUCCEEDED, createClient } from './index.js'
+import { PUBSUB_ERROR, PUBSUB_RECONNECTION_ATTEMPT, PUBSUB_RECONNECTION_SUCCEEDED, createClient } from './index.js'
 import type { JsonSbpInvocation, PubSubClient, RsiMessage } from './index.js'
 
 class FakeWebSocket extends EventTarget {
@@ -199,7 +199,48 @@ describe('rsi()', function () {
     server.acceptConnection()
     await assert.rejects(client.rsi(['foo/bar']), /timed out/)
 
-    assert.doesNotThrow(() => server.reply({ to: `${client.id}-0`, type: 'rsi-ok' }))
+    const errors: unknown[] = []
+    const errorHandler = (c: PubSubClient, detail: unknown) => {
+      if (c === client) errors.push(detail)
+    }
+    sbp('okTurtles.events/on', PUBSUB_ERROR, errorHandler)
+    try {
+      server.reply({ to: `${client.id}-0`, type: 'rsi-ok' })
+    } finally {
+      sbp('okTurtles.events/off', PUBSUB_ERROR, errorHandler)
+    }
+    assert.deepEqual(errors, [], 'A late reply should not cause an error.')
+    assert.equal(client.pendingRsiOperations.size, 0)
+    client.destroy()
+  })
+
+  it('resends a pending request with the same ID upon reconnection', async function () {
+    const client = createClient('ws://localhost:8080', {
+      ...testOptions,
+      reconnectOnDisconnection: true,
+      minReconnectionDelay: 1,
+      maxReconnectionDelay: 5,
+      rsiTimeout: 1000
+    })
+    const server = new FakeServer(client)
+    client.connect()
+    server.acceptConnection()
+    const promise = client.rsi(['foo/bar'])
+    const id = (client.socket as unknown as FakeWebSocket).sentMessages[0].id
+
+    client.socket?.close()
+    await new Promise(resolve => setImmediate(resolve)) // let 'close' run
+    assert.equal(client.pendingRsiOperations.size, 1)
+    assert.equal(client.promiseTimeoutsByMessageID.size, 0)
+
+    sbp('okTurtles.events/on', PUBSUB_RECONNECTION_ATTEMPT, () => {
+      server.acceptConnection()
+      const resent = (client.socket as unknown as FakeWebSocket).sentMessages
+      assert.equal(resent.length, 1)
+      assert.equal(resent[0].id, id)
+      server.reply({ type: 'rsi-ok', to: id, data: 'done' })
+    })
+    assert.equal(await promise, 'done')
     client.destroy()
   })
 })

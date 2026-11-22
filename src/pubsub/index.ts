@@ -1264,6 +1264,7 @@ const publicMethods: {
     for (const name of socketEventNames) {
       client.socket.addEventListener(name, client.listeners[name] as () => void)
     }
+    sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_ATTEMPT, client)
     updateState(client)
   },
 
@@ -1380,7 +1381,6 @@ const publicMethods: {
     const nth = client.failedConnectionAttempts + 1
 
     client.nextConnectionAttemptDelayID = setTimeout(() => {
-      sbp('okTurtles.events/emit', PUBSUB_RECONNECTION_ATTEMPT, client)
       client.nextConnectionAttemptDelayID = undefined
       client.connect()
     }, delay)
