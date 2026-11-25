@@ -285,7 +285,7 @@ pubsub frame) is classified before it is decoded:
 
 | Status | Condition | Read as |
 |---|---|---|
-| `absent` | `404`, or a `412` without a body | no value |
+| `absent` | `404`, or a `412` without a body (`kv/set`'s fetch-first GET also takes a `410`, which `kv/get` rejects) | no value |
 | `present` | stamp ≤ local height | the decoded value |
 | `ahead` | stamp > local height, or the contract isn't loaded | `ChelErrorKvHeightAhead` (`exact: true`, `requiredHeight` = stamp) |
 | `malformed` | stamp not canonical | `ChelErrorKvHeightMalformed`; never verifiable, only an overwrite fixes it |
@@ -328,7 +328,8 @@ no passive height wait runs (the backoff and `409` waits still do),
 out of attempts on one is a conflict. A conflict's `.cause`
 (`KvConflictCause`) describes the last `412` only: `{ currentStatus?,
 currentData? (present / absent), requiredHeight? (ahead), etag }`,
-`currentStatus` left out only if the body can't be read. Raw `kv/set`
+`currentStatus` left out if the body can't be read, or a `present`
+value's decode fails. Raw `kv/set`
 throws the internal `ChelErrorKvMaxAttempts`; the slot writes and
 `queuedSet` rethrow it as `ChelErrorKvConflict` (`isKvConflict`
 matches both).
@@ -360,8 +361,10 @@ single-key `sync` run the same one, with the same options.
    re-subscribes), or after 30 s. A recovery that races a re-sync
    waits for it.
 5. No recovery sync starts from `chelonia/reset`'s abort until the reset
-   ends (`AbortError`), and the reset waits for running ones. `signal`
-   and a reset end only the caller's wait, never a shared sync.
+   ends (`AbortError`). The reset's drain waits for running ones (unless
+   `resetDrainTimeout` aborts their requests); its abort skips one still
+   queued and aborts the request of one still running. `signal` ends
+   only the caller's wait, never a shared sync.
 6. `queue(body)` runs `body` on the contract's public lane. `signal`
    and a reset reject it at once while it is queued (the body then
    never runs). A body that never runs rejects (`ChelErrorUnexpected`
@@ -372,8 +375,9 @@ value `ahead`:
 
 - The mirror keeps its value and etag. `status` stays `loaded` /
   `error`, anything else becomes `loading`; `heightAhead` gets the
-  highest required height known; `settled` doesn't change. An explicit
-  caller gets the error.
+  highest required height known; `settled` doesn't change. If the
+  contract has reached the height meanwhile, the key instead reloads at
+  once, with no marker. An explicit caller gets the error.
 - The key gets one wait. Once the contract reaches the height, the key
   reloads with the reason that registered the wait (`'load'`,
   `'remote'` or `'reconnect'`), without showing `loading` if the slot is `loaded`: one
@@ -430,7 +434,7 @@ reloads the key (once per attempt, plus the retry below) when:
    clean `409` (no `412` before it) or the mirror is `loaded` with the
    etag found ahead;
 3. the caller passed `ifMatch` and the slot hasn't settled since its
-   activation;
+   activation, or is `error` without a value;
 4. the slot is `error` but holds a value (a visible reload: `loading`,
    `'load'` event, `onUpdate`).
 
@@ -523,8 +527,8 @@ queued, or running but not yet posted (e.g. reloading their basis),
 reject with `AbortError` without posting (the reducer doesn't run);
 running single-key syncs reject with `AbortError`; loads it drops
 resolve and settle nothing. Work started after the abort, until
-`postCleanupFn` runs, fails the same way. Until its
-teardown no recovery or fallback sync starts (a due fallback re-arms).
+`postCleanupFn` runs, fails the same way. Until the reset ends, no
+recovery or fallback sync starts (a due fallback re-arms).
 The teardown cancels every wait and rejects pending `whenSettled` with
 `AbortError`, and the next session starts with fresh
 KV runtime state even if the teardown throws; a reset that fails before
@@ -961,8 +965,9 @@ Internally:
 2. Looks up the current `(value, etag)` from the local mirror,
    reloading the key first when the mirror can't be trusted (§3.4,
    "Reducer basis").
-3. Calls `updater(value)`. If the result is `KV_NOOP`, skips the network
-   and resolves with `undefined` (unless a needed reload failed, §3.4).
+3. Calls `updater(value)`. If the result is `KV_NOOP`, skips the write
+   and resolves with `undefined` (unless a needed reload failed, §3.4;
+   on a slot that hasn't settled, it first reloads and re-runs).
 4. Validates the result through `schema.parse` (if defined). On
    failure, rejects with `ChelErrorKvValidation` — the network is
    never hit.
@@ -2223,9 +2228,15 @@ Mirror state lives in `rootState._kv` (see §5). Initialise this in
    behind each active per-contract `chelonia/queueInvocation` lane) and
    for running recovery syncs;
 4. empties `rootState._kv` and calls `resetKvRuntime`, which replaces
-   every per-session map of this section, but **leaves `kvSlots` (and
-   `defContractKvByManifest`) intact** because slot definitions are
-   application code, not runtime state.
+   every per-session map and set (`kvSlotsByContractID`,
+   `kvActiveFilters`, `kvFilterDirty`, `kvFilterRetry`,
+   `kvLocalEchoCIDs`, `kvReconnectRefresh`, `kvPendingWrites`,
+   `kvPendingLoads`, `kvSlotLoadsRunning`, `kvOnUpdateActive`,
+   `kvHeightListeners`, `kvHeightWaits`, `kvRecoveries`,
+   `kvSettleWaiters`, `kvReconciledContracts`, `kvResyncedContracts`),
+   clears `kvFilterRetryTimer` and `kvFlushInFlight`, but **leaves
+   `kvSlots` (and `defContractKvByManifest`) intact** because slot
+   definitions are application code, not runtime state.
 
 After a `chelonia/reset`, the next contract sync replays the
 `_reconcileForSlot` pass against the surviving definitions.
@@ -2600,7 +2611,8 @@ Mirror the structure of `src/journal.test.ts`:
    removes filter entries correctly.
 3. `update` writes the reducer result; on a synthesised 412 response
    from a stub `fetch`, the reducer is re-run against the fresh
-   `currentData`. Returning `KV_NOOP` skips the network entirely.
+   `currentData`. Returning `KV_NOOP` skips the write (and, on a
+   settled slot, the network).
 4. Schema rejection on `update` reducer output throws
    `ChelErrorKvValidation` and does **not** hit the network.
 5. Schema rejection on a simulated pubsub notification does *not*

@@ -78,9 +78,13 @@ loaded yet: both are `'non-init'`. Each entry therefore also carries:
 - `heightAhead: { requiredHeight }`: the server holds a value for the
   key that this client can't verify yet (see
   [Contract heights](#contract-heights)). It is removed once a load or
-  a write verifies the key.
+  a write verifies the key, and when a resync tears the contract down
+  (a `CHELONIA_KV_STATUS_CHANGED` fires; the deferred reload goes with
+  it).
 
-Read them through the selectors rather than the raw entry:
+Read `settled` through the selectors rather than the raw entry. No
+selector returns `heightAhead`: only the entry and
+`CHELONIA_KV_STATUS_CHANGED` (below) carry it.
 
 - `chelonia/kv/settledStatus(contractID, key)` gives `'loaded'`,
   `'non-init'` (verified empty) or `'error'` once the active slot has
@@ -164,7 +168,8 @@ still holds), but have their own names.
   re-signs. It never syncs, and `409`s never reach `onconflict`.
 - **Raw KV pubsub handlers** (`messageHandlers[NOTIFICATION_TYPE.KV]`
   of `chelonia/connect`) never receive frames that are ahead (a warning
-  is logged) or malformed (the error is logged).
+  is logged when such a handler is registered) or malformed (the error
+  is logged).
 
 ### Options and timings
 
@@ -267,7 +272,7 @@ Apps used to guard KV writes themselves: a pre-flight
 | `.cause` walk for a height error | `isKvHeightAhead(e)` (`findErrorCause` across your own wrappers); `isKvHeightMalformed(e)` for values to overwrite. |
 | `e.name === 'ChelErrorKvConflict'` plus a retry | `isKvConflict(e)`; merge in the reducer / `onconflict`, or raise `maxAttempts`. |
 | Telling an empty slot from one not loaded yet | `settledStatus` / `whenSettled`. |
-| Remembering that the server holds a newer value | The entry's `heightAhead`. |
+| Remembering that the server holds a newer value | The entry's `heightAhead` (a resync clears it). |
 
 Caveats:
 
@@ -423,8 +428,10 @@ reducer when the mirror can't be trusted (e.g. it is `'loading'`, has
 `heightAhead`, follows a height recovery, or is `'error'` but holds a
 value). These reloads emit `'load'` events and call `onUpdate` like any
 load. When one fails, `update` either rejects or runs the reducer on
-the mirror under its etag, where a `KV_NOOP` rejects with the reload
-error. Rules:
+the mirror under its etag; a `KV_NOOP` then rejects with the reload
+error, unless the only reload was that of an `'error'` slot holding a
+value and it never found the value ahead (then `update` resolves
+`undefined`). Rules:
 [KV-REVAMPED.md §3.4](specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery)
 ("Reducer basis").
 
@@ -542,7 +549,12 @@ omitted here; the source is authoritative.
   settled rejects with an `AbortError` and leaves the mirror as it was.
 
 - **A resync keeps the mirror.** While a contract re-syncs, its slots
-  are inactive (`read` / `update` / single-key `sync` reject with
-  `ChelErrorKvSlotUnknown`, `status` is `'non-init'`, `whenSettled` keeps
-  waiting), but their entries keep values and statuses. The slots reload
-  once active again; entries of slots no longer claimed are dropped.
+  are inactive (`read` / `update` / `clear` / single-key `sync` reject
+  with `ChelErrorKvSlotUnknown`, `status` is `'non-init'`,
+  `settledStatus` is `undefined`, the all-slots `sync` resolves without
+  loading, `whenSettled` keeps waiting), but their entries keep values
+  and statuses; their `heightAhead` markers are cleared. Slots with
+  `autoLoad: 'on-sync'` reload once active again (and are marked again
+  if the value is still ahead); `'on-demand'` and `'never'` slots keep
+  their entry, unsettled, until a load, a write or an applied pubsub
+  frame. Entries of slots no longer claimed are dropped.
