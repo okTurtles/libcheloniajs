@@ -931,6 +931,35 @@ describe('Slot writes and contract heights', () => {
     assert.strictEqual(serverValue('names'), null)
   })
 
+  it('a load queued behind an update that gives up on a value ahead drops the wait', async () => {
+    writeAsDeviceB('names', ['b'], AHEAD)
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    let queued = false
+    filterCalls('chelonia/kv/_loadSlot', () => { queued = true })
+    let gaveUp = false
+    let getCount = 0
+    let syncing: Promise<unknown> | undefined
+    server.onGet = async () => {
+      // The update's reload finds the value ahead; a sync queues meanwhile
+      if (++getCount === 1) {
+        syncing = within(sbp('chelonia/kv/sync', CONTRACT_ID, 'names'), 'the sync')
+        await until(() => queued, 'the sync to queue')
+      } else if (getCount === 2) {
+        // The height arrives during the sync's GET, which verifies the key
+        await until(() => gaveUp, 'the update to give up')
+        setLocalHeight(AHEAD)
+      }
+    }
+    await assert.rejects(updateWith('names', { onHeightAhead: 'reject' }), aheadAt(AHEAD))
+    gaveUp = true
+    await syncing
+    await drainLanes()
+    // No reload once the sync verified the key
+    assert.strictEqual(getCount, 2)
+    assert.deepStrictEqual(slotState('names'), ['loaded', undefined, true])
+  })
+
   it('an abort while queued rejects at once; one after the write committed is ignored', async () => {
     const late = new AbortController()
     defineSlot({

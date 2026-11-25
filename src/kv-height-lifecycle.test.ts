@@ -8,7 +8,7 @@ import {
   activate, aheadAt, configure, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes, filterCalls,
   findAhead, gateLane, gets, holdGets, holdResetAfterAbort, holdSyncs, installKvHarness, logs,
   mirror, read, resync, rootState, server, setLocalHeight, settledStatus, setupContract, sleep,
-  START_HEIGHT, sync, syncs, update, whenSettled, writeAsDeviceB
+  START_HEIGHT, sync, syncs, update, vetoQueue, whenSettled, writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
 import { isPending, until, waitMicrotasks, within } from './test-utils.js'
@@ -449,4 +449,66 @@ describe('A contract removal', () => {
       assert.strictEqual(rootState().contracts[CONTRACT_ID], undefined, via)
     }
   })
+})
+
+describe('A write that outlives its session', () => {
+  installKvHarness()
+
+  const ends = {
+    'chelonia/_init': async () => {
+      sbp('chelonia/_init')
+      await configure()
+    },
+    // Its drains fail on the vetoed lanes, so it doesn't wait for the write
+    'a chelonia/reset whose drains fail': async () => {
+      const lifts = [vetoQueue(CONTRACT_ID), vetoQueue(`public:${CONTRACT_ID}`)]
+      await within(sbp('chelonia/reset'), 'the reset')
+      for (const lift of lifts) lift()
+    }
+  }
+  for (const [name, end] of Object.entries(ends)) {
+    it(`leaves the next session's writes counted (${name})`, async () => {
+      let release!: () => void
+      const held = new Promise<void>((resolve) => { release = resolve })
+      let holding = false
+      writeAsDeviceB('count', { n: 1 })
+      // The old write waits in its `onUpdate`, which an abort doesn't end
+      defineSlot({
+        key: 'count',
+        defaultValue: { n: 0 },
+        onUpdate: (_value, { reason }) => {
+          if (reason !== 'local') return
+          holding = true
+          return held
+        }
+      })
+      await activate()
+      const old = update('count', increment)
+      let openPost: (() => void) | undefined
+      try {
+        await until(() => holding, 'the old write')
+        await end()
+        setupContract()
+        writeAsDeviceB('count', { n: 5 })
+        defineSlot({ key: 'count', defaultValue: { n: 0 } })
+        // Activates without draining the lane, which the old write holds
+        await within(sbp('chelonia/private/in/sync', CONTRACT_ID), 'the activating sync')
+        const posted = new Promise<void>((resolve) => { openPost = resolve })
+        server.onPost = () => posted
+        const write = update('count', increment)
+        release()
+        await old
+        await until(() => server.posts().length === 2, 'the new write\'s POST')
+        // A slot replaced while a write runs loads the value the write commits
+        defineSlot({ key: 'count', defaultValue: { n: 9 } })
+        openPost!()
+        assert.deepStrictEqual(await write, { n: 6 })
+      } finally {
+        release()
+        openPost?.()
+      }
+      await drainLanes()
+      assert.deepStrictEqual(read('count'), { n: 6 })
+    })
+  }
 })

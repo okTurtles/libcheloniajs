@@ -1010,45 +1010,20 @@ function recordEchoCID (
   }
 }
 
-// Held by each `update` / `clear` call until it settles: `_waitInFlight`'s third
-// source, for writes whose slot and echo CID were dropped mid-flight.
-function incrementPending (ctx: CheloniaContext, contractID: string): void {
-  ctx.kvPendingWrites.set(contractID, (ctx.kvPendingWrites.get(contractID) ?? 0) + 1)
-}
-
-function decrementPending (ctx: CheloniaContext, contractID: string): void {
-  const n = (ctx.kvPendingWrites.get(contractID) ?? 1) - 1
-  if (n <= 0) ctx.kvPendingWrites.delete(contractID)
-  else ctx.kvPendingWrites.set(contractID, n)
-}
-
-// Per-contract pending-load counter. Incremented by both `_loadSlot`
-// (on schedule, to cover the queued-but-not-started window) and
-// `_loadSlotNow` (on entry, to cover direct callers like `_handleRemote`
-// and `update`'s reload). A load that flows `_loadSlot` →
-// `_loadSlotNow` therefore increments twice for one logical operation;
-// this is intentional — the only consumer is `defineSlot`'s `> 0` gate,
-// so the inflation is harmless. Do NOT rely on the exact count for
-// "exactly one load in flight" assertions or telemetry.
-// `defineSlot`'s post-reconcile gate consults it so a slot replaced
-// while a load is queued-but-not-started (status still `loaded`, so the
-// `unloaded` check misses it) schedules a fresh load for the replacement
-// rather than revalidating a value the superseded load is about to
-// discard at its staleness guard.
-// Returns the release. It decrements the map the load was counted in: a load
-// that outlives `chelonia/reset` must not uncount one of the next session.
-function trackPendingLoad (ctx: CheloniaContext, contractID: string): () => void {
-  const pending = ctx.kvPendingLoads
-  pending.set(contractID, (pending.get(contractID) ?? 0) + 1)
+// Counts `id` in `counts` until the returned release runs. The release
+// decrements the map it counted in: work that outlives `chelonia/reset` or
+// `chelonia/_init` must not uncount the next session's.
+function holdCount (counts: Map<string, number>, id: string): () => void {
+  counts.set(id, (counts.get(id) ?? 0) + 1)
   return () => {
-    const n = (pending.get(contractID) ?? 1) - 1
-    if (n <= 0) pending.delete(contractID)
-    else pending.set(contractID, n)
+    const n = (counts.get(id) ?? 1) - 1
+    if (n <= 0) counts.delete(id)
+    else counts.set(id, n)
   }
 }
 
 // Counts a running `_loadSlotNow` of the slot; returns its release, which,
-// like `trackPendingLoad`'s, decrements the map the load was counted in. The
+// like `holdCount`'s, decrements the map the load was counted in. The
 // last release settles the slot for a load that couldn't start meanwhile, if
 // the running loads left it unsettled or `'loading'` (a replaced slot's load
 // restores the prior status), unless the session ended.
@@ -1145,7 +1120,7 @@ async function safeOnUpdateGuarded (
 ): Promise<void> {
   if (!slot.onUpdate) return
   let ret: unknown
-  ctx.kvOnUpdateActive.set(contractID, (ctx.kvOnUpdateActive.get(contractID) ?? 0) + 1)
+  const releaseActive = holdCount(ctx.kvOnUpdateActive, contractID)
   try {
     // Synchronous portion of the callback. Any same-contract write
     // issued here is re-entrant and is rejected by `assertNotReentrant`.
@@ -1160,9 +1135,7 @@ async function safeOnUpdateGuarded (
     // Clear the flag as soon as the synchronous portion returns (or
     // suspends at its first await), BEFORE awaiting the callback's
     // promise below — so independent concurrent writes are not rejected.
-    const n = (ctx.kvOnUpdateActive.get(contractID) ?? 1) - 1
-    if (n <= 0) ctx.kvOnUpdateActive.delete(contractID)
-    else ctx.kvOnUpdateActive.set(contractID, n)
+    releaseActive()
   }
   if (ret && typeof (ret as { then?: unknown }).then === 'function') {
     try {
@@ -1211,6 +1184,9 @@ type SlotWriteAttempt = Pick<KvHeightRecoveryAttempt, 'recoveries' | 'heightWait
   signal: AbortSignal;
 }
 
+// Height-ahead errors thrown by `update`'s reload, which registered their finding
+const reloadFindings = new WeakSet<Error>()
+
 // Height recoveries run off the lane, so each attempt queues `body` anew. Giving
 // up on a value the contract can't verify yet reloads the key once it can.
 async function runSlotWrite<T> (
@@ -1224,7 +1200,8 @@ async function runSlotWrite<T> (
   const signal = sessionSignal(ctx, options.signal)
   const { onHeightAhead, maxHeightRecoveries } = options
   let aheadAt: number | undefined
-  incrementPending(ctx, contractID)
+  // `_waitInFlight`'s third source, for writes whose slot and echo CID were dropped
+  const releasePending = holdCount(ctx.kvPendingWrites, contractID)
   try {
     return await withHeightRecovery(ctx, contractID, ({ heightWaitMs, recoveries, queue }) =>
       queue(() => body({ heightWaitMs, recoveries, signal })).catch((e: unknown) => {
@@ -1236,13 +1213,15 @@ async function runSlotWrite<T> (
     const conflict = isKvConflict(e) ? kvConflictCause(e) : undefined
     const requiredHeight = aheadAt ??
       (conflict?.currentStatus === 'ahead' ? conflict.requiredHeight : undefined)
-    if (typeof requiredHeight === 'number') {
+    // Registering a reload's finding twice would keep a load started in between
+    // from dropping the wait once it verifies the key
+    if (typeof requiredHeight === 'number' && !reloadFindings.has(e as Error)) {
       registerHeightWait(ctx, contractID, slot, requiredHeight, KV_UPDATE_REASON.LOAD)
     }
     throw e
   } finally {
     signal._cleanup?.()
-    decrementPending(ctx, contractID)
+    releasePending()
   }
 }
 
@@ -2003,7 +1982,7 @@ export default (sbp('sbp/selectors/register', {
     // not yet flipped the slot to 'loading', so `defineSlot`'s gate
     // would otherwise miss it and revalidate a value this load is about
     // to discard at its staleness guard (#1).
-    const untrackPending = trackPendingLoad(this, contractID)
+    const untrackPending = holdCount(this.kvPendingLoads, contractID)
     const instance = this._instance
     // Run, or skipped as stale; not vetoed
     let handled = false
@@ -2053,7 +2032,7 @@ export default (sbp('sbp/selectors/register', {
       signal?: AbortSignal;
     }
   ): Promise<void> {
-    const untrackPending = trackPendingLoad(this, contractID)
+    const untrackPending = holdCount(this.kvPendingLoads, contractID)
     const untrackRunning = trackSlotLoad(this, contractID, slot.key)
     return (async () => {
       const rootState = sbp(this.config.stateSelector) as ChelRootState
@@ -2100,6 +2079,7 @@ export default (sbp('sbp/selectors/register', {
       // terminal status, not infer health from the presence or absence of a
       // `CHELONIA_KV_VALIDATION_ERROR` event.
       const failLoadValidation = (e: unknown, wrappedMessage: string): never => {
+        const before = liveEntry(this, contractID, slot.key)
         sbp('okTurtles.events/emit', CHELONIA_KV_VALIDATION_ERROR, {
           contractID,
           contractType: slot.contractType,
@@ -2107,10 +2087,13 @@ export default (sbp('sbp/selectors/register', {
           error: e,
           reason
         })
-        if (preserveStatusOnError) {
-          restorePriorStatus()
-        } else {
-          setStatus({ status: KV_LOAD_STATUS.ERROR, lastError: normalizeError(e), settled: true })
+        // A listener may have dropped (or dropped and re-seeded) the entry
+        if (before && liveEntry(this, contractID, slot.key) === before) {
+          if (preserveStatusOnError) {
+            restorePriorStatus()
+          } else {
+            setStatus({ status: KV_LOAD_STATUS.ERROR, lastError: normalizeError(e), settled: true })
+          }
         }
         throw new ChelErrorKvValidation(wrappedMessage, { cause: e })
       }
@@ -2767,6 +2750,8 @@ export default (sbp('sbp/selectors/register', {
         error: e,
         reason: KV_UPDATE_REASON.REMOTE
       })
+      // A listener may have dropped (or dropped and re-seeded) the entry
+      if (liveEntry(this, contractID, key) !== entry) return Promise.resolve()
       patchEntry(this, contractID, slot, {
         status: KV_LOAD_STATUS.ERROR, lastError: normalizeError(e), settled: true
       })
@@ -2993,6 +2978,7 @@ export default (sbp('sbp/selectors/register', {
           })
         } catch (e) {
           if (signal.aborted) throw abortReason(signal)
+          if (isKvHeightAhead(e)) reloadFindings.add(e)
           if (isKvHeightAhead(e) || !slotIsCurrent(this, contractID, slot) || unverified ||
               ifMatch !== undefined) throw e
           console.warn(`[chelonia/kv] ${label}: reload failed; the reducer runs on the mirror`, e)
@@ -3668,6 +3654,8 @@ function revalidateMirrorEntry (
         )
       })
     } else {
+      // A listener may have dropped (or dropped and re-seeded) the entry
+      if (liveEntry(ctx, contractID, slot.key) !== entry) return
       patchEntry(ctx, contractID, slot, {
         status: KV_LOAD_STATUS.ERROR, lastError: normalizeError(e)
       })
