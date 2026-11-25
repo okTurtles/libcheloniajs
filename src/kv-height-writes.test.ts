@@ -190,6 +190,15 @@ describe('chelonia/kv/withHeightRecovery', () => {
     assert.strictEqual(syncs.count, before + 1)
   })
 
+  it('takes a null signal as no signal, as update and clear do', async () => {
+    defineSlot({ key: 'prefs' })
+    await activate()
+    assert.strictEqual(await within(recover(() => 'ran', { signal: null }), 'the call'), 'ran')
+    assert.deepStrictEqual(await update('prefs', () => ({ v: 1 }), { signal: null }), { v: 1 })
+    await within(sbp('chelonia/kv/clear', CONTRACT_ID, 'prefs', { signal: null }), 'the clear')
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [204, 204])
+  })
+
   it('shares one sync between callers, and a signal ends only its own wait', async () => {
     await activate()
     server.height = START_HEIGHT + 1
@@ -480,7 +489,7 @@ describe('chelonia/kv/withHeightRecovery', () => {
 
   it('validates the attempt and options before the first attempt', async () => {
     await assert.rejects(recover(undefined as unknown as () => void), {
-      name: 'TypeError', message: /`attempt` must be a function/
+      name: 'ChelErrorKvUpdateInvalid', message: /`attempt` must be a function/
     })
     let calls = 0
     const attempt = () => ++calls

@@ -298,7 +298,9 @@ export type KvMirrorEntry = {
   heightAhead?: { requiredHeight: number };
 };
 
-// A slot key whose server value needs a contract height not reached yet
+// A slot key whose server value needs a contract height not reached yet.
+// Internal bookkeeping of `src/kv.ts`: reachable through `CheloniaContext`, but
+// not a supported API.
 export type KvHeightWait = {
   contractID: string;
   key: string;
@@ -332,7 +334,8 @@ export type KvUpdateCtx = {
 // Why a slot loads: every update reason but a local write
 export type KvLoadReason = Exclude<KvUpdateCtx['reason'], typeof KV_UPDATE_REASON.LOCAL>;
 
-// Called once the local contract commits `minHeight` or later
+// Called once the local contract commits `minHeight` or later. Internal, like
+// `KvHeightWait`.
 export type KvHeightListener = { minHeight: number; fire: () => void };
 
 // Public subset of the internal `SlotDefinition`. Accepted by
@@ -387,7 +390,8 @@ export type SlotDefinitionSource =
 // `KvSlotDefinition` at `chelonia/kv/defineSlot` time: defaults applied,
 // `resolvedDefault` computed, `contractType` narrowed to a single string
 // (the public form accepts an array; each entry is stored as its own
-// `SlotDefinition`). NOT re-exported from `index.ts` — internal only.
+// `SlotDefinition`). Internal: reachable from the package root through
+// `CheloniaContext`, but not a supported API.
 export type SlotDefinition = {
   contractType: string;
   key: string;
@@ -851,7 +855,8 @@ export type ChelKvOnConflictCallback = (args: {
    * The verified server data, decrypted lazily. **Throws on access** if it
    * can't be decrypted or verified, and for an `'ahead'`
    * (`ChelErrorKvHeightAhead`) or `'malformed'` (`ChelErrorKvHeightMalformed`)
-   * value, so read it inside a `try`/`catch`.
+   * value, which `onconflict` only gets with `allowUnverifiedConflict: true`.
+   * Read it inside a `try`/`catch`.
    */
   currentData: JSONType | undefined;
 } & KvConflictServerValue) => Promise<[JSONType, string | undefined] | false>;
@@ -875,7 +880,7 @@ export type KvHeightAheadMode = 'sync' | 'reject';
 export type KvHeightRecoveryOptions = {
   onHeightAhead?: KvHeightAheadMode | null;
   maxHeightRecoveries?: number | null;
-  signal?: AbortSignal;
+  signal?: AbortSignal | null;
 };
 
 export type KvHeightRecoveryAttempt = {
@@ -891,7 +896,7 @@ export type KvConflictCause = {
   currentStatus?: KvServerValueStatus;
   currentData?: JSONType;
   requiredHeight?: number;
-  etag?: string | null;
+  etag: string | null;
 };
 
 export type KvConflictServerValue =

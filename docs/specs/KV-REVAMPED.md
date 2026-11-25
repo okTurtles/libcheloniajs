@@ -342,7 +342,7 @@ single-key `sync` run the same one, with the same options.
    `null` = default, unknown keys ignored, invalid values reject with
    `ChelErrorKvUpdateInvalid` before any request.
 2. `attempt({ recoveries, heightWaitMs, queue })` (a function, else
-   `TypeError`) runs up to `maxHeightRecoveries + 1` times.
+   `ChelErrorKvUpdateInvalid`) runs up to `maxHeightRecoveries + 1` times.
    `heightWaitMs` is `0`, except on the last attempt in `'sync'` mode
    (`undefined`: the `kv/set` default).
    So `maxHeightRecoveries: 0` makes one attempt with a passive wait

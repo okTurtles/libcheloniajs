@@ -2516,7 +2516,9 @@ export default (sbp('sbp/selectors/register', {
     options?: KvHeightRecoveryOptions | null
   ): Promise<T> {
     if (typeof attempt !== 'function') {
-      throw new TypeError('[chelonia/kv] withHeightRecovery: `attempt` must be a function')
+      throw new ChelErrorKvUpdateInvalid(
+        '[chelonia/kv] withHeightRecovery: `attempt` must be a function'
+      )
     }
     assertNotReentrant(this, contractID, undefined, 'withHeightRecovery')
     return withHeightRecovery(this, contractID, attempt, options)

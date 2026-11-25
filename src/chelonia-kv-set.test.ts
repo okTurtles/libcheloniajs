@@ -215,6 +215,8 @@ describe('chelonia/kv/set', () => {
       [undefined, undefined, { currentStatus: 'absent', currentData: undefined, etag: null }],
       [value('01'), 'etag-m', { currentStatus: 'malformed', etag: 'etag-m' }]
     ]
+    // `etag` is always set, so a consumer reads it with no `undefined` case
+    const etagOf = (cause: KvConflictCause): string | null => cause.etag
     for (const [body, etag, cause] of cases) {
       const calls = stubFetch(() => conflict(body, etag))
       const e = await within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
@@ -224,6 +226,7 @@ describe('chelonia/kv/set', () => {
       assert.strictEqual(e.message, `[chelonia/kv] set: ${contractID}::settings got a conflict, ` +
         'and no onconflict handler was provided')
       assert.deepStrictEqual(e.cause, cause)
+      assert.strictEqual(etagOf(e.cause as KvConflictCause), etag ?? null)
       assert.deepStrictEqual(calls, ['POST'])
     }
   })

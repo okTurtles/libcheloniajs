@@ -3110,7 +3110,7 @@ export default sbp('sbp/selectors/register', {
       // Give `onconflict` values that can't be verified instead of failing
       allowUnverifiedConflict?: boolean;
       onconflict?: ChelKvOnConflictCallback | null | undefined;
-      signal?: AbortSignal;
+      signal?: AbortSignal | null;
     }
   ) {
     const label = `set: ${contractID}::${key}`
