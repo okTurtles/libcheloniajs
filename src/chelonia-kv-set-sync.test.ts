@@ -27,6 +27,7 @@ import {
   storeSecretKeys, subscribed, waitFor
 } from './pubsub/test-harness.js'
 import type { RelayRequest, TestContract } from './pubsub/test-harness.js'
+import { within } from './test-utils.js'
 import type { ChelKvGetResult, ChelRootState, JSONType } from './types.js'
 
 const KEY = 'readUntil'
@@ -145,11 +146,11 @@ async function kvSet (
     })
   let error: unknown
   try {
-    await (raw
+    await within(raw
       ? set()
       : sbp('chelonia/kv/withHeightRecovery', contractID, set, {
         maxHeightRecoveries, signal: options.signal
-      }))
+      }), 'the write')
   } catch (e) {
     error = e
   }
@@ -190,7 +191,7 @@ function settlement (promise: Promise<unknown>) {
 }
 
 const kvValue = async (contractID: string) =>
-  ((await sbp('chelonia/kv/get', contractID, KEY)) as ChelKvGetResult | null)?.data
+  ((await within(sbp('chelonia/kv/get', contractID, KEY), 'kv/get')) as ChelKvGetResult | null)?.data
 
 describe('kv/set with height recovery on a contract whose subscription was lost', () => {
   const data = { messageHash: 'x' }
@@ -265,17 +266,21 @@ describe('kv/set on a contract that Chelonia is up to date with', () => {
 describe('kv/set when syncing does not help', () => {
   // On a subscribed contract: once the pubsub client lost it, the sync that
   // follows the new subscription would add to the count
-  it('syncs at most `maxHeightRecoveries` times', async () => {
-    const contract = await retainedContract(relay, pubsub)
-    // The server keeps answering 409 (e.g. it keeps getting new events)
-    relay.onRequest = (request) => {
-      if (isKvWrite(request)) return kvConflict()
-    }
-    const result = await kvSet(contract, { messageHash: 'x' }, { heightWaitMs: 0 })
-    assert.ok(isKvHeightAhead(result.error), describeError(result.error))
-    assert.deepEqual(result.statuses, [409, 409])
-    assert.equal(result.syncs, 1)
-  })
+  for (const maxHeightRecoveries of [1, 2]) {
+    it(`syncs at most \`maxHeightRecoveries\` times (${maxHeightRecoveries})`, async () => {
+      const contract = await retainedContract(relay, pubsub)
+      // The server keeps answering 409 (e.g. it keeps getting new events)
+      relay.onRequest = (request) => {
+        if (isKvWrite(request)) return kvConflict()
+      }
+      const result = await kvSet(contract, { messageHash: 'x' }, { heightWaitMs: 0 }, {
+        maxHeightRecoveries
+      })
+      assert.ok(isKvHeightAhead(result.error), describeError(result.error))
+      assert.deepEqual(result.statuses, Array(maxHeightRecoveries + 1).fill(409))
+      assert.equal(result.syncs, maxHeightRecoveries)
+    })
+  }
 
   it('keeps the outcome when the sync fails, and logs it', async () => {
     const contract = await retainedContract(relay, pubsub)
@@ -330,7 +335,7 @@ describe('kv/set on a contract that Chelonia does not want', () => {
     }
     const logged = logs.fromNow()
     const result = await kvSet(contract, { messageHash: 'x' }, { heightWaitMs: 0 })
-    await sbp('chelonia/contract/wait', contractID)
+    await within(sbp('chelonia/contract/wait', contractID), 'the contract\'s queue')
     assert.ok(isKvHeightAhead(result.error), describeError(result.error))
     assert.deepEqual(result.statuses, [409])
     // The recovery ran, and its sync refused the released contract
@@ -347,7 +352,7 @@ describe('chelonia/kv/queuedSet on a contract whose subscription was lost', () =
     const from = relay.requests.length
     const subAt = subscribedAgainAt(contract.contractID)
     const data = { messageHash: 'q' }
-    await sbp('chelonia/kv/queuedSet', {
+    await within(sbp('chelonia/kv/queuedSet', {
       contractID: contract.contractID,
       key: KEY,
       data,
@@ -355,7 +360,7 @@ describe('chelonia/kv/queuedSet on a contract whose subscription was lost', () =
       // The test contract has no encryption key: store the value unencrypted
       encryptionKeyName: null,
       onconflict: writeAgain(data)
-    })
+    }), 'queuedSet')
     assert.equal(relay.syncsOf(contract.contractID, from, subAt()), 1)
     assert.deepEqual(await kvValue(contract.contractID), data)
     assert.ok(await waitFor(subscribed(pubsub, [contract.contractID])), 'not re-subscribed')
@@ -380,9 +385,9 @@ describe('chelonia/kv/update (slot API) on a contract whose subscription was los
     const { contract } = await staleContract(relay, pubsub)
     const from = relay.requests.length
     const subAt = subscribedAgainAt(contract.contractID)
-    await sbp('chelonia/kv/update', {
+    await within(sbp('chelonia/kv/update', {
       contractID: contract.contractID, key: SLOT, updater: () => ({ n: 1 })
-    })
+    }), 'update')
     assert.deepEqual(writeStatuses(from), [409, 204])
     assert.equal(relay.syncsOf(contract.contractID, from, subAt()), 1)
     assert.ok(await waitFor(subscribed(pubsub, [contract.contractID])), 'not re-subscribed')
@@ -427,7 +432,7 @@ describe('a signal that aborts while the recovery sync after a 409 runs', () => 
     } finally {
       hold.release()
     }
-    await sbp('chelonia/contract/wait', contractID)
+    await within(sbp('chelonia/contract/wait', contractID), 'the contract\'s queue')
     assert.equal(localHeight(contractID), relay.headInfo(contractID)!.height, 'not synced')
     assert.deepEqual(writeStatuses(from), [409], 'wrote again after the abort')
     assert.ok(await waitFor(subscribed(pubsub, [contractID])), 'not re-subscribed')
@@ -445,7 +450,7 @@ describe('a signal that aborts while the recovery sync after a 409 runs', () => 
     assert.ok(error instanceof DOMException && error.name === 'AbortError', describeError(error))
   })
 
-  it('frees the public queue for the next kv/update', async () => {
+  it('does not hold the public queue while its height recovery syncs', async () => {
     const { contract } = await staleContract(relay, pubsub)
     const { contractID } = contract
     const hold = holdSync(contractID)
@@ -459,14 +464,15 @@ describe('a signal that aborts while the recovery sync after a 409 runs', () => 
     }))
     try {
       assert.ok(await waitFor(hold.isHeld), 'did not sync')
-      controller.abort()
-      assert.ok(await waitFor(() => first.settled, { timeout: 500 }), 'still waiting for the sync')
-      assert.equal((first.error as Error)?.name, 'AbortError', describeError(first.error))
-      // The next update runs (its write gets a 409 too: the sync is held)
+      // The next update writes while the first one's recovery sync is held (its
+      // write gets a 409 too)
       assert.ok(
         await waitFor(() => writeStatuses(from).length === 2, { timeout: 500 }),
         `the next update did not write: ${JSON.stringify(writeStatuses(from))}`
       )
+      controller.abort()
+      assert.ok(await waitFor(() => first.settled, { timeout: 500 }), 'still waiting for the sync')
+      assert.equal((first.error as Error)?.name, 'AbortError', describeError(first.error))
     } finally {
       hold.release()
     }
@@ -490,8 +496,8 @@ describe('chelonia/reset during the height wait of a raw kv/set', () => {
       })
     assert.ok(await waitFor(() => writeStatuses(from)[0] === 409), 'no 409')
     const resetAt = performance.now()
-    await sbp('chelonia/reset', () => sleep(1500))
-    assert.equal(((await write).error as Error | undefined)?.name, 'AbortError')
+    await within(sbp('chelonia/reset', () => sleep(1500)), 'chelonia/reset')
+    assert.equal(((await within(write, 'the write')).error as Error | undefined)?.name, 'AbortError')
     // The reset aborts before `postCleanupFn`, and the write ends at once
     const took = settledAt - resetAt
     assert.ok(took < 300, `rejected ${took} ms after the reset started, not at once`)

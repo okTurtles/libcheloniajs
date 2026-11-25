@@ -262,7 +262,9 @@ describe('Single-key kv/sync with the pubsub socket down', () => {
     )
     await until(() => syncs.count === before + 1, 'the recovery sync')
     writeAsDeviceB('prefs', { theme: 'light' }, AHEAD + 1)
-    deliverFrame('prefs')
+    // What its frame does, but at once: the frame handler's work would wait behind
+    // the held sync on the contract's lane, and then race the give-up
+    sbp('chelonia/kv/_onUnverifiableFrame', CONTRACT_ID, 'prefs', AHEAD + 1)
     releaseSyncs()
     await explicit
     // Its failed recovery sync ended the recovery

@@ -8,8 +8,9 @@ import {
 } from './events.js'
 import {
   activate, aheadAt, CONTRACT_ID, defineSlot, drainLanes, failGets, findAhead, gateLane, gets,
-  holdSyncs, installKvHarness, logs, mirror, read, rootState, server, setLocalHeight, settledStatus,
-  sleep, START_HEIGHT, sync, syncs, vetoQueue, vetoSelector, whenSettled, writeAsDeviceB
+  holdGets, holdSyncs, installKvHarness, logs, mirror, read, rootState, server, setLocalHeight,
+  settledStatus, sleep, START_HEIGHT, sync, syncs, vetoQueue, vetoSelector, whenSettled,
+  writeAsDeviceB
 } from './kv-height-harness.js'
 import {
   kvHeightTimings, notifyContractHeight, onHeight, waitForHeight, waitForHeightAfterSync
@@ -17,7 +18,8 @@ import {
 import { captureConsole, isPending, until, waitMicrotasks, within } from './test-utils.js'
 import type { CheloniaContext, KvHeightRecoveryOptions, KvLoadStatus } from './types.js'
 
-// Errors: an abort with any other reason rejects with an AbortError
+// An abort rejects with its reason if that is an Error (STOP below); with a
+// non-Error reason, or none (chelonia/reset aborts without one), with an AbortError
 const STOP = new Error('stop')
 
 const CID = 'zHeightContract'
@@ -251,22 +253,16 @@ describe('Slot loads of values from a newer contract height', () => {
     let active = true
     defineSlot({ key: 'prefs', defaultValue: {}, match: () => active })
     await activate()
-    let answer!: () => void
-    let held = false
-    server.onGet = () => {
-      held = true
-      return new Promise<void>((resolve) => { answer = resolve })
-    }
+    const get = holdGets('prefs', 1)
     const refreshing = within(sbp('chelonia/kv/sync', CONTRACT_ID) as Promise<void>, 'the refresh')
-    await until(() => held, 'the GET')
-    server.onGet = undefined
+    await until(() => get.requests.length, 'the GET')
     // Its entry is seeded again, `non-init`, while the GET is out
     for (const match of [false, true]) {
       active = match
       sbp('chelonia/kv/refreshFilters', CONTRACT_ID)
     }
     writeAsDeviceB('prefs', { theme: 'dark' }, AHEAD)
-    answer()
+    get.open()
     await refreshing
     await drainLanes()
     assert.deepStrictEqual([mirror('prefs')?.status, read('prefs')], ['loading', {}])
@@ -391,25 +387,18 @@ describe('Slot loads of values from a newer contract height', () => {
   it('re-arms the fallback when one ran during a reload that ends up empty', async () => {
     kvHeightTimings.pendingFallbackMs = 60_000
     await deferEmptySlot()
-    let answer!: () => void
-    const answered = new Promise<void>((resolve) => { answer = resolve })
-    let held = false
-    server.onGet = () => { held = true; return answered }
-    let before!: number
-    try {
-      setLocalHeight(AHEAD)
-      await until(() => held, 'the reload')
-      server.store.delete('prefs')
-      kvHeightTimings.pendingFallbackMs = 20
-      before = syncs.count
-      frameAhead(AHEAD + 1)
-      await until(() => syncs.count > before && !sbp('chelonia/contract/isSyncing', CONTRACT_ID),
-        'the fallback sync during the reload')
-      await sleep(20)
-      assert.strictEqual(settledStatus('prefs'), undefined, 'the fallback left it to the reload')
-    } finally {
-      answer()
-    }
+    const reload = holdGets('prefs')
+    setLocalHeight(AHEAD)
+    await until(() => reload.requests.length, 'the reload')
+    server.store.delete('prefs')
+    kvHeightTimings.pendingFallbackMs = 20
+    const before = syncs.count
+    frameAhead(AHEAD + 1)
+    await until(() => syncs.count > before && !sbp('chelonia/contract/isSyncing', CONTRACT_ID),
+      'the fallback sync during the reload')
+    await sleep(20)
+    assert.strictEqual(settledStatus('prefs'), undefined, 'the fallback left it to the reload')
+    reload.open()
     assert.strictEqual(await whenSettled('prefs'), 'error')
     // The re-armed fallback syncs again before it gives up
     assert.strictEqual(syncs.count, before + 2)
@@ -580,24 +569,16 @@ describe('Single-key kv/sync of a value from a newer contract height', () => {
     setLocalHeight(AHEAD + 1)
     await waitMicrotasks()
     // Holds the next GET: the stale reload makes none, so it's the replacement's
-    let answer!: () => void
-    const answered = new Promise<void>((resolve) => { answer = resolve })
-    let held = false
-    server.onGet = () => {
-      server.onGet = undefined
-      held = true
-      return answered
-    }
-    try {
-      openSecond()
-      await waitMicrotasks()
-      openThird()
-      await until(() => held, "the replacement's GET")
-      assert.ok(await isPending(explicit), 'resolved before the replacement loaded')
-    } finally {
-      answer()
-    }
+    const replacement = holdGets('prefs', 1)
+    const getsBefore = gets('prefs')
+    openSecond()
+    await waitMicrotasks()
+    openThird()
+    await until(() => replacement.requests.length, "the replacement's GET")
+    assert.ok(await isPending(explicit), 'resolved before the replacement loaded')
+    replacement.open()
     await explicit
+    assert.strictEqual(gets('prefs'), getsBefore + 1, 'only the replacement reload fetched')
     assert.deepStrictEqual(atResolve, { v: 2 })
   })
 

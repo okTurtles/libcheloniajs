@@ -2261,34 +2261,40 @@ describe('KV slot API', () => {
   // pending load of the next session still takes 42c's fresh-load gate.
   // -----------------------------------------------------------------------
   it('42e: a load that outlives a reset leaves the next session\'s loads counted', async () => {
-    const held: Array<(v: GetResult | null) => void> = []
+    // Each held GET is tagged with the session that sent it (bumped after the reset)
+    let session = 0
+    const held: Array<{ resolve: (v: GetResult | null) => void; session: number }> = []
     // Earlier tests' slots for CTYPE load too
     stubGet = async (_cID, key) => key !== 'crossReset'
       ? null
-      : await new Promise((resolve) => { held.push(resolve) })
-    const answer = (i: number, x: number) => held[i]({ ...fakeParsed({ x }), etag: `e${x}` })
+      : await new Promise((resolve) => { held.push({ resolve, session }) })
+    const answer = (i: number, x: number, expectSession: number) => {
+      assert.strictEqual(held[i].session, expectSession, `GET ${i} is of session ${expectSession}`)
+      held[i].resolve({ ...fakeParsed({ x }), etag: `e${x}` })
+    }
     const def = { key: 'crossReset', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema }
     sbp('chelonia/kv/defineSlot', def)
     const c = 'cid-42e'
     const entryOf = () => rootState()._kv?.[c]?.crossReset
     await setupContract(c)
     await until(() => held.length === 1, 'first autoload GET')
-    answer(0, 1)
+    answer(0, 1, 0)
     await until(() => entryOf()?.status === 'loaded', 'first session loaded')
     // A load of the first session is still running when the reset ends
     const old = (sbp('chelonia/kv/sync', c, 'crossReset') as Promise<void>).catch(() => {})
     await until(() => held.length === 2, 'old GET')
     await sbp('chelonia/reset')
+    session++
 
     await setupContract(c)
     await until(() => held.length === 3, 'second autoload GET')
-    answer(2, 1)
+    answer(2, 1, 1)
     await until(() => entryOf()?.status === 'loaded', 'second session loaded')
     // A conflict-resolution GET of the new session (status stays 'loaded')
     sbp('chelonia/test/addEchoCID', `${c}::crossReset`, 'conflict-cid', true)
     const remote = sbp('chelonia/kv/_handleRemote', c, 'crossReset', fakeParsed({ x: 9 }), 'remote-cid')
     await until(() => held.length === 4, 'conflict GET')
-    answer(1, 1)
+    answer(1, 1, 0)
     await within(old, 'old load')
     assert.strictEqual(sbp('chelonia/test/pendingLoadCount', c), 1,
       'the old load must not uncount the new session\'s pending load')
@@ -2297,9 +2303,9 @@ describe('KV slot API', () => {
     sbp('chelonia/kv/defineSlot', { ...def, defaultValue: { x: 7 } })
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.strictEqual(held.length, 5, 'the replacement schedules its own load')
-    answer(3, 2)
+    answer(3, 2, 1)
     await within(remote, 'conflict GET')
-    answer(4, 2)
+    answer(4, 2, 1)
     await until(() => entryOf()?.etag === 'e2', 'the replacement to load')
     assert.deepStrictEqual(entryOf()?.value, { x: 2 })
   })

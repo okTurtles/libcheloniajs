@@ -5,10 +5,10 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 import { ChelErrorKvHeightAhead } from './errors.js'
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import {
-  activate, aheadAt, configure, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes, findAhead,
-  gateLane, gets, holdSyncs, installKvHarness, logs, mirror, read, resync, rootState, server,
-  setLocalHeight, settledStatus, setupContract, sleep, START_HEIGHT, sync, syncs, update,
-  whenSettled, writeAsDeviceB
+  activate, aheadAt, configure, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes, filterCalls,
+  findAhead, gateLane, gets, holdGets, holdSyncs, installKvHarness, logs, mirror, read, resync,
+  rootState, server, setLocalHeight, settledStatus, setupContract, sleep, START_HEIGHT, sync, syncs,
+  update, whenSettled, writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
 import { isPending, until, waitMicrotasks, within } from './test-utils.js'
@@ -182,24 +182,19 @@ describe('A contract resync', () => {
 const OTHER_ID = 'zKvOtherContract'
 const increment = (value: JSONType) => ({ n: (value as { n: number }).n + 1 })
 
-// `chelonia/reset` drains the lanes of each contract twice, then aborts and
-// calls `chelonia/kv/_waitInFlight`
-const resetProbe = { waits: 0, aborted: false, atLastDrain: undefined as (() => void) | undefined }
-sbp('sbp/filters/selector/add', 'chelonia/contract/wait',
-  (_domain: string, _selector: string, [contractID]: unknown[]) => {
-    if (contractID === OTHER_ID && ++resetProbe.waits === 2) resetProbe.atLastDrain?.()
-  }
-)
-sbp('sbp/filters/selector/add', 'chelonia/kv/_waitInFlight', () => { resetProbe.aborted = true })
-
 // Starts a reset and holds it in its last drain before the abort, on the lane
 // of another contract it drains, so that this contract's lanes are free
 const startHeldReset = () => {
   rootState().contracts[OTHER_ID] = { HEAD: 'other', height: 0, previousKeyOp: '', type: 'other' }
   let open: (() => void) | undefined
-  Object.assign(resetProbe, {
-    waits: 0, aborted: false, atLastDrain: () => { open = gateLane('public', OTHER_ID) }
+  let waits = 0
+  let aborted = false
+  // `chelonia/reset` drains the lanes of each contract twice, then aborts and
+  // calls `chelonia/kv/_waitInFlight`
+  filterCalls('chelonia/contract/wait', ([contractID]) => {
+    if (contractID === OTHER_ID && ++waits === 2) open = gateLane('public', OTHER_ID)
   })
+  filterCalls('chelonia/kv/_waitInFlight', () => { aborted = true })
   return {
     reset: within(sbp('chelonia/reset') as Promise<unknown>, 'the reset'),
     held: async () => {
@@ -208,7 +203,7 @@ const startHeldReset = () => {
     },
     abort: async () => {
       open!()
-      await until(() => resetProbe.aborted, 'the abort')
+      await until(() => aborted, 'the abort')
     }
   }
 }
@@ -247,17 +242,17 @@ describe('chelonia/reset', () => {
     await activate()
     const { reset, held, abort } = startHeldReset()
     await held()
-    let releaseGet: (() => void) | undefined
-    server.onGet = () => new Promise<void>((resolve) => { releaseGet = resolve })
+    const reload = holdGets('count')
     let calls = 0
     const write = assert.rejects(
       update('count', (value) => { calls++; return increment(value) }, { ifMatch: '*' }),
       { name: 'AbortError' }
     )
-    await until(() => releaseGet, 'the reload')
+    await until(() => reload.requests.length, 'the reload')
     await abort()
-    releaseGet!()
-    await write
+    // Ended by the abort: its GET is still held
+    await within(write, 'the aborted update', 1000)
+    assert.ok(reload.requests[0].aborted)
     await reset
     assert.strictEqual(calls, 0)
     assert.deepStrictEqual(server.posts(), [])

@@ -24,7 +24,8 @@ import type {
   JSONType, KvConflictCause
 } from './types.js'
 
-// Errors: an abort with any other reason rejects with an AbortError
+// An abort rejects with its reason if that is an Error (STOP below); with a
+// non-Error reason, or none (chelonia/reset aborts without one), with an AbortError
 const STOP = new Error('stop')
 
 type ConflictArgs = Parameters<ChelKvOnConflictCallback>[0]

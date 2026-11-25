@@ -60,8 +60,7 @@ export const setLocalHeight = (height: number): void => {
   sbp('chelonia/kv/_notifyHeight', CONTRACT_ID, height)
 }
 
-export const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms))
+export { sleep } from './test-utils.js'
 
 // GET requests for `key` the server answered
 export const gets = (key: string): number =>
@@ -102,7 +101,14 @@ export const aheadAt = (height: number) => (e: unknown): boolean =>
 export const findAhead = (key: string, height: number): Promise<void> =>
   assert.rejects(sync(key, { onHeightAhead: 'reject' }), aheadAt(height))
 
-const route = async (url: string, init?: FetchInit): Promise<Response> => {
+// Like `fetch`, a request rejects as soon as its signal aborts, while the server
+// carries on (a POST may still be stored)
+const route = (url: string, init?: FetchInit): Promise<Response> => {
+  const answer = answerRequest(url, init)
+  return init?.signal ? raceAbort(answer, init.signal) : answer
+}
+
+const answerRequest = async (url: string, init?: FetchInit): Promise<Response> => {
   init?.signal?.throwIfAborted()
   const kvResponse = await server.handle(url, init)
   if (kvResponse) return kvResponse
@@ -113,6 +119,7 @@ const route = async (url: string, init?: FetchInit): Promise<Response> => {
     return new Response(null, { status: 404 })
   }
   syncs.count++
+  // A sync's replay and catch-up are this client's: none once it aborted
   if (syncs.hold) await (init?.signal ? raceAbort(syncs.hold, init.signal) : syncs.hold)
   const meta = rootState().contracts[CONTRACT_ID]
   if (syncs.fail || !meta) return new Response(null, { status: 500 })
@@ -150,13 +157,28 @@ export const gateLane = (
 
 // GETs of `key` answer 500 until the returned function is called
 export const failGets = (key: string): (() => void) => {
-  const { handle } = server
-  server.handle = async (url, init) => {
-    if (init?.method === 'POST' || !url.endsWith(`/${key}`)) return handle(url, init)
-    server.log.push({ method: 'GET', key, status: 500 })
-    return new Response(null, { status: 500 })
+  server.failingGets.add(key)
+  return () => { server.failingGets.delete(key) }
+}
+
+// GETs of `key` (the next `count` of them) wait until `open()` or the test's end;
+// `requests` has the signal of each
+export const holdGets = (key: string, count = Infinity) => {
+  const requests: AbortSignal[] = []
+  let release!: () => void
+  const released = new Promise<void>((resolve) => { release = resolve })
+  const hook = (got: string, signal?: AbortSignal | null) => {
+    if (got !== key || requests.length >= count) return
+    requests.push(signal ?? new AbortController().signal)
+    return released
   }
-  return () => { server.handle = handle }
+  server.onGet = hook
+  const open = () => {
+    if (server.onGet === hook) server.onGet = undefined
+    release()
+  }
+  teardowns.push(open)
+  return { requests, open }
 }
 
 type CallFilter = (args: unknown[]) => unknown

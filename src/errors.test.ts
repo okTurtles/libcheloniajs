@@ -163,11 +163,12 @@ describe('package root', () => {
     ]) {
       assert.ok(name in root, name)
     }
-    for (const name of [
-      'hasErrorName', 'isKvMaxAttempts', 'ChelErrorKvMaxAttempts', 'resolveKvKeyIds',
-      'assertMaxAttempts', 'resolveRecoveryOptions', 'withHeightRecovery', 'recoverContractHeight',
-      'assertNotReentrant'
-    ]) {
+    // Every export of the modules kept out of the root, so that new ones are checked too
+    const internal = await Promise.all([
+      import('./internal-errors.js'), import('./kv-checks.js'),
+      import('./kv-height.js'), import('./kv-runtime.js')
+    ])
+    for (const name of ['hasErrorName', ...internal.flatMap((mod) => Object.keys(mod))]) {
       assert.ok(!(name in root), name)
     }
   })

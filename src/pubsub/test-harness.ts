@@ -20,7 +20,7 @@ import { createCID } from '../functions.js'
 import { signedOutgoingDataWithRawKey } from '../signedData.js'
 import type { ChelRootState, JSONType } from '../types.js'
 import { createCloseEvent } from '../utils.js'
-import { kvPostStatus, type FetchInit } from '../test-utils.js'
+import { kvPostStatus, sleep, type FetchInit } from '../test-utils.js'
 import {
   createClient, NOTIFICATION_TYPE, PUBSUB_RECONNECTION_SUCCEEDED, REQUEST_TYPE, RESPONSE_TYPE
 } from './index.js'
@@ -760,9 +760,6 @@ export const kvConflict = (): Response =>
 export const fakeEntryData = (contractID: string): string =>
   JSON.stringify({ head: JSON.stringify({ contractID, op: 'ae' }) })
 
-export const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms))
-
 // The harness's own clock, which `emulateSleep()` doesn't hold back
 const harnessNow = performance.now.bind(performance)
 
@@ -879,4 +876,4 @@ export function emulateSleep ({ monotonic = false }: { monotonic?: boolean } = {
   }
 }
 
-export { captureConsole } from '../test-utils.js'
+export { captureConsole, sleep } from '../test-utils.js'

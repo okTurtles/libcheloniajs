@@ -11,6 +11,9 @@ export const waitMicrotasks = async (): Promise<void> => {
   }
 }
 
+export const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms))
+
 // Bound when this module loads, so that the harness's `emulateSleep()` can't
 // move it: its `changeClock()` and default `wake()` shift `Date.now()`, and
 // with `monotonic: true` it replaces `performance.now` later, when called
@@ -133,9 +136,11 @@ export const makeKvServer = (contractID: string, { height = 0 } = {}) => {
     store,
     log: [] as KvServerRequest[],
     // Runs when a POST arrives, before it's checked (e.g. another device wins the race)
-    onPost: undefined as ((key: string) => unknown) | undefined,
+    onPost: undefined as ((key: string, signal?: AbortSignal | null) => unknown) | undefined,
     // Runs when a GET arrives, before it's answered
-    onGet: undefined as ((key: string) => unknown) | undefined,
+    onGet: undefined as ((key: string, signal?: AbortSignal | null) => unknown) | undefined,
+    // GETs of these keys answer 500, once `onGet` has run
+    failingGets: new Set<string>(),
     etagOf: (key: string) => store.get(key)?.etag ?? '""',
     // Stores `body` as is, bypassing every check
     put (key: string, body: unknown): string {
@@ -151,17 +156,21 @@ export const makeKvServer = (contractID: string, { height = 0 } = {}) => {
       if (!pathname.startsWith(prefix)) return undefined
       const key = decodeURIComponent(pathname.slice(prefix.length))
       if (init?.method !== 'POST') {
-        await server.onGet?.(key)
+        // Logged on arrival, like a POST, so that a GET a hook holds is counted
+        const request: KvServerRequest = { method: 'GET', key, status: 0 }
+        server.log.push(request)
+        await server.onGet?.(key, init?.signal)
         const stored = store.get(key)
-        server.log.push({ method: 'GET', key, status: stored ? 200 : 404 })
-        return stored ? respond(200, stored.body, stored.etag) : new Response(null, { status: 404 })
+        request.status = server.failingGets.has(key) ? 500 : stored ? 200 : 404
+        if (!stored || request.status !== 200) return new Response(null, { status: request.status })
+        return respond(200, stored.body, stored.etag)
       }
       const body = String(init.body)
       const ifMatch = new Headers(init.headers).get('if-match')
       const stamp = kvStampOf(body)
       const request: KvServerRequest = { method: 'POST', key, status: 0, ifMatch, height: stamp }
       server.log.push(request)
-      await server.onPost?.(key)
+      await server.onPost?.(key, init?.signal)
       const stored = store.get(key)
       const current = server.etagOf(key)
       const status = kvPostStatus({ ifMatch, etag: current, body, height: server.height })

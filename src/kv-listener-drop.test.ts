@@ -8,8 +8,8 @@ import { describe, it } from 'node:test'
 
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import {
-  activate, CONTRACT_ID, connectPubsub, defineSlot, deliverFrame, drainLanes, installKvHarness,
-  logs, mirror, rootState, server, sync, writeAsDeviceB
+  activate, CONTRACT_ID, connectPubsub, defineSlot, deliverFrame, drainLanes, gets,
+  installKvHarness, logs, mirror, rootState, server, sync, update, writeAsDeviceB
 } from './kv-height-harness.js'
 import type { KvMirrorEntry } from './types.js'
 
@@ -42,11 +42,12 @@ const errors = () => logs.entries.filter(({ level }) => level === 'error').map((
 describe('A CHELONIA_KV_UPDATED listener that drops the entry', () => {
   installKvHarness()
 
-  const start = async ({ pubsub = false } = {}) => {
+  // Every test connects: a pubsub client outlives `chelonia/_init`
+  const start = async () => {
     matches = true
     writeAsDeviceB('prefs', { theme: 'light' })
     defineSlot({ key: 'prefs', defaultValue: {}, match: () => matches })
-    if (pubsub) connectPubsub()
+    connectPubsub()
     await activate()
     assert.strictEqual(mirror('prefs')?.status, 'loaded')
   }
@@ -63,7 +64,7 @@ describe('A CHELONIA_KV_UPDATED listener that drops the entry', () => {
   })
 
   it('on a pubsub frame', async () => {
-    await start({ pubsub: true })
+    await start()
     writeAsDeviceB('prefs', { theme: 'dark' })
     const { dropped, off } = dropOnUpdate('remote')
     try {
@@ -75,9 +76,52 @@ describe('A CHELONIA_KV_UPDATED listener that drops the entry', () => {
     assert.strictEqual(rootState()._kv?.[CONTRACT_ID], undefined)
   })
 
+  it('and re-seeds it, on a load that finds the key deleted: the fresh entry settles on its own GET', async () => {
+    await start()
+    server.store.delete('prefs')
+    const { dropped, off } = dropOnUpdate('load', { reseed: true })
+    const getsBefore = gets('prefs')
+    // The fresh entry's settled statuses, with the GETs sent by then
+    const settles: [string, number][] = []
+    const onStatus = () => {
+      const entry = mirror('prefs')
+      if (dropped.length && entry?.settled) settles.push([entry.status, gets('prefs') - getsBefore])
+    }
+    sbp('okTurtles.events/on', CHELONIA_KV_STATUS_CHANGED, onStatus)
+    try {
+      await sync('prefs')
+      await drainLanes()
+    } finally {
+      off()
+      sbp('okTurtles.events/off', CHELONIA_KV_STATUS_CHANGED, onStatus)
+    }
+    assert.deepStrictEqual(dropped, [{ value: undefined, etag: null, status: 'non-init', settled: false }])
+    // The stale 404 would settle it `'non-init'` before its own GET
+    assert.deepStrictEqual(settles, [['non-init', 2]], 'the fresh entry settles once, on its own GET')
+  })
+
+  it('and re-seeds it, on a local write: the fresh entry keeps its status', async () => {
+    await start()
+    const { dropped, off } = dropOnUpdate('local', { reseed: true })
+    const statuses = statusesOf('prefs')
+    try {
+      assert.deepStrictEqual(await update('prefs', () => ({ theme: 'dark' })), { theme: 'dark' })
+      await drainLanes()
+    } finally {
+      off()
+      statuses.off()
+    }
+    assert.deepStrictEqual(dropped, [{ value: undefined, etag: null, status: 'non-init', settled: false }])
+    // The stale outcome would stamp the empty entry `'loaded'`
+    assert.ok(!statuses.seen.some(({ status, value }) => status === 'loaded' && value === undefined),
+      JSON.stringify(statuses.seen))
+    assert.deepStrictEqual(mirror('prefs')?.value, { theme: 'dark' })
+    assert.strictEqual(mirror('prefs')?.status, 'loaded')
+  })
+
   for (const [what, reason] of [['a pubsub frame', 'remote'], ['a load', 'load']] as const) {
     it(`and re-seeds it, on ${what}: the fresh entry keeps its status`, async () => {
-      await start({ pubsub: true })
+      await start()
       writeAsDeviceB('prefs', { theme: 'dark' })
       const { dropped, off } = dropOnUpdate(reason, { reseed: true })
       const statuses = statusesOf('prefs')

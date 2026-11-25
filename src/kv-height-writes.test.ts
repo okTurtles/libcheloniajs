@@ -7,9 +7,9 @@ import {
 } from './errors.js'
 import {
   activate, aheadAt, CONTRACT_ID, defineSlot, drainLanes, failGets, filterCalls, gateLane, gets,
-  holdSyncs, installKvHarness, keys, logs, mirror, restamp, rootState, server, serverValue,
-  setLocalHeight, sleep, START_HEIGHT, syncs, update, type UpdateOptions, vetoQueue, vetoSelector,
-  writeAsDeviceB
+  holdGets, holdSyncs, installKvHarness, keys, logs, mirror, restamp, rootState, server,
+  serverValue, setLocalHeight, sleep, START_HEIGHT, syncs, update, type UpdateOptions, vetoQueue,
+  vetoSelector, writeAsDeviceB
 } from './kv-height-harness.js'
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import { KV_NOOP } from './kv-constants.js'
@@ -20,7 +20,8 @@ import type {
   KvHeightRecoveryOptions, KvMirrorEntry
 } from './types.js'
 
-// Errors: an abort with any other reason rejects with an AbortError
+// An abort rejects with its reason if that is an Error (STOP, GONE below); with a
+// non-Error reason, or none (chelonia/reset aborts without one), with an AbortError
 const STOP = new Error('stop')
 const GONE = new Error('gone')
 
@@ -953,6 +954,27 @@ describe('Slot writes and contract heights', () => {
     assert.deepStrictEqual(slotState('names'), ['loaded', undefined, true])
   })
 
+  it('an abort during its POST rejects at once, and the server may still store the write', async () => {
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => { answer = resolve })
+    server.onPost = () => answered
+    const controller = new AbortController()
+    const updating = updateWith('names', { signal: controller.signal })
+    try {
+      await until(() => server.posts().length, 'the POST')
+      controller.abort(STOP)
+      const error = await within(updating.then(() => undefined, (e) => e), 'the aborted update', 1000)
+      assert.strictEqual(error, STOP)
+    } finally {
+      answer()
+    }
+    await drainLanes()
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [204])
+    assert.deepStrictEqual(serverValue('names'), ['x'])
+  })
+
   it('validates its options before any request', async () => {
     defineSlot({ key: 'names', defaultValue: [] })
     await activate()
@@ -1031,24 +1053,6 @@ describe('Slot writes and contract heights', () => {
   }
 })
 
-// GETs of `key` hang until `open()`; like a fetch, each rejects when its request aborts
-const holdGets = (key: string) => {
-  const { handle } = server
-  const requests: AbortSignal[] = []
-  let release!: () => void
-  const released = new Promise<void>((resolve) => { release = resolve })
-  server.handle = async (url, init) => {
-    if (init?.method === 'POST' || !url.endsWith(`/${key}`)) return handle(url, init)
-    const signal = init?.signal ?? new AbortController().signal
-    requests.push(signal)
-    await new Promise<void>((resolve, reject) => {
-      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-      released.then(resolve)
-    })
-    return handle(url, init)
-  }
-  return { requests, open: () => { server.handle = handle; release() } }
-}
 const httpError = (e: unknown) => (e as Error)?.name === 'ChelErrorUnexpectedHttpResponseCode'
 const listSchema = {
   parse: (value: unknown) => {
