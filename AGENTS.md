@@ -424,7 +424,8 @@ it resolves with the truthy value of `cond()`, or with `undefined` after 2 s by 
 `makeKvServer` in `src/test-utils.ts` simulates the server's KV store (`if-match` and height
 checks, in `kvPostStatus`, which the fake relay uses too). `src/kv-height-harness.ts` (imports
 `chelonia.ts`, excluded from the CJS build) runs the real KV slot layer against it for the
-`kv-height*.test.ts` files, and holds the helpers they share (`gets`, `read`, `sync`, `update`,
+`kv-height*.test.ts` files and `kv-listener-drop.test.ts`, and holds the helpers they share
+(`gets`, `read`, `sync`, `update`,
 `findAhead`, …). Its `vetoQueue`, `vetoSelector` and `filterCalls` filter SBP calls until the
 test ends. Use them, not a module-level `sbp/filters/selector/add` driven by a variable: SBP
 filters can't be removed, and a test that fails or times out before it resets the variable

@@ -1,6 +1,7 @@
 // The real slot layer and `kv/set`/`kv/get` against a simulated server, for the
-// `kv-height*.test.ts` files (`installKvHarness()` per `describe`). A pubsub client
-// outlives `chelonia/_init`, so a file that connects must connect in every test.
+// `kv-height*.test.ts` files and `kv-listener-drop.test.ts` (`installKvHarness()`
+// per `describe`). A pubsub client outlives `chelonia/_init`, so a file that
+// connects must connect in every test.
 import {
   CURVE25519XSALSA20POLY1305, EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey
 } from '@chelonia/crypto'
@@ -102,6 +103,10 @@ export const aheadAt = (height: number) => (e: unknown): boolean =>
 // A load that finds the value ahead at `height`, without recovering
 export const findAhead = (key: string, height: number): Promise<void> =>
   assert.rejects(sync(key, { onHeightAhead: 'reject' }), aheadAt(height))
+
+// Height recoveries that gave up because their sync failed, from the warnings logged so far
+export const failedSyncGiveUps = (): number => logs.entries.filter(({ level, args }) =>
+  level === 'warn' && /gave up: its sync failed/.test(String(args[0]))).length
 
 // Like `fetch`, a request rejects as soon as its signal aborts, while the server
 // carries on (a POST may still be stored)

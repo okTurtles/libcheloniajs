@@ -66,7 +66,7 @@ import {
   clearReprocessDebounceAll, reconcilePubsub, type PublishOptions
 } from './internals.js'
 import './kv.js'
-import { assertMaxAttempts } from './kv-checks.js'
+import { assertIntegerOption } from './kv-checks.js'
 import {
   heightAheadError,
   localHeight,
@@ -3114,7 +3114,7 @@ export default sbp('sbp/selectors/register', {
     }
   ) {
     const label = `set: ${contractID}::${key}`
-    assertMaxAttempts(maxAttempts, label, TypeError)
+    assertIntegerOption('maxAttempts', maxAttempts, 1, label, TypeError)
     if (heightWaitMs != null && !(Number.isFinite(heightWaitMs) && heightWaitMs >= 0)) {
       throw new TypeError(`[chelonia/kv] ${label}: \`heightWaitMs\` must be a finite number >= 0`)
     }

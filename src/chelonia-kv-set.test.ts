@@ -558,7 +558,7 @@ describe('chelonia/kv/set', () => {
     const status = (code: number, statusText: string) => () =>
       new Response('', { status: code, statusText })
     const cases: [JSONType | undefined, object, (n: number) => Response, string, unknown][] = [
-      [{ x: 1 }, { maxAttempts: 0 }, accepted, ': `maxAttempts` must be an integer >= 1', undefined],
+      [{ x: 1 }, { maxAttempts: 0 }, accepted, ': `maxAttempts` must be a safe integer >= 1', undefined],
       [{ x: 1 }, { heightWaitMs: -1 }, accepted, ': `heightWaitMs` must be a finite number >= 0',
         undefined],
       [undefined, {}, accepted, ': `onconflict` is required when `data` is undefined', undefined],

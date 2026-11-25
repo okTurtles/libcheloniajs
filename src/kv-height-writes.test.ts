@@ -6,10 +6,10 @@ import {
   ChelErrorKvHeightAhead, ChelErrorKvReentrant, isKvConflict, isKvHeightAhead, isKvHeightMalformed
 } from './errors.js'
 import {
-  activate, aheadAt, CONTRACT_ID, defineSlot, drainLanes, failGets, filterCalls, gateLane, gets,
-  holdGets, holdSyncs, installKvHarness, keys, logs, mirror, restamp, rootState, server,
-  serverValue, setLocalHeight, sleep, START_HEIGHT, syncs, update, type UpdateOptions, vetoQueue,
-  vetoSelector, writeAsDeviceB
+  activate, aheadAt, CONTRACT_ID, defineSlot, drainLanes, failedSyncGiveUps, failGets, filterCalls,
+  gateLane, gets, holdGets, holdSyncs, installKvHarness, keys, logs, mirror, restamp, rootState,
+  server, serverValue, setLocalHeight, sleep, START_HEIGHT, syncs, update, type UpdateOptions,
+  vetoQueue, vetoSelector, writeAsDeviceB
 } from './kv-height-harness.js'
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import { ChelErrorKvMaxAttempts } from './internal-errors.js'
@@ -289,12 +289,10 @@ describe('chelonia/kv/withHeightRecovery', () => {
     // The sync fails well before the deadline: this is not the "too long" branch.
     kvHeightTimings.waitMs = 60_000
     kvHeightTimings.recoveryTimeoutMs = 250
-    const gaveUp = () => logs.entries.filter(({ level, args }) => level === 'warn' &&
-      /gave up: its sync failed/.test(String(args[0]))).length
-    const warned = gaveUp()
+    const warned = failedSyncGiveUps()
     const late = needs(START_HEIGHT + 1)
     await assert.rejects(within(recover(late.attempt), 'the deadline', 2000), (e) => e === late.errors[0])
-    assert.strictEqual(gaveUp() - warned, 1, 'gave up after the failed sync')
+    assert.strictEqual(failedSyncGiveUps() - warned, 1, 'gave up after the failed sync')
     await until(syncEnded(before + 2), 'the second failed sync')
     kvHeightTimings.recoveryTimeoutMs = 60_000
 
@@ -330,8 +328,6 @@ describe('chelonia/kv/withHeightRecovery', () => {
     kvHeightTimings.waitMs = 20
     writeAsDeviceB('prefs', { v: 1 }, START_HEIGHT + 2)
     const before = syncs.count
-    const gaveUp = () => logs.entries.filter(({ level, args }) => level === 'warn' &&
-      /gave up: its sync failed/.test(String(args[0]))).length
     const attempts = {
       'kv/get': () => sbp('chelonia/kv/get', CONTRACT_ID, 'prefs'),
       'kv/set': ({ heightWaitMs }: KvHeightRecoveryAttempt) =>
@@ -345,14 +341,14 @@ describe('chelonia/kv/withHeightRecovery', () => {
     }
     for (const [via, attempt] of Object.entries(attempts)) {
       let calls = 0
-      const warned = gaveUp()
+      const warned = failedSyncGiveUps()
       const lift = vetoQueue(CONTRACT_ID)
       await assert.rejects(within(recover((args) => {
         calls++
         return attempt(args)
       }), via), (e) => isKvHeightAhead(e))
       lift()
-      assert.deepStrictEqual([calls, gaveUp() - warned], [1, 1], via)
+      assert.deepStrictEqual([calls, failedSyncGiveUps() - warned], [1, 1], via)
     }
     assert.strictEqual(syncs.count, before)
   })

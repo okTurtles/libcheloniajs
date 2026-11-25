@@ -9,7 +9,8 @@ import {
   kvHeightAheadCause
 } from './errors.js'
 import { CONTRACT_IS_SYNCING } from './events.js'
-import { MAX_TIMER_DELAY } from './timer-utils.js'
+import { assertIntegerOption } from './kv-checks.js'
+import { clampTimerDelay } from './timer-utils.js'
 import type {
   CheloniaContext,
   KvHeightAheadCause,
@@ -55,6 +56,10 @@ export function localHeight (ctx: CheloniaContext, contractID: string): number |
   const height = sbp(ctx.config.stateSelector)?.contracts?.[contractID]?.height
   return typeof height === 'number' ? height : undefined
 }
+
+// An unknown local height (the contract isn't in state) is never reached
+export const heightReached = (ctx: CheloniaContext, contractID: string, height: number): boolean =>
+  (localHeight(ctx, contractID) ?? -1) >= height
 
 export function heightAheadError (
   ctx: CheloniaContext,
@@ -195,7 +200,7 @@ function waitFor (
       else resolve(result)
     }
     const onAbort = () => settle(null)
-    const timer = setTimeout(() => settle(false), Math.min(ms, MAX_TIMER_DELAY))
+    const timer = setTimeout(() => settle(false), clampTimerDelay(ms))
     signal?.addEventListener('abort', onAbort, { once: true })
     off = subscribe(() => settle(true))
     if (settled) off()
@@ -211,7 +216,7 @@ export async function waitForHeight (
   { timeoutMs = kvHeightTimings.waitMs, signal }: HeightWaitOptions = {}
 ): Promise<boolean> {
   if (signal?.aborted) throw abortReason(signal)
-  if ((localHeight(ctx, contractID) ?? -1) >= minHeight) return true
+  if (heightReached(ctx, contractID, minHeight)) return true
   const socketDown = !!ctx.pubsub && ctx.pubsub.socket?.readyState !== WebSocket.OPEN
   return waitFor(socketDown ? 0 : timeoutMs, signal, (done) =>
     onHeight(ctx, contractID, minHeight, done)
@@ -288,11 +293,7 @@ export function resolveRecoveryOptions (
       `[chelonia/kv] ${operation}: \`onHeightAhead\` must be 'sync' or 'reject'`
     )
   }
-  if (!(Number.isSafeInteger(maxHeightRecoveries) && maxHeightRecoveries >= 0)) {
-    throw new ChelErrorKvUpdateInvalid(
-      `[chelonia/kv] ${operation}: \`maxHeightRecoveries\` must be an integer >= 0`
-    )
-  }
+  assertIntegerOption('maxHeightRecoveries', maxHeightRecoveries, 0, operation)
   return { onHeightAhead, maxHeightRecoveries }
 }
 
@@ -348,7 +349,7 @@ export async function recoverContractHeight (
 ): Promise<void> {
   const required = kvHeightAheadCause(error)?.requiredHeight
   const reached = () =>
-    typeof required === 'number' && (localHeight(ctx, contractID) ?? -1) >= required
+    typeof required === 'number' && heightReached(ctx, contractID, required)
   if (signal.aborted) throw abortReason(signal)
   if (reached()) return
   if (ctx.kvResetsInProgress > 0) {

@@ -591,10 +591,10 @@ export const keepQueueBusy = (contractID: string, ms: number): void => {
 // - the KV store (`relay.kv`) of either kind: `GET /kv/<id>/<key>` and
 //   `POST /kv/<id>/<key>`, which, like the server (`kvPostStatus`), answers
 //   400 without `if-match`, 412 unless it is `*` or has the stored value's
-//   etag (`""` if there is none), 422 for a body that isn't JSON, then 409
-//   unless the value is signed with the contract's current height; the 412
-//   and 409 with the stored value and its etag (`x-cid`). Unlike the server,
-//   it never pushes a KV notification for a write.
+//   etag (`""` if there is none), 422 for a body that isn't JSON or is `null`,
+//   then 409 unless the value is signed with the contract's current height;
+//   the 412 and 409 with the stored value and its etag (`x-cid`). Unlike the
+//   server, it never pushes a KV notification for a write.
 // Like the server, requests with a shelter authorization header get a 401 if
 // its timestamp is more than 60 s off the server's clock (`new Date()`).
 // Anything else is a 404 unless `onRequest` answers it.

@@ -5,10 +5,11 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 import { ChelErrorKvHeightAhead } from './errors.js'
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import {
-  activate, aheadAt, configure, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes, filterCalls,
-  findAhead, gateLane, gets, holdGets, holdResetAfterAbort, holdSyncs, installKvHarness, logs,
-  mirror, read, resync, rootState, server, setLocalHeight, settledStatus, setupContract, sleep,
-  START_HEIGHT, sync, syncs, update, vetoQueue, whenSettled, writeAsDeviceB
+  activate, aheadAt, configure, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes,
+  failedSyncGiveUps, filterCalls, findAhead, gateLane, gets, holdGets, holdResetAfterAbort,
+  holdSyncs, installKvHarness, mirror, read, resync, rootState, server, setLocalHeight,
+  settledStatus, setupContract, sleep, START_HEIGHT, sync, syncs, update, vetoQueue, whenSettled,
+  writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
 import { isPending, until, waitMicrotasks, within } from './test-utils.js'
@@ -420,9 +421,7 @@ describe('A contract removal', () => {
       setupContract()
       await activate()
       const before = syncs.count
-      const refusals = () => logs.entries.filter(({ level, args }) => level === 'warn' &&
-        /gave up: its sync failed/.test(String(args[0]))).length
-      const refusedBefore = refusals()
+      const refusedBefore = failedSyncGiveUps()
       const open = gateLane('internal')
       const removing = within(sbp('chelonia/contract/remove', CONTRACT_ID), 'the removal')
       let recovering: Promise<unknown> | undefined
@@ -445,7 +444,7 @@ describe('A contract removal', () => {
       await recovering
       await drainLanes()
       assert.strictEqual(syncs.count, before, via)
-      assert.strictEqual(refusals(), refusedBefore + 1, via)
+      assert.strictEqual(failedSyncGiveUps(), refusedBefore + 1, via)
       assert.strictEqual(rootState().contracts[CONTRACT_ID], undefined, via)
     }
   })

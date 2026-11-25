@@ -24,13 +24,16 @@ export function assertNotReentrant (
   }
 }
 
-export function assertMaxAttempts (
-  maxAttempts: unknown,
+// `null` and `undefined` stand for the option's default
+export function assertIntegerOption (
+  name: string,
+  value: unknown,
+  min: number,
   label: string,
   ErrorClass: new (message: string) => Error = ChelErrorKvUpdateInvalid
 ): void {
-  if (maxAttempts != null && !(Number.isSafeInteger(maxAttempts) && (maxAttempts as number) >= 1)) {
-    throw new ErrorClass(`[chelonia/kv] ${label}: \`maxAttempts\` must be an integer >= 1`)
+  if (value != null && !(Number.isSafeInteger(value) && (value as number) >= min)) {
+    throw new ErrorClass(`[chelonia/kv] ${label}: \`${name}\` must be a safe integer >= ${min}`)
   }
 }
 

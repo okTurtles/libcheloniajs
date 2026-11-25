@@ -419,6 +419,11 @@ describe('KV slot API', () => {
     await sbp('chelonia/reset')
   })
 
+  // Keeps the KV layer's warnings and errors out of the test output
+  let logs: ReturnType<typeof captureConsole>
+  beforeEach(() => { logs = captureConsole() })
+  afterEach(() => logs.restore())
+
   // -----------------------------------------------------------------------
   // 1
   // -----------------------------------------------------------------------
@@ -5216,11 +5221,12 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     const entry = rootState()._kv![c]!.rl as {
-      value: unknown; etag: string | null; status: string
+      value: unknown; etag: string | null; status: string; lastError?: object
     }
     entry.value = { x: 5 }
     entry.etag = 'stale-etag'
     entry.status = 'error'
+    entry.lastError = { name: 'Error', message: 'an earlier load failed' }
 
     // The authoritative reload fails (transient 5xx / brief offline).
     let getCount = 0
@@ -5298,11 +5304,12 @@ describe('KV slot API', () => {
     await setupContract(c)
 
     const entry = rootState()._kv![c]!.rl as {
-      value: unknown; etag: string | null; status: string
+      value: unknown; etag: string | null; status: string; lastError?: object
     }
     entry.value = { x: 5 }
     entry.etag = 'stale-etag'
     entry.status = 'error'
+    entry.lastError = { name: 'Error', message: 'an earlier load failed' }
 
     stubGet = async () => { throw new Error('reload failed') }
 
@@ -5700,10 +5707,6 @@ describe('KV slot API', () => {
       .filter((e) => e.type === CHELONIA_KV_STATUS_CHANGED)
       .map((e) => e.payload as Record<string, unknown>)
       .filter((p) => p.key === KEY)
-    let logs: ReturnType<typeof captureConsole>
-    beforeEach(() => { logs = captureConsole() })
-    afterEach(() => logs.restore())
-
     it('settles on the first load and stays settled through later reloads', async () => {
       defineSlot()
       let respond!: (value: GetResult | null) => void
@@ -5972,10 +5975,6 @@ describe('KV slot API', () => {
     const defineSlot = (extra: Record<string, unknown> = {}) =>
       sbp('chelonia/kv/defineSlot', { key: KEY, contractType: TYPE, defaultValue: { x: 0 }, ...extra })
     const slotUnknown = { name: 'ChelErrorKvSlotUnknown' }
-    let logs: ReturnType<typeof captureConsole>
-    beforeEach(() => { logs = captureConsole() })
-    afterEach(() => logs.restore())
-
     it('waits through activation and reloads for a settled status', async () => {
       defineSlot()
       const responders: Array<(value: GetResult | null) => void> = []
