@@ -304,14 +304,11 @@ const keyRotationHelper = <T>(
 // Force-syncs `contractID` unless Chelonia no longer wants it or its state has
 // reached `height`. Checked in the contract's queue, i.e. after a removal
 // queued earlier: syncing a released contract would subscribe to it again.
-// Also skipped if `signal` aborted while this waited in the queue (a sync that
-// started runs to completion). `beforeSync` runs right before the sync.
-export const syncIfBehind = function (
-  this: CheloniaContext, contractID: string, height: number, beforeSync?: () => void,
-  signal?: AbortSignal
+// `beforeSync` runs right before the sync.
+const syncIfBehind = function (
+  this: CheloniaContext, contractID: string, height: number, beforeSync?: () => void
 ): Promise<void> {
   return queueEventOrReject(contractID, async () => {
-    if (signal?.aborted) return
     if (!this.subscriptionSet.has(contractID)) return
     const localHeight = sbp(this.config.stateSelector).contracts[contractID]?.height
     if (localHeight == null || localHeight >= height) return
@@ -1027,8 +1024,7 @@ export default sbp('sbp/selectors/register', {
             // so the next attempt stops (and syncing would subscribe to it).
             if (!entry.isFirstMessage()) {
               // A failed sync (e.g., a network error) doesn't end the publish
-              // while attempts remain: unlike `kv/set`, which syncs once per
-              // call, the next 409 syncs again
+              // while attempts remain: the next 409 syncs again
               try {
                 await syncIfBehind.call(this, contractID, entry.height())
               } catch (e) {
@@ -2142,8 +2138,8 @@ export default sbp('sbp/selectors/register', {
     contractID: string,
     params?: { force?: boolean; resync?: boolean },
     // The session's signal when the sync was queued. `chelonia/reset` aborts
-    // it, then waits for the queues: a sync still queued then would fetch with
-    // the new controller's signal, and nothing would end it on a dead link.
+    // it, then waits for the queues: a sync still queued then is skipped before
+    // it changes anything (e.g. a resync's removal of the contract).
     queuedSignal?: AbortSignal
   ): Promise<void> {
     if (queuedSignal?.aborted) throw abortReason(queuedSignal)

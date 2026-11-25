@@ -6,8 +6,9 @@ import { isKvHeightMalformed, kvHeightAheadCause } from './errors.js'
 import { CHELONIA_KV_STATUS_CHANGED } from './events.js'
 import {
   activate, CONTRACT_ID, connectPubsub, defineSlot, deliverFrame, drainLanes, frameOf, gets,
-  holdSyncs, installKvHarness, logs, mirror, read, restamped, server, setLocalHeight,
-  settledStatus, START_HEIGHT, syncs, vetoQueue, whenSettled, writeAsDeviceB
+  holdResetAfterAbort, holdSyncs, installKvHarness, logs, mirror, read, restamped, server,
+  setLocalHeight, settledStatus, START_HEIGHT, subscriptionSucceeded, syncs, vetoQueue,
+  whenSettled, writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
 import { until, within } from './test-utils.js'
@@ -272,5 +273,22 @@ describe('Single-key kv/sync with the pubsub socket down', () => {
     assert.strictEqual(mirror('prefs')?.status, 'loading')
     assert.strictEqual(settledStatus('prefs'), undefined)
     assert.deepStrictEqual(mirror('prefs')?.heightAhead, { requiredHeight: AHEAD + 1 })
+  })
+})
+
+describe('chelonia/reset with the pubsub client connected', () => {
+  installKvHarness()
+
+  it('ends although a confirmed subscription starts a sync while it waits after its abort', async () => {
+    connectPubsub()
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    const ends = await holdResetAfterAbort()
+    const before = syncs.count
+    const openSyncs = holdSyncs()
+    // Queues a contract sync that captures no signal
+    subscriptionSucceeded()
+    await ends(openSyncs)
+    assert.strictEqual(syncs.count, before)
   })
 })

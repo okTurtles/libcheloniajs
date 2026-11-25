@@ -6,9 +6,9 @@ import { ChelErrorKvHeightAhead } from './errors.js'
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
 import {
   activate, aheadAt, configure, CONTRACT_ID, CONTRACT_TYPE, defineSlot, drainLanes, filterCalls,
-  findAhead, gateLane, gets, holdGets, holdSyncs, installKvHarness, logs, mirror, read, resync,
-  rootState, server, setLocalHeight, settledStatus, setupContract, sleep, START_HEIGHT, sync, syncs,
-  update, whenSettled, writeAsDeviceB
+  findAhead, gateLane, gets, holdGets, holdResetAfterAbort, holdSyncs, installKvHarness, logs,
+  mirror, read, resync, rootState, server, setLocalHeight, settledStatus, setupContract, sleep,
+  START_HEIGHT, sync, syncs, update, whenSettled, writeAsDeviceB
 } from './kv-height-harness.js'
 import { kvHeightTimings } from './kv-height.js'
 import { isPending, until, waitMicrotasks, within } from './test-utils.js'
@@ -366,6 +366,32 @@ describe('chelonia/reset', () => {
     assert.strictEqual(await whenSettled('prefs'), 'error')
     await sleep(100)
     assert.strictEqual(syncs.count, before + 2)
+  })
+
+  it('ends although a slot load starts while it waits after its abort', async () => {
+    writeAsDeviceB('prefs', { theme: 'dark' })
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    const ends = await holdResetAfterAbort()
+    const reload = holdGets('prefs')
+    // As after a malformed pubsub frame
+    sbp('chelonia/kv/_onUnverifiableFrame', CONTRACT_ID, 'prefs')
+    await ends(reload.open)
+    // Its GET had the aborted signal, so it never reached the server
+    assert.deepStrictEqual(reload.requests, [])
+  })
+
+  it('ends although a contract sync is requested while it waits after its abort', async () => {
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    await activate()
+    const ends = await holdResetAfterAbort()
+    const before = syncs.count
+    const openSyncs = holdSyncs()
+    const synced = (sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true }) as Promise<unknown>)
+      .then(() => 'synced', (e) => e?.name)
+    await ends(openSyncs)
+    assert.strictEqual(await within(synced, 'the sync'), 'AbortError')
+    assert.strictEqual(syncs.count, before)
   })
 })
 

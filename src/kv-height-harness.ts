@@ -14,10 +14,12 @@ import { kvHeightAheadCause } from './errors.js'
 import { CONTRACTS_MODIFIED } from './events.js'
 import type { KV_NOOP } from './kv-constants.js'
 import { kvHeightTimings } from './kv-height.js'
-import { NOTIFICATION_TYPE, type PubSubClient } from './pubsub/index.js'
+import {
+  NOTIFICATION_TYPE, PUBSUB_SUBSCRIPTION_SUCCEEDED, type PubSubClient
+} from './pubsub/index.js'
 import { signedOutgoingData } from './signedData.js'
 import {
-  captureConsole, makeKvServer, waitMicrotasks, within, type FetchInit, type KvServer
+  captureConsole, makeKvServer, until, waitMicrotasks, within, type FetchInit, type KvServer
 } from './test-utils.js'
 import type {
   ChelContractKey, ChelKvGetResult, ChelRootState, CheloniaConfig, JSONType,
@@ -222,6 +224,25 @@ export const vetoQueue = (queueName: string): (() => void) =>
 export const vetoSelector = (selector: string): (() => void) =>
   filterCalls(selector, () => false)
 
+// Starts `chelonia/reset` and holds it after its abort, while it waits for the lanes
+// of the contract (which needs an active slot). The returned `ends(release)` lets it
+// go on, checks that it ends before `release` (of what it waits for) runs, then runs it
+export const holdResetAfterAbort = async () => {
+  let open: (() => void) | undefined
+  filterCalls('chelonia/kv/_waitInFlight', () => { open ??= gateLane() })
+  const reset = sbp('chelonia/reset') as Promise<unknown>
+  await until(() => open, 'the reset to abort')
+  return async (release: () => void): Promise<void> => {
+    open!()
+    try {
+      await within(reset, 'the reset to end while the work it waits for is held', 1000)
+    } finally {
+      release()
+      await within(reset, 'the reset')
+    }
+  }
+}
+
 // The contract in local state at `height`, with keys for the slots' defaults
 // (`cek`, `csk`) and `#sak` for the server's authorization header
 export const setupContract = (height = START_HEIGHT): void => {
@@ -350,6 +371,12 @@ export const deliverFrame = (
   pubsub.messageHandlers[NOTIFICATION_TYPE.KV].call(pubsub, {
     type: NOTIFICATION_TYPE.KV, channelID: CONTRACT_ID, key, data: body, cid
   })
+}
+
+// The server confirms the subscription to the contract, as after a reconnection
+export const subscriptionSucceeded = (): void => {
+  assert.ok(pubsub, 'subscriptionSucceeded: call connectPubsub() in this test first')
+  sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, pubsub, { channelID: CONTRACT_ID })
 }
 
 const reconcile = (_ids: string[], change: { added: string[]; removed: string[] }) => {

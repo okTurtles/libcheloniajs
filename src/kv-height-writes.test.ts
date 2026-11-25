@@ -446,12 +446,15 @@ describe('chelonia/kv/withHeightRecovery', () => {
     const reset = sbp('chelonia/reset', () => cleanup) as Promise<void>
     await assert.rejects(within(queuedBefore, 'work queued before the reset'), { name: 'AbortError' })
 
-    const queuedDuring = recover(({ queue }) => queue(body), null, other)
+    const queuedDuring = assert.rejects(
+      within(recover(({ queue }) => queue(body), null, other), 'work queued during the reset'),
+      { name: 'AbortError' }
+    )
     await waitMicrotasks()
     finishCleanup()
     await within(reset, 'the reset')
     open()
-    await assert.rejects(within(queuedDuring, 'work the reset dropped'), { name: 'AbortError' })
+    await queuedDuring
     assert.strictEqual(ran, false)
   })
 

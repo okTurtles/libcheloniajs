@@ -835,14 +835,17 @@ export default sbp('sbp/selectors/register', {
       // No height-recovery syncs start meanwhile.
       counted = true
       this.kvResetsInProgress++
-      this.abortController.abort()
-      this.abortController = new AbortController()
+      const ended = this.abortController
+      ended.abort()
       try {
         await sbp('chelonia/kv/_waitInFlight')
       } catch (e) {
         logDrainError('chelonia/kv/_waitInFlight', e)
       }
       await drain('chelonia/contract/wait')
+      // Only now: work that starts during the waits above must get the aborted
+      // signal, or it would run on a fresh one that nothing aborts
+      if (this.abortController === ended) this.abortController = new AbortController()
       const result = await postCleanupFn?.()
       // The following are all synchronous operations
       const rootState = sbp(this.config.stateSelector)
