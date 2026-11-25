@@ -230,8 +230,6 @@ sbp('sbp/selectors/register', {
     return stubSet(contractID, key, data, opts)
   },
 
-  'chelonia/rootState': () => rootState(),
-
   'chelonia/contract/currentKeyIdByName': function (
     contractState: ChelContractState,
     name: string

@@ -312,7 +312,7 @@ has neither a mirror value nor a `defaultValue`.
 
 Slot values must reject `null` / `undefined` anywhere in the parsed value, not just at the root. This invariant is enforced for schema-backed and schemaless slots alike: `null` is reserved for wire-clear semantics and `undefined` for unloaded mirror state, so model optional fields as explicit tagged unions or by omitting the field rather than using `T | null`.
 
-Slot writes resolve `encryptionKeyName` / `signingKeyName` inside the per-contract queue. A missing named encryption key rejects with `ChelErrorKvUpdateInvalid` instead of silently writing plaintext. Set `encryptionKeyName: null` explicitly to opt into plaintext slot storage. A missing signing key always rejects. `chelonia/kv/queuedSet` now does the same with its `encryptionKeyName` (default `'cek'`) and `signingKeyName` (`'csk'`) options; it used to write plaintext when the encryption key was missing.
+Slot writes resolve `encryptionKeyName` / `signingKeyName` inside the per-contract queue. A missing named encryption key rejects with `ChelErrorKvUpdateInvalid` instead of silently writing plaintext. Set `encryptionKeyName: null` explicitly to opt into plaintext slot storage. A missing signing key, or one whose secret key isn't loaded, always rejects. `chelonia/kv/queuedSet` now does the same with its `encryptionKeyName` (default `'cek'`) and `signingKeyName` (`'csk'`) options; it used to write plaintext when the encryption key was missing.
 
 KV pubsub frames should carry `cid`; legacy or non-Chelonia frames without one still apply as `reason: 'remote'`, but preserve the mirror's previous etag and may cause extra conflict retries on the next local write.
 

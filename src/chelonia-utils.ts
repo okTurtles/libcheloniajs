@@ -58,7 +58,7 @@ export default sbp('sbp/selectors/register', {
     try {
       return await withHeightRecovery(this, contractID, ({ heightWaitMs, queue }) =>
         queue(async () => sbp('chelonia/kv/set', contractID, key, data, {
-          ...resolveKvKeyIds(contractID, { encryptionKeyName, signingKeyName }, label),
+          ...resolveKvKeyIds(this, contractID, { encryptionKeyName, signingKeyName }, label),
           ifMatch,
           onconflict,
           allowUnverifiedConflict,
@@ -70,7 +70,7 @@ export default sbp('sbp/selectors/register', {
     } catch (e) {
       if (!isKvMaxAttempts(e)) throw e
       throw new ChelErrorKvConflict(
-        `[chelonia/kv] ${label} ${kvConflictText(e, onconflict ? 'attempts' : 'no-onconflict')}`,
+        `[chelonia/kv] ${label} ${kvConflictText(e)}`,
         { cause: e.cause }
       )
     }

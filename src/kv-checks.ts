@@ -36,17 +36,18 @@ export function assertMaxAttempts (
 
 // Resolved right before each write, so that it uses keys rotated since the call
 export function resolveKvKeyIds (
+  ctx: CheloniaContext,
   contractID: string,
   names: { encryptionKeyName: string | null; signingKeyName: string },
   label: string
 ): { encryptionKeyId: string | null; signingKeyId: string } {
   const { encryptionKeyName, signingKeyName } = names
-  const state = sbp('chelonia/rootState')?.[contractID]
+  const state = sbp(ctx.config.stateSelector)?.[contractID]
   if (!state?._vm) {
     throw new ChelErrorKvUpdateInvalid(`[chelonia/kv] ${label}: ${contractID} is not in local state`)
   }
-  const keyId = (name: string): string | null | undefined =>
-    sbp('chelonia/contract/currentKeyIdByName', state, name)
+  const keyId = (name: string, requireSecretKey?: boolean): string | null | undefined =>
+    sbp('chelonia/contract/currentKeyIdByName', state, name, requireSecretKey)
   let encryptionKeyId: string | null = null
   if (encryptionKeyName !== null) {
     encryptionKeyId = keyId(encryptionKeyName) || null
@@ -61,6 +62,14 @@ export function resolveKvKeyIds (
   if (!signingKeyId) {
     throw new ChelErrorKvUpdateInvalid(
       `[chelonia/kv] ${label}: signing key '${signingKeyName}' not found on contract`
+    )
+  }
+  // Only signing needs the secret key (encrypting uses the public one). Without
+  // it, signing would fail later with an error that suggests an unknown key.
+  if (!keyId(signingKeyName, true)) {
+    throw new ChelErrorKvUpdateInvalid(
+      `[chelonia/kv] ${label}: signing key '${signingKeyName}' (${signingKeyId}) is on the ` +
+      'contract, but its secret key is not available'
     )
   }
   return { encryptionKeyId, signingKeyId }

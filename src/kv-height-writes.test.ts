@@ -12,6 +12,7 @@ import {
   vetoSelector, writeAsDeviceB
 } from './kv-height-harness.js'
 import { CHELONIA_KV_STATUS_CHANGED, CHELONIA_KV_UPDATED } from './events.js'
+import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import { KV_NOOP } from './kv-constants.js'
 import { kvHeightTimings } from './kv-height.js'
 import { until, waitMicrotasks, within } from './test-utils.js'
@@ -528,6 +529,24 @@ describe('chelonia/kv/queuedSet', () => {
     assert.strictEqual(serverValue('note'), 'in the clear')
   })
 
+  it("needs its signing key's secret key, but not its encryption key's", async () => {
+    const { secretKeys } = rootState()
+    const cskSecret = secretKeys[keys.cskId]
+    delete secretKeys[keys.cskId]
+    await assert.rejects(within(queuedSet({ key: 'note', data: 'x' }), 'no csk secret'), {
+      name: 'ChelErrorKvUpdateInvalid',
+      message: `[chelonia/kv] queuedSet: ${CONTRACT_ID}::note: signing key 'csk' ` +
+        `(${keys.cskId}) is on the contract, but its secret key is not available`
+    })
+    assert.deepStrictEqual(server.log, [])
+
+    // Encrypting needs only the public key
+    secretKeys[keys.cskId] = cskSecret
+    delete secretKeys[keys.cekId]
+    await within(queuedSet({ key: 'note', data: 'x' }), 'no cek secret')
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), [204])
+  })
+
   it('rejects a contract that is not in local state, also one removed while queued', async () => {
     const notLoaded = { name: 'ChelErrorKvUpdateInvalid', message: /is not in local state/ }
     await assert.rejects(
@@ -628,6 +647,21 @@ describe('chelonia/kv/queuedSet', () => {
       }
     )
     assert.deepStrictEqual([calls, server.posts().length], [0, 1])
+  })
+
+  it('says that attempts ran out for a kv/set conflict error without a reason', async () => {
+    filterCalls('chelonia/kv/set', () => {
+      throw new ChelErrorKvMaxAttempts('kv/set conflict', { cause: { etag: null } })
+    })
+    const ranOut = {
+      name: 'ChelErrorKvConflict',
+      message: `[chelonia/kv] queuedSet: ${CONTRACT_ID}::names ran out of attempts resolving conflicts`
+    }
+    const onconflict: ChelKvOnConflictCallback = async () => [['b'], '"stale"']
+    for (const options of [{ onconflict }, {}]) {
+      const write = queuedSet({ key: 'names', data: ['b'], ...options })
+      await assert.rejects(within(write, 'queuedSet'), ranOut)
+    }
   })
 
   it('gives onconflict a value from a newer height with allowUnverifiedConflict', async () => {

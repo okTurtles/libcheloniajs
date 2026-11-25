@@ -3080,7 +3080,7 @@ export default (sbp('sbp/selectors/register', {
           // never read then comes back as a 412 to merge, not overwritten
           ifMatch: ifMatch ?? mirrorEntry?.etag ?? undefined,
           // Resolved now, to use keys rotated while the write was queued
-          ...resolveKvKeyIds(contractID, slot, label),
+          ...resolveKvKeyIds(this, contractID, slot, label),
           onconflict,
           maxAttempts,
           heightWaitMs,
@@ -3227,7 +3227,7 @@ export default (sbp('sbp/selectors/register', {
       try {
         ;({ etag } = await sbp('chelonia/kv/set', contractID, key, null, {
           ifMatch: mirrorEtag ?? undefined,
-          ...resolveKvKeyIds(contractID, slot, label),
+          ...resolveKvKeyIds(this, contractID, slot, label),
           onconflict,
           allowUnverifiedConflict: true,
           maxAttempts,

@@ -46,10 +46,10 @@ export function kvMaxAttemptsError (
   )
 }
 
-// The text for an error that wraps `e`; `fallback` if `e` has no reason
-export function kvConflictText (e: unknown, fallback: KvMaxAttemptsReason = 'attempts'): string {
+// The text for an error that wraps `e`; that of `'attempts'` if `e` has no reason
+export function kvConflictText (e: unknown): string {
   const reason = (e as { reason?: unknown } | null)?.reason
   return typeof reason === 'string' && Object.hasOwn(KV_CONFLICT_TEXT, reason)
     ? KV_CONFLICT_TEXT[reason as KvMaxAttemptsReason]
-    : KV_CONFLICT_TEXT[fallback]
+    : KV_CONFLICT_TEXT.attempts
 }
