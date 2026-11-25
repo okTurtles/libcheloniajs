@@ -773,8 +773,9 @@ describe('chelonia/kv/set', () => {
         requiredHeight: 7, exact: false, localHeight: 7, etag: 'etag-0', httpStatus: 409
       })
       assert.match(e.message, new RegExp(
-        'still rejected the height stamp after 5 re-signs \\(it needs contract height 7 ' +
-          'or later; the local contract is at height 7\\); sync the contract and retry$'
+        ': the contract kept advancing: after 5 re-signs the server still rejected the height ' +
+          'stamp \\(it needs contract height 7 or later, which the local contract reached only ' +
+          'after the last write was signed\\); retry$'
       ))
       assert.deepStrictEqual(posts.map(({ height }) => height), ['1', '2', '3', '4', '5', '6'])
       assert.strictEqual(onconflictCalls, 0)
@@ -895,8 +896,23 @@ describe('chelonia/kv/get', () => {
       within(sbp('chelonia/kv/get', contractID, 'settings'), 'kv/get'),
       (e: unknown) => e instanceof ChelErrorUnexpectedHttpResponseCode &&
         (e as Error).cause === 503 &&
-        (e as Error).message === '[kv/get] 503: Service Unavailable'
+        (e as Error).message ===
+          `[chelonia/kv] get: ${contractID}::settings: GET failed with 503: Service Unavailable`
     )
+  })
+
+  it('names the contract and key for a non-JSON body, with the SyntaxError as cause', async () => {
+    const { contractID } = setupContract()
+    stubFetch(() => new Response('not json', { status: 200, headers: { etag: 'etag-1' } }))
+
+    const e = await within(
+      sbp('chelonia/kv/get', contractID, 'settings').catch((e: unknown) => e), 'kv/get'
+    ) as Error
+    assert.deepStrictEqual([e.name, e.message, e.cause instanceof SyntaxError], [
+      'ChelErrorUnexpected',
+      `[chelonia/kv] get: ${contractID}::settings: GET returned a body that isn't JSON`,
+      true
+    ])
   })
 })
 

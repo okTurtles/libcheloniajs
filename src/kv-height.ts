@@ -67,17 +67,28 @@ export function heightAheadError (
 ): Error & { cause: KvHeightAheadCause } {
   const local = localHeight(ctx, contractID)
   const at = local === undefined ? 'is not loaded' : `is at height ${local}`
-  const server = exact
+  // The local contract reached the height after the write was signed
+  const caughtUp = local !== undefined && local >= requiredHeight
+  const server = () => exact
     ? `the server value was written at contract height ${requiredHeight}`
     : `the server needs contract height ${requiredHeight} or later`
   const reason = resigns !== undefined
-    ? `the server still rejected the height stamp after ${resigns} re-signs ` +
-      `(it needs contract height ${requiredHeight} or later; the local contract ${at})`
+    ? caughtUp
+      ? `the contract kept advancing: after ${resigns} re-signs the server still rejected the ` +
+        `height stamp (it needs contract height ${requiredHeight} or later, which the local ` +
+        'contract reached only after the last write was signed)'
+      : `the server still rejected the height stamp after ${resigns} re-signs ` +
+        `(it needs contract height ${requiredHeight} or later; the local contract ${at})`
     : syncing
-      ? `${server}; the local contract ${at}, and a sync of it is still running`
-      : `${server}, but the local contract ${at}`
+      ? caughtUp
+        ? `${server()}; the local contract has reached it, but a sync of it is still running`
+        : `${server()}; the local contract ${at}, and a sync of it is still running`
+      : `${server()}, but the local contract ${at}`
+  const advice = syncing
+    ? 'wait for the sync to end and retry'
+    : caughtUp ? 'retry' : 'sync the contract and retry'
   return new ChelErrorKvHeightAhead(
-    `[chelonia/kv] ${contractID}::${key}: ${reason}; sync the contract and retry`,
+    `[chelonia/kv] ${contractID}::${key}: ${reason}; ${advice}`,
     { cause: { requiredHeight, exact, localHeight: local, etag, httpStatus } }
   ) as Error & { cause: KvHeightAheadCause }
 }

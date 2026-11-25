@@ -339,10 +339,15 @@ describe('Contract sync and removal', () => {
   describe("the contract type's destructor", () => {
     const calls: Array<{ resync: boolean; state: unknown }> = []
     const resyncFlags = () => calls.map(({ resync }) => resync)
+    // What the destructor returns after recording its call
+    let result: (() => unknown) | undefined
     sbp('sbp/selectors/register', {
       [`test-manifest/${CONTRACT_TYPE}/_cleanup`]: (
         { resync, state }: { resync: boolean; state: unknown }
-      ) => { calls.push({ resync, state: structuredClone(state) }) }
+      ) => {
+        calls.push({ resync, state: structuredClone(state) })
+        return result?.()
+      }
     })
 
     beforeEach(async () => {
@@ -351,6 +356,7 @@ describe('Contract sync and removal', () => {
         contracts: { manifests: { [CONTRACT_TYPE]: 'test-manifest' } }
       }).catch(() => {})
       calls.length = 0
+      result = undefined
     })
 
     const failResync = async (cid: string) => {
@@ -408,6 +414,31 @@ describe('Contract sync and removal', () => {
       )
       await within(sbp('chelonia/contract/release', cid), 'release')
       assert.deepStrictEqual(calls, [])
+    })
+
+    it("logs an async destructor's rejection instead of leaving it unhandled", async () => {
+      const cid = server.contract!.hash()
+      await within(sbp('chelonia/contract/retain', cid), 'retain')
+      result = async () => {
+        await null
+        throw new Error('cleanup failed after its first await')
+      }
+      // Observed here rather than fatal to the test process
+      const unhandled: unknown[] = []
+      const probe = (reason: unknown) => { unhandled.push(reason) }
+      process.on('unhandledRejection', probe)
+      try {
+        await within(sbp('chelonia/contract/release', cid), 'release')
+        await until(() => unhandled.length || errorsLogged().length, 'the rejection')
+      } finally {
+        process.off('unhandledRejection', probe)
+      }
+      assert.deepStrictEqual(resyncFlags(), [false])
+      assert.deepStrictEqual(unhandled, [])
+      assert.deepStrictEqual(errorsLogged().map(({ text }) => text), [
+        `[chelonia/private/removeImmediately] Error at destructor for ${cid} ` +
+          'Error: cleanup failed after its first await'
+      ])
     })
 
     it('is not called by a reset, nor after a restart', async () => {

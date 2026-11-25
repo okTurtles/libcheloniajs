@@ -885,7 +885,8 @@ export type KvHeightRecoveryAttempt = {
   queue: <T>(body: () => Promise<T>) => Promise<T>;
 };
 
-// Describes the server value of the final 412 only.
+// Describes the server value of the final 412 only (of the first GET for a raw
+// `kv/set` without `data`).
 export type KvConflictCause = {
   currentStatus?: KvServerValueStatus;
   currentData?: JSONType;

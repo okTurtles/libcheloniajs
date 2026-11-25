@@ -3128,11 +3128,6 @@ export default sbp('sbp/selectors/register', {
     const signal = sessionSignal(this, callerSignal)
     const get = () => fetchKv(this, contractID, key, signal)
     const isPreconditionFailed = (response: Response) => response.status === 412
-    const unexpected = (response: Response, method: 'GET' | 'POST') =>
-      new ChelErrorUnexpectedHttpResponseCode(
-        `[chelonia/kv] ${label}: ${method} failed with ${httpErrorMessage(response)}`,
-        { cause: response.status }
-      )
     const conflictError = (
       reason: KvMaxAttemptsReason, value: KvServerValue | undefined, response: Response
     ) => kvMaxAttemptsError(label, reason, conflictCause(value, response))
@@ -3145,7 +3140,7 @@ export default sbp('sbp/selectors/register', {
     ): Promise<KvServerValue> => {
       const etag = responseEtag(response)
       const text = response.ok || isPreconditionFailed(response) ? await response.text() : ''
-      if (recover && !text && !etag && !recoveryGetDone && isPreconditionFailed(response)) {
+      if (recover && !text && !etag && !recoveryGetDone) {
         recoveryGetDone = true
         const recovered = await get()
         if (recovered.ok) return readServerValue(recovered, { wait })
@@ -3222,7 +3217,7 @@ export default sbp('sbp/selectors/register', {
         if (data === undefined) {
           const response = await get()
           if (!response.ok && response.status !== 404 && response.status !== 410) {
-            throw unexpected(response, 'GET')
+            throw unexpectedKvResponse(label, 'GET', response)
           }
           // Read like a non-final 412: nothing to merge with a value that can't be read
           const value = verified(await readConflict(response, { wait: true }))
@@ -3263,7 +3258,7 @@ export default sbp('sbp/selectors/register', {
           }
           continue
         }
-        if (!isPreconditionFailed(response)) throw unexpected(response, 'POST')
+        if (!isPreconditionFailed(response)) throw unexpectedKvResponse(label, 'POST', response)
         if (typeof onconflict !== 'function') {
           throw conflictError(
             'no-onconflict', await readConflict(response, { final: true }), response
@@ -3286,24 +3281,28 @@ export default sbp('sbp/selectors/register', {
     key: string,
     options?: { signal?: AbortSignal | null } | null
   ): Promise<ChelKvGetResult | null> {
+    const label = `get: ${contractID}::${key}`
     // Aborted by `signal` or by `chelonia/reset`, also while the body downloads
     const signal = sessionSignal(this, options?.signal)
     let response: Response
     let body: unknown
     try {
       response = await fetchKv(this, contractID, key, signal)
-      if (response.ok) body = await response.json()
+      if (response.ok) {
+        body = await response.json().catch((e: unknown) => {
+          if (!(e instanceof SyntaxError)) throw e
+          throw new ChelErrorUnexpected(
+            `[chelonia/kv] ${label}: GET returned a body that isn't JSON`, { cause: e }
+          )
+        })
+      }
     } finally {
       signal._cleanup?.()
     }
     if (response.status === 404) {
       return null
     }
-    if (!response.ok) {
-      throw new ChelErrorUnexpectedHttpResponseCode(
-        `[kv/get] ${httpErrorMessage(response)}`, { cause: response.status }
-      )
-    }
+    if (!response.ok) throw unexpectedKvResponse(label, 'GET', response)
     const etag = responseEtag(response)
     const value: KvServerValue = {
       ...classifyKvValue<JSONType>(this, contractID, key, body),
@@ -3401,6 +3400,13 @@ function outputEncryptedOrUnencryptedMessage (
   return serializedData
 }
 
+// `label` is `<selector>: <contractID>::<key>`
+const unexpectedKvResponse = (label: string, method: 'GET' | 'POST', response: Response) =>
+  new ChelErrorUnexpectedHttpResponseCode(
+    `[chelonia/kv] ${label}: ${method} failed with ${httpErrorMessage(response)}`,
+    { cause: response.status }
+  )
+
 const responseEtag = (response: Response): string | null =>
   response.headers.get('x-cid') || response.headers.get('etag')
 
@@ -3423,7 +3429,8 @@ function unverifiedError (
   return heightAheadError(ctx, contractID, key, { requiredHeight, exact: true, etag, httpStatus })
 }
 
-// Only what the final conflict revealed; fields that couldn't be read are omitted
+// Only what the last 412 (or, without `data`, the first GET) revealed; fields that
+// couldn't be read are omitted
 function conflictCause (value: KvServerValue | undefined, response: Response): KvConflictCause {
   if (!value) return { etag: responseEtag(response) }
   const { etag } = value

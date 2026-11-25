@@ -111,8 +111,8 @@ describe('KV slot writes against the server', () => {
           httpStatus: 409
         })
         assert.strictEqual(e.message, `[chelonia/kv] ${CONTRACT_ID}::prefs: the server needs ` +
-          `contract height ${START_HEIGHT + 1} or later; the local contract is at height ` +
-          `${START_HEIGHT + 1}, and a sync of it is still running; sync the contract and retry`)
+          `contract height ${START_HEIGHT + 1} or later; the local contract has reached it, ` +
+          'but a sync of it is still running; wait for the sync to end and retry')
         return true
       })
     } finally {
@@ -120,6 +120,25 @@ describe('KV slot writes against the server', () => {
     }
     await within(sync, 'the sync')
     assert.deepStrictEqual(server.posts().map(({ status }) => status), [409])
+  })
+
+  it("says to wait for a running sync when a 409's height isn't reached yet", async () => {
+    const release = holdSyncs()
+    const sync = sbp('chelonia/private/in/sync', CONTRACT_ID) as Promise<void>
+    try {
+      await until(() => sbp('chelonia/contract/isSyncing', CONTRACT_ID), 'the sync to start')
+      server.height = START_HEIGHT + 1
+      const e = await within(sbp('chelonia/kv/set', CONTRACT_ID, 'prefs', { lang: 'en' }, {
+        signingKeyId: keys.cskId, encryptionKeyId: keys.cekId, heightWaitMs: 0
+      }).catch((e: unknown) => e), 'kv/set') as Error
+      assert.ok(isKvHeightAhead(e))
+      assert.strictEqual(e.message, `[chelonia/kv] ${CONTRACT_ID}::prefs: the server needs ` +
+        `contract height ${START_HEIGHT + 1} or later; the local contract is at height ` +
+        `${START_HEIGHT}, and a sync of it is still running; wait for the sync to end and retry`)
+    } finally {
+      release()
+    }
+    await within(sync, 'the sync')
   })
 })
 

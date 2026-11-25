@@ -761,14 +761,20 @@ export default sbp('sbp/selectors/register', {
       const destructor = `${manifestHash}/${type}/_cleanup`
       // Check if a destructor is defined
       if (sbp('sbp/selectors/fn', destructor)) {
-        // And call it
-        try {
-          sbp(destructor, { contractID, resync: !!params?.resync, state: state[contractID] })
-        } catch (e) {
+        const logError = (e: unknown) => {
           console.error(
             `[chelonia/private/removeImmediately] Error at destructor for ${contractID}`,
             e
           )
+        }
+        // And call it. An async one isn't awaited, so its rejection is only logged
+        try {
+          const result = sbp(destructor, {
+            contractID, resync: !!params?.resync, state: state[contractID]
+          })
+          if (typeof result?.then === 'function') Promise.resolve(result).catch(logError)
+        } catch (e) {
+          logError(e)
         }
       }
     }
