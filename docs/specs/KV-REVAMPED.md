@@ -527,8 +527,9 @@ queued, or running but not yet posted (e.g. reloading their basis),
 reject with `AbortError` without posting (the reducer doesn't run);
 running single-key syncs reject with `AbortError`; loads it drops
 resolve and settle nothing. Work started after the abort, until
-`postCleanupFn` runs, fails the same way. Until the reset ends, no
-recovery or fallback sync starts (a due fallback re-arms).
+`postCleanupFn` runs (when resets overlap, the last one's), fails the
+same way. Until the reset ends, no recovery or fallback sync starts (a
+due fallback re-arms).
 The teardown cancels every wait and rejects pending `whenSettled` with
 `AbortError`, and the next session starts with fresh
 KV runtime state even if the teardown throws; a reset that fails before

@@ -400,6 +400,8 @@ export default sbp('sbp/selectors/register', {
     // Used in publishEvent to cancel sending events after reset (logout)
     this._instance = Object.create(null)
     this.abortController = new AbortController()
+    // A reset still in its waits after its abort counts across this call
+    this.resetsAfterAbort ??= 0
     this.state = {
       contracts: {}, // contractIDs => { type, HEAD } (contracts we've subscribed to)
       pending: [] // prevents processing unexpected data from a malicious server
@@ -788,10 +790,18 @@ export default sbp('sbp/selectors/register', {
     // A request that never settles (e.g. a queued KV write on a dead link)
     // would hold up the waits below for good
     const { abortController } = this
+    // Each time the timer fires, it also aborts the controller in place: another
+    // reset or `chelonia/_init` may have replaced this one, also after a first
+    // firing, and the queues may hold work that runs on the new one
+    let timedOut: AbortController | undefined
     const drainTimeout = timerDelay(this.config.resetDrainTimeout)
     const drainTimer = drainTimeout === undefined
       ? undefined
-      : unrefTimer(setTimeout(() => abortController.abort(), drainTimeout))
+      : unrefTimer(setInterval(() => {
+        abortController.abort()
+        timedOut = this.abortController
+        timedOut.abort()
+      }, drainTimeout))
     // The drain is best effort, like the timer above. An SBP filter can veto
     // a contract's queue, and waiting on it then rejects. Stopping the reset
     // would keep the state and the secret keys in memory, so log the failure
@@ -812,6 +822,19 @@ export default sbp('sbp/selectors/register', {
     }
     // Whether this reset is counted in `kvResetsInProgress`
     let counted = false
+    // The controller this reset aborts after its drain
+    let ended: AbortController | undefined
+    // Whether this reset is in the waits that follow its abort. The last reset
+    // to leave them puts a live controller in place: work started on one before
+    // could hold the waits of the others.
+    let waiting = false
+    const leaveWaits = () => {
+      if (!waiting) return
+      waiting = false
+      if (--this.resetsAfterAbort === 0 && this.abortController.signal.aborted) {
+        this.abortController = new AbortController()
+      }
+    }
     try {
       // wait for any pending sync operations to finish before saving
       Object.keys(this.postSyncOperations).forEach((cID) => {
@@ -828,15 +851,17 @@ export default sbp('sbp/selectors/register', {
       await drain('chelonia/contract/wait')
       // Not only in `finally`: the timer bounds the drain and must not abort
       // anything later (e.g. if `chelonia/_init` replaced the controller)
-      clearTimeout(drainTimer)
+      clearInterval(drainTimer)
       // The waits above drained the queued KV writes (`kv/update`, `kv/clear`,
       // `kv/queuedSet`). Before `postCleanupFn` and the teardown, abort what runs
       // outside those queues (e.g. a raw `kv/set`) and drain what is still queued.
       // No height-recovery syncs start meanwhile.
       counted = true
       this.kvResetsInProgress++
-      const ended = this.abortController
+      ended = this.abortController
       ended.abort()
+      waiting = true
+      this.resetsAfterAbort++
       try {
         await sbp('chelonia/kv/_waitInFlight')
       } catch (e) {
@@ -845,7 +870,7 @@ export default sbp('sbp/selectors/register', {
       await drain('chelonia/contract/wait')
       // Only now: work that starts during the waits above must get the aborted
       // signal, or it would run on a fresh one that nothing aborts
-      if (this.abortController === ended) this.abortController = new AbortController()
+      leaveWaits()
       const result = await postCleanupFn?.()
       // The following are all synchronous operations
       const rootState = sbp(this.config.stateSelector)
@@ -905,9 +930,16 @@ export default sbp('sbp/selectors/register', {
       }
       return result
     } finally {
+      leaveWaits()
       if (counted) this.kvResetsInProgress--
-      clearTimeout(drainTimer)
-      if (this.abortController === abortController && abortController.signal.aborted) {
+      clearInterval(drainTimer)
+      // Leave no controller this reset aborted in place, unless another reset is
+      // still in its waits: the last one to leave them replaces it
+      const current = this.abortController
+      if (
+        this.resetsAfterAbort === 0 && current.signal.aborted &&
+        [abortController, timedOut, ended].includes(current)
+      ) {
         this.abortController = new AbortController()
       }
       // Stop first: an overlapping reset may have restarted it already
