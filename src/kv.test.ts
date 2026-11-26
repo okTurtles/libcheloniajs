@@ -1448,11 +1448,15 @@ describe('KV slot API', () => {
     })
     const c = 'cid-26'
     await setupContract(c)
+    // Each message starts with the same label as every other KV error
+    const invalid = {
+      name: 'ChelErrorKvUpdateInvalid', message: /^\[chelonia\/kv\] update: cid-26::de: \S/
+    }
 
     // 26a: neither updater nor value
     await assert.rejects(
       () => sbp('chelonia/kv/update', { contractID: c, key: 'de' }),
-      (e: unknown) => e instanceof ChelErrorKvUpdateInvalid
+      invalid
     )
 
     // 26b: both updater and value
@@ -1463,7 +1467,7 @@ describe('KV slot API', () => {
         updater: () => ({ x: 1 }),
         value: { x: 2 }
       }),
-      (e: unknown) => e instanceof ChelErrorKvUpdateInvalid
+      invalid
     )
 
     // 26c: value without defaultUpdater
@@ -1471,7 +1475,7 @@ describe('KV slot API', () => {
       () => sbp('chelonia/kv/update', {
         contractID: c, key: 'de', value: { x: 2 }
       }),
-      (e: unknown) => e instanceof ChelErrorKvUpdateInvalid
+      invalid
     )
   })
 
@@ -3136,7 +3140,8 @@ describe('KV slot API', () => {
       () => sbp('chelonia/kv/update', {
         contractID: c, key: 'decodeConflict', updater: () => ({ x: 2 })
       }),
-      (e: unknown) => e instanceof ChelErrorKvValidation && e.cause === decodeErr
+      (e: unknown) => e instanceof ChelErrorKvValidation && e.cause === decodeErr &&
+        e.message.startsWith('[chelonia/kv] update: cid-58::decodeConflict: server ')
     )
   })
 
@@ -3286,6 +3291,28 @@ describe('KV slot API', () => {
     assert.deepStrictEqual(rootState()._kv![c]!.noCid2.value, { x: 5 })
     assert.strictEqual(rootState()._kv![c]!.noCid2.etag, null,
       'inline apply keeps null etag (no stale etag to clobber)')
+  })
+
+  it("61d: a no-cid frame's GET demotes conflict markers, so later frames apply inline", async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'noCid3', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-62d'
+    await setupContract(c)
+    await sbp('chelonia/kv/_handleRemote', c, 'noCid3', fakeParsed({ x: 1 }), 'known-cid')
+    const echoKey = `${c}::noCid3`
+    sbp('chelonia/test/addEchoCID', echoKey, 'e-local', true)
+    let getCalled = 0
+    stubGet = async () => { getCalled++; return fakeParsed({ x: 2 }) }
+
+    await sbp('chelonia/kv/_handleRemote', c, 'noCid3', fakeParsed({ x: 9 }))
+    assert.strictEqual(getCalled, 1, 'the no-cid frame forces a GET')
+    assert.strictEqual(sbp('chelonia/test/echoCIDFromConflict', echoKey, 'e-local'), false,
+      "the no-cid frame's GET demotes the conflict marker")
+    // A marker left set would make this non-self frame force another GET
+    await sbp('chelonia/kv/_handleRemote', c, 'noCid3', fakeParsed({ x: 3 }), 'e-other')
+    assert.strictEqual(getCalled, 1, 'the next non-self frame applies inline, with no GET')
+    assert.deepStrictEqual(rootState()._kv![c]!.noCid3.value, { x: 3 })
   })
 
   it('62: conflicted write self-echo is suppressed by CID', async () => {
@@ -4507,6 +4534,24 @@ describe('KV slot API', () => {
     })
     assert.strictEqual(onUpdateRan, true)
     assert.deepStrictEqual(rootState()._kv![c]!.cloneCb.value, { x: 4 })
+  })
+
+  it('70e: mutating what read returns cannot change the default or the mirror', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'cloneRead', contractType: CTYPE, defaultValue: { nested: { a: 0 } }, autoLoad: 'never'
+    })
+    const c = 'cid-70e'
+    await setupContract(c)
+    const mutate = () => {
+      (sbp('chelonia/kv/read', c, 'cloneRead') as { nested: { a: number } }).nested.a = 999
+    }
+    mutate()
+    assert.deepStrictEqual(sbp('chelonia/kv/read', c, 'cloneRead'), { nested: { a: 0 } })
+
+    stubGet = async () => ({ ...fakeParsed({ nested: { a: 1 } }), etag: 'e1' })
+    await sbp('chelonia/kv/sync', c, 'cloneRead')
+    mutate()
+    assert.deepStrictEqual(sbp('chelonia/kv/read', c, 'cloneRead'), { nested: { a: 1 } })
   })
 
   // -----------------------------------------------------------------------

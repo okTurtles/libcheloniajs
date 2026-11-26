@@ -1155,6 +1155,20 @@ describe('Slot writes and contract heights', () => {
     assert.deepStrictEqual(server.posts().map(({ status }) => status), [204, 204, 204])
   })
 
+  it("update and clear need their signing key's secret key, and write nothing without it", async () => {
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    delete rootState().secretKeys[keys.cskId]
+    const noSecret = (label: string) => ({
+      name: 'ChelErrorKvUpdateInvalid',
+      message: `[chelonia/kv] ${label}: ${CONTRACT_ID}::names: signing key 'csk' ` +
+        `(${keys.cskId}) is on the contract, but its secret key is not available`
+    })
+    await assert.rejects(updateWith('names'), noSecret('update'))
+    await assert.rejects(clear('names'), noSecret('clear'))
+    assert.deepStrictEqual(server.posts(), [])
+  })
+
   it("resolves when a listener drops the slot's entry as the write applies", async () => {
     let matching = true
     defineSlot({ key: 'prefs', defaultValue: {}, match: () => matching })
