@@ -2612,8 +2612,8 @@ Mirror the structure of `src/journal.test.ts`:
    removes filter entries correctly.
 3. `update` writes the reducer result; on a synthesised 412 response
    from a stub `fetch`, the reducer is re-run against the fresh
-   `currentData`. Returning `KV_NOOP` skips the write (and, on a
-   settled slot, the network).
+   `currentData`. Returning `KV_NOOP` skips the write (and the
+   network, unless §3.4's "Reducer basis" reloads the key first).
 4. Schema rejection on `update` reducer output throws
    `ChelErrorKvValidation` and does **not** hit the network.
 5. Schema rejection on a simulated pubsub notification does *not*
@@ -2735,7 +2735,8 @@ Mirror the structure of `src/journal.test.ts`:
     of these cases.
 27. **`defaultUpdater` + `KV_NOOP`** — a slot whose `defaultUpdater`
     returns `KV_NOOP` based on `prev` (e.g. a throttle window not
-    yet elapsed) skips the network entirely and resolves with
+    yet elapsed) skips the write (and the network, unless §3.4's
+    "Reducer basis" reloads the key first) and resolves with
     `undefined`, identical to the hand-written `updater` path.
 28. **Contract heights** (§3.4): stamp parsing; `kv/get` / `kv/set`
     per response; recovery options, shared syncs and failure paths;

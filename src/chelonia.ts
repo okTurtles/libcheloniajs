@@ -3473,8 +3473,8 @@ function unverifiedError (
   return heightAheadError(ctx, contractID, key, { requiredHeight, exact: true, etag, httpStatus })
 }
 
-// Only what the last 412 (or, without `data`, the first GET) revealed; fields that
-// couldn't be read are omitted
+// Only what the last 412 (or, without `data`, a GET whose body isn't JSON) revealed;
+// fields that couldn't be read are omitted
 function conflictCause (value: KvServerValue | undefined, response: Response): KvConflictCause {
   if (!value) return { etag: responseEtag(response) }
   const { etag } = value

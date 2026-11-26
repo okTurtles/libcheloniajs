@@ -65,7 +65,8 @@ export const setLocalHeight = (height: number): void => {
 
 export { sleep } from './test-utils.js'
 
-// GET requests for `key` the server answered
+// GET requests for `key` that reached the server, logged on arrival: held and
+// aborted ones count too
 export const gets = (key: string): number =>
   server.log.filter((request) => request.method === 'GET' && request.key === key).length
 

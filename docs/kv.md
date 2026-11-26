@@ -467,7 +467,8 @@ sbp('chelonia/defineContract', {
 ```ts
 import { KV_NOOP } from '@chelonia/lib'
 
-// Inside an updater — abort the write without touching the server:
+// Inside an updater: skip the write. The key is still reloaded first if the
+// slot hasn't settled or its mirror can't be trusted (see "Reducer basis").
 sbp('chelonia/kv/update', {
   contractID, key: 'lastSeen',
   updater: (prev) => {

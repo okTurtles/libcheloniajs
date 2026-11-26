@@ -298,9 +298,11 @@ export type KvMirrorEntry = {
   heightAhead?: { requiredHeight: number };
 };
 
-// A slot key whose server value needs a contract height not reached yet.
-// Internal bookkeeping of `src/kv.ts`: reachable through `CheloniaContext`, but
-// not a supported API.
+/**
+ * A slot key whose server value needs a contract height not reached yet.
+ * Internal bookkeeping of `src/kv.ts`: reachable through `CheloniaContext`, but
+ * not a supported API.
+ */
 export type KvHeightWait = {
   contractID: string;
   key: string;
@@ -334,8 +336,10 @@ export type KvUpdateCtx = {
 // Why a slot loads: every update reason but a local write
 export type KvLoadReason = Exclude<KvUpdateCtx['reason'], typeof KV_UPDATE_REASON.LOCAL>;
 
-// Called once the local contract commits `minHeight` or later. Internal, like
-// `KvHeightWait`.
+/**
+ * Called once the local contract commits `minHeight` or later. Internal, like
+ * `KvHeightWait`.
+ */
 export type KvHeightListener = { minHeight: number; fire: () => void };
 
 // Public subset of the internal `SlotDefinition`. Accepted by
@@ -386,12 +390,14 @@ export type SlotDefinitionSource =
 // `_cleanupContractSlots` into unregistering another contract's
 // slots.
 
-// Internal, resolved form of a slot definition. Built from a
-// `KvSlotDefinition` at `chelonia/kv/defineSlot` time: defaults applied,
-// `resolvedDefault` computed, `contractType` narrowed to a single string
-// (the public form accepts an array; each entry is stored as its own
-// `SlotDefinition`). Internal: reachable from the package root through
-// `CheloniaContext`, but not a supported API.
+/**
+ * Internal, resolved form of a slot definition. Built from a
+ * `KvSlotDefinition` at `chelonia/kv/defineSlot` time: defaults applied,
+ * `resolvedDefault` computed, `contractType` narrowed to a single string
+ * (the public form accepts an array; each entry is stored as its own
+ * `SlotDefinition`). Internal: reachable from the package root through
+ * `CheloniaContext`, but not a supported API.
+ */
 export type SlotDefinition = {
   contractType: string;
   key: string;
@@ -892,8 +898,8 @@ export type KvHeightRecoveryAttempt = {
   queue: <T>(body: () => Promise<T>) => Promise<T>;
 };
 
-// Describes the server value of the final 412 only (of the first GET for a raw
-// `kv/set` without `data`).
+// Describes the server value of the final 412 only, or, for a `kv/set` without
+// `data`, that of a GET whose body isn't JSON (which ends the write).
 export type KvConflictCause = {
   currentStatus?: KvServerValueStatus;
   currentData?: JSONType;

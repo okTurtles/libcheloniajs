@@ -3361,10 +3361,10 @@ export default (sbp('sbp/selectors/register', {
   // `rootState._kv[cID][key]` mirror entry with its echo CIDs and height
   // waits; then reject the `whenSettled` waits no slot can settle any more.
   // Two passes drop the mirror entry: the index walk covers
-  // subscribed/reconciled contracts, and a
-  // second `_kv` walk covers non-subscribed contracts whose persisted
-  // entries were seeded by `_defineSlotInternal` and never entered the
-  // index (skipping entries whose contract type can't be confirmed).
+  // subscribed/reconciled contracts, and a second `_kv` walk covers
+  // non-subscribed contracts whose persisted entries were seeded by
+  // `_defineSlotInternal` and never entered the index (skipping entries
+  // whose contract type can't be confirmed).
   // Keys present in both blocks are left to the normal `defineSlot`
   // re-registration path (which re-validates persisted mirror values
   // against the new schema — §4.1).
