@@ -72,7 +72,8 @@ export function heightAheadError (
 ): Error & { cause: KvHeightAheadCause } {
   const local = localHeight(ctx, contractID)
   const at = local === undefined ? 'is not loaded' : `is at height ${local}`
-  // The local contract reached the height after the write was signed
+  // The local contract reached the height after the write was signed or the
+  // value was read
   const caughtUp = local !== undefined && local >= requiredHeight
   const server = () => exact
     ? `the server value was written at contract height ${requiredHeight}`
@@ -88,7 +89,9 @@ export function heightAheadError (
       ? caughtUp
         ? `${server()}; the local contract has reached it, but a sync of it is still running`
         : `${server()}; the local contract ${at}, and a sync of it is still running`
-      : `${server()}, but the local contract ${at}`
+      : caughtUp
+        ? `${server()}, which the local contract has reached since`
+        : `${server()}, but the local contract ${at}`
   const advice = syncing
     ? 'wait for the sync to end and retry'
     : caughtUp ? 'retry' : 'sync the contract and retry'

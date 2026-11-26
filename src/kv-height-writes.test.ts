@@ -140,6 +140,39 @@ describe('KV slot writes against the server', () => {
     }
     await within(sync, 'the sync')
   })
+
+  it('says only to retry once the contract reaches the height of a value onconflict reads', async () => {
+    writeAsDeviceB('prefs', { theme: 'dark' }, START_HEIGHT + 2)
+    const messages: string[] = []
+    const readCurrentData = (args: { currentData: unknown }) => {
+      try {
+        return args.currentData
+      } catch (e) {
+        messages.push((e as Error).message)
+      }
+    }
+    const onconflict: ChelKvOnConflictCallback = async (args) => {
+      readCurrentData(args)
+      // The app synced the contract before reading the value again
+      setLocalHeight(START_HEIGHT + 2)
+      readCurrentData(args)
+      return false
+    }
+    const result = await within(sbp('chelonia/kv/set', CONTRACT_ID, 'prefs', { lang: 'en' }, {
+      signingKeyId: keys.cskId,
+      encryptionKeyId: keys.cekId,
+      ifMatch: '"stale"',
+      allowUnverifiedConflict: true,
+      onconflict
+    }), 'kv/set')
+    assert.deepStrictEqual(result, { etag: null })
+    const found = `[chelonia/kv] ${CONTRACT_ID}::prefs: the server value was written at contract ` +
+      `height ${START_HEIGHT + 2}`
+    assert.deepStrictEqual(messages, [
+      `${found}, but the local contract is at height ${START_HEIGHT}; sync the contract and retry`,
+      `${found}, which the local contract has reached since; retry`
+    ])
+  })
 })
 
 const recover = <T>(
