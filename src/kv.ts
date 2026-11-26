@@ -2574,6 +2574,31 @@ export default (sbp('sbp/selectors/register', {
     // into the mirror as an etag — an empty etag would later be sent as
     // `ifMatch: ''` and trigger a spurious 412 on the next local write.
     const hasCid = typeof cid === 'string' && cid.length > 0
+    // The authoritative GET for a frame that can't be applied inline. Whether it
+    // succeeds or not, it then demotes the conflict markers in `cids` (every one if
+    // `null`), so that later frames don't each fire another GET.
+    const reloadAndDemote = (cids: Set<string> | null, failure: string): Promise<void> => {
+      const demote = () => {
+        for (const [pendingCID, marker] of this.kvLocalEchoCIDs.get(echoKey) ?? []) {
+          if (!cids || cids.has(pendingCID)) marker.fromConflict = false
+        }
+      }
+      return loadSlotNow({
+        contractID,
+        slot,
+        reason: KV_UPDATE_REASON.REMOTE,
+        // Already-loaded slot: don't flash `loaded → loading → loaded`.
+        suppressLoadingStatus: true,
+        // A failed authoritative GET must not flip the slot to `'error'`: the
+        // mirror still holds a consistent value and etag. See the flag's
+        // definition in `_loadSlotNow`.
+        preserveStatusOnError: true
+      }).then(demote, (e: unknown) => {
+        // Never throw out of the pubsub dispatch path (§4.9 / §6).
+        demote()
+        logLoadRejection(`${failure} for ${contractID}::${key}`, e)
+      })
+    }
     if (hasCid) {
       const now = nowMs()
       purgeExpiredEchoCIDs(this, echoKey, now)
@@ -2632,37 +2657,7 @@ export default (sbp('sbp/selectors/register', {
           // until the echo TTL expires (5 min). Demoting on failure
           // lets the next frame take the normal last-write-wins path
           // while the still-pending self-echo stays suppressed.
-          const demoteConflictMarkers = () => {
-            const currentBucket = this.kvLocalEchoCIDs.get(echoKey)
-            if (currentBucket) {
-              for (const pendingCID of conflictCIDs) {
-                const pendingEntry = currentBucket.get(pendingCID)
-                if (pendingEntry) pendingEntry.fromConflict = false
-              }
-            }
-          }
-          return loadSlotNow({
-            contractID,
-            slot,
-            reason: KV_UPDATE_REASON.REMOTE,
-            // Reconciling a conflict on an already-loaded slot must not
-            // surface a cosmetic `loaded → loading → loaded` flicker.
-            suppressLoadingStatus: true,
-            // A failed authoritative GET must not flip the slot to
-            // `'error'`: the conflict-resolved write already committed,
-            // so the mirror still holds a valid value. See the flag's
-            // definition in `_loadSlotNow`.
-            preserveStatusOnError: true
-          }).then((result: void) => {
-            demoteConflictMarkers()
-            return result
-          }, (e: unknown) => {
-            // Never throw out of the pubsub dispatch path (§4.9 / §6).
-            // The authoritative GET failed; demote markers regardless
-            // (see above) and resolve so the dispatcher keeps running.
-            logLoadRejection(`conflict-resolution GET failed for ${contractID}::${key}`, e)
-            demoteConflictMarkers()
-          })
+          return reloadAndDemote(conflictCIDs, 'conflict-resolution GET failed')
         }
       }
     }
@@ -2709,31 +2704,7 @@ export default (sbp('sbp/selectors/register', {
       // and the next local write's `if-match` reconciles — so the
       // broader demotion is accepted to keep the common (single-write)
       // case loop-free.
-      const demoteConflictMarkers = () => {
-        const bucket = this.kvLocalEchoCIDs.get(echoKey)
-        if (bucket) {
-          for (const [, m] of bucket) {
-            if (m.fromConflict) m.fromConflict = false
-          }
-        }
-      }
-      return loadSlotNow({
-        contractID,
-        slot,
-        reason: KV_UPDATE_REASON.REMOTE,
-        // Already-loaded slot: don't flash `loaded → loading → loaded`.
-        suppressLoadingStatus: true,
-        // A failed authoritative GET must not flip to `'error'`: the
-        // mirror still holds its prior (consistent) value + etag pair.
-        preserveStatusOnError: true
-      }).then((result: void) => {
-        demoteConflictMarkers()
-        return result
-      }, (e: unknown) => {
-        // Never throw out of the pubsub dispatch path (§4.9 / §6).
-        demoteConflictMarkers()
-        logLoadRejection(`no-cid authoritative GET failed for ${contractID}::${key}`, e)
-      })
+      return reloadAndDemote(null, 'no-cid authoritative GET failed')
     }
     const failRemoteValidation = (e: unknown): Promise<void> => {
       sbp('okTurtles.events/emit', CHELONIA_KV_VALIDATION_ERROR, {
