@@ -202,8 +202,8 @@ attempts, default `3`) also accepts `null` for the default.
 `chelonia/kv/get` never waits or syncs: it rejects with
 `ChelErrorKvHeightAhead` or `ChelErrorKvHeightMalformed`. Its optional
 third argument `{ signal }` aborts the GET, also while the body
-downloads, and the call rejects with the error `fetch` gives (normally
-`signal.reason`). `chelonia/reset` aborts it either way. Wrap raw calls
+downloads, and the call rejects with `signal.reason` if it is an `Error`
+(else an `AbortError`). `chelonia/reset` aborts it either way. Wrap raw calls
 in `chelonia/kv/withHeightRecovery` to recover like the slots do:
 
 ```ts

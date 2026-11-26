@@ -1459,3 +1459,110 @@ describe('update\'s reducer basis', () => {
     }
   })
 })
+
+// Each KV request a caller's signal aborts, by the selector that sends it
+const inFlight: {
+  name: string; method: 'GET' | 'POST'; key: string; call: (signal: AbortSignal) => unknown
+}[] = [
+  {
+    name: 'kv/get',
+    method: 'GET',
+    key: 'prefs',
+    call: (signal) => sbp('chelonia/kv/get', CONTRACT_ID, 'prefs', { signal })
+  },
+  {
+    name: 'kv/set',
+    method: 'POST',
+    key: 'prefs',
+    call: (signal) => sbp('chelonia/kv/set', CONTRACT_ID, 'prefs', { theme: 'x' }, {
+      signingKeyId: keys.cskId, encryptionKeyId: keys.cekId, signal
+    })
+  },
+  {
+    name: 'kv/set without data',
+    method: 'GET',
+    key: 'prefs',
+    call: (signal) => sbp('chelonia/kv/set', CONTRACT_ID, 'prefs', undefined, {
+      signingKeyId: keys.cskId,
+      encryptionKeyId: keys.cekId,
+      onconflict: () => [{ theme: 'x' }, undefined],
+      signal
+    })
+  },
+  {
+    name: 'update',
+    method: 'POST',
+    key: 'prefs',
+    call: (signal) => sbp('chelonia/kv/update', {
+      contractID: CONTRACT_ID, key: 'prefs', updater: () => ({ theme: 'x' }), signal
+    })
+  },
+  {
+    // An unsettled slot and the caller's `ifMatch`: the basis reloads first
+    name: "update's reload",
+    method: 'GET',
+    key: 'lazy',
+    call: (signal) => sbp('chelonia/kv/update', {
+      contractID: CONTRACT_ID, key: 'lazy', updater: () => ({ theme: 'x' }), ifMatch: '*', signal
+    })
+  },
+  {
+    name: 'clear',
+    method: 'POST',
+    key: 'prefs',
+    call: (signal) => sbp('chelonia/kv/clear', CONTRACT_ID, 'prefs', { signal })
+  },
+  {
+    name: 'queuedSet',
+    method: 'POST',
+    key: 'prefs',
+    call: (signal) => queuedSet({ key: 'prefs', data: { theme: 'x' }, signal })
+  },
+  {
+    name: 'withHeightRecovery',
+    method: 'GET',
+    key: 'prefs',
+    call: (signal) => recover(() => sbp('chelonia/kv/get', CONTRACT_ID, 'prefs', { signal }), {
+      signal
+    })
+  }
+]
+
+const abortError = (e: unknown) => e instanceof Error && e.name === 'AbortError'
+
+describe('KV requests in flight that the caller aborts', () => {
+  installKvHarness()
+
+  for (const { name, method, key, call } of inFlight) {
+    it(`${name}: rejects with an Error reason, else with an AbortError`, async () => {
+      defineSlot({ key: 'prefs', defaultValue: {} })
+      defineSlot({ key: 'lazy', defaultValue: {}, autoLoad: 'never' })
+      writeAsDeviceB('prefs', { theme: 'dark' })
+      writeAsDeviceB('lazy', { theme: 'dark' })
+      await activate()
+      let release!: () => void
+      const released = new Promise<void>((resolve) => { release = resolve })
+      const heldGets = method === 'GET' ? holdGets(key) : undefined
+      if (method === 'POST') server.onPost = () => released
+      const arrived = () => heldGets ? heldGets.requests.length : server.posts().length
+      try {
+        for (const [reason, value, expected] of [
+          ['an Error reason', STOP, (e: unknown) => e === STOP],
+          ['a string reason', 'stop', abortError],
+          ['no reason', undefined, abortError]
+        ] as const) {
+          const before = arrived()
+          const controller = new AbortController()
+          const settled = Promise.resolve(call(controller.signal)).then(() => 'resolved', (e) => e)
+          await until(() => arrived() > before, `the ${method} of ${name} (${reason})`)
+          controller.abort(value)
+          const error = await within(settled, `${name} aborted with ${reason}`, 1000)
+          assert.ok(expected(error), `${name} aborted with ${reason} rejected with ${String(error)}`)
+        }
+      } finally {
+        heldGets?.open()
+        release()
+      }
+    })
+  }
+})

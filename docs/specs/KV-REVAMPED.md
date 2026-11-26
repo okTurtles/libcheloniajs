@@ -305,7 +305,7 @@ exists and its socket isn't open.
 any request for a `maxAttempts` that isn't a positive safe integer, a
 `heightWaitMs` that isn't finite and ≥ 0 (`null` = default for both),
 or `data === undefined` without `onconflict`. The caller's `signal`
-and `chelonia/reset` end it at any wait or backoff with
+and `chelonia/reset` end it at any request, wait or backoff with
 `signal.reason` if it is an `Error`, or else an `AbortError`.
 
 | Response | Behaviour |

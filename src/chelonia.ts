@@ -3260,7 +3260,7 @@ export default sbp('sbp/selectors/register', {
         const message = outputEncryptedOrUnencryptedMessage.call(this, {
           contractID, innerSigningKeyId, encryptionKeyId, signingKeyId, data, meta: key
         })
-        const response = await this.config.fetch(kvUrl(this, contractID, key), {
+        const response = await kvRequest(this, contractID, key, {
           headers: new Headers([
             ['authorization', buildShelterAuthorizationHeader.call(this, contractID)],
             ['if-match', ifMatch || '""']
@@ -3322,6 +3322,8 @@ export default sbp('sbp/selectors/register', {
       response = await fetchKv(this, contractID, key, signal)
       if (response.ok) {
         body = await response.json().catch((e: unknown) => {
+          // An aborted body errors with the abort reason as is too (see `kvRequest`)
+          if (signal.aborted) throw abortReason(signal)
           if (!(e instanceof SyntaxError)) throw e
           throw new ChelErrorUnexpected(
             `[chelonia/kv] ${label}: GET returned a body that isn't JSON`, { cause: e }
@@ -3445,8 +3447,18 @@ const responseEtag = (response: Response): string | null =>
 const kvUrl = (ctx: CheloniaContext, contractID: string, key: string) =>
   `${ctx.config.connectionURL}/kv/${encodeURIComponent(contractID)}/${encodeURIComponent(key)}`
 
+// `fetch` rejects with the abort reason as is, even one that isn't an `Error`
+const kvRequest = (
+  ctx: CheloniaContext,
+  contractID: string,
+  key: string,
+  init: { headers: Headers; method?: string; body?: string; signal: AbortSignal }
+): Promise<Response> => ctx.config.fetch(kvUrl(ctx, contractID, key), init).catch((e: unknown) => {
+  throw init.signal.aborted ? abortReason(init.signal) : e
+})
+
 const fetchKv = (ctx: CheloniaContext, contractID: string, key: string, signal: AbortSignal) =>
-  ctx.config.fetch(kvUrl(ctx, contractID, key), {
+  kvRequest(ctx, contractID, key, {
     headers: new Headers([['authorization', buildShelterAuthorizationHeader.call(ctx, contractID)]]),
     signal
   })

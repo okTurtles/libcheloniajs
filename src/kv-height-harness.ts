@@ -108,11 +108,18 @@ export const findAhead = (key: string, height: number): Promise<void> =>
 export const failedSyncGiveUps = (): number => logs.entries.filter(({ level, args }) =>
   level === 'warn' && /gave up: its sync failed/.test(String(args[0]))).length
 
-// Like `fetch`, a request rejects as soon as its signal aborts, while the server
-// carries on (a POST may still be stored)
+// Like Node's `fetch`, a request rejects with its signal's reason as is (even one
+// that isn't an Error) as soon as it aborts, while the server carries on (a POST
+// may still be stored)
 const route = (url: string, init?: FetchInit): Promise<Response> => {
   const answer = answerRequest(url, init)
-  return init?.signal ? raceAbort(answer, init.signal) : answer
+  const signal = init?.signal
+  if (!signal) return answer
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    answer.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
 }
 
 const answerRequest = async (url: string, init?: FetchInit): Promise<Response> => {

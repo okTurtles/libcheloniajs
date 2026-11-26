@@ -917,6 +917,32 @@ describe('chelonia/kv/get', () => {
       true
     ])
   })
+
+  it('rejects with an Error abort reason, else with an AbortError, while the body downloads', async () => {
+    const { contractID } = setupContract()
+    let abort = () => {}
+    // Like Node's `fetch`, the body errors with the signal's reason as is
+    stubFetch((_method, init) => new Response(new ReadableStream({
+      start (body) {
+        body.enqueue(new TextEncoder().encode('{"_signedData":'))
+        init!.signal!.addEventListener('abort', () => body.error(init!.signal!.reason))
+        setTimeout(abort, 10)
+      }
+    }), { status: 200, headers: { etag: 'etag-1' } }))
+
+    for (const [reason, value, expected] of [
+      ['an Error reason', STOP, (e: unknown) => e === STOP],
+      ['a string reason', 'stop', (e: unknown) => e instanceof Error && e.name === 'AbortError'],
+      ['no reason', undefined, (e: unknown) => e instanceof Error && e.name === 'AbortError']
+    ] as const) {
+      const controller = new AbortController()
+      abort = () => controller.abort(value)
+      const e = await within(sbp('chelonia/kv/get', contractID, 'settings', {
+        signal: controller.signal
+      }).catch((e: unknown) => e), `kv/get aborted with ${reason}`, 1000)
+      assert.ok(expected(e), `kv/get aborted with ${reason} rejected with ${String(e)}`)
+    }
+  })
 })
 
 describe('height stamps of detached messages', () => {
