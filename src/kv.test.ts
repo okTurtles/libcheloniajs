@@ -5799,6 +5799,56 @@ describe('KV slot API', () => {
       assert.strictEqual(settledOf(kept), undefined)
     })
 
+    it("gives an 'error' entry kept without lastError one on activation, then loads it", async () => {
+      defineSlot()
+      const [empty, held] = ['cid-kept-error-empty', 'cid-kept-error-held']
+      // The library never writes these; an app may restore them
+      persist(empty, { value: undefined, etag: 'e1', status: 'error', settled: false })
+      persist(held, { value: { x: 1 }, etag: 'e2', status: 'error', settled: false })
+      const { log, offs } = collectEvents()
+      for (const c of [empty, held]) await setupContract(c, TYPE)
+      await until(() => settledOf(empty) === 'non-init' && settledOf(held) === 'non-init', 'loads')
+      offs.forEach((off) => off())
+      const eventsOf = (c: string) => statusEvents(log).filter((e) => e.contractID === c)
+        .map((e) => [e.previousStatus, e.status, e.lastError])
+      for (const c of [empty, held]) {
+        const restored = {
+          name: 'Error', message: `[chelonia/kv] ${c}::${KEY}: restored as 'error' without lastError`
+        }
+        assert.deepStrictEqual(eventsOf(c), [
+          ['error', 'error', restored], ['error', 'loading', null], ['loading', 'non-init', null]
+        ], c)
+      }
+    })
+
+    it("outside production, a status patch that leaves 'error' without lastError throws", async () => {
+      defineSlot({ autoLoad: 'never' })
+      const c = 'cid-error-lost-lastError'
+      persist(c, {
+        value: undefined, etag: null, status: 'error', lastError: { name: 'Error', message: 'old' }
+      })
+      await setupContract(c, TYPE)
+      // As a library patch that dropped it would leave the entry
+      delete entryOf(c)!.lastError
+      const markAhead = (nodeEnv: string | undefined) => {
+        const saved = process.env.NODE_ENV
+        if (nodeEnv === undefined) delete process.env.NODE_ENV
+        else process.env.NODE_ENV = nodeEnv
+        try {
+          sbp('chelonia/kv/_onUnverifiableFrame', c, KEY, 5)
+        } finally {
+          if (saved === undefined) delete process.env.NODE_ENV
+          else process.env.NODE_ENV = saved
+        }
+      }
+      assert.throws(() => markAhead(undefined), {
+        message: `[chelonia/kv] 'error' status without lastError for ${c}::${KEY}`
+      })
+      assert.strictEqual(entryOf(c)?.heightAhead, undefined)
+      markAhead('production')
+      assert.deepStrictEqual(entryOf(c)?.heightAhead, { requiredHeight: 5 })
+    })
+
     it('re-validating a kept entry does not settle it', async () => {
       const c = 'cid-revalidated'
       await setupContract(c, TYPE)

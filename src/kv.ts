@@ -1197,16 +1197,16 @@ async function runSlotWrite<T> (
     return await withHeightRecovery(ctx, contractID, ({ heightWaitMs, recoveries, queue }) =>
       queue(() => body({ heightWaitMs, recoveries, signal })).catch((e: unknown) => {
         const cause = kvHeightAheadCause(e)
-        aheadAt = cause?.exact ? cause.requiredHeight : undefined
+        // Registering a reload's finding twice would keep a load started in
+        // between from dropping the wait once it verifies the key
+        aheadAt = cause?.exact && !reloadFindings.has(e as Error) ? cause.requiredHeight : undefined
         throw e
       }), { onHeightAhead, maxHeightRecoveries, signal: options.signal }, label)
   } catch (e) {
     const conflict = isKvConflict(e) ? kvConflictCause(e) : undefined
     const requiredHeight = aheadAt ??
       (conflict?.currentStatus === 'ahead' ? conflict.requiredHeight : undefined)
-    // Registering a reload's finding twice would keep a load started in between
-    // from dropping the wait once it verifies the key
-    if (typeof requiredHeight === 'number' && !reloadFindings.has(e as Error)) {
+    if (typeof requiredHeight === 'number') {
       registerHeightWait(ctx, contractID, slot, requiredHeight, KV_UPDATE_REASON.LOAD)
     }
     throw e
@@ -1919,12 +1919,20 @@ export default (sbp('sbp/selectors/register', {
         })
       } else if (!wasActive) {
         // A kept or persisted entry is unverified until this activation's
-        // first outcome; a `'loading'` left over from before is stale.
+        // first outcome; a `'loading'` left over from before is stale. An
+        // `'error'` restored without its `lastError` gets one.
+        const unexplained = existing.status === KV_LOAD_STATUS.ERROR && !existing.lastError
         patchEntry(this, contractID, slot, {
           settled: false,
           status: existing.status !== KV_LOAD_STATUS.LOADING
             ? undefined
-            : existing.value === undefined ? KV_LOAD_STATUS.NON_INIT : KV_LOAD_STATUS.LOADED
+            : existing.value === undefined ? KV_LOAD_STATUS.NON_INIT : KV_LOAD_STATUS.LOADED,
+          lastError: unexplained
+            ? {
+                name: 'Error',
+                message: `[chelonia/kv] ${contractID}::${slot.key}: restored as 'error' without lastError`
+              }
+            : undefined
         })
       }
       // Schedule a load. The actual fetch is serialised against

@@ -1051,6 +1051,34 @@ describe('Slot writes and contract heights', () => {
     assert.deepStrictEqual(slotState('names'), ['loaded', undefined, true])
   })
 
+  it('an update aborted while it recovers leaves the wait to the reload that found the value', async () => {
+    writeAsDeviceB('names', ['b'], AHEAD)
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    kvHeightTimings.waitMs = 60_000
+    syncs.fail = true
+    const synced = syncs.count
+    const controller = new AbortController()
+    const stopped = updateWith('names', { signal: controller.signal })
+    // Its reload found the value ahead and its sync failed: it waits for the height
+    await until(syncEnded(synced + 1), 'the failed recovery sync')
+    const before = gets('names')
+    const held = holdGets('names', 1)
+    const loading = within(sbp('chelonia/kv/sync', CONTRACT_ID, 'names', {
+      onHeightAhead: 'reject'
+    }), 'kv/sync')
+    await until(() => held.requests.length === 1, "kv/sync's GET")
+    controller.abort(STOP)
+    await assert.rejects(stopped, (e) => e === STOP)
+    setLocalHeight(AHEAD)
+    held.open()
+    await loading
+    await drainLanes()
+    // The load in flight verified the key, so nothing reloads it again
+    assert.strictEqual(gets('names') - before, 1, 'GETs of the key since kv/sync started')
+    assert.deepStrictEqual(slotState('names'), ['loaded', undefined, true])
+  })
+
   it('an abort while queued rejects at once; one after the write committed is ignored', async () => {
     const late = new AbortController()
     defineSlot({
