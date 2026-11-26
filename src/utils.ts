@@ -31,6 +31,7 @@ import { CONTRACT_IS_PENDING_KEY_REQUESTS } from './events.js'
 import { b64ToStr } from './functions.js'
 import type { SignedData } from './signedData.js'
 import { isSignedData } from './signedData.js'
+import { clampTimerDelay } from './timer-utils.js'
 import {
   ChelContractKey,
   ChelContractState,
@@ -1172,10 +1173,14 @@ export const raceAbort = <T>(promise: Promise<T>, signal: AbortSignal): Promise<
 }
 
 // Resolves after `ms` ms, or rejects with `abortReason(signal)` as soon as
-// `signal` aborts (and then clears the timer, which would keep Node.js alive)
+// `signal` aborts (and then clears the timer, which would keep Node.js alive).
+// A delay above the longest that timers support waits that longest delay
+// instead of firing at once.
 export const abortableDelay = (ms: number, signal: AbortSignal): Promise<void> => {
   let timer: ReturnType<typeof setTimeout> | undefined
-  const wait = new Promise<void>((resolve) => { timer = setTimeout(resolve, ms) })
+  const wait = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, clampTimerDelay(ms))
+  })
   return raceAbort(wait, signal).finally(() => clearTimeout(timer))
 }
 

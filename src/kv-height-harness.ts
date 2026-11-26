@@ -1,0 +1,373 @@
+// The real slot layer and `kv/set`/`kv/get` against a simulated server, for the
+// `kv-height*.test.ts` files (`installKvHarness()`
+// per `describe`). A pubsub client outlives `chelonia/_init`, so a file that
+// connects must connect in every test.
+import {
+  CURVE25519XSALSA20POLY1305, EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey
+} from '@chelonia/crypto'
+import sbp from '@sbp/sbp'
+import assert from 'node:assert'
+import { afterEach, beforeEach } from 'node:test'
+
+import './chelonia.js'
+import { encryptedOutgoingData } from './encryptedData.js'
+import { CONTRACTS_MODIFIED } from './events.js'
+import type { KV_NOOP } from './kv-constants.js'
+import {
+  NOTIFICATION_TYPE, PUBSUB_SUBSCRIPTION_SUCCEEDED, type PubSubClient
+} from './pubsub/index.js'
+import { signedOutgoingData } from './signedData.js'
+import {
+  captureConsole, makeKvServer, until, waitMicrotasks, within, type FetchInit, type KvServer
+} from './test-utils.js'
+import type {
+  ChelContractKey, ChelKvGetResult, ChelRootState, CheloniaConfig, JSONType,
+  KvMirrorEntry, KvSlotDefinition
+} from './types.js'
+import { raceAbort } from './utils.js'
+
+export const CONTRACT_ID = 'zKvHarnessContract'
+export const CONTRACT_TYPE = 'test/kv-harness'
+export const START_HEIGHT = 40
+
+export let server: KvServer
+export let logs: ReturnType<typeof captureConsole>
+export const keys = { cskId: '', cekId: '', sakId: '' }
+// `latestHEADinfo` requests seen, and how the next ones behave
+export const syncs = {
+  count: 0,
+  fail: false,
+  hold: undefined as Promise<void> | undefined
+}
+
+const teardowns: (() => void)[] = []
+// Set by `connectPubsub` for the current test only
+let pubsub: PubSubClient | undefined
+
+export const rootState = (): ChelRootState => sbp('chelonia/private/state')
+
+export const mirror = (key: string): KvMirrorEntry | undefined =>
+  rootState()._kv?.[CONTRACT_ID]?.[key]
+
+export { sleep } from './test-utils.js'
+
+// GET requests for `key` that reached the server, logged on arrival: held and
+// aborted ones count too
+export const gets = (key: string): number =>
+  server.log.filter((request) => request.method === 'GET' && request.key === key).length
+
+// The slot's value (any: the tests read the fields of the values they wrote)
+export const read = (key: string) => sbp('chelonia/kv/read', CONTRACT_ID, key)
+
+type Updater = (value: JSONType) => JSONType | typeof KV_NOOP
+
+// `chelonia/kv/update`'s options; an `updater` replaces the one given
+export type UpdateOptions = {
+  updater?: Updater; maxAttempts?: number | null; ifMatch?: string
+}
+
+export const update = (
+  key: string,
+  updater: Updater,
+  options: UpdateOptions = {}
+): Promise<JSONType | undefined> => within(
+  sbp('chelonia/kv/update', { contractID: CONTRACT_ID, key, updater, ...options }),
+  `update of ${key}`
+)
+
+// Like Node's `fetch`, a request rejects with its signal's reason as is (even one
+// that isn't an Error) as soon as it aborts, while the server carries on (a POST
+// may still be stored)
+const route = (url: string, init?: FetchInit): Promise<Response> => {
+  const answer = answerRequest(url, init)
+  const signal = init?.signal
+  if (!signal) return answer
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    answer.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
+const answerRequest = async (url: string, init?: FetchInit): Promise<Response> => {
+  init?.signal?.throwIfAborted()
+  const kvResponse = await server.handle(url, init)
+  if (kvResponse) return kvResponse
+  const { pathname } = new URL(url)
+  // Clock sync, which `chelonia/connect` starts
+  if (pathname === '/time') return new Response(new Date().toISOString())
+  if (pathname !== `/latestHEADinfo/${CONTRACT_ID}`) {
+    return new Response(null, { status: 404 })
+  }
+  syncs.count++
+  // A sync's replay and catch-up are this client's: none once it aborted
+  if (syncs.hold) await (init?.signal ? raceAbort(syncs.hold, init.signal) : syncs.hold)
+  const meta = rootState().contracts[CONTRACT_ID]
+  if (syncs.fail || !meta) return new Response(null, { status: 500 })
+  // The local HEAD: the sync finds nothing to fetch
+  return Response.json({ HEAD: meta.HEAD, height: meta.height })
+}
+
+// Syncs wait until the returned function is called
+export const holdSyncs = (): (() => void) => {
+  let release!: () => void
+  const hold = new Promise<void>((resolve) => { release = resolve })
+  syncs.hold = hold
+  const open = () => {
+    if (syncs.hold === hold) syncs.hold = undefined
+    release()
+  }
+  teardowns.push(open)
+  return open
+}
+
+// Blocks a lane of the contract until the returned function is called
+export const gateLane = (
+  lane: 'public' | 'internal' = 'public',
+  contractID = CONTRACT_ID
+): (() => void) => {
+  let open!: () => void
+  const gate = new Promise<void>((resolve) => { open = resolve })
+  sbp('chelonia/private/queueEvent', lane === 'public' ? `public:${contractID}` : contractID, () => gate)
+  teardowns.push(open)
+  return open
+}
+
+// GETs of `key` answer 500 until the returned function is called
+export const failGets = (key: string): (() => void) => {
+  server.failingGets.add(key)
+  return () => { server.failingGets.delete(key) }
+}
+
+// GETs of `key` (the next `count` of them) wait until `open()` or the test's end;
+// `requests` has the signal of each
+export const holdGets = (key: string, count = Infinity) => {
+  const requests: AbortSignal[] = []
+  let release!: () => void
+  const released = new Promise<void>((resolve) => { release = resolve })
+  const hook = (got: string, signal?: AbortSignal | null) => {
+    if (got !== key || requests.length >= count) return
+    requests.push(signal ?? new AbortController().signal)
+    return released
+  }
+  server.onGet = hook
+  const open = () => {
+    if (server.onGet === hook) server.onGet = undefined
+    release()
+  }
+  teardowns.push(open)
+  return { requests, open }
+}
+
+type CallFilter = (args: unknown[]) => unknown
+
+// The filters that `filterCalls` added, by selector. SBP filters can't be
+// removed, so one SBP filter per selector runs them, added when a test first
+// filters that selector.
+const callFilters = new Map<string, Set<CallFilter>>()
+
+const callFiltersOf = (selector: string): Set<CallFilter> => {
+  const known = callFilters.get(selector)
+  if (known) return known
+  const filters = new Set<CallFilter>()
+  callFilters.set(selector, filters)
+  sbp('sbp/filters/selector/add', selector, (_domain: string, _name: string, args: unknown[]) => {
+    let pass = true
+    for (const filter of [...filters]) if (filter(args) === false) pass = false
+    return pass
+  })
+  return filters
+}
+
+// Runs `filter` with the arguments of each call of `selector`, before the
+// call; `false` vetoes the call (`sbp` returns `undefined`). Until the
+// returned function is called or the test ends.
+export const filterCalls = (selector: string, filter: CallFilter): (() => void) => {
+  const filters = callFiltersOf(selector)
+  // Its own entry, even if the same `filter` is added twice
+  const entry: CallFilter = (args) => filter(args)
+  filters.add(entry)
+  const lift = () => { filters.delete(entry) }
+  teardowns.push(lift)
+  return lift
+}
+
+// Vetoes the work queued on lane `queueName` (`chelonia/private/queueEvent`)
+export const vetoQueue = (queueName: string): (() => void) =>
+  filterCalls('chelonia/private/queueEvent', ([queue]) => queue !== queueName)
+
+// Vetoes every call of `selector`
+export const vetoSelector = (selector: string): (() => void) =>
+  filterCalls(selector, () => false)
+
+// Starts `chelonia/reset` and holds it after its abort, while it waits for the lanes
+// of the contract (which needs an active slot). The returned `ends(release)` lets it
+// go on, checks that it ends before `release` (of what it waits for) runs, then runs it
+export const holdResetAfterAbort = async () => {
+  let open: (() => void) | undefined
+  filterCalls('chelonia/kv/_waitInFlight', () => { open ??= gateLane() })
+  const reset = sbp('chelonia/reset') as Promise<unknown>
+  await until(() => open, 'the reset to abort')
+  return async (release: () => void): Promise<void> => {
+    open!()
+    try {
+      await within(reset, 'the reset to end while the work it waits for is held', 1000)
+    } finally {
+      release()
+      await within(reset, 'the reset')
+    }
+  }
+}
+
+// The contract in local state at `height`, with keys for the slots' defaults
+// (`cek`, `csk`) and `#sak` for the server's authorization header
+export const setupContract = (height = START_HEIGHT): void => {
+  const authorizedKeys: Record<string, ChelContractKey> = {}
+  const secretKeys: Record<string, string> = {}
+  const add = (name: string, purpose: string, algorithm: string) => {
+    const key = keygen(algorithm)
+    const id = keyId(key)
+    authorizedKeys[id] = {
+      id,
+      name,
+      purpose: [purpose],
+      ringLevel: 0,
+      permissions: '*',
+      data: serializeKey(key, false),
+      _notBeforeHeight: 0
+    }
+    secretKeys[id] = serializeKey(key, true)
+    return id
+  }
+  keys.cskId = add('csk', 'sig', EDWARDS25519SHA512BATCH)
+  keys.cekId = add('cek', 'enc', CURVE25519XSALSA20POLY1305)
+  keys.sakId = add('#sak', 'sak', EDWARDS25519SHA512BATCH)
+  const state = rootState()
+  state.contracts[CONTRACT_ID] = { HEAD: 'head', height, previousKeyOp: '', type: CONTRACT_TYPE }
+  ;(state as unknown as Record<string, unknown>)[CONTRACT_ID] = {
+    _vm: { type: CONTRACT_TYPE, authorizedKeys }
+  }
+  state.secretKeys = { ...state.secretKeys, ...secretKeys }
+}
+
+export const defineSlot = (
+  definition: Omit<KvSlotDefinition, 'contractType'> & Partial<KvSlotDefinition>
+): void => {
+  sbp('chelonia/kv/defineSlot', { contractType: CONTRACT_TYPE, ...definition })
+}
+
+// Queued work can queue more, so drain a few rounds
+export const drainLanes = async (contractID = CONTRACT_ID): Promise<void> => {
+  for (let round = 0; round < 3; round++) {
+    await within(sbp('chelonia/queueInvocation', contractID, () => {}), `${contractID} lanes`)
+    await waitMicrotasks()
+  }
+}
+
+// Subscribes to the contract, so that its slots activate and load
+export const activate = async (): Promise<void> => {
+  await within(sbp('chelonia/private/in/sync', CONTRACT_ID), 'the activating sync')
+  await drainLanes()
+}
+
+// What `kv/set` would post for `data` stamped with `stamp`
+export const sealValue = (key: string, data: JSONType, stamp: unknown) => {
+  const payload = encryptedOutgoingData(CONTRACT_ID, keys.cekId, data)
+  return {
+    ...signedOutgoingData(CONTRACT_ID, keys.cskId, payload).serialize(key + String(stamp)),
+    height: stamp
+  }
+}
+
+// Another device stores `data` written at `height`; returns its etag
+export const writeAsDeviceB = (key: string, data: JSONType, height = server.height): string => {
+  server.height = Math.max(server.height, height)
+  return server.put(key, sealValue(key, data, String(height)))
+}
+
+// The stored value as a frame
+export const frameOf = (key: string): { body: string; cid: string } =>
+  ({ body: server.store.get(key)!.body, cid: server.etagOf(key) })
+
+// The stored value, decoded as this device would (needs the local height)
+export const serverValue = (key: string): JSONType | undefined => {
+  const stored = server.store.get(key)
+  if (!stored) return undefined
+  return (sbp('chelonia/parseEncryptedOrUnencryptedDetachedMessage', {
+    contractID: CONTRACT_ID, serializedData: JSON.parse(stored.body), meta: key
+  }) as ChelKvGetResult).data
+}
+
+// A pubsub client that never opens its socket; returns the frames its raw KV
+// handler (if `rawHandler`) gets
+export const connectPubsub = ({ rawHandler = false } = {}): unknown[] => {
+  const rawFrames: unknown[] = []
+  const client: PubSubClient = pubsub = sbp('chelonia/connect', rawHandler
+    ? { messageHandlers: { [NOTIFICATION_TYPE.KV]: (msg: unknown) => { rawFrames.push(msg) } } }
+    : {})
+  teardowns.push(() => {
+    if (pubsub === client) pubsub = undefined
+    client.destroy()
+    sbp('chelonia/private/stopClockSync')
+  })
+  return rawFrames
+}
+
+// Delivers a KV frame as the server would; by default the stored value
+export const deliverFrame = (
+  key: string,
+  { body = server.store.get(key)!.body, cid = server.etagOf(key) } = {}
+): void => {
+  assert.ok(pubsub, 'deliverFrame: call connectPubsub() in this test first')
+  pubsub.messageHandlers[NOTIFICATION_TYPE.KV].call(pubsub, {
+    type: NOTIFICATION_TYPE.KV, channelID: CONTRACT_ID, key, data: body, cid
+  })
+}
+
+// The server confirms the subscription to the contract, as after a reconnection
+export const subscriptionSucceeded = (): void => {
+  assert.ok(pubsub, 'subscriptionSucceeded: call connectPubsub() in this test first')
+  sbp('okTurtles.events/emit', PUBSUB_SUBSCRIPTION_SUCCEEDED, pubsub, { channelID: CONTRACT_ID })
+}
+
+const reconcile = (_ids: string[], change: { added: string[]; removed: string[] }) => {
+  sbp('chelonia/kv/_onContractsModified', change)
+}
+
+// Points Chelonia at the simulated server (again after a `chelonia/_init`)
+export const configure = (): Promise<unknown> => sbp('chelonia/configure', {
+  connectionURL: 'https://example.test',
+  connectionOptions: { manual: true },
+  fetch: route
+} as unknown as Partial<CheloniaConfig>)
+
+export const installKvHarness = (): void => {
+  const random = Math.random
+  beforeEach(async () => {
+    sbp('chelonia/_init')
+    server = makeKvServer(CONTRACT_ID, { height: START_HEIGHT })
+    Object.assign(syncs, { count: 0, fail: false, hold: undefined })
+    await configure()
+    setupContract()
+    // What `chelonia/connect` installs: slots activate when a contract is added
+    sbp('okTurtles.events/on', CONTRACTS_MODIFIED, reconcile)
+    // No random 0-1.5 s backoff before conflict retries
+    Math.random = () => 0
+    logs = captureConsole()
+  })
+
+  afterEach(async () => {
+    try {
+      const errors: unknown[] = []
+      for (const teardown of teardowns.splice(0)) {
+        try { teardown() } catch (e) { errors.push(e) }
+      }
+      await drainLanes()
+      if (errors.length) throw errors[0]
+    } finally {
+      sbp('okTurtles.events/off', CONTRACTS_MODIFIED, reconcile)
+      Math.random = random
+      logs.restore()
+    }
+  })
+}

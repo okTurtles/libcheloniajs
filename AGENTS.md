@@ -38,8 +38,8 @@ Dual ESM/CJS output with TypeScript declarations:
 
 `dist/` is build output and is not in git. `prepack` runs `npm run build`, so `npm pack` and
 `npm publish` always ship a fresh build. The `files` field in `package.json` limits the package
-to `dist/` without tests, `test-utils.*` and `test-harness.*`. An install from a git URL gets no
-`dist/`: npm runs only `prepare`, not `prepack`, for git dependencies.
+to `dist/` without tests, `test-utils.*`, `test-harness.*` and `kv-height-harness.*`. An install
+from a git URL gets no `dist/`: npm runs only `prepare`, not `prepack`, for git dependencies.
 
 ### Build Process (`buildHelper.ts`)
 
@@ -48,7 +48,7 @@ to `dist/` without tests, `test-utils.*` and `test-harness.*`. An install from a
 3. Runs `renameFiles.mjs` to rename `.js` → `.mjs`/`.cjs` and rewrite import paths within files
 4. Restores `package.json`
 
-**Note**: CJS build excludes test files and the test helpers `src/test-utils.ts` and `src/pubsub/test-harness.ts` via `tsconfig.cjs.json`.
+**Note**: CJS build excludes test files and the test helpers `src/test-utils.ts`, `src/kv-height-harness.ts` and `src/pubsub/test-harness.ts` via `tsconfig.cjs.json`.
 
 ## CI
 
@@ -122,6 +122,7 @@ src/
 ├── persistent-actions.ts # PersistentAction queue with retry
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
+├── kv-runtime.ts         # KV runtime maps: created by _init, replaced by reset (internal)
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time sync: performance.now()-driven, Date.now() jumps (sleep) trigger correction + resync
 ├── timer-utils.ts        # timerDelay()/unrefTimer(): timers that can be disabled, clamped, and don't keep Node alive
@@ -392,13 +393,28 @@ no WebSocket server in the repo; the file's header comment lists what it fakes).
 and relay test helpers go there too. Examples: `src/pubsub/recovery.test.ts`,
 `src/chelonia-publish-receipt.test.ts`.
 
-Generic test helpers (e.g. `waitMicrotasks`, `until`, `within`, `captureConsole`) live in
-`src/test-utils.ts`, a plain module that registers no selectors; `test-harness.ts` re-exports
-`captureConsole`. A test must fail rather than hang when the behaviour it checks regresses:
-poll with `until(cond, label)` and bound a promise that might never settle with
+Generic test helpers (e.g. `waitMicrotasks`, `until`, `within`, `isPending`, `sleep`,
+`captureConsole`) live in `src/test-utils.ts`, a plain module that registers no selectors;
+both harnesses re-export `sleep`, and `test-harness.ts` also `captureConsole`. A test must
+fail rather than hang when the behaviour it checks
+regresses: poll with `until(cond, label)` and bound a promise that might never settle with
 `within(promise, label)`. `until` throws a labelled timeout error (5 s by default); prefer
 the harness's `waitFor(cond)` when the test should inspect a timeout rather than fail on it:
 it resolves with the truthy value of `cond()`, or with `undefined` after 2 s by default.
+
+`makeKvServer` in `src/test-utils.ts` simulates the server's KV store (`if-match` and height
+checks, in `kvPostStatus`, which the fake relay uses too). `src/kv-height-harness.ts` (imports
+`chelonia.ts`, excluded from the CJS build) runs the real KV slot layer against it for the
+`kv-height*.test.ts` files, and holds the helpers they share (`gets`, `read`, `update`,
+`holdResetAfterAbort`, …). Its `vetoQueue`, `vetoSelector` and `filterCalls` filter SBP calls
+until the test ends. Use them, not a module-level `sbp/filters/selector/add` driven by a
+variable: SBP filters can't be removed, and a test that fails or times out before it resets the
+variable leaves the filter armed for the rest of the file. Test files may import `test-utils.ts`,
+`pubsub/test-harness.ts` and `kv-height-harness.ts`, never each other.
+
+`npm test` passes `--test-timeout=60000`. On Node 22, which CI uses, that bounds a whole
+test *file* (newer Node lines bound each test), so keep each file under about 25 s when run
+alone on Node 22, and split one that grows past that.
 
 ## Common Gotchas
 

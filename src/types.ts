@@ -484,6 +484,8 @@ export type CheloniaContext = {
   config: CheloniaConfig;
   _instance: object;
   abortController: AbortController;
+  // `chelonia/reset` calls between their abort and the end of the waits after it
+  resetsAfterAbort: number;
   state: {
     contracts: Record<string, { type: string; HEAD: string }>;
     pending: string[];

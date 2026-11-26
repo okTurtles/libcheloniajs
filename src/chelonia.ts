@@ -65,6 +65,7 @@ import {
   clearReprocessDebounceAll, reconcilePubsub, syncIfBehind, type PublishOptions
 } from './internals.js'
 import './kv.js'
+import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import {
   isSignedData,
   type RawSignedData,
@@ -377,6 +378,8 @@ export default sbp('sbp/selectors/register', {
     // Used in publishEvent to cancel sending events after reset (logout)
     this._instance = Object.create(null)
     this.abortController = new AbortController()
+    // A reset still in its waits after its abort counts across this call
+    this.resetsAfterAbort ??= 0
     this.state = {
       contracts: {}, // contractIDs => { type, HEAD } (contracts we've subscribed to)
       pending: [] // prevents processing unexpected data from a malicious server
@@ -448,23 +451,7 @@ export default sbp('sbp/selectors/register', {
     // those rotated keys as foreign keys.
     this.subscriptionSet = new Set()
     // KV slot registry — see KV-REVAMPED.md §11.2.
-    // `kvSlots` and `defContractKvByManifest` survive `chelonia/reset`
-    // because slot definitions are application code.
-    this.kvSlots = new Map()
-    this.kvSlotsByContractID = new Map()
-    this.kvActiveFilters = new Map()
-    this.kvFilterDirty = new Set()
-    this.kvFilterRetry = new Set()
-    this.kvFlushInFlight = false
-    this.kvLocalEchoCIDs = new Map()
-    this.kvReconnectRefresh = new Set()
-    this.kvPendingWrites = new Map()
-    this.kvPendingLoads = new Map()
-    this.kvOnUpdateActive = new Map()
-    // Name for `defContractKvByManifest` doesn't start with
-    // `kv`, like the preceding keys, for consistency with
-    // `defContractManifest`.
-    this.defContractKvByManifest = new Map()
+    initKvRuntime(this)
     // pending includes contracts that are scheduled for syncing or in the
     // process of syncing for the first time. After sync completes for the
     // first time, they are removed from pending and added to subscriptionSet
@@ -781,10 +768,18 @@ export default sbp('sbp/selectors/register', {
     // A request that never settles (e.g. a queued KV write on a dead link)
     // would hold up the waits below for good
     const { abortController } = this
+    // Each time the timer fires, it also aborts the controller in place: another
+    // reset or `chelonia/_init` may have replaced this one, also after a first
+    // firing, and the queues may hold work that runs on the new one
+    let timedOut: AbortController | undefined
     const drainTimeout = timerDelay(this.config.resetDrainTimeout)
     const drainTimer = drainTimeout === undefined
       ? undefined
-      : unrefTimer(setTimeout(() => abortController.abort(), drainTimeout))
+      : unrefTimer(setInterval(() => {
+        abortController.abort()
+        timedOut = this.abortController
+        timedOut.abort()
+      }, drainTimeout))
     // The drain is best effort, like the timer above. An SBP filter can veto
     // a contract's queue, and waiting on it then rejects. Stopping the reset
     // would keep the state and the secret keys in memory, so log the failure
@@ -803,6 +798,19 @@ export default sbp('sbp/selectors/register', {
         }
       })
     }
+    // The controller this reset aborts after its drain
+    let ended: AbortController | undefined
+    // Whether this reset is in the waits that follow its abort. The last reset
+    // to leave them puts a live controller in place: work started on one before
+    // could hold the waits of the others.
+    let waiting = false
+    const leaveWaits = () => {
+      if (!waiting) return
+      waiting = false
+      if (--this.resetsAfterAbort === 0 && this.abortController.signal.aborted) {
+        this.abortController = new AbortController()
+      }
+    }
     try {
       // wait for any pending sync operations to finish before saving
       Object.keys(this.postSyncOperations).forEach((cID) => {
@@ -819,50 +827,39 @@ export default sbp('sbp/selectors/register', {
       await drain('chelonia/contract/wait')
       // Not only in `finally`: the timer bounds the drain and must not abort
       // anything later (e.g. if `chelonia/_init` replaced the controller)
-      clearTimeout(drainTimer)
+      clearInterval(drainTimer)
       // The waits above drained the queued KV writes (`kv/update`, `kv/clear`,
       // `kv/queuedSet`). Before `postCleanupFn` and the teardown, abort what runs
-      // outside those queues (e.g. a raw `kv/set`) and drain what is still queued
-      this.abortController.abort()
-      this.abortController = new AbortController()
+      // outside those queues (e.g. a raw `kv/set`) and drain what is still queued.
+      ended = this.abortController
+      ended.abort()
+      waiting = true
+      this.resetsAfterAbort++
       try {
         await sbp('chelonia/kv/_waitInFlight')
       } catch (e) {
         logDrainError('chelonia/kv/_waitInFlight', e)
       }
       await drain('chelonia/contract/wait')
+      // Only now: work that starts during the waits above must get the aborted
+      // signal, or it would run on a fresh one that nothing aborts
+      leaveWaits()
       const result = await postCleanupFn?.()
       // The following are all synchronous operations
       const rootState = sbp(this.config.stateSelector)
-      // Cancel all outgoing messages by replacing this._instance
-      this._instance = Object.create(null)
-      // Remove all contracts, including all contracts from pending
-      reactiveClearObject(rootState, this.config.reactiveDel)
-      this.config.reactiveSet(rootState, 'contracts', Object.create(null))
-      this.config.reactiveSet(rootState, 'secretKeys', Object.create(null))
-      // Re-seed the KV mirror — `reactiveClearObject` above stripped it
-      // along with everything else. Slot definitions (`kvSlots`) and the
-      // per-manifest cache (`defContractKvByManifest`) survive reset
-      // because they are code-level state; the five per-subscription maps
-      // are cleared alongside `subscriptionSet` below. In-flight KV writes
-      // were already drained via `chelonia/kv/_waitInFlight` above, so
-      // clearing `kvLocalEchoCIDs` / `kvPendingWrites` here cannot strand a
-      // continuation mid-write.
-      this.config.reactiveSet(rootState, '_kv', Object.create(null))
-      this.kvSlotsByContractID.clear()
-      this.kvActiveFilters.clear()
-      this.kvFilterDirty.clear()
-      this.kvFilterRetry.clear()
-      if (this.kvFilterRetryTimer != null) {
-        clearTimeout(this.kvFilterRetryTimer)
-        this.kvFilterRetryTimer = undefined
+      try {
+        // Cancel all outgoing messages by replacing this._instance
+        this._instance = Object.create(null)
+        // Remove all contracts, including all contracts from pending
+        reactiveClearObject(rootState, this.config.reactiveDel)
+        this.config.reactiveSet(rootState, 'contracts', Object.create(null))
+        this.config.reactiveSet(rootState, 'secretKeys', Object.create(null))
+        this.config.reactiveSet(rootState, '_kv', Object.create(null))
+      } finally {
+        // KV writes were drained above. Start a fresh KV session even if the
+        // teardown throws, so nothing from this one leaks into the next.
+        resetKvRuntime(this)
       }
-      this.kvFlushInFlight = false
-      this.kvLocalEchoCIDs.clear()
-      this.kvReconnectRefresh.clear()
-      this.kvPendingWrites.clear()
-      this.kvPendingLoads.clear()
-      this.kvOnUpdateActive.clear()
       clearObject(this.ephemeralReferenceCount)
       clearObject(this.contractTypesBeforeResync)
       this.pending.splice(0)
@@ -893,8 +890,15 @@ export default sbp('sbp/selectors/register', {
       }
       return result
     } finally {
-      clearTimeout(drainTimer)
-      if (this.abortController === abortController && abortController.signal.aborted) {
+      leaveWaits()
+      clearInterval(drainTimer)
+      // Leave no controller this reset aborted in place, unless another reset is
+      // still in its waits: the last one to leave them replaces it
+      const current = this.abortController
+      if (
+        this.resetsAfterAbort === 0 && current.signal.aborted &&
+        [abortController, timedOut, ended].includes(current)
+      ) {
         this.abortController = new AbortController()
       }
       // Stop first: an overlapping reset may have restarted it already

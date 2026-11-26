@@ -386,4 +386,20 @@ describe('abortReason, raceAbort and abortableDelay', () => {
     await assert.rejects(wait, { name: 'AbortError' })
     assert.ok(clear.mock.calls.some(({ arguments: [id] }) => id === timer), 'timer not cleared')
   })
+
+  // Timers fire at once for delays of 2^31 ms or more
+  it("abortableDelay doesn't resolve at once for a delay of 2^31 ms or more", async (t) => {
+    for (const ms of [2 ** 31, 2 ** 40, Infinity]) {
+      const set = t.mock.method(globalThis, 'setTimeout')
+      const controller = new AbortController()
+      let resolved = false
+      const wait = utils.abortableDelay(ms, controller.signal).then(() => { resolved = true })
+      assert.deepStrictEqual(set.mock.calls.map(({ arguments: [, delay] }) => delay), [2 ** 31 - 1])
+      set.mock.restore()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      assert.strictEqual(resolved, false, `resolved for ${ms} ms`)
+      controller.abort()
+      await assert.rejects(wait, { name: 'AbortError' })
+    }
+  })
 })
