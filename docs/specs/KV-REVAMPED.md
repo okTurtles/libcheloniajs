@@ -284,7 +284,7 @@ pubsub frame) is classified before it is decoded:
 
 | Status | Condition | Read as |
 |---|---|---|
-| `absent` | `404`, or a `412` without a body (`kv/set`'s fetch-first GET also takes a `410`, which `kv/get` rejects) | no value |
+| `absent` | `404`, or a `412` without a body whose recovery GET (if any, below) finds no value (`kv/set`'s GETs also take a `410`, which `kv/get` rejects) | no value |
 | `present` | stamp ≤ local height | the decoded value |
 | `ahead` | stamp > local height, or the contract isn't loaded | `ChelErrorKvHeightAhead` (`exact: true`, `requiredHeight` = stamp) |
 | `malformed` | stamp not canonical | `ChelErrorKvHeightMalformed`; never verifiable, only an overwrite fixes it |
@@ -319,7 +319,10 @@ A value that can't be read (not JSON) ends the call at once with
 `ChelErrorKvMaxAttempts`, whatever the attempts left. The fetch-first
 GET (`data === undefined`) is read like a non-final `412`; so is the
 one GET per call that stands in for a `412` with neither body nor etag
-(with `onconflict`). `onconflict` receives `currentStatus`,
+(with `onconflict`). If that recovery GET fails (any status but 2xx,
+`404` or `410`), a non-final `412` rejects with
+`ChelErrorUnexpectedHttpResponseCode` (`cause`: the GET's status)
+without calling `onconflict`. `onconflict` receives `currentStatus`,
 `currentValue` (only when `present`), `requiredHeight` (only when
 `ahead`) and a lazy `currentData` that throws for `ahead` /
 `malformed`. With `allowUnverifiedConflict: true` (for blind writers)
@@ -328,8 +331,8 @@ no passive height wait runs (the backoff and `409` waits still do),
 out of attempts on one is a conflict. A conflict's `.cause`
 (`KvConflictCause`) describes the last `412` only: `{ currentStatus?,
 currentData? (present / absent), requiredHeight? (ahead), etag }`,
-`currentStatus` left out if the body can't be read, or a `present`
-value's decode fails. Raw `kv/set`
+only `etag` if the body can't be read, the recovery GET failed, or a
+`present` value's decode fails. Raw `kv/set`
 throws the internal `ChelErrorKvMaxAttempts`; the slot writes rethrow
 it as `ChelErrorKvConflict` (`isKvConflict` matches both). `clear` is a
 blind write (`allowUnverifiedConflict`): it never waits for the value

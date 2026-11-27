@@ -3149,7 +3149,7 @@ export default sbp('sbp/selectors/register', {
         if (recovered.ok) return readServerValue(recovered, { wait })
         // A 404 or 410 just means the key is absent
         if (recovered.status !== 404 && recovered.status !== 410) {
-          console.warn(`[chelonia/kv] ${label} recovery GET returned ${recovered.status}`)
+          throw unexpectedKvResponse(label, 'GET', recovered)
         }
       }
       if (!text) return { status: 'absent', etag, httpStatus: response.status }

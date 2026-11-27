@@ -107,6 +107,12 @@ running sync first), and rejects with `ChelErrorKvHeightAhead`
 wait while the pubsub socket is down), or after 5 re-signs. `409`s
 never reach `onconflict`.
 
+For a `412` with neither body nor etag, `kv/set` GETs the value once
+per call. If that GET fails with a status other than `404` or `410`,
+the write rejects with `ChelErrorUnexpectedHttpResponseCode` (`cause`:
+the status) without calling `onconflict`, or, on the last attempt,
+with a conflict error whose cause has only `etag`.
+
 Pubsub frames that are ahead are dropped with a warning; neither raw KV
 pubsub handlers (`messageHandlers[NOTIFICATION_TYPE.KV]` of
 `chelonia/connect`) nor slots receive them, and neither receives a

@@ -306,6 +306,25 @@ describe('chelonia/kv/set', () => {
     assert.deepStrictEqual(calls, ['POST', 'GET'])
   })
 
+  it('rejects with the abort reason when aborted while the final recovery GET fails', async () => {
+    const { contractID, signingKeyId } = setupContract()
+    const controller = new AbortController()
+    const reason = new Error('stopped')
+    const calls = stubFetch((method) => {
+      if (method === 'POST') return conflict()
+      controller.abort(reason)
+      return new Response('', { status: 500 })
+    })
+
+    await assert.rejects(
+      within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+        signingKeyId, maxAttempts: 1, onconflict: merge, signal: controller.signal
+      }), 'kv/set'),
+      (e: unknown) => e === reason
+    )
+    assert.deepStrictEqual(calls, ['POST', 'GET'])
+  })
+
   for (const [label, abort, expected] of [
     ['the caller aborts', (c: AbortController) => c.abort(STOP), (e: unknown) => e === STOP],
     ['Chelonia resets', () => sbp('chelonia/reset'),
@@ -353,8 +372,8 @@ describe('chelonia/kv/set', () => {
     }
   }
 
-  // A 404 or 410 just means the key is absent; another status is worth a warning
-  for (const [status, warnings] of [[404, 0], [410, 0], [500, 1]] as const) {
+  // A 404 or 410 just means the key is absent
+  for (const status of [404, 410]) {
     it(`bounds body-less conflict recovery GETs to one per set call (GET ${status})`, async () => {
       const { contractID, signingKeyId } = setupContract()
       const calls = stubFetch((method) =>
@@ -371,11 +390,44 @@ describe('chelonia/kv/set', () => {
         logs.restore()
       }
       assert.deepStrictEqual(calls, ['POST', 'GET', 'POST', 'POST'])
-      assert.deepStrictEqual(logs.entries.map(({ text }) => text), Array(warnings).fill(
-        `[chelonia/kv] set: ${contractID}::settings recovery GET returned ${status}`
-      ))
+      assert.deepStrictEqual(logs.entries, [])
     })
   }
+
+  const setWithFailedRecoveryGet = async (maxAttempts: number) => {
+    const { contractID, signingKeyId } = setupContract()
+    const calls = stubFetch((method) => new Response('', method === 'POST'
+      ? { status: 412 }
+      : { status: 500, statusText: 'Internal Server Error' }))
+    let onconflictCalls = 0
+    const logs = captureConsole(['warn'])
+    try {
+      const e = await within(sbp('chelonia/kv/set', contractID, 'settings', { x: 1 }, {
+        signingKeyId,
+        maxAttempts,
+        onconflict: (args: ConflictArgs) => { onconflictCalls++; return merge(args) }
+      }).catch((e: unknown) => e), 'kv/set')
+      return { contractID, e, effects: { onconflictCalls, calls, warnings: logs.entries } }
+    } finally {
+      logs.restore()
+    }
+  }
+
+  it("rejects with the HTTP error of a body-less 412's failed recovery GET", async () => {
+    const { contractID, e, effects } = await setWithFailedRecoveryGet(3)
+    assert.ok(e instanceof ChelErrorUnexpectedHttpResponseCode, String(e))
+    assert.deepStrictEqual([e.message, e.cause], [
+      `[chelonia/kv] set: ${contractID}::settings: GET failed with 500: Internal Server Error`, 500
+    ])
+    assert.deepStrictEqual(effects, { onconflictCalls: 0, calls: ['POST', 'GET'], warnings: [] })
+  })
+
+  it("doesn't call the value absent when the final 412's recovery GET fails", async () => {
+    const { e, effects } = await setWithFailedRecoveryGet(1)
+    assert.ok(e instanceof ChelErrorKvMaxAttempts && isKvConflict(e), String(e))
+    assert.deepStrictEqual(e.cause, { etag: null })
+    assert.deepStrictEqual(effects, { onconflictCalls: 0, calls: ['POST', 'GET'], warnings: [] })
+  })
 
   it('falls back when AbortSignal.any is unavailable and propagates aborts', async () => {
     const { contractID, signingKeyId } = setupContract()
