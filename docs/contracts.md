@@ -786,10 +786,15 @@ aborts in-flight messages, clears `rootState.contracts` and
 - The two-argument form is `(newState, postCleanupFn)`.
 - The return value is whatever `postCleanupFn` returned (or
   `undefined`).
+- Work started after the reset's abort and before `postCleanupFn` runs
+  rejects with an `AbortError`. A contract sync is then skipped before
+  it starts, or fails at its request and goes to `syncContractError`;
+  either way it is logged.
 - `postCleanupFn` runs once the requests the reset aborted are allowed
   again. If another `chelonia/reset` still waits after its own abort,
   they stay aborted until it is done waiting too: a request started in
-  `postCleanupFn` then rejects with an `AbortError`.
+  `postCleanupFn`, or while the reset clears the state, then rejects
+  with an `AbortError`.
 - The drain is best effort. If an SBP filter vetoes a contract's queue,
   `reset` logs it (`[chelonia/reset] Draining ... failed; resetting
   anyway`), still waits for the other contracts' queues, and then clears
