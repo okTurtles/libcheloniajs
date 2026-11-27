@@ -84,7 +84,7 @@ wrapped in your own errors.
 |---|---|---|
 | `ChelErrorKvHeightAhead` | `isKvHeightAhead` | The value (or the server) needs a contract height not reached locally; syncing the contract helps. `kvHeightAheadCause(e)` gives its `KvHeightAheadCause` (`requiredHeight`, `exact`, `localHeight`, `etag`, `httpStatus`). |
 | `ChelErrorKvHeightMalformed` | `isKvHeightMalformed` | The value's height stamp is missing or invalid: it can never be verified, and syncing doesn't help. Overwrite it (`chelonia/kv/clear`). |
-| `ChelErrorKvConflict` | `isKvConflict` | A write ran out of attempts on `412` conflicts, got a `412` without `onconflict`, or got a conflict value it can't read. `.cause` (`KvConflictCause`) describes the server value of the last `412`. Also matches the internal error raw `chelonia/kv/set` throws. |
+| `ChelErrorKvConflict` | `isKvConflict` | A write ran out of attempts on `412` conflicts, got a `412` without `onconflict`, or got a conflict value it can't read. `.cause` (`KvConflictCause`) describes the server value of the last `412`, or of the fetch-first GET when `data` was omitted and that GET's body was unreadable. Also matches the internal error raw `chelonia/kv/set` throws. |
 
 Both height errors extend `ChelErrorInvalidMessageHeight` (`instanceof`
 still holds), but have their own names.
