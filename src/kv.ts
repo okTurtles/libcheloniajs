@@ -2621,9 +2621,8 @@ export default (sbp('sbp/selectors/register', {
         } else if (slot.schema) {
           try {
             // Clone the parsed result before it reaches the reducer: a
-            // mutating reducer must not corrupt the server's cached
-            // decode (currentValue.data in kv/set), which is re-read for
-            // lastRecoveredValue and the conflict-exhaustion error cause.
+            // mutating reducer must not change the decode that `kv/set`
+            // caches on `currentValue`.
             // Mirrors the first-attempt seed clone (step 2).
             basis = cloneDeep(
               parseSyncSlotValue(slot, currentData, `update onconflict currentData ${contractID}::${key}`)
