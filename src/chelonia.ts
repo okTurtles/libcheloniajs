@@ -74,7 +74,8 @@ import {
   readHeightStamp,
   sessionSignal,
   waitForHeight,
-  waitForHeightAfterSync
+  waitForHeightAfterSync,
+  WEBSOCKET_OPEN
 } from './kv-height.js'
 import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import {
@@ -1443,7 +1444,7 @@ export default sbp('sbp/selectors/register', {
         // `open` emits PUBSUB_RECONNECTION_SUCCEEDED before it re-sends the
         // pending SUBs, so wait for that to happen
         setTimeout(() => {
-          if (client === this.pubsub && client.socket?.readyState === WebSocket.OPEN) {
+          if (client === this.pubsub && client.socket?.readyState === WEBSOCKET_OPEN) {
             reconcilePubsub.call(this, trigger)
           }
         }, 0)
@@ -1465,7 +1466,7 @@ export default sbp('sbp/selectors/register', {
           }
           return
         }
-        if (client.socket?.readyState === WebSocket.OPEN) {
+        if (client.socket?.readyState === WEBSOCKET_OPEN) {
           reconcilePubsub.call(this, 'periodic')
         }
       }, reconcileInterval)

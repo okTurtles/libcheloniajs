@@ -15,7 +15,7 @@ import { abortReason } from './utils.js'
 
 const CANONICAL_HEIGHT = /^(?:0|[1-9][0-9]*)$/
 
-const WEBSOCKET_OPEN = 1
+export const WEBSOCKET_OPEN = 1
 
 // Mutable so that tests can shorten them
 export const kvHeightTimings = {
