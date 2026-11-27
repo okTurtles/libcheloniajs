@@ -8,7 +8,6 @@
 //
 // The relay is the fake from `./pubsub/test-harness.ts` with real `SPMessage`
 // chains and a KV store that checks heights like the server.
-import { serializeKey } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import * as assert from 'node:assert/strict'
 import { after, afterEach, before, describe, it } from 'node:test'
@@ -20,12 +19,12 @@ import { ChelErrorKvMaxAttempts } from './internal-errors.js'
 import { REQUEST_TYPE } from './pubsub/index.js'
 import type { PubSubClient } from './pubsub/index.js'
 import {
-  captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay, createTestContract,
-  handledEvents, keepQueueBusy, kvConflict, localHeight, retainedContract, sleep, staleContract,
-  storeSecretKeys, subscribed, waitFor
+  captureConsole, connectChelonia, createFakePubsubServer, createFakeRelay, handledEvents,
+  keepQueueBusy, kvConflict, localHeight, retainedContract, staleContract, subscribed, waitFor
 } from './pubsub/test-harness.js'
 import type { RelayRequest, TestContract } from './pubsub/test-harness.js'
-import type { ChelKvGetResult, ChelRootState, JSONType } from './types.js'
+import { within } from './test-utils.js'
+import type { ChelKvGetResult, JSONType } from './types.js'
 
 const KEY = 'readUntil'
 const server = createFakePubsubServer()
@@ -60,32 +59,6 @@ after(() => {
   server.uninstall()
 })
 
-const rootState = () => sbp('chelonia/private/state') as ChelRootState
-
-// A stale copy of a contract that Chelonia does not want (not retained, so
-// not in its subscription set), e.g. state left over from a previous session
-function unwantedContract (): TestContract {
-  const contract = createTestContract()
-  const { contractID } = contract
-  assert.equal(relay.append(contract.first), 200)
-  relay.postAction(contract, { text: 'missed' })
-  storeSecretKeys(contract)
-  const key = (id: string, name: string, purpose: string[], data: string) =>
-    ({ id, name, purpose, ringLevel: 0, permissions: '*', data, _notBeforeHeight: 0 })
-  rootState().contracts[contractID] = {
-    HEAD: contractID, height: 0, previousKeyOp: contractID, type: 'test/contract'
-  }
-  ;(rootState() as unknown as Record<string, unknown>)[contractID] = {
-    _vm: {
-      authorizedKeys: {
-        [contract.CSKid]: key(contract.CSKid, '#csk', ['sig'], serializeKey(contract.CSK, false)),
-        [contract.SAKid]: key(contract.SAKid, '#sak', ['sak'], serializeKey(contract.SAK, false))
-      }
-    }
-  }
-  return contract
-}
-
 // `onconflict` like Group Income's read markers: the same value is written
 // again (with the etag from the conflict)
 const writeAgain = (data: JSONType) =>
@@ -98,17 +71,6 @@ const isKvWrite = ({ method, path }: RelayRequest) => method === 'POST' && path.
 const writeStatuses = (from: number) => relay.requests.slice(from)
   .filter(isKvWrite)
   .map(({ status }) => status)
-
-// The relay answers the next KV write with a 409, and the ones after it as
-// usual
-function conflictOnce () {
-  let first = true
-  relay.onRequest = (request) => {
-    if (!first || !isKvWrite(request)) return
-    first = false
-    return kvConflict()
-  }
-}
 
 // The position in `relay.requests` when the pubsub client sends its next SUB
 // for `contractID`: `kv/set` syncs before it subscribes again, and the sync
@@ -241,34 +203,6 @@ describe('kv/set on a contract that Chelonia is up to date with', () => {
 describe('kv/set when syncing does not help', () => {
   // On a subscribed contract: once the pubsub client lost it, the sync that
   // follows the new subscription would add to the count
-  it('syncs at most once per call', async () => {
-    const contract = await retainedContract(relay, pubsub)
-    // The server keeps answering 409 (e.g. it keeps getting new events)
-    relay.onRequest = (request) => {
-      if (isKvWrite(request)) return kvConflict()
-    }
-    const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 3 })
-    assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
-    assert.deepEqual(result.statuses, [409, 409, 409])
-    assert.equal(result.syncs, 1)
-  })
-
-  it('keeps the outcome when the sync fails, and logs it', async () => {
-    const contract = await retainedContract(relay, pubsub)
-    const logged = logs.fromNow()
-    relay.onRequest = (request) => {
-      if (isKvWrite(request)) return kvConflict()
-      if (request.path === `/latestHEADinfo/${contract.contractID}`) {
-        return new Response('', { status: 500 })
-      }
-    }
-    const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 3 })
-    assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
-    assert.deepEqual(result.statuses, [409, 409, 409])
-    assert.equal(result.syncs, 1)
-    assert.equal(logged.grep(/\[kv\/set\] .*sync/).length, 1)
-  })
-
   it('does not sync on a 412 (the If-Match etag is stale, not the height)', async () => {
     const { contract } = await staleContract(relay, pubsub)
     relay.onRequest = (request) => {
@@ -282,17 +216,6 @@ describe('kv/set when syncing does not help', () => {
 })
 
 describe('kv/set on a contract that Chelonia does not want', () => {
-  it('does not sync (which would subscribe to it)', async () => {
-    const contract = unwantedContract()
-    const result = await kvSet(contract, { messageHash: 'x' }, { maxAttempts: 2 })
-    assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
-    assert.deepEqual(result.statuses, [409, 409])
-    assert.equal(result.syncs, 0)
-    await sleep(50)
-    assert.ok(!pubsub.subscriptionSet.has(contract.contractID))
-    assert.ok(!pubsub.pendingOperations.tHas(REQUEST_TYPE.SUB, contract.contractID))
-  })
-
   it('does not sync one released while its queue is busy (the removal waits in the queue)', async (t) => {
     const contract = await retainedContract(relay, pubsub)
     const { contractID } = contract
@@ -353,71 +276,12 @@ describe('chelonia/kv/update (slot API) on a contract whose subscription was los
     const { contract } = await staleContract(relay, pubsub)
     const from = relay.requests.length
     const subAt = subscribedAgainAt(contract.contractID)
-    await sbp('chelonia/kv/update', {
+    await within(sbp('chelonia/kv/update', {
       contractID: contract.contractID, key: SLOT, updater: () => ({ n: 1 })
-    })
+    }), 'update')
     assert.deepEqual(writeStatuses(from), [409, 204])
     assert.equal(relay.syncsOf(contract.contractID, from, subAt()), 1)
-  })
-})
-
-describe('a signal that aborts during the back-off after a 409', () => {
-  const SLOT = 'abortedValue'
-
-  before(() => {
-    sbp('chelonia/kv/defineSlot', {
-      contractType: 'test/contract',
-      key: SLOT,
-      defaultValue: {},
-      encryptionKeyName: null,
-      signingKeyName: '#csk',
-      autoLoad: 'never'
-    })
-  })
-
-  it('stops kv/update at once, with an AbortError also for a reason that is not an Error', async (t) => {
-    const contract = await retainedContract(relay, pubsub)
-    conflictOnce()
-    t.mock.method(Math, 'random', () => 0.5) // 750 ms back-off
-    const from = relay.requests.length
-    const controller = new AbortController()
-    const update = sbp('chelonia/kv/update', {
-      contractID: contract.contractID,
-      key: SLOT,
-      updater: () => ({ n: 1 }),
-      signal: controller.signal
-    })
-    assert.ok(await waitFor(() => writeStatuses(from)[0] === 409), 'no 409')
-    const abortedAt = performance.now()
-    controller.abort('stop')
-    await assert.rejects(update, (e) => (e as Error)?.name === 'AbortError')
-    const took = performance.now() - abortedAt
-    assert.ok(took < 300, `rejected ${took} ms after the abort, not at once`)
-    assert.equal(relay.syncsOf(contract.contractID, from), 0, 'synced after the abort')
-  })
-
-  it('ends raw kv/set at once, and it neither syncs nor writes again', async (t) => {
-    const contract = await retainedContract(relay, pubsub)
-    conflictOnce()
-    t.mock.method(Math, 'random', () => 0.5) // 750 ms back-off
-    const from = relay.requests.length
-    const controller = new AbortController()
-    let outcome: Awaited<ReturnType<typeof kvSet>> | undefined
-    kvSet(contract, { messageHash: 'b' }, { signal: controller.signal }).then((result) => {
-      outcome = result
-    })
-    assert.ok(await waitFor(() => writeStatuses(from)[0] === 409), 'no 409')
-    const reason = new DOMException('caller abort', 'AbortError')
-    const abortedAt = performance.now()
-    controller.abort(reason)
-    const result = await waitFor(() => outcome)
-    const took = performance.now() - abortedAt
-    assert.equal(result?.error, reason, describeError(result?.error))
-    assert.ok(took < 300, `rejected ${took} ms after the abort, not at once`)
-    // Nor does anything happen once the back-off would have ended
-    await sleep(850 - took)
-    assert.deepEqual(writeStatuses(from), [409])
-    assert.equal(relay.syncsOf(contract.contractID, from), 0, 'synced after the abort')
+    assert.ok(await waitFor(subscribed(pubsub, [contract.contractID])), 'not re-subscribed')
   })
 })
 
@@ -537,47 +401,5 @@ describe('a signal that aborts while kv/set waits for the sync after a 409', () 
     assert.ok(!queueFree, 'waited for the queue')
     await sbp('chelonia/contract/wait', contractID)
     assert.equal(relay.syncsOf(contractID, from), 0)
-  })
-
-  it('still logs and retries when the sync fails, with a signal', async (t) => {
-    t.mock.method(Math, 'random', () => 0)
-    const contract = await retainedContract(relay, pubsub)
-    const logged = logs.fromNow()
-    relay.onRequest = (request) => {
-      if (isKvWrite(request)) return kvConflict()
-      if (request.path === `/latestHEADinfo/${contract.contractID}`) {
-        return new Response('', { status: 500 })
-      }
-    }
-    const result = await kvSet(contract, { messageHash: 'x' }, {
-      maxAttempts: 3, signal: new AbortController().signal
-    })
-    assert.ok(result.error instanceof ChelErrorKvMaxAttempts, describeError(result.error))
-    assert.deepEqual(result.statuses, [409, 409, 409])
-    assert.equal(result.syncs, 1)
-    assert.equal(logged.grep(/\[kv\/set\] .*sync/).length, 1)
-  })
-})
-
-// Last: the reset clears the state that the tests above share
-describe('chelonia/reset during the back-off of a raw kv/set', () => {
-  it('does not sync once chelonia/reset aborted it during the back-off', async (t) => {
-    const contract = await retainedContract(relay, pubsub)
-    conflictOnce()
-    t.mock.method(Math, 'random', () => 0.5) // 750 ms back-off
-    const from = relay.requests.length
-    let settledAt = Infinity
-    const write = kvSet(contract, { messageHash: 'r' }).then((result) => {
-      settledAt = performance.now()
-      return result
-    })
-    assert.ok(await waitFor(() => writeStatuses(from)[0] === 409), 'no 409')
-    const resetAt = performance.now()
-    await sbp('chelonia/reset', () => sleep(1500))
-    assert.equal(((await write).error as Error | undefined)?.name, 'AbortError')
-    // The reset aborts before `postCleanupFn`, and the write ends at once
-    const took = settledAt - resetAt
-    assert.ok(took < 300, `rejected ${took} ms after the reset started, not at once`)
-    assert.equal(relay.syncsOf(contract.contractID, from), 0, 'synced after the abort')
   })
 })

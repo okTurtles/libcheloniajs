@@ -2,10 +2,33 @@ import assert from 'node:assert'
 import { describe, it } from 'node:test'
 
 import {
-  activate, CONTRACT_ID, connectPubsub, defineSlot, drainLanes, holdResetAfterAbort, holdSyncs,
-  installKvHarness, logs, rootState, setupContract, sleep, subscriptionSucceeded, syncs
+  activate, CONTRACT_ID, connectPubsub, defineSlot, deliverFrame, drainLanes, holdResetAfterAbort,
+  holdSyncs, installKvHarness, logs, read, rootState, setupContract, sleep, subscriptionSucceeded,
+  syncs, vetoQueue, writeAsDeviceB
 } from './kv-height-harness.js'
 import { until } from './test-utils.js'
+
+const logged = (method: string, text: string) => logs.entries.filter((entry) =>
+  entry.level === method && String(entry.args[0]).includes(text))
+const frameErrors = () => logged('error', 'Error processing kv event')
+
+describe('Vetoed pubsub KV frame work', () => {
+  installKvHarness()
+
+  it("is logged, and doesn't throw out of the message handler", async () => {
+    writeAsDeviceB('prefs', { theme: 'light' })
+    defineSlot({ key: 'prefs', defaultValue: {} })
+    connectPubsub()
+    await activate()
+    writeAsDeviceB('prefs', { theme: 'dark' })
+    const lift = vetoQueue(CONTRACT_ID)
+    deliverFrame('prefs')
+    lift()
+    await until(() => frameErrors().length === 1, 'the logged veto')
+    await drainLanes()
+    assert.deepStrictEqual(read('prefs'), { theme: 'light' })
+  })
+})
 
 describe('chelonia/reset with the pubsub client connected', () => {
   installKvHarness()

@@ -11,8 +11,10 @@ import { afterEach, beforeEach } from 'node:test'
 
 import './chelonia.js'
 import { encryptedOutgoingData } from './encryptedData.js'
+import { kvHeightAheadCause } from './errors.js'
 import { CONTRACTS_MODIFIED } from './events.js'
 import type { KV_NOOP } from './kv-constants.js'
+import { kvHeightTimings } from './kv-height.js'
 import {
   NOTIFICATION_TYPE, PUBSUB_SUBSCRIPTION_SUCCEEDED, type PubSubClient
 } from './pubsub/index.js'
@@ -36,6 +38,8 @@ export const keys = { cskId: '', cekId: '', sakId: '' }
 // `latestHEADinfo` requests seen, and how the next ones behave
 export const syncs = {
   count: 0,
+  // Bring the local height up to the server's, as a real sync would
+  catchUp: false,
   fail: false,
   hold: undefined as Promise<void> | undefined
 }
@@ -43,11 +47,21 @@ export const syncs = {
 const teardowns: (() => void)[] = []
 // Set by `connectPubsub` for the current test only
 let pubsub: PubSubClient | undefined
+// Rebuilds the contract's state, as replaying its events would
+let replay: (() => void) | undefined
 
 export const rootState = (): ChelRootState => sbp('chelonia/private/state')
 
 export const mirror = (key: string): KvMirrorEntry | undefined =>
   rootState()._kv?.[CONTRACT_ID]?.[key]
+
+// As if an event had committed `height`
+export const setLocalHeight = (height: number): void => {
+  const meta = rootState().contracts[CONTRACT_ID]
+  if (!meta) return
+  meta.height = height
+  sbp('chelonia/kv/_notifyHeight', CONTRACT_ID, height)
+}
 
 export { sleep } from './test-utils.js'
 
@@ -62,7 +76,7 @@ export const read = (key: string) => sbp('chelonia/kv/read', CONTRACT_ID, key)
 type Updater = (value: JSONType) => JSONType | typeof KV_NOOP
 
 // `chelonia/kv/update`'s options; an `updater` replaces the one given
-export type UpdateOptions = {
+export type UpdateOptions = { signal?: AbortSignal | null } & {
   updater?: Updater; maxAttempts?: number | null; ifMatch?: string
 }
 
@@ -74,6 +88,9 @@ export const update = (
   sbp('chelonia/kv/update', { contractID: CONTRACT_ID, key, updater, ...options }),
   `update of ${key}`
 )
+
+export const aheadAt = (height: number) => (e: unknown): boolean =>
+  kvHeightAheadCause(e)?.requiredHeight === height
 
 // Like Node's `fetch`, a request rejects with its signal's reason as is (even one
 // that isn't an Error) as soon as it aborts, while the server carries on (a POST
@@ -106,6 +123,9 @@ const answerRequest = async (url: string, init?: FetchInit): Promise<Response> =
   if (syncs.hold) await (init?.signal ? raceAbort(syncs.hold, init.signal) : syncs.hold)
   const meta = rootState().contracts[CONTRACT_ID]
   if (syncs.fail || !meta) return new Response(null, { status: 500 })
+  replay?.()
+  replay = undefined
+  if (syncs.catchUp) setLocalHeight(Math.max(meta.height, server.height))
   // The local HEAD: the sync finds nothing to fetch
   return Response.json({ HEAD: meta.HEAD, height: meta.height })
 }
@@ -273,6 +293,23 @@ export const activate = async (): Promise<void> => {
   await drainLanes()
 }
 
+// Resyncs the contract: its teardown removes it, then the sync replays its
+// current state (once a held sync is let through; a failing one replays nothing)
+export const resync = (): Promise<unknown> => {
+  const state = rootState() as unknown as Record<string, Record<string, unknown>>
+  const meta = { ...rootState().contracts[CONTRACT_ID] }
+  const contractState = { ...state[CONTRACT_ID] }
+  delete contractState._volatile
+  replay = () => {
+    Object.assign(rootState().contracts[CONTRACT_ID], meta)
+    Object.assign(state[CONTRACT_ID], contractState)
+    sbp('chelonia/kv/_notifyHeight', CONTRACT_ID, meta.height)
+  }
+  return within(
+    sbp('chelonia/private/in/sync', CONTRACT_ID, { force: true, resync: true }), 'the resync'
+  )
+}
+
 // What `kv/set` would post for `data` stamped with `stamp`
 export const sealValue = (key: string, data: JSONType, stamp: unknown) => {
   const payload = encryptedOutgoingData(CONTRACT_ID, keys.cekId, data)
@@ -291,6 +328,14 @@ export const writeAsDeviceB = (key: string, data: JSONType, height = server.heig
 // The stored value as a frame
 export const frameOf = (key: string): { body: string; cid: string } =>
   ({ body: server.store.get(key)!.body, cid: server.etagOf(key) })
+
+// The stored value with another (unsigned) stamp, as a frame
+export const restamped = (key: string, stamp: unknown): { body: string } =>
+  ({ body: JSON.stringify({ ...JSON.parse(server.store.get(key)!.body), height: stamp }) })
+
+// Changes the stored value's stamp without re-signing it
+export const restamp = (key: string, stamp: unknown): string =>
+  server.put(key, restamped(key, stamp).body)
 
 // The stored value, decoded as this device would (needs the local height)
 export const serverValue = (key: string): JSONType | undefined => {
@@ -346,10 +391,12 @@ export const configure = (): Promise<unknown> => sbp('chelonia/configure', {
 
 export const installKvHarness = (): void => {
   const random = Math.random
+  const timings = { ...kvHeightTimings }
   beforeEach(async () => {
     sbp('chelonia/_init')
     server = makeKvServer(CONTRACT_ID, { height: START_HEIGHT })
-    Object.assign(syncs, { count: 0, fail: false, hold: undefined })
+    Object.assign(syncs, { count: 0, catchUp: false, fail: false, hold: undefined })
+    replay = undefined
     await configure()
     setupContract()
     // What `chelonia/connect` installs: slots activate when a contract is added
@@ -370,6 +417,7 @@ export const installKvHarness = (): void => {
     } finally {
       sbp('okTurtles.events/off', CONTRACTS_MODIFIED, reconcile)
       Math.random = random
+      Object.assign(kvHeightTimings, timings)
       logs.restore()
     }
   })

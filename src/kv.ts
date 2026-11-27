@@ -22,6 +22,8 @@ import {
   CHELONIA_KV_UPDATED,
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
+import { isKvMaxAttempts } from './internal-errors.js'
+import { notifyContractHeight } from './kv-height.js'
 import {
   KV_AUTO_LOAD,
   KV_DEFAULT_ENCRYPTION_KEY_NAME,
@@ -42,6 +44,7 @@ import type {
   CheloniaContext,
   ChelRootState,
   JSONType,
+  KvConflictCause,
   KvLoadStatus,
   KvMirrorEntry,
   KvSlotDefinition,
@@ -555,16 +558,6 @@ function normalizeError (e: unknown): { name: string; message: string } {
   return { name: 'Error', message }
 }
 
-// Realm-safe detection of the low-level conflict-exhaustion error.
-// `ChelErrorGenerator` assigns `.name` from a string literal (see
-// errors.ts), so it survives a dual ESM/CJS or cross-realm load of
-// `@chelonia/lib` where `instanceof ChelErrorKvMaxAttempts` would fail
-// against an error constructed by the other copy. This mirrors the
-// `Symbol.for`-based realm safety of the `KV_NOOP` path (kv-constants.ts).
-function isKvMaxAttempts (e: unknown): boolean {
-  return e instanceof Error && e.name === 'ChelErrorKvMaxAttempts'
-}
-
 // Resolve the contract type from rootState. The spec (KV-REVAMPED §4.2
 // step 1) resolves via _vm.type; in the actual data model the same value
 // is also stored on rootState.contracts[contractID].type. Prefer the
@@ -712,7 +705,6 @@ function throwIfSignalAborted (signal?: AbortSignal): void {
   if (signal?.aborted) throw abortReason(signal)
 }
 
-type KvConflictCause = { currentData?: JSONType; etag?: string | null }
 type NormalizedKvConflictData =
   | { present: false }
   | { present: true; currentData: JSONType | undefined }
@@ -2034,6 +2026,16 @@ export default (sbp('sbp/selectors/register', {
     }
   },
 
+  // Private. Event processing calls it right after committing a height; tests
+  // that set a height directly call it too.
+  'chelonia/kv/_notifyHeight': function (
+    this: CheloniaContext,
+    contractID: string,
+    height: number
+  ): void {
+    notifyContractHeight(this, contractID, height)
+  },
+
   'chelonia/kv/_onContractResynced': function (this: CheloniaContext, contractID: string): void {
     if (!this.kvReconnectRefresh.has(contractID)) return
     this.kvReconnectRefresh.delete(contractID)
@@ -3005,6 +3007,7 @@ export default (sbp('sbp/selectors/register', {
             encryptionKeyId: keyIds.encryptionKeyId,
             signingKeyId: keyIds.signingKeyId,
             onconflict,
+            allowUnverifiedConflict: true,
             maxAttempts,
             signal
           }

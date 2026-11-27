@@ -34,7 +34,8 @@ sync (`'load'`), pubsub pushes from other clients (`'remote'`), this
 client's own successful writes (`'local'`), and re-fetches after a
 websocket reconnect (`'reconnect'`). Every channel validates the value
 against the slot's `schema` before it lands and pairs the value with its
-etag, so the mirror never holds a value the server didn't confirm.
+etag, so the mirror never holds a value the server didn't confirm, nor
+one this client can't verify yet (see [Contract heights](#contract-heights)).
 Because the mirror lives inside Chelonia's root state, it is projected
 into external stores (Vuex, Pinia) by `chelonia/externalStateSetup`
 with no per-key wiring — see
@@ -60,6 +61,63 @@ Direct observers of `rootState._kv` must therefore treat `status`, not
 the default", not "no value configured" (see
 [Consumer caveats](#consumer-caveats)). For a `_kv`-free view of root
 state, project `{ ...rootState, _kv: undefined }`.
+
+## Contract heights
+
+Every KV value is stamped with the height its contract had when the
+value was written. A client can verify a value only once its local copy
+of the contract has reached that height (the signing key may have been
+added after the local height), and the server only accepts writes
+stamped with the contract's current height (`409` otherwise). Both
+happen mostly right after switching devices, or while another device
+is changing the contract. A value that can't be verified yet is not an
+absent value: never treat it as one. The exact rules are in
+[KV-REVAMPED.md §3.4](specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery).
+
+The KV selectors report these cases with their own errors. Check them
+with the predicates exported from the package root. They compare
+names, so they work across realms and library copies, but they only
+look at `e` itself: `findErrorCause(e, isKvHeightAhead)` finds one
+wrapped in your own errors.
+
+| Error | Predicate | Meaning |
+|---|---|---|
+| `ChelErrorKvHeightAhead` | `isKvHeightAhead` | The value (or the server) needs a contract height not reached locally; syncing the contract helps. `kvHeightAheadCause(e)` gives its `KvHeightAheadCause` (`requiredHeight`, `exact`, `localHeight`, `etag`, `httpStatus`). |
+| `ChelErrorKvHeightMalformed` | `isKvHeightMalformed` | The value's height stamp is missing or invalid: it can never be verified, and syncing doesn't help. Overwrite it (`chelonia/kv/clear`). |
+| `ChelErrorKvConflict` | `isKvConflict` | A write ran out of attempts on `412` conflicts, got a `412` without `onconflict`, or got a conflict value it can't read. `.cause` (`KvConflictCause`) describes the server value of the last `412`. Also matches the internal error raw `chelonia/kv/set` throws. |
+
+Both height errors extend `ChelErrorInvalidMessageHeight` (`instanceof`
+still holds), but have their own names.
+
+### Raw `kv/get` and `kv/set`
+
+`chelonia/kv/get` never waits or syncs: it rejects with
+`ChelErrorKvHeightAhead` or `ChelErrorKvHeightMalformed`. Its optional
+third argument `{ signal }` aborts the GET, also while the body
+downloads, and the call rejects with `signal.reason` if it is an `Error`
+(else an `AbortError`). `chelonia/reset` aborts it either way.
+
+`chelonia/kv/set` waits briefly for incoming events to bring the
+contract to a conflicting value's height before giving up. After a
+`409` it syncs the contract once per call (see the
+[migration notes](#migration-notes-for-direct-cheloniakvset-callers)),
+then re-signs the same data once the contract catches up (waiting for a
+running sync first), and rejects with `ChelErrorKvHeightAhead`
+(`exact: false`) if it doesn't within `heightWaitMs` (default 1.5 s; no
+wait while the pubsub socket is down), or after 5 re-signs. `409`s
+never reach `onconflict`.
+
+Pubsub frames that are ahead are dropped with a warning; neither raw KV
+pubsub handlers (`messageHandlers[NOTIFICATION_TYPE.KV]` of
+`chelonia/connect`) nor slots receive them, and neither receives a
+malformed one (the error is logged). A slot load that finds a value
+ahead or malformed fails (`'error'`).
+
+`onconflict` gets `currentStatus` (`'present'`, `'absent'`, `'ahead'`
+or `'malformed'`). By default an unverifiable value fails the write
+instead of reaching `onconflict`; a blind writer, which doesn't need
+the current value, can pass `allowUnverifiedConflict: true` to get it
+(reading `currentData` then throws).
 
 ## `KvSlotDefinition` reference
 
@@ -120,8 +178,8 @@ direct callers (the high-level slot API hides them):
 - **`onconflict` return type is now `Promise<[JSONType, string | undefined] | false>`**
   (previously `Promise<[JSONType, string]>`). The `etag` element may be
   `undefined` when the server returned neither `x-cid` nor `etag`
-  (typical for 404 / 410 fall-throughs); the primitive substitutes
-  `''` at the wire so the POST still goes through.
+  (typical for 404 / 410 fall-throughs); the primitive then sends
+  `if-match: ""` (no value), so the POST still goes through.
 - **Any falsy `onconflict` return aborts the write** (including `false`,
   `null`, `undefined`, `0`, `''`). The runtime `if (!result) return false`
   guard already existed pre-revamp, so a falsy return always silently
@@ -129,32 +187,39 @@ direct callers (the high-level slot API hides them):
   where previously it was only representable at the type level as a
   tuple. No runtime behaviour change for existing callers.
 
-One runtime change applies to every caller that retries a conflict (an
-`onconflict` handler and `maxAttempts` above 1), slots included: **a `409`
-makes `chelonia/kv/set` sync the contract** (at most once per call) before
-it retries. A `409` means the value was signed with a stale contract
-height: this client missed some of the contract's events (e.g. its pubsub
-subscription was lost), so every retry used to fail the same way, ending
-in `kv/set conflict setting KV value`.
+Behaviour changes (see [Contract heights](#contract-heights)):
 
-- Before retrying, `kv/set` waits for the contract's internal queue, and
-  syncs only if Chelonia is subscribed to the contract and none of its
-  events was processed since the value was signed. A failing sync is
-  logged and the write retried anyway. After the sync, failed or not,
-  `kv/set` also subscribes the pubsub client again to the contracts it
-  lost.
-- An abort (the caller's `signal`, or `chelonia/reset`) ends the write at
-  once, with the signal's reason (an `AbortError` if the reason isn't an
-  `Error`). During the back-off, it also skips the sync. During the wait
-  for the sync, it skips a sync still in the queue; a sync that started
-  runs to completion (unless the reset aborts it), and the pubsub client
-  still subscribes again after it (but not during a reset).
-- Because of the queue wait, never await `chelonia/kv/set` from inside the
-  contract's internal queue (e.g. a side effect), even for a contract
-  Chelonia isn't subscribed to: a `409` would deadlock.
-  `chelonia/kv/queuedSet`, `chelonia/queueInvocation` and the slot API use
-  the public queue, which waits for the internal one, so they are safe to
-  call (not to await) from a side effect.
+- **A `409` (stale height stamp) is no longer a conflict.** It doesn't
+  call `onconflict` or count against `maxAttempts`: `kv/set` re-signs,
+  or rejects with `ChelErrorKvHeightAhead` (`exact: false`).
+- **A `409` makes `chelonia/kv/set` sync the contract** (at most once
+  per call) before it re-signs. A `409` means the value was signed with
+  a stale contract height: this client missed some of the contract's
+  events (e.g. its pubsub subscription was lost).
+  - Before re-signing, `kv/set` waits for the contract's internal queue,
+    and syncs only if Chelonia is subscribed to the contract and none of
+    its events was processed since the value was signed. A failing sync
+    is logged and the write goes on. After the sync, failed or not,
+    `kv/set` also subscribes the pubsub client again to the contracts it
+    lost.
+  - An abort (the caller's `signal`, or `chelonia/reset`) ends the write
+    at once, with the signal's reason (an `AbortError` if the reason
+    isn't an `Error`). During the wait for the sync, it skips a sync
+    still in the queue; a sync that started runs to completion (unless
+    the reset aborts it), and the pubsub client still subscribes again
+    after it (but not during a reset).
+  - Because of the queue wait, never await `chelonia/kv/set` from inside
+    the contract's internal queue (e.g. a side effect), even for a
+    contract Chelonia isn't subscribed to: a `409` would deadlock.
+    `chelonia/kv/queuedSet`, `chelonia/queueInvocation` and the slot API
+    use the public queue, which waits for the internal one, so they are
+    safe to call (not to await) from a side effect.
+- **Unverifiable values reject** with `ChelErrorKvHeightAhead` /
+  `ChelErrorKvHeightMalformed` (from `kv/get`, and from `kv/set` instead
+  of reaching `onconflict`), not with `ChelErrorInvalidMessageHeight`.
+- **Invalid options reject up front.** A bad `maxAttempts` or
+  `heightWaitMs`, or `data === undefined` without `onconflict`, rejects
+  with a `TypeError` before any request.
 
 ## Schema-driven default normalization
 

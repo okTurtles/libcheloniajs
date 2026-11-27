@@ -3279,6 +3279,28 @@ describe('KV slot API', () => {
       'inline apply keeps null etag (no stale etag to clobber)')
   })
 
+  it("61d: a no-cid frame's GET demotes conflict markers, so later frames apply inline", async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'noCid3', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-62d'
+    await setupContract(c)
+    await sbp('chelonia/kv/_handleRemote', c, 'noCid3', fakeParsed({ x: 1 }), 'known-cid')
+    const echoKey = `${c}::noCid3`
+    sbp('chelonia/test/addEchoCID', echoKey, 'e-local', true)
+    let getCalled = 0
+    stubGet = async () => { getCalled++; return fakeParsed({ x: 2 }) }
+
+    await sbp('chelonia/kv/_handleRemote', c, 'noCid3', fakeParsed({ x: 9 }))
+    assert.strictEqual(getCalled, 1, 'the no-cid frame forces a GET')
+    assert.strictEqual(sbp('chelonia/test/echoCIDFromConflict', echoKey, 'e-local'), false,
+      "the no-cid frame's GET demotes the conflict marker")
+    // A marker left set would make this non-self frame force another GET
+    await sbp('chelonia/kv/_handleRemote', c, 'noCid3', fakeParsed({ x: 3 }), 'e-other')
+    assert.strictEqual(getCalled, 1, 'the next non-self frame applies inline, with no GET')
+    assert.deepStrictEqual(rootState()._kv![c]!.noCid3.value, { x: 3 })
+  })
+
   it('62: conflicted write self-echo is suppressed by CID', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'awaitEcho', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
@@ -4499,6 +4521,24 @@ describe('KV slot API', () => {
     })
     assert.strictEqual(onUpdateRan, true)
     assert.deepStrictEqual(rootState()._kv![c]!.cloneCb.value, { x: 4 })
+  })
+
+  it('70e: mutating what read returns cannot change the default or the mirror', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'cloneRead', contractType: CTYPE, defaultValue: { nested: { a: 0 } }, autoLoad: 'never'
+    })
+    const c = 'cid-70e'
+    await setupContract(c)
+    const mutate = () => {
+      (sbp('chelonia/kv/read', c, 'cloneRead') as { nested: { a: number } }).nested.a = 999
+    }
+    mutate()
+    assert.deepStrictEqual(sbp('chelonia/kv/read', c, 'cloneRead'), { nested: { a: 0 } })
+
+    stubGet = async () => ({ ...fakeParsed({ nested: { a: 1 } }), etag: 'e1' })
+    await sbp('chelonia/kv/sync', c, 'cloneRead')
+    mutate()
+    assert.deepStrictEqual(sbp('chelonia/kv/read', c, 'cloneRead'), { nested: { a: 1 } })
   })
 
   // -----------------------------------------------------------------------
