@@ -119,12 +119,15 @@ src/
 ├── functions.ts          # CID creation, blake32Hash, base64 utilities
 ├── utils.ts              # Key lookup, permissions, event stream, abort and close event utilities
 ├── errors.ts             # Custom error classes via ChelErrorGenerator factory
+├── internal-errors.ts    # Errors kept out of the package root (`ChelErrorKvMaxAttempts`)
 ├── events.ts             # Event name constants
 ├── constants.ts          # INVITE_STATUS enum
 ├── persistent-actions.ts # PersistentAction queue with retry
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
 ├── kv-runtime.ts         # KV runtime maps: created by _init, replaced by reset (internal)
+├── kv-height.ts          # KV height stamps and height waits (internal)
+├── kv-checks.ts          # `maxAttempts` check of the KV selectors (internal)
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time sync: performance.now()-driven, Date.now() jumps (sleep) trigger correction + resync
 ├── timer-utils.ts        # timerDelay()/unrefTimer(): timers that can be disabled, clamped, and don't keep Node alive
@@ -280,6 +283,10 @@ Full documentation:
 - Public selectors: `chelonia/kv/defineSlot`, `chelonia/kv/update`,
   `chelonia/kv/read`, `chelonia/kv/sync`, `chelonia/kv/clear`,
   `chelonia/kv/status`, `chelonia/kv/refreshFilters`
+- Contract heights (a value that can't be verified yet is not absent;
+  check KV errors with `isKvHeightAhead`, `isKvHeightMalformed` and
+  `isKvConflict`, not `instanceof` or `e.name`): [docs/kv.md](docs/kv.md#contract-heights),
+  rules in [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery)
 
 ### Contract State Structure
 
