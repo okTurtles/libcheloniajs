@@ -15,6 +15,8 @@ import { abortReason } from './utils.js'
 
 const CANONICAL_HEIGHT = /^(?:0|[1-9][0-9]*)$/
 
+const WEBSOCKET_OPEN = 1
+
 // Mutable so that tests can shorten them
 export const kvHeightTimings = {
   // How long to wait for an incoming event to bring the contract to a height
@@ -206,7 +208,7 @@ export async function waitForHeight (
 ): Promise<boolean> {
   if (signal?.aborted) throw abortReason(signal)
   if (heightReached(ctx, contractID, minHeight)) return true
-  const socketDown = !!ctx.pubsub && ctx.pubsub.socket?.readyState !== WebSocket.OPEN
+  const socketDown = !!ctx.pubsub && ctx.pubsub.socket?.readyState !== WEBSOCKET_OPEN
   return waitFor(socketDown ? 0 : timeoutMs, signal, (done) =>
     onHeight(ctx, contractID, minHeight, done)
   )

@@ -86,6 +86,24 @@ describe('waitForHeight', () => {
     }
   })
 
+  it('needs no global WebSocket, as with a manual pubsub client before connect()', async () => {
+    const open = WebSocket.OPEN
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket')!
+    delete (globalThis as { WebSocket?: unknown }).WebSocket
+    try {
+      ctx.pubsub = pubsubWith(null)
+      const noSocket = waitForHeight(ctx, CID, 11, { timeoutMs: 60_000, signal: waits.signal })
+      assert.strictEqual(await within(noSocket, 'the wait without a socket'), false)
+      ctx.pubsub = pubsubWith(open)
+      const wait = waitForHeight(ctx, CID, 11, { timeoutMs: 60_000, signal: waits.signal })
+      assert.strictEqual(await settledSoon(wait), PENDING)
+      commit(11)
+      assert.strictEqual(await within(wait, 'the wait with an open socket'), true)
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', saved)
+    }
+  })
+
   it('waits with an open socket, and without a pubsub client', async () => {
     for (const pubsub of [pubsubWith(WebSocket.OPEN), undefined]) {
       ctx.pubsub = pubsub as CheloniaContext['pubsub']

@@ -1,12 +1,14 @@
+import sbp from '@sbp/sbp'
 import assert from 'node:assert'
 import { describe, it } from 'node:test'
 
+import { isKvHeightAhead, kvHeightAheadCause } from './errors.js'
 import {
   activate, CONTRACT_ID, connectPubsub, defineSlot, deliverFrame, drainLanes, holdResetAfterAbort,
-  holdSyncs, installKvHarness, logs, read, rootState, setupContract, sleep, subscriptionSucceeded,
-  syncs, vetoQueue, writeAsDeviceB
+  holdSyncs, installKvHarness, keys, logs, read, rootState, setupContract, sleep, START_HEIGHT,
+  subscriptionSucceeded, syncs, vetoQueue, writeAsDeviceB
 } from './kv-height-harness.js'
-import { until } from './test-utils.js'
+import { until, within } from './test-utils.js'
 
 const logged = (method: string, text: string) => logs.entries.filter((entry) =>
   entry.level === method && String(entry.args[0]).includes(text))
@@ -97,5 +99,38 @@ describe('chelonia/reset with the pubsub client connected', () => {
     await confirmed('the sync once the reset ended')
     // Only the one during the reset failed
     assert.strictEqual(syncFailures().length, 1)
+  })
+})
+
+describe('kv/set with a manual pubsub client before connect()', () => {
+  installKvHarness()
+
+  it('needs no global WebSocket to report a conflict value stamped ahead', async () => {
+    connectPubsub()
+    const etag = writeAsDeviceB('prefs', { theme: 'dark' }, START_HEIGHT + 2)
+    let onconflictCalls = 0
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket')!
+    delete (globalThis as { WebSocket?: unknown }).WebSocket
+    let e: unknown
+    try {
+      e = await within(sbp('chelonia/kv/set', CONTRACT_ID, 'prefs', { lang: 'en' }, {
+        signingKeyId: keys.cskId,
+        encryptionKeyId: keys.cekId,
+        ifMatch: '"stale"',
+        heightWaitMs: 60_000,
+        onconflict: () => { onconflictCalls++; return false }
+      }).catch((e: unknown) => e), 'kv/set', 1000)
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', saved)
+    }
+    assert.ok(isKvHeightAhead(e), String(e))
+    assert.deepStrictEqual(kvHeightAheadCause(e), {
+      requiredHeight: START_HEIGHT + 2,
+      exact: true,
+      localHeight: START_HEIGHT,
+      etag,
+      httpStatus: 412
+    })
+    assert.strictEqual(onconflictCalls, 0)
   })
 })
