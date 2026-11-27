@@ -283,13 +283,10 @@ Full documentation:
 - Public selectors: `chelonia/kv/defineSlot`, `chelonia/kv/update`,
   `chelonia/kv/read`, `chelonia/kv/sync`, `chelonia/kv/clear`,
   `chelonia/kv/status`, `chelonia/kv/refreshFilters`
-- Contract heights: a KV value can't be verified until the local contract
-  reaches the height it was written at, and the server rejects writes
-  stamped with an older height. A value that can't be verified yet is not
-  absent. Detect the errors with `isKvHeightAhead`, `isKvHeightMalformed`
-  and `isKvConflict` (`src/errors.ts`), not `instanceof` or `e.name`. See
-  [docs/kv.md](docs/kv.md#contract-heights); rules in
-  [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery).
+- Contract heights (a value that can't be verified yet is not absent;
+  check KV errors with `isKvHeightAhead`, `isKvHeightMalformed` and
+  `isKvConflict`, not `instanceof` or `e.name`): [docs/kv.md](docs/kv.md#contract-heights),
+  rules in [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery)
 
 ### Contract State Structure
 

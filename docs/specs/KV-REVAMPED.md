@@ -310,10 +310,21 @@ and `chelonia/reset` end it at any request, wait or backoff with
 
 | Response | Behaviour |
 |---|---|
-| `409` (stale stamp) | The first `409` of the call syncs the contract (only one Chelonia is subscribed to, and only if the local height is still below max(posted stamp + 1, stored value's stamp); an abort ends the wait for the sync, not the sync; a failed sync is logged and the write goes on). Then wait (up to `heightWaitMs`; first for a running sync of the contract to end, even with the socket closed) until the local height is ≥ max(posted stamp + 1, stored value's stamp), then re-sign the same data with the same `if-match`. If the wait times out (with `heightWaitMs: 0`: at once, unless no sync is running and the height is already reached), or after 5 re-signs per call, `ChelErrorKvHeightAhead` (`exact: false`, `httpStatus: 409`). The local height may then have reached `requiredHeight` (a sync was still running, or the re-signs ran out); the message says which. Never calls `onconflict`, doesn't count against `maxAttempts`. |
+| `409` (stale stamp) | Sync if behind (below), wait up to `heightWaitMs` until the local height is ≥ max(posted stamp + 1, stored value's stamp), then re-sign the same data with the same `if-match`. If the wait times out, or after 5 re-signs per call, `ChelErrorKvHeightAhead` (`exact: false`, `httpStatus: 409`). Never calls `onconflict`, doesn't count against `maxAttempts`. |
 | `412`, no `onconflict` | `ChelErrorKvMaxAttempts` at once: no wait, no extra GET, never a height error. |
 | `412`, attempts left | An `ahead` value gets one passive wait (`heightWaitMs`) and is reclassified: still `ahead` ⇒ `ChelErrorKvHeightAhead`, `malformed` ⇒ `ChelErrorKvHeightMalformed`. Otherwise a random 0-1.5 s backoff, then `onconflict`. |
 | `412`, last attempt | Read without a wait: `ahead` / `malformed` ⇒ the height error (with this response's etag), else `ChelErrorKvMaxAttempts`. |
+
+**After a `409`.** The sync runs only for a contract Chelonia is
+subscribed to, and only if the local height is still below the
+required height. An abort ends the wait for the sync, not the sync; a
+failed sync is logged and the write goes on. The wait for the height
+first waits for a running sync of the contract to end, even with the
+socket closed; with `heightWaitMs: 0` it fails at once unless no sync
+is running and the height is already reached. When the `409` ends in
+`ChelErrorKvHeightAhead`, the local height may have reached
+`requiredHeight` (a sync was still running, or the re-signs ran out);
+the message says which.
 
 A value that can't be read (not JSON) ends the call at once with
 `ChelErrorKvMaxAttempts`, whatever the attempts left. The fetch-first
@@ -702,7 +713,7 @@ same events; the only difference is who authors the reducer.
 | `ChelErrorKvSlotUnknown` | No slot is registered for the resolved `(contractType, key)`, or `contractID` isn't synced. |
 | `ChelErrorKvUpdateInvalid` | Neither `updater` nor `value` was provided; **or** both were provided; **or** `value` was provided but the slot has no `defaultUpdater`; **or** the reducer threw, or returned `null` / `undefined` (use `KV_NOOP` to abort a write explicitly). The first three cases reject synchronously before any network or mirror access; reducer-side faults reject after the reducer runs but before the network write. The original thrown value (if any) is preserved on `.cause`. |
 | `ChelErrorKvValidation` | The reducer's output failed `schema.parse`, or the server's `currentData` on a conflict retry failed `schema.parse`. The underlying issue is attached as `.cause`. |
-| `ChelErrorKvConflict` | All `maxAttempts` attempts hit a `412` and the reducer kept producing a new value (i.e. real contention, not malformed data), or a `412` value couldn't be read (not JSON), which ends the write at once. The last server `currentData` and `etag` are attached on `.cause` (the same convention the journal uses for `ChelErrorJournalCorrupt`). |
+| `ChelErrorKvConflict` | All `maxAttempts` attempts hit a `412` and the reducer kept producing a new value (i.e. real contention, not malformed data), or a `412` value couldn't be read (§3.4). The last server `currentData` and `etag` are attached on `.cause` (the same convention the journal uses for `ChelErrorJournalCorrupt`). |
 | `ChelErrorKvHeightAhead` / `ChelErrorKvHeightMalformed` | The server value can't be verified (§3.4): the contract didn't reach its height in time, or its stamp is malformed (`clear` overwrites it). |
 | `AbortError` | `signal` was aborted. Mirror is unchanged; no event fires. |
 | underlying network / HTTP errors | Propagated verbatim from `chelonia/kv/set` for non-409/412 failures (e.g. 5xx, offline). The mirror is not updated by the rejected call and `status` is **not** flipped to `'error'` (that state is reserved for *load* failures). If the server committed an ambiguous write before the failure surfaced, the later pubsub notification can still reconcile the mirror as a `reason: 'remote'` update. |

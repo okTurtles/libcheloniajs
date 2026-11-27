@@ -84,7 +84,7 @@ wrapped in your own errors.
 |---|---|---|
 | `ChelErrorKvHeightAhead` | `isKvHeightAhead` | The value (or the server) needs a contract height not reached locally; syncing the contract helps. `kvHeightAheadCause(e)` gives its `KvHeightAheadCause` (`requiredHeight`, `exact`, `localHeight`, `etag`, `httpStatus`). |
 | `ChelErrorKvHeightMalformed` | `isKvHeightMalformed` | The value's height stamp is missing or invalid: it can never be verified, and syncing doesn't help. Overwrite it (`chelonia/kv/clear`). |
-| `ChelErrorKvConflict` | `isKvConflict` | A write ran out of attempts on `412` conflicts, got a `412` without `onconflict`, or got a conflict value it can't read. `.cause` (`KvConflictCause`) describes the server value of the last `412`, or of the fetch-first GET when `data` was omitted and that GET's body was unreadable. Also matches the internal error raw `chelonia/kv/set` throws. |
+| `ChelErrorKvConflict` | `isKvConflict` | A write ran out of attempts on `412` conflicts, got a `412` without `onconflict`, or got a conflict value it can't read. Also matches the internal error raw `chelonia/kv/set` throws ([details](#raw-kvget-and-kvset)). |
 
 Both height errors extend `ChelErrorInvalidMessageHeight` (`instanceof`
 still holds), but have their own names.
@@ -95,7 +95,11 @@ still holds), but have their own names.
 `ChelErrorKvHeightAhead` or `ChelErrorKvHeightMalformed`. Its optional
 third argument `{ signal }` aborts the GET, also while the body
 downloads, and the call rejects with `signal.reason` if it is an `Error`
-(else an `AbortError`). `chelonia/reset` aborts it either way.
+(else an `AbortError`). `chelonia/reset` aborts it either way. It
+rejects with `ChelErrorUnexpectedHttpResponseCode` (`cause`: the
+status) for a status other than 2xx or `404`, and with
+`ChelErrorUnexpected` (`cause`: the `SyntaxError`) for a body that
+isn't JSON.
 
 `chelonia/kv/set` waits briefly for incoming events to bring the
 contract to a conflicting value's height before giving up. After a
@@ -107,11 +111,16 @@ running sync first), and rejects with `ChelErrorKvHeightAhead`
 wait while the pubsub socket is down), or after 5 re-signs. `409`s
 never reach `onconflict`.
 
-For a `412` with neither body nor etag, `kv/set` GETs the value once
-per call. If that GET fails with a status other than `404` or `410`,
-the write rejects with `ChelErrorUnexpectedHttpResponseCode` (`cause`:
-the status) without calling `onconflict`, or, on the last attempt,
-with a conflict error whose cause has only `etag`.
+A conflict value that `kv/set` can't read (in a `412`, or, with `data`
+undefined, in the first GET) ends the call at once with its conflict
+error (`isKvConflict`), whatever the attempts left. That error's
+`.cause` (`KvConflictCause`) describes the server value of the last
+`412`, or of that GET. For a `412` with neither body nor etag, `kv/set`
+GETs the value once per call. If that GET fails with a status other
+than `404` or `410`, the write rejects with
+`ChelErrorUnexpectedHttpResponseCode` (`cause`: the status) without
+calling `onconflict`, or, on the last attempt, with a conflict error
+whose cause has only `etag`.
 
 Pubsub frames that are ahead are dropped with a warning; neither raw KV
 pubsub handlers (`messageHandlers[NOTIFICATION_TYPE.KV]` of
