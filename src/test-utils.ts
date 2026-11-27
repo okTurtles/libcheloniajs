@@ -1,3 +1,5 @@
+import { createCID } from './functions.js'
+
 // Shared test helpers. This is a plain module, not a `*.test.ts` file: the
 // `test` script never runs it directly, and it registers no SBP selectors,
 // so any test file may import it without contaminating registrations.
@@ -8,6 +10,9 @@ export const waitMicrotasks = async (): Promise<void> => {
     await new Promise<void>((resolve) => setTimeout(resolve as () => void, 0))
   }
 }
+
+export const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms))
 
 // Bound when this module loads, so that the harness's `emulateSleep()` can't
 // move it: its `changeClock()` and default `wake()` shift `Date.now()`, and
@@ -34,6 +39,14 @@ export const within = <T>(promise: Promise<T>, label: string, timeoutMs = 5000):
     timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), timeoutMs)
   })
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
+
+// Whether `promise` is still pending once queued work has run
+export const isPending = async (promise: Promise<unknown>): Promise<boolean> => {
+  let pending = true
+  promise.then(() => { pending = false }, () => { pending = false })
+  await waitMicrotasks()
+  return pending
 }
 
 type ConsoleLevel = 'debug' | 'info' | 'log' | 'warn' | 'error'
@@ -80,3 +93,93 @@ export function captureConsole (
     }
   }
 }
+
+export type KvServerRequest = {
+  method: 'GET' | 'POST';
+  key: string;
+  status: number;
+  ifMatch?: string | null;
+  height?: unknown;
+}
+
+export type FetchInit = Parameters<typeof fetch>[1]
+
+// The height stamp of a KV POST body; `undefined` without one (or not JSON)
+const kvStampOf = (body: string): unknown => {
+  try { return JSON.parse(body).height } catch { return undefined }
+}
+
+// What the server (okTurtles/chel `POST /kv/:contractID/:key`) answers a KV
+// POST, checked in its order: it needs `if-match` (400) that is `*` or lists the
+// stored value's etag (412; `*` in a list doesn't count), a JSON body other than
+// `null` (422) stamped with the contract's height (409). The server also checks
+// the signature (422). For `makeKvServer` and the fake relay.
+export const kvPostStatus = ({ ifMatch, etag, body, height }: {
+  ifMatch: string | null; etag: string; body: string; height: number | undefined
+}): 204 | 400 | 409 | 412 | 422 => {
+  if (!ifMatch) return 400
+  if (ifMatch !== '*' && !ifMatch.split(',').map((tag) => tag.trim()).includes(etag)) return 412
+  let value: unknown
+  try { value = JSON.parse(body) } catch { return 422 }
+  if (value === null) return 422
+  return Number((value as { height?: unknown }).height) === height ? 204 : 409
+}
+
+// One contract's KV store (`kvPostStatus`). Etag = quoted body CID.
+export const makeKvServer = (contractID: string, { height = 0 } = {}) => {
+  const store = new Map<string, { body: string; etag: string }>()
+  const prefix = `/kv/${encodeURIComponent(contractID)}/`
+  const respond = (status: number, body: string | null, etag: string) =>
+    new Response(body, { status, headers: { etag, 'x-cid': etag } })
+  const server = {
+    height,
+    store,
+    log: [] as KvServerRequest[],
+    // Runs when a POST arrives, before it's checked (e.g. another device wins the race)
+    onPost: undefined as ((key: string, signal?: AbortSignal | null) => unknown) | undefined,
+    // Runs when a GET arrives, before it's answered
+    onGet: undefined as ((key: string, signal?: AbortSignal | null) => unknown) | undefined,
+    // GETs of these keys answer 500, once `onGet` has run
+    failingGets: new Set<string>(),
+    etagOf: (key: string) => store.get(key)?.etag ?? '""',
+    // Stores `body` as is, bypassing every check
+    put (key: string, body: unknown): string {
+      const text = typeof body === 'string' ? body : JSON.stringify(body)
+      const etag = `"${createCID(text)}"`
+      store.set(key, { body: text, etag })
+      return etag
+    },
+    posts: () => server.log.filter(({ method }) => method === 'POST'),
+    // Answers a request for this contract's KV store, `undefined` for any other URL
+    async handle (url: string, init?: FetchInit): Promise<Response | undefined> {
+      const { pathname } = new URL(url)
+      if (!pathname.startsWith(prefix)) return undefined
+      const key = decodeURIComponent(pathname.slice(prefix.length))
+      if (init?.method !== 'POST') {
+        // Logged on arrival, like a POST, so that a GET a hook holds is counted
+        const request: KvServerRequest = { method: 'GET', key, status: 0 }
+        server.log.push(request)
+        await server.onGet?.(key, init?.signal)
+        const stored = store.get(key)
+        request.status = server.failingGets.has(key) ? 500 : stored ? 200 : 404
+        if (!stored || request.status !== 200) return new Response(null, { status: request.status })
+        return respond(200, stored.body, stored.etag)
+      }
+      const body = String(init.body)
+      const ifMatch = new Headers(init.headers).get('if-match')
+      const stamp = kvStampOf(body)
+      const request: KvServerRequest = { method: 'POST', key, status: 0, ifMatch, height: stamp }
+      server.log.push(request)
+      await server.onPost?.(key, init?.signal)
+      const stored = store.get(key)
+      const current = server.etagOf(key)
+      const status = kvPostStatus({ ifMatch, etag: current, body, height: server.height })
+      request.status = status
+      if (status === 204) return respond(204, null, server.put(key, body))
+      return respond(status, status === 409 || status === 412 ? stored?.body ?? '' : null, current)
+    }
+  }
+  return server
+}
+
+export type KvServer = ReturnType<typeof makeKvServer>

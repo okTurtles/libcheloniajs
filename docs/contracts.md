@@ -368,15 +368,19 @@ You can introspect sync state via `chelonia/contract/isSyncing(id)`,
 `chelonia/contract/currentSyncs()`.
 
 A contract type may define a destructor: a `methods` entry named
-`<contract name>/_cleanup` (registered as
-`<manifest>/<contract name>/_cleanup`). Chelonia calls it as
-`_cleanup({ contractID, resync, state })` before clearing a contract's
-state: with `resync: true` when a re-sync starts over, and with
-`resync: false` at the final removal (refcount 0 or permanent). The
-final call happens even if a re-sync failed, with whatever state that
-re-sync left. Chelonia remembers the type of such a contract in memory
-only, so after a restart its removal calls no destructor;
-`chelonia/reset` calls none either.
+`'<contract name>/_cleanup'`, which Chelonia registers as the
+`<manifest hash>/<contract name>/_cleanup` selector. Chelonia calls it
+synchronously as `_cleanup({ contractID, resync, state })` before
+clearing a contract's state: with `resync: true` when a re-sync starts
+over, and with `resync: false` at the final removal (refcount 0 or
+permanent). The final call happens even if a re-sync failed, with
+whatever state that re-sync left. A returned promise isn't awaited (a
+rejection is logged, like a throw), and the state is cleared as soon as
+the call returns (a re-sync empties `state` itself): an `async`
+destructor must read `state` before its first `await`.
+Chelonia remembers the type of such a contract in memory only, so after
+a restart its removal calls no destructor; `chelonia/reset` calls none
+either.
 
 ### Booting with a persisted root state
 
@@ -782,6 +786,15 @@ aborts in-flight messages, clears `rootState.contracts` and
 - The two-argument form is `(newState, postCleanupFn)`.
 - The return value is whatever `postCleanupFn` returned (or
   `undefined`).
+- Work started after the reset's abort and before `postCleanupFn` runs
+  rejects with an `AbortError`. A contract sync is then skipped before
+  it starts (so a resync leaves the contract's state alone) and logged,
+  without going to `syncContractError`.
+- `postCleanupFn` runs once the requests the reset aborted are allowed
+  again. If another `chelonia/reset` still waits after its own abort,
+  they stay aborted until it is done waiting too: a request started in
+  `postCleanupFn`, or while the reset clears the state, then rejects
+  with an `AbortError`.
 - The drain is best effort. If an SBP filter vetoes a contract's queue,
   `reset` logs it (`[chelonia/reset] Draining ... failed; resetting
   anyway`), still waits for the other contracts' queues, and then clears
