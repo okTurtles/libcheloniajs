@@ -84,7 +84,9 @@ const route = (url: string, init?: FetchInit): Promise<Response> => {
   if (!signal) return answer
   return new Promise((resolve, reject) => {
     const onAbort = () => reject(signal.reason)
-    signal.addEventListener('abort', onAbort, { once: true })
+    // A server hook may have aborted it synchronously, before this listener
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
     answer.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
   })
 }

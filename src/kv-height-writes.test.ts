@@ -42,6 +42,21 @@ describe('KV slot writes against the server', () => {
     assert.deepStrictEqual(serverValue('names'), ['a', 'b', 'c'])
     assert.deepStrictEqual(sbp('chelonia/kv/read', CONTRACT_ID, 'names'), ['a', 'b', 'c'])
   })
+
+  it('a request that a server hook aborts rejects with the abort reason', async () => {
+    const fetch: typeof globalThis.fetch = sbp('chelonia/config').fetch
+    for (const method of ['GET', 'POST']) {
+      const controller = new AbortController()
+      const reason = new Error(`${method} aborted`)
+      server.onGet = server.onPost = () => { controller.abort(reason) }
+      const request = fetch(`https://example.test/kv/${CONTRACT_ID}/names`, {
+        method, body: method === 'POST' ? '{}' : undefined, signal: controller.signal
+      })
+      const error = await within(request.then(() => undefined, (e) => e), `the aborted ${method}`)
+      assert.strictEqual(error, reason)
+    }
+    assert.deepStrictEqual(server.log.map(({ method }) => method), ['GET', 'POST'])
+  })
 })
 
 describe('chelonia/kv/withHeightRecovery', () => {
