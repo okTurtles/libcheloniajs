@@ -373,4 +373,38 @@ describe('KV requests in flight that the caller aborts', () => {
       }
     })
   }
+
+  it('kv/set: an abort while the body of the 409 after its last re-sign downloads rejects with its reason', async () => {
+    // Each POST finds the server one height ahead, which an event brings the contract to
+    server.onPost = () => {
+      server.height++
+      setLocalHeight(server.height)
+    }
+    let reading = false
+    const handle = server.handle
+    server.handle = async (url, init) => {
+      const response = await handle(url, init)
+      if (server.posts().length < 6 || response?.status !== 409) return response
+      const signal = init!.signal!
+      const body = new ReadableStream({
+        // As a real fetch's body, it fails when the request aborts
+        start: (stream) => {
+          signal.addEventListener('abort', () => stream.error(signal.reason), { once: true })
+        },
+        pull: () => {
+          reading = true
+          return new Promise(() => {})
+        }
+      }, { highWaterMark: 0 })
+      return new Response(body, { status: 409, headers: response.headers })
+    }
+    const controller = new AbortController()
+    const settled = (sbp('chelonia/kv/set', CONTRACT_ID, 'prefs', { theme: 'x' }, {
+      signingKeyId: keys.cskId, encryptionKeyId: keys.cekId, signal: controller.signal
+    }) as Promise<unknown>).then(() => 'resolved', (e) => e)
+    await until(() => reading, "the last 409's body to download")
+    controller.abort(STOP)
+    assert.strictEqual(await within(settled, 'the aborted kv/set', 1000), STOP)
+    assert.deepStrictEqual(server.posts().map(({ status }) => status), Array(6).fill(409))
+  })
 })

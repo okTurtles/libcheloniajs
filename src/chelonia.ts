@@ -3211,6 +3211,7 @@ export default sbp('sbp/selectors/register', {
       try {
         return readHeightStamp(JSON.parse(await response.text()))
       } catch {
+        if (signal.aborted) throw abortReason(signal)
         return 0
       }
     }
