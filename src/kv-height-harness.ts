@@ -202,13 +202,14 @@ export const vetoQueue = (queueName: string): (() => void) =>
 export const vetoSelector = (selector: string): (() => void) =>
   filterCalls(selector, () => false)
 
-// Starts `chelonia/reset` and holds it after its abort, while it waits for the lanes
-// of the contract (which needs an active slot). The returned `ends(release)` lets it
-// go on, checks that it ends before `release` (of what it waits for) runs, then runs it
-export const holdResetAfterAbort = async () => {
+// Starts `chelonia/reset` (with `postCleanupFn`) and holds it after its abort, while it
+// waits for the lanes of the contract (which needs an active slot). The returned
+// `ends(release)` lets it go on, checks that it ends before `release` (of what it waits
+// for) runs, then runs it
+export const holdResetAfterAbort = async (postCleanupFn?: () => void) => {
   let open: (() => void) | undefined
   filterCalls('chelonia/kv/_waitInFlight', () => { open ??= gateLane() })
-  const reset = sbp('chelonia/reset') as Promise<unknown>
+  const reset = sbp('chelonia/reset', postCleanupFn) as Promise<unknown>
   await until(() => open, 'the reset to abort')
   return async (release: () => void): Promise<void> => {
     open!()

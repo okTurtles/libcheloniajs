@@ -788,8 +788,8 @@ aborts in-flight messages, clears `rootState.contracts` and
   `undefined`).
 - Work started after the reset's abort and before `postCleanupFn` runs
   rejects with an `AbortError`. A contract sync is then skipped before
-  it starts, or fails at its request and goes to `syncContractError`;
-  either way it is logged.
+  it starts (so a resync leaves the contract's state alone) and logged,
+  without going to `syncContractError`.
 - `postCleanupFn` runs once the requests the reset aborted are allowed
   again. If another `chelonia/reset` still waits after its own abort,
   they stay aborted until it is done waiting too: a request started in

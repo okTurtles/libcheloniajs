@@ -2147,7 +2147,10 @@ export default sbp('sbp/selectors/register', {
     // it changes anything (e.g. a resync's removal of the contract).
     queuedSignal?: AbortSignal
   ): Promise<void> {
-    if (queuedSignal?.aborted) throw abortReason(queuedSignal)
+    // So is one queued without a signal that starts during those waits: the
+    // current signal is still the aborted one, and its requests would fail
+    const signal = queuedSignal?.aborted ? queuedSignal : this.abortController.signal
+    if (signal.aborted) throw abortReason(signal)
     const state = sbp(this.config.stateSelector)
     if (state.contracts[contractID] === null) {
       throw new ChelErrorResourceGone('Cannot sync permanently deleted contract ' + contractID)
