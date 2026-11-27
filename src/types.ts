@@ -304,6 +304,11 @@ export type KvUpdateCtx = {
   previousValue: JSONType | undefined;
 };
 
+/**
+ * Called once the local contract commits `minHeight` or later. Internal.
+ */
+export type KvHeightListener = { minHeight: number; fire: () => void };
+
 // Public subset of the internal `SlotDefinition`. Accepted by
 // `chelonia/kv/defineSlot`. See KV-REVAMPED.md §4.1.
 export type KvSlotDefinition = {
@@ -484,6 +489,8 @@ export type CheloniaContext = {
   config: CheloniaConfig;
   _instance: object;
   abortController: AbortController;
+  // `chelonia/reset` calls between their abort and the end of the waits after it
+  resetsAfterAbort: number;
   state: {
     contracts: Record<string, { type: string; HEAD: string }>;
     pending: string[];
@@ -587,6 +594,12 @@ export type CheloniaContext = {
   // to match the lane granularity exactly (cross-contract writes from
   // `onUpdate` are safe and not rejected).
   kvOnUpdateActive: Map<string, number>;
+  // Callbacks waiting for a contract to commit a height (`kv-height.ts`)
+  kvHeightListeners: Map<string, Set<KvHeightListener>>;
+  // Running height-recovery syncs, each shared by all its callers
+  kvRecoveries: Map<string, Promise<void>>;
+  // Survives `chelonia/reset`, which blocks recovery syncs while it drains
+  kvResetsInProgress: number;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
@@ -762,7 +775,7 @@ export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<
 };
 
 /**
- * Callback supplied to `chelonia/kv/set` to resolve a `409` / `412`
+ * Callback supplied to `chelonia/kv/set` to resolve a `412`
  * conflict (or to populate the body when `data` was omitted and the
  * primitive performs a fetch-first GET — see the `data === undefined`
  * branch in `src/chelonia.ts`).
@@ -771,8 +784,8 @@ export type ChelKvGetResult<T = JSONType> = ParsedEncryptedOrUnencryptedMessage<
  *   - `[newData, ifMatch]` to retry the write with `newData` against
  *     etag `ifMatch`. `ifMatch` may be `undefined` when the server
  *     returned neither `x-cid` nor `etag` (typical for 404 / 410
- *     fall-throughs) — the primitive substitutes `''` at the wire so
- *     the POST still goes through.
+ *     fall-throughs): the primitive then sends `if-match: ""` (no value),
+ *     so the POST still goes through.
  *   - **any falsy value** (`false`, `null`, `undefined`, `0`, `''`)
  *     to abort the write without an HTTP call. The slot API
  *     (`chelonia/kv/update`) relies on this to honour `KV_NOOP` and
@@ -793,18 +806,59 @@ export type ChelKvOnConflictCallback = (args: {
   status: number;
   etag: string | null | undefined;
   /**
-   * The decrypted/verified server data for the conflicting key.
-   *
-   * **Throws on access.** The runtime value is a lazy getter (see
-   * `resolveData` in `src/chelonia.ts`) that forces decryption and
-   * signature verification the first time it is read, and may reject
-   * with `ChelErrorDecryptionError` or `ChelErrorSignatureError`.
-   * Access it inside a `try`/`catch` (falling back to `undefined` or
-   * re-throwing as appropriate), or read `currentValue.data` directly
-   * with the same precaution. The bundled slot API (`chelonia/kv/update`,
-   * `chelonia/kv/clear`) already guards access; this note applies to
-   * direct `chelonia/kv/set` callers supplying a custom `onconflict`.
+   * The verified server data, decrypted lazily. **Throws on access** if it
+   * can't be decrypted or verified, and for an `'ahead'`
+   * (`ChelErrorKvHeightAhead`) or `'malformed'` (`ChelErrorKvHeightMalformed`)
+   * value, which `onconflict` only gets with `allowUnverifiedConflict: true`.
+   * Read it inside a `try`/`catch`.
    */
   currentData: JSONType | undefined;
-  currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType> | undefined;
-}) => Promise<[JSONType, string | undefined] | false>;
+} & KvConflictServerValue) => Promise<[JSONType, string | undefined] | false>;
+
+// 'ahead': stamped at a contract height not reached locally, so it can't be
+// verified yet. 'malformed': its height stamp is missing or invalid.
+export type KvServerValueStatus = 'absent' | 'present' | 'ahead' | 'malformed';
+
+export type KvHeightAheadCause = {
+  requiredHeight: number;
+  // false: `requiredHeight` is only a lower bound (inferred from a 409)
+  exact: boolean;
+  localHeight: number | undefined;
+  etag: string | null;
+  httpStatus: number;
+};
+
+export type KvHeightAheadMode = 'sync' | 'reject';
+
+// `null` means the default.
+export type KvHeightRecoveryOptions = {
+  onHeightAhead?: KvHeightAheadMode | null;
+  maxHeightRecoveries?: number | null;
+  signal?: AbortSignal | null;
+};
+
+export type KvHeightRecoveryAttempt = {
+  recoveries: number;
+  // `undefined`: let `chelonia/kv/set` wait for the height (default wait)
+  heightWaitMs: 0 | undefined;
+  queue: <T>(body: () => Promise<T>) => Promise<T>;
+};
+
+// Describes the server value of the final 412 only, or, for a `kv/set` without
+// `data`, that of a GET whose body isn't JSON (which ends the write).
+export type KvConflictCause = {
+  currentStatus?: KvServerValueStatus;
+  currentData?: JSONType;
+  requiredHeight?: number;
+  etag: string | null;
+};
+
+export type KvConflictServerValue =
+  | {
+      currentStatus: 'present';
+      // Decrypted and verified lazily: reading `.data` throws like `currentData`
+      currentValue: ParsedEncryptedOrUnencryptedMessage<JSONType>;
+      requiredHeight?: undefined;
+    }
+  | { currentStatus: 'absent' | 'malformed'; currentValue: undefined; requiredHeight?: undefined }
+  | { currentStatus: 'ahead'; currentValue: undefined; requiredHeight: number };

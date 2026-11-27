@@ -73,6 +73,7 @@ import {
   SendMessageHooks
 } from './types.js'
 import {
+  abortReason,
   buildShelterAuthorizationHeader,
   deleteKeyHelper,
   findKeyIdByName,
@@ -324,7 +325,7 @@ export const syncIfBehind = function (
 // that follows the new SUB. A new client's first connection lost nothing.
 export const reconcilePubsub = function (
   this: CheloniaContext,
-  trigger: 'connected' | 'reconnected' | 'periodic' | 'publish' | 'kv/set'
+  trigger: 'connected' | 'reconnected' | 'periodic' | 'publish' | 'kv/set' | 'kv recovery'
 ): void {
   if (trigger !== 'connected') {
     const { missing } = sbp('chelonia/pubsub/status') as ChelPubSubStatus
@@ -761,14 +762,20 @@ export default sbp('sbp/selectors/register', {
       const destructor = `${manifestHash}/${type}/_cleanup`
       // Check if a destructor is defined
       if (sbp('sbp/selectors/fn', destructor)) {
-        // And call it
-        try {
-          sbp(destructor, { contractID, resync: !!params?.resync, state: state[contractID] })
-        } catch (e) {
+        const logError = (e: unknown) => {
           console.error(
             `[chelonia/private/removeImmediately] Error at destructor for ${contractID}`,
             e
           )
+        }
+        // And call it. An async one isn't awaited, so its rejection is only logged
+        try {
+          const result = sbp(destructor, {
+            contractID, resync: !!params?.resync, state: state[contractID]
+          })
+          if (typeof result?.then === 'function') Promise.resolve(result).catch(logError)
+        } catch (e) {
+          logError(e)
         }
       }
     }
@@ -820,6 +827,10 @@ export default sbp('sbp/selectors/register', {
   },
   // used by, e.g. 'chelonia/contract/wait'
   'chelonia/private/noop': function () {},
+  // `reconcilePubsub` for the KV height recovery, which can't import this module
+  'chelonia/private/kv/reconcilePubsub': function (this: CheloniaContext) {
+    if (this.pubsub) reconcilePubsub.call(this, 'kv recovery')
+  },
   'chelonia/private/in/sync': function (
     this: CheloniaContext,
     contractIDs: string | string[],
@@ -845,10 +856,12 @@ export default sbp('sbp/selectors/register', {
         // but after it's finished. This is used in tandem with
         // queuing the 'chelonia/private/in/handleEvent' selector, defined below.
         // This prevents handleEvent getting called with the wrong previousHEAD for an event.
+        // The signal lets `syncContract` skip the sync if a reset aborts it meanwhile.
         return queueEventOrReject(contractID, [
           'chelonia/private/in/syncContract',
           contractID,
-          params
+          params,
+          this.abortController.signal
         ]).catch((err: unknown) => {
           console.error(`[chelonia] failed to sync ${contractID}:`, err)
           throw err // re-throw the error
@@ -2132,8 +2145,16 @@ export default sbp('sbp/selectors/register', {
   'chelonia/private/in/syncContract': async function (
     this: CheloniaContext,
     contractID: string,
-    params?: { force?: boolean; resync?: boolean }
+    params?: { force?: boolean; resync?: boolean },
+    // The session's signal when the sync was queued. `chelonia/reset` aborts
+    // it, then waits for the queues: a sync still queued then is skipped before
+    // it changes anything (e.g. a resync's removal of the contract).
+    queuedSignal?: AbortSignal
   ): Promise<void> {
+    // So is one queued without a signal that starts during those waits: the
+    // current signal is still the aborted one, and its requests would fail
+    const signal = queuedSignal?.aborted ? queuedSignal : this.abortController.signal
+    if (signal.aborted) throw abortReason(signal)
     const state = sbp(this.config.stateSelector)
     if (state.contracts[contractID] === null) {
       throw new ChelErrorResourceGone('Cannot sync permanently deleted contract ' + contractID)
@@ -3562,6 +3583,8 @@ const handleEvent = {
     }
     this.config.reactiveSet(state.contracts[contractID], 'HEAD', hash)
     this.config.reactiveSet(state.contracts[contractID], 'height', height)
+    // Right here, so that a throw further down can't keep KV waits asleep
+    sbp('chelonia/kv/_notifyHeight', contractID, height)
     // If there were decryption errors due to missing encryption keys, we store
     // those key IDs. If those key IDs are later shared with us, we can re-sync
     // the contract. Without this information, we can only guess whether a

@@ -24,8 +24,10 @@ import {
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
 import { KV_ECHO_CID_MAX, KV_ECHO_TTL_MS, KV_KEY_SEPARATOR } from './kv-constants.js'
+import { initKvRuntime, resetKvRuntime } from './kv-runtime.js'
 import { KV_NOOP } from './kv.js'
 import type {
+  ChelContractState,
   ChelKvGetResult,
   ChelRootState,
   CheloniaConfig,
@@ -99,6 +101,8 @@ const setupContract = async (contractID: string, contractType = CTYPE): Promise<
   ;(s.contracts as Record<string, unknown>)[contractID] = {
     HEAD: '', height: 0, type: contractType
   }
+  // The KV key checks resolve key names against the contract's state
+  ;(s as unknown as Record<string, unknown>)[contractID] ??= { _vm: { authorizedKeys: {} } }
   // Add to subscriptionSet (normally done by chelonia.ts sync path).
   sbp('chelonia/test/addSubscription', contractID)
   sbp('chelonia/kv/_onContractsModified', { added: [contractID], removed: [] })
@@ -151,7 +155,8 @@ let stubGet: GetStub
 let stubSet: SetStub
 let stubSetFilter: SetFilterStub
 let stubQueueInvocation: QueueInvocationStub
-let stubCurrentKeyIdByName: (contractID: string, name: string) => string | undefined
+// `resolveKvKeyIds` passes the contract's state
+let stubCurrentKeyIdByName: (contractState: ChelContractState, name: string) => string | undefined
 
 let stubSetFilterCalls: Array<{ contractID: string; keys: string[] }>
 
@@ -173,19 +178,10 @@ sbp('sbp/selectors/register', {
       reactiveSet,
       reactiveDel
     } as unknown as CheloniaConfig
+    this._instance = Object.create(null)
     this.abortController = new AbortController()
     this.subscriptionSet = new Set()
-    this.kvSlots = new Map()
-    this.kvSlotsByContractID = new Map()
-    this.kvActiveFilters = new Map()
-    this.kvFilterDirty = new Set()
-    this.kvFilterRetry = new Set()
-    this.kvLocalEchoCIDs = new Map()
-    this.kvReconnectRefresh = new Set()
-    this.kvPendingWrites = new Map()
-    this.kvPendingLoads = new Map()
-    this.kvOnUpdateActive = new Map()
-    this.defContractKvByManifest = new Map()
+    initKvRuntime(this)
   },
 
   'chelonia/configure': function (this: CheloniaContext) {
@@ -204,26 +200,14 @@ sbp('sbp/selectors/register', {
     this.abortController = new AbortController()
     await sbp('chelonia/kv/_waitInFlight')
     await postCleanupFn?.()
+    // As the real reset: drops this session's queued work, and every contract's state
+    this._instance = Object.create(null)
     const s = this.state as Record<string, unknown>
-    reactiveDel(s, 'contracts')
+    for (const key of Object.keys(s)) reactiveDel(s, key)
     reactiveSet(s, 'contracts', Object.create(null))
-    reactiveDel(s, 'secretKeys')
     reactiveSet(s, 'secretKeys', Object.create(null))
-    reactiveDel(s, '_kv')
     reactiveSet(s, '_kv', Object.create(null))
-    this.kvSlotsByContractID.clear()
-    this.kvActiveFilters.clear()
-    this.kvFilterDirty.clear()
-    this.kvFilterRetry.clear()
-    if (this.kvFilterRetryTimer != null) {
-      clearTimeout(this.kvFilterRetryTimer)
-      this.kvFilterRetryTimer = undefined
-    }
-    this.kvLocalEchoCIDs.clear()
-    this.kvReconnectRefresh.clear()
-    this.kvPendingWrites.clear()
-    this.kvPendingLoads.clear()
-    this.kvOnUpdateActive.clear()
+    resetKvRuntime(this)
     this.subscriptionSet.clear()
   },
 
@@ -241,10 +225,10 @@ sbp('sbp/selectors/register', {
   },
 
   'chelonia/contract/currentKeyIdByName': function (
-    _contractID: string,
+    contractState: ChelContractState,
     name: string
   ) {
-    return stubCurrentKeyIdByName(_contractID, name)
+    return stubCurrentKeyIdByName(contractState, name)
   },
 
   'chelonia/kv/setFilter': function (_contractID: string, _filter?: string[]) {
@@ -416,7 +400,7 @@ describe('KV slot API', () => {
       stubSetFilterCalls.push({ contractID, keys: filter ?? [] })
     }
     stubQueueInvocation = (_cID, fn) => Promise.resolve(runQueued(fn))
-    stubCurrentKeyIdByName = (_cID, name) => name
+    stubCurrentKeyIdByName = (_state, name) => name
   })
 
   afterEach(async () => {
@@ -1128,7 +1112,7 @@ describe('KV slot API', () => {
       assert.strictEqual(opts.signingKeyId, 'csk')
       return { etag: 'plain-etag' }
     }
-    stubCurrentKeyIdByName = (_cID, name) => name === 'cek' ? undefined : name
+    stubCurrentKeyIdByName = (_state, name) => name === 'cek' ? undefined : name
 
     await assert.rejects(
       sbp('chelonia/kv/update', {
@@ -1157,7 +1141,7 @@ describe('KV slot API', () => {
       writes++
       return { etag: 'unused' }
     }
-    stubCurrentKeyIdByName = (_cID, name) => name === 'csk' ? undefined : name
+    stubCurrentKeyIdByName = (_state, name) => name === 'csk' ? undefined : name
 
     await assert.rejects(
       sbp('chelonia/kv/update', {
@@ -3279,6 +3263,28 @@ describe('KV slot API', () => {
       'inline apply keeps null etag (no stale etag to clobber)')
   })
 
+  it("61d: a no-cid frame's GET demotes conflict markers, so later frames apply inline", async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'noCid3', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
+    })
+    const c = 'cid-62d'
+    await setupContract(c)
+    await sbp('chelonia/kv/_handleRemote', c, 'noCid3', fakeParsed({ x: 1 }), 'known-cid')
+    const echoKey = `${c}::noCid3`
+    sbp('chelonia/test/addEchoCID', echoKey, 'e-local', true)
+    let getCalled = 0
+    stubGet = async () => { getCalled++; return fakeParsed({ x: 2 }) }
+
+    await sbp('chelonia/kv/_handleRemote', c, 'noCid3', fakeParsed({ x: 9 }))
+    assert.strictEqual(getCalled, 1, 'the no-cid frame forces a GET')
+    assert.strictEqual(sbp('chelonia/test/echoCIDFromConflict', echoKey, 'e-local'), false,
+      "the no-cid frame's GET demotes the conflict marker")
+    // A marker left set would make this non-self frame force another GET
+    await sbp('chelonia/kv/_handleRemote', c, 'noCid3', fakeParsed({ x: 3 }), 'e-other')
+    assert.strictEqual(getCalled, 1, 'the next non-self frame applies inline, with no GET')
+    assert.deepStrictEqual(rootState()._kv![c]!.noCid3.value, { x: 3 })
+  })
+
   it('62: conflicted write self-echo is suppressed by CID', async () => {
     sbp('chelonia/kv/defineSlot', {
       key: 'awaitEcho', contractType: CTYPE, defaultValue: { x: 0 }, schema: objectSchema
@@ -4499,6 +4505,24 @@ describe('KV slot API', () => {
     })
     assert.strictEqual(onUpdateRan, true)
     assert.deepStrictEqual(rootState()._kv![c]!.cloneCb.value, { x: 4 })
+  })
+
+  it('70e: mutating what read returns cannot change the default or the mirror', async () => {
+    sbp('chelonia/kv/defineSlot', {
+      key: 'cloneRead', contractType: CTYPE, defaultValue: { nested: { a: 0 } }, autoLoad: 'never'
+    })
+    const c = 'cid-70e'
+    await setupContract(c)
+    const mutate = () => {
+      (sbp('chelonia/kv/read', c, 'cloneRead') as { nested: { a: number } }).nested.a = 999
+    }
+    mutate()
+    assert.deepStrictEqual(sbp('chelonia/kv/read', c, 'cloneRead'), { nested: { a: 0 } })
+
+    stubGet = async () => ({ ...fakeParsed({ nested: { a: 1 } }), etag: 'e1' })
+    await sbp('chelonia/kv/sync', c, 'cloneRead')
+    mutate()
+    assert.deepStrictEqual(sbp('chelonia/kv/read', c, 'cloneRead'), { nested: { a: 1 } })
   })
 
   // -----------------------------------------------------------------------

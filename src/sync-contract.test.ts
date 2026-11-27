@@ -1,10 +1,10 @@
-import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey } from '@chelonia/crypto'
+import { EDWARDS25519SHA512BATCH, keygen, keyId, serializeKey, type Key } from '@chelonia/crypto'
 import sbp from '@sbp/sbp'
 import assert from 'node:assert'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import './chelonia.js'
-import { CONTRACTS_MODIFIED } from './events.js'
+import { CONTRACTS_MODIFIED, EVENT_HANDLED } from './events.js'
 import type { PubSubClient } from './pubsub/index.js'
 import { SPMessage } from './SPMessage.js'
 import type { SPKey, SPOpContract, SPOpValue } from './SPMessage.js'
@@ -25,8 +25,7 @@ const CONTRACT_TYPE = 'test/sync-contract'
 
 // A self-signed contract whose only event is its OP_CONTRACT. With
 // `skipActionProcessing`, no contract source has to be served.
-const makeContract = (): SPMessage => {
-  const CSK = keygen(EDWARDS25519SHA512BATCH)
+const makeContract = (CSK = keygen(EDWARDS25519SHA512BATCH)): SPMessage => {
   const payload: SPOpContract = {
     type: CONTRACT_TYPE,
     keys: [{
@@ -49,17 +48,43 @@ const makeContract = (): SPMessage => {
   })
 }
 
-const server: { contract?: SPMessage; failEvents: boolean } = { failEvents: false }
+// An action signed with the contract's key; `skipActionProcessing` skips it
+const makeAction = (CSK: Key, previous: SPMessage): SPMessage => {
+  const contractID = previous.contractID()
+  const action = signedOutgoingDataWithRawKey<SPOpValue, object>(CSK, {
+    action: `${CONTRACT_TYPE}/noop`, data: {}, meta: {}
+  })
+  return SPMessage.createV1_0({
+    contractID,
+    previousHEAD: previous.hash(),
+    previousKeyOp: contractID,
+    height: previous.height() + 1,
+    op: [SPMessage.OP_ACTION_UNENCRYPTED, action],
+    manifest: 'test-manifest'
+  })
+}
+
+// `later` are events after the OP_CONTRACT
+const server: { contract?: SPMessage; later: SPMessage[]; failEvents: boolean } = {
+  later: [],
+  failEvents: false
+}
 
 const stubFetch = async (url: string): Promise<Response> => {
   const { contract } = server
   const cid = contract?.hash()
+  const events = contract ? [contract, ...server.later] : []
+  const head = events[events.length - 1]
   if (contract && url.endsWith(`/latestHEADinfo/${cid}`)) {
-    return Response.json({ HEAD: cid, height: 0 })
+    return Response.json({ HEAD: head.hash(), height: head.height() })
   }
   if (contract && url.includes(`/eventsAfter/${cid}/`) && !server.failEvents) {
-    const event = Buffer.from(JSON.stringify({ message: contract.serialize() })).toString('base64')
-    return new Response(JSON.stringify([event]), { headers: { 'shelter-headinfo-height': '0' } })
+    const body = events.map((event) =>
+      Buffer.from(JSON.stringify({ message: event.serialize() })).toString('base64')
+    )
+    return new Response(JSON.stringify(body), {
+      headers: { 'shelter-headinfo-height': String(head.height()) }
+    })
   }
   return new Response('', { status: 500 })
 }
@@ -111,6 +136,7 @@ describe('Contract sync and removal', () => {
       fetch: stubFetch
     } as Partial<CheloniaConfig>)
     server.contract = makeContract()
+    server.later = []
     server.failEvents = false
     added.length = 0
     removed.length = 0
@@ -311,10 +337,15 @@ describe('Contract sync and removal', () => {
   describe("the contract type's destructor", () => {
     const calls: Array<{ resync: boolean; state: unknown }> = []
     const resyncFlags = () => calls.map(({ resync }) => resync)
+    // What the destructor returns after recording its call
+    let result: (() => unknown) | undefined
     sbp('sbp/selectors/register', {
       [`test-manifest/${CONTRACT_TYPE}/_cleanup`]: (
         { resync, state }: { resync: boolean; state: unknown }
-      ) => { calls.push({ resync, state: structuredClone(state) }) }
+      ) => {
+        calls.push({ resync, state: structuredClone(state) })
+        return result?.()
+      }
     })
 
     beforeEach(async () => {
@@ -323,6 +354,7 @@ describe('Contract sync and removal', () => {
         contracts: { manifests: { [CONTRACT_TYPE]: 'test-manifest' } }
       }).catch(() => {})
       calls.length = 0
+      result = undefined
     })
 
     const failResync = async (cid: string) => {
@@ -372,6 +404,31 @@ describe('Contract sync and removal', () => {
       assert.deepStrictEqual(calls, [])
     })
 
+    it("logs an async destructor's rejection instead of leaving it unhandled", async () => {
+      const cid = server.contract!.hash()
+      await within(sbp('chelonia/contract/retain', cid), 'retain')
+      result = async () => {
+        await null
+        throw new Error('cleanup failed after its first await')
+      }
+      // Observed here rather than fatal to the test process
+      const unhandled: unknown[] = []
+      const probe = (reason: unknown) => { unhandled.push(reason) }
+      process.on('unhandledRejection', probe)
+      try {
+        await within(sbp('chelonia/contract/release', cid), 'release')
+        await until(() => unhandled.length || errorsLogged().length, 'the rejection')
+      } finally {
+        process.off('unhandledRejection', probe)
+      }
+      assert.deepStrictEqual(resyncFlags(), [false])
+      assert.deepStrictEqual(unhandled, [])
+      assert.deepStrictEqual(errorsLogged().map(({ text }) => text), [
+        `[chelonia/private/removeImmediately] Error at destructor for ${cid} ` +
+          'Error: cleanup failed after its first await'
+      ])
+    })
+
     it('is not called by a reset, nor after a restart', async () => {
       const cid = server.contract!.hash()
       await failResync(cid)
@@ -381,6 +438,71 @@ describe('Contract sync and removal', () => {
       await within(sbp('chelonia/contract/release', cid), 'release')
       assert.deepStrictEqual(resyncFlags(), [true])
       assert.strictEqual(rootState().contracts[cid], undefined)
+    })
+  })
+
+  describe('committed heights', () => {
+    // Heights passed to the hook that wakes KV height waits
+    let notified: number[] | undefined
+    let failProcessingAt: number | undefined
+    sbp('sbp/filters/selector/add', 'chelonia/kv/_notifyHeight',
+      (_domain: string, _selector: string, [, height]: unknown[]) => {
+        notified?.push(height as number)
+      }
+    )
+    sbp('sbp/filters/selector/add', 'chelonia/private/in/processMessage',
+      (_domain: string, _selector: string, [message]: unknown[]) => {
+        if ((message as SPMessage).height() === failProcessingAt) {
+          throw new Error('processing failed')
+        }
+      }
+    )
+    const throwingListener = (_cid: string, message: SPMessage) => {
+      if (message.height() === 1) throw new Error('app listener failed')
+    }
+
+    beforeEach(() => { notified = [] })
+
+    afterEach(() => {
+      notified = undefined
+      failProcessingAt = undefined
+      sbp('okTurtles.events/off', EVENT_HANDLED, throwingListener)
+      // Restores the default error handler
+      sbp('okTurtles.events/_init')
+    })
+
+    const syncThreeEvents = async () => {
+      const CSK = keygen(EDWARDS25519SHA512BATCH)
+      server.contract = makeContract(CSK)
+      const action = makeAction(CSK, server.contract)
+      server.later = [action, makeAction(CSK, action)]
+      const cid = server.contract.hash()
+      await within(sbp('chelonia/contract/retain', cid), 'retain')
+      assert.strictEqual(rootState().contracts[cid]?.height, 2)
+    }
+
+    it('each reach the KV height hook', async () => {
+      await syncThreeEvents()
+      assert.deepStrictEqual(notified, [0, 1, 2])
+      assert.deepStrictEqual(errorsLogged(), [])
+    })
+
+    it('reach it when an EVENT_HANDLED listener throws', async () => {
+      sbp('okTurtles.events/setErrorHandler', (_event: string, e: unknown) => { throw e })
+      sbp('okTurtles.events/on', EVENT_HANDLED, throwingListener)
+      await syncThreeEvents()
+      assert.deepStrictEqual(notified, [0, 1, 2])
+      assert.match(
+        String(errorsLogged()[0]?.args[0]),
+        /marking the event as processed: app listener failed/
+      )
+    })
+
+    it('reach it when processing the event fails', async () => {
+      failProcessingAt = 1
+      await syncThreeEvents()
+      assert.deepStrictEqual(notified, [0, 1, 2])
+      assert.ok(logs.entries.some(({ args }) => /processing failed/.test(String(args[0]))))
     })
   })
 })

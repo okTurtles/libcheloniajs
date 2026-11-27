@@ -1,8 +1,8 @@
 // A contract that the pubsub client lost has also missed its KV pushes. When
 // Chelonia subscribes the client to it again without a reconnection (the
-// periodic reconcile, publishing or `kv/set`), the slots that a reconnection
-// reloads (`refreshOnReconnect`, the default) must reload too, after the sync
-// that follows the new subscription (okTurtles/group-income#3176).
+// periodic reconcile, publishing or a KV height recovery), the slots that a
+// reconnection reloads (`refreshOnReconnect`, the default) must reload too,
+// after the sync that follows the new subscription (okTurtles/group-income#3176).
 //
 // Another device's write is a raw `chelonia/kv/set`, which doesn't touch the
 // local mirror, and the fake relay pushes no KV notifications, as if they
@@ -20,7 +20,8 @@ import {
   loseInPubsub, retainedContract, sleep, subscribed, waitFor
 } from './pubsub/test-harness.js'
 import type { TestContract } from './pubsub/test-harness.js'
-import type { JSONType } from './types.js'
+import { within } from './test-utils.js'
+import type { JSONType, KvHeightRecoveryAttempt } from './types.js'
 
 const KEY = 'marker'
 const server = createFakePubsubServer()
@@ -104,20 +105,21 @@ describe('KV slots of a contract that the pubsub client lost', () => {
     assert.ok(await reloads(contract.contractID, data, from), 'the slot did not reload')
   })
 
-  it('reload when kv/set syncs after a 409 and subscribes to it again', async (t) => {
+  it('reload when a KV height recovery syncs after a 409 and subscribes to it again', async () => {
     await setUp(0)
     const data = { n: 3 }
     const contract = await lostWithNewValue(data)
     const { contractID } = contract
     // Another participant posted meanwhile, so the next write gets a 409
     relay.postAction(contract, { text: 'missed' })
-    // No back-off before the sync
-    t.mock.method(Math, 'random', () => 0)
     const from = relay.requests.length
-    await sbp('chelonia/kv/set', contractID, 'other', { x: 1 }, {
-      signingKeyId: contract.CSKid,
-      onconflict: async ({ etag }: { etag?: string | null }) => [{ x: 1 }, etag ?? undefined]
-    })
+    await within(sbp('chelonia/kv/withHeightRecovery', contractID,
+      ({ heightWaitMs }: KvHeightRecoveryAttempt) =>
+        sbp('chelonia/kv/set', contractID, 'other', { x: 1 }, {
+          signingKeyId: contract.CSKid,
+          heightWaitMs
+        })
+    ), 'the write after the 409')
     assert.ok(relay.requests.slice(from).some(({ status }) => status === 409), 'precondition: 409')
     assert.ok(await reloads(contractID, data, from), 'the slot did not reload')
   })

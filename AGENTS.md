@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> This file is a high-level project overview (table of contents) and project Gotchas. Keep additions at that level: name the module, file, or rule in a short line. Never nitty-gritty details, those belong in code docstrings, comments, tests, etc.
+
 Guide for AI agents working in the `@chelonia/lib` codebase.
 
 ## Project Overview
@@ -38,8 +40,8 @@ Dual ESM/CJS output with TypeScript declarations:
 
 `dist/` is build output and is not in git. `prepack` runs `npm run build`, so `npm pack` and
 `npm publish` always ship a fresh build. The `files` field in `package.json` limits the package
-to `dist/` without tests, `test-utils.*` and `test-harness.*`. An install from a git URL gets no
-`dist/`: npm runs only `prepare`, not `prepack`, for git dependencies.
+to `dist/` without tests, `test-utils.*`, `test-harness.*` and `kv-height-harness.*`. An install
+from a git URL gets no `dist/`: npm runs only `prepare`, not `prepack`, for git dependencies.
 
 ### Build Process (`buildHelper.ts`)
 
@@ -48,7 +50,7 @@ to `dist/` without tests, `test-utils.*` and `test-harness.*`. An install from a
 3. Runs `renameFiles.mjs` to rename `.js` → `.mjs`/`.cjs` and rewrite import paths within files
 4. Restores `package.json`
 
-**Note**: CJS build excludes test files and the test helpers `src/test-utils.ts` and `src/pubsub/test-harness.ts` via `tsconfig.cjs.json`.
+**Note**: CJS build excludes test files and the test helpers `src/test-utils.ts`, `src/kv-height-harness.ts` and `src/pubsub/test-harness.ts` via `tsconfig.cjs.json`.
 
 ## CI
 
@@ -117,11 +119,15 @@ src/
 ├── functions.ts          # CID creation, blake32Hash, base64 utilities
 ├── utils.ts              # Key lookup, permissions, event stream, abort and close event utilities
 ├── errors.ts             # Custom error classes via ChelErrorGenerator factory
+├── internal-errors.ts    # Errors kept out of the package root (`ChelErrorKvMaxAttempts`)
 ├── events.ts             # Event name constants
 ├── constants.ts          # INVITE_STATUS enum
 ├── persistent-actions.ts # PersistentAction queue with retry
 ├── journal.ts            # Per-contract state-change journal (diff + snapshots)
 ├── kv.ts                 # KV slots — declarative typed key/value store API
+├── kv-runtime.ts         # KV runtime maps: created by _init, replaced by reset (internal)
+├── kv-height.ts          # KV height stamps, height waits and recovery syncs (internal)
+├── kv-checks.ts          # Re-entrancy, `maxAttempts` and signing/encryption key checks of the KV selectors (internal)
 ├── presets.ts            # Server preset for configuring Chelonia
 ├── time-sync.ts          # Server time sync: performance.now()-driven, Date.now() jumps (sleep) trigger correction + resync
 ├── timer-utils.ts        # timerDelay()/unrefTimer(): timers that can be disabled, clamped, and don't keep Node alive
@@ -175,6 +181,7 @@ Often the source file's default export is an array of the selector names it regi
 | `chelonia/private/journal/*` | `journal.ts` | Internal journal recorder — recordEvent |
 | `chelonia/kv/queuedSet` | `chelonia-utils.ts` | Optional queued raw KV setter |
 | `chelonia/kv/{defineSlot,update,read,sync,clear,status,refreshFilters}` | `kv.ts` | KV slots — declarative typed key/value API |
+| `chelonia/kv/withHeightRecovery` | `kv.ts` | The height recovery, for raw `kv/get` / `kv/set` calls |
 | `chelonia/externalStateSetup` | `local-selectors/` | External state synchronization |
 
 #### Key Public Selectors
@@ -276,7 +283,20 @@ Full documentation:
 - Selector reference and events: [docs/api.md](docs/api.md#kv-slots)
 - Public selectors: `chelonia/kv/defineSlot`, `chelonia/kv/update`,
   `chelonia/kv/read`, `chelonia/kv/sync`, `chelonia/kv/clear`,
-  `chelonia/kv/status`, `chelonia/kv/refreshFilters`
+  `chelonia/kv/status`, `chelonia/kv/refreshFilters`,
+  `chelonia/kv/withHeightRecovery`
+- Contract heights: a KV value can't be verified until the local contract
+  reaches the height it was written at, and the server rejects writes
+  stamped with an older height. A value that can't be verified yet is not
+  absent. Detect the errors with `isKvHeightAhead`, `isKvHeightMalformed`
+  and `isKvConflict` (`src/errors.ts`), not `instanceof` or `e.name`. See
+  [docs/kv.md](docs/kv.md#contract-heights); rules in
+  [KV-REVAMPED.md §3.4](docs/specs/KV-REVAMPED.md#34-height-stamps-verifiability-and-recovery).
+- Never await `update`, `clear`, `queuedSet`, `sync` or
+  `withHeightRecovery` from code running on the same
+  contract's queue (side effects, `queueInvocation` bodies, `onUpdate`,
+  reducers, `onconflict`): they may never settle. See
+  [docs/kv.md](docs/kv.md#where-not-to-await).
 
 ### Contract State Structure
 
@@ -392,13 +412,23 @@ no WebSocket server in the repo; the file's header comment lists what it fakes).
 and relay test helpers go there too. Examples: `src/pubsub/recovery.test.ts`,
 `src/chelonia-publish-receipt.test.ts`.
 
-Generic test helpers (e.g. `waitMicrotasks`, `until`, `within`, `captureConsole`) live in
-`src/test-utils.ts`, a plain module that registers no selectors; `test-harness.ts` re-exports
-`captureConsole`. A test must fail rather than hang when the behaviour it checks regresses:
-poll with `until(cond, label)` and bound a promise that might never settle with
-`within(promise, label)`. `until` throws a labelled timeout error (5 s by default); prefer
-the harness's `waitFor(cond)` when the test should inspect a timeout rather than fail on it:
-it resolves with the truthy value of `cond()`, or with `undefined` after 2 s by default.
+Generic test helpers (e.g. `waitMicrotasks`, `until`, `within`, `isPending`, `sleep`,
+`captureConsole`) live in `src/test-utils.ts`, a plain module that registers no selectors;
+`test-harness.ts` re-exports `captureConsole`. A test must fail rather than hang when the
+behaviour it checks regresses: poll with `until(cond, label)` and bound a promise that might
+never settle with `within(promise, label)`. `until` throws a labelled timeout error (5 s by
+default); prefer the harness's `waitFor(cond)` when the test should inspect a timeout rather
+than fail on it: it resolves with the truthy value of `cond()`, or with `undefined` after 2 s
+by default.
+
+`src/kv-height-harness.ts` runs the real KV slot layer against a simulated KV server
+(`makeKvServer` in `src/test-utils.ts`) for the `kv-height*.test.ts` files. Filter SBP calls
+with its `vetoQueue`, `vetoSelector` and `filterCalls`, never a module-level
+`sbp/filters/selector/add`: SBP filters can't be removed. Test files may import
+`test-utils.ts`, `pubsub/test-harness.ts` and `kv-height-harness.ts`, never each other.
+
+`npm test` passes `--test-timeout=60000`, which on Node 22 (CI) bounds a whole test *file*:
+keep each file under about 25 s and split one that grows past that.
 
 ## Common Gotchas
 

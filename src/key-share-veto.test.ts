@@ -17,7 +17,7 @@ import { Secret } from './Secret.js'
 import { SPMessage } from './SPMessage.js'
 import type { SPKey, SPOpContract, SPOpValue, ProtoSPOpKeyShare } from './SPMessage.js'
 import { signedOutgoingDataWithRawKey } from './signedData.js'
-import { captureConsole, until, waitMicrotasks, within } from './test-utils.js'
+import { captureConsole, sleep, until, waitMicrotasks, within } from './test-utils.js'
 import type { ChelRootState, CheloniaConfig } from './types.js'
 
 // Decides, for each `chelonia/private/queueEvent` call, whether to veto it
@@ -26,6 +26,9 @@ sbp('sbp/filters/selector/add', 'chelonia/private/queueEvent',
   (_domain: string, _selector: string, [queueName, invocation]: unknown[]) =>
     !veto(queueName as string, invocation)
 )
+// Runs when `chelonia/reset` starts its waits after its abort
+let afterResetAbort = () => {}
+sbp('sbp/filters/selector/add', 'chelonia/kv/_waitInFlight', () => { afterResetAbort() })
 
 const rootState = (): ChelRootState => sbp('chelonia/private/state')
 
@@ -228,5 +231,66 @@ describe('OP_KEY_SHARE when a filter vetoes the follow-up work', () => {
     assert.strictEqual(logs.grep(log).length, 1)
     assert.deepStrictEqual(logs.grep(/postKeyShare/), [])
     assert.deepStrictEqual(keysReceived, [])
+  })
+})
+
+describe('OP_KEY_SHARE received while chelonia/reset waits after its abort', () => {
+  let logs: ReturnType<typeof captureConsole>
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+
+  beforeEach(async () => {
+    sbp('chelonia/_init')
+    sbp('chelonia/configure', {
+      connectionURL: 'https://example.test',
+      skipActionProcessing: true,
+      fetch: stubFetch
+    } as Partial<CheloniaConfig>)
+    sbp('chelonia/storeSecretKeys', new Secret([{ key: CEK, transient: true }]))
+    unhandled.length = 0
+    process.on('unhandledRejection', onUnhandled)
+    logs = captureConsole()
+    await within(sbp('chelonia/contract/retain', cid), 'retain')
+  })
+
+  afterEach(() => {
+    afterResetAbort = () => {}
+    logs.restore()
+    process.off('unhandledRejection', onUnhandled)
+    sbp('chelonia/_init')
+  })
+
+  it("leaves the contract that it marks dirty to the reset's callback", async () => {
+    // Without the shared key, part of the other contract couldn't be decrypted
+    rootState().contracts[subscribedOther] = {
+      ...subscribedOtherHead, previousKeyOp: '', type: 'test/other'
+    }
+    await within(sbp('chelonia/private/in/sync', subscribedOther), 'sync')
+    rootState().contracts[subscribedOther]!.missingDecryptionKeyIds = [keyId(OTHER_CEK)]
+    rootState()[subscribedOther] = { _vm: { authorizedKeys: {}, type: 'test/other' } }
+    const snapshot = () => JSON.parse(JSON.stringify({
+      meta: rootState().contracts[subscribedOther], state: rootState()[subscribedOther]
+    }))
+    const cached = snapshot()
+    // Its re-sync is queued without a signal
+    let handled: Promise<unknown> | undefined
+    afterResetAbort = () => {
+      afterResetAbort = () => {}
+      handled = sbp(
+        'chelonia/private/in/enqueueHandleEvent', cid, keyShare(subscribedOther).serialize()
+      )
+    }
+    let seen: unknown
+    await within(sbp('chelonia/reset', () => { seen = snapshot() }), 'the reset')
+    await within(handled!, 'the key share')
+    assert.deepStrictEqual(seen, {
+      meta: cached.meta, state: { ...cached.state, _volatile: { dirty: true } }
+    })
+    await sleep(0)
+    assert.deepStrictEqual(unhandled, [])
+    assert.strictEqual(
+      logs.grep(new RegExp(`Error during sync for ${subscribedOther} during OP_KEY_SHARE`)).length,
+      1
+    )
   })
 })
