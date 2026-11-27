@@ -213,6 +213,24 @@ describe('Slot writes and contract heights', () => {
     assert.strictEqual(syncs.count, before + 1)
   })
 
+  it("update syncs when its 409's stored value is ahead of a height the contract reached meanwhile", async () => {
+    defineSlot({ key: 'names', defaultValue: [] })
+    await activate()
+    syncs.catchUp = true
+    const before = syncs.count
+    server.onPost = () => {
+      server.onPost = undefined
+      writeAsDeviceB('names', ['b'], AHEAD)
+      // An event arrives, but not up to the stored value's height
+      setLocalHeight(START_HEIGHT + 1)
+    }
+    assert.deepStrictEqual(await updateWith('names', { ifMatch: '*' }), ['x'])
+    assert.deepStrictEqual(server.posts().map(({ status, height }) => [status, height]), [
+      [409, String(START_HEIGHT)], [204, String(AHEAD)]
+    ])
+    assert.strictEqual(syncs.count, before + 1)
+  })
+
   it('an abort during its POST rejects at once, and the server may still store the write', async () => {
     defineSlot({ key: 'names', defaultValue: [] })
     await activate()

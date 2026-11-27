@@ -197,8 +197,9 @@ Behaviour changes (see [Contract heights](#contract-heights)):
   a stale contract height: this client missed some of the contract's
   events (e.g. its pubsub subscription was lost).
   - Before re-signing, `kv/set` waits for the contract's internal queue,
-    and syncs only if Chelonia is subscribed to the contract and none of
-    its events was processed since the value was signed. A failing sync
+    and syncs only if Chelonia is subscribed to the contract and its
+    height is still below the one the `409` asks for (the signed height +
+    1, or the stored value's height if higher). A failing sync
     is logged and the write goes on. After the sync, failed or not,
     `kv/set` also subscribes the pubsub client again to the contracts it
     lost.

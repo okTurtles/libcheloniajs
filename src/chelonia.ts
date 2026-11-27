@@ -3259,8 +3259,8 @@ export default sbp('sbp/selectors/register', {
             const instance = this._instance
             const globalSignal = this.abortController.signal
             let synced = false
-            // Unless an event past the signed height arrived meanwhile
-            const sync = syncIfBehind.call(this, contractID, Number(message.height) + 1, () => {
+            // Unless an event reaching the required height arrived meanwhile
+            const sync = syncIfBehind.call(this, contractID, requiredHeight, () => {
               synced = true
             }, signal).finally(() => {
               // Like publishing, re-subscribe to the contract if the pubsub
