@@ -11,7 +11,6 @@ import sbp from '@sbp/sbp'
 import { cloneDeep, deepEqualJSONType, has } from 'turtledash'
 import {
   ChelErrorKvConflict,
-  ChelErrorKvReentrant,
   ChelErrorKvSlotInvalid,
   ChelErrorKvSlotUnknown,
   ChelErrorKvUpdateInvalid,
@@ -23,7 +22,8 @@ import {
   CHELONIA_KV_VALIDATION_ERROR
 } from './events.js'
 import { isKvMaxAttempts } from './internal-errors.js'
-import { notifyContractHeight } from './kv-height.js'
+import { assertNotReentrant, resolveKvKeyIds } from './kv-checks.js'
+import { notifyContractHeight, withHeightRecovery } from './kv-height.js'
 import {
   KV_AUTO_LOAD,
   KV_DEFAULT_ENCRYPTION_KEY_NAME,
@@ -45,6 +45,8 @@ import type {
   ChelRootState,
   JSONType,
   KvConflictCause,
+  KvHeightRecoveryAttempt,
+  KvHeightRecoveryOptions,
   KvLoadStatus,
   KvMirrorEntry,
   KvSlotDefinition,
@@ -137,31 +139,6 @@ function resolveSlotDefinition (
     onUpdate: def.onUpdate,
     source
   }
-}
-
-function resolveSlotKeyIds (
-  contractID: string,
-  key: string,
-  slot: SlotDefinition,
-  operation: 'update' | 'clear'
-): { encryptionKeyId: string | null; signingKeyId: string } {
-  const encryptionKeyId = slot.encryptionKeyName === null
-    ? null
-    : sbp('chelonia/contract/currentKeyIdByName', contractID, slot.encryptionKeyName)
-  const signingKeyId = sbp('chelonia/contract/currentKeyIdByName', contractID, slot.signingKeyName)
-  if (slot.encryptionKeyName !== null && !encryptionKeyId) {
-    throw new ChelErrorKvUpdateInvalid(
-      `[chelonia/kv] ${operation}: ${contractID}::${key} — encryption key ` +
-      `'${slot.encryptionKeyName}' not found on contract; refusing to write plaintext`
-    )
-  }
-  if (!signingKeyId) {
-    throw new ChelErrorKvUpdateInvalid(
-      `[chelonia/kv] ${operation}: ${contractID}::${key} — signing key ` +
-      `'${slot.signingKeyName}' not found on contract`
-    )
-  }
-  return { encryptionKeyId, signingKeyId }
 }
 
 function assertParsedDefaultValue (
@@ -812,32 +789,6 @@ async function safeOnUpdateGuarded (
         e
       )
     }
-  }
-}
-
-// Reject a KV write selector that was invoked from within an `onUpdate`
-// callback for the *same* contract — doing so would deadlock the
-// contract's `chelonia/queueInvocation` lane (see `safeOnUpdateGuarded`).
-// Only synchronous re-entrancy is detected (the flag is held just for the
-// callback's synchronous portion), so the recommended way to trigger a
-// same-contract write from `onUpdate` is to schedule it off the
-// synchronous stack and NOT await it within the callback, e.g.
-// `queueMicrotask(() => sbp('chelonia/kv/update', …))`. The scheduled
-// write simply queues behind the lane and runs once it releases.
-function assertNotReentrant (
-  ctx: CheloniaContext,
-  contractID: string,
-  key: string,
-  operation: 'update' | 'clear' | 'sync'
-): void {
-  if ((ctx.kvOnUpdateActive.get(contractID) ?? 0) > 0) {
-    throw new ChelErrorKvReentrant(
-      `[chelonia/kv] ${operation}: ${contractID}::${key} was called ` +
-      'synchronously from within an onUpdate callback for the same ' +
-      'contract; this would deadlock the contract lane. Schedule the ' +
-      'write off the synchronous stack instead, e.g. ' +
-      "queueMicrotask(() => sbp('chelonia/kv/" + operation + "', …))."
-    )
   }
 }
 
@@ -1969,7 +1920,8 @@ export default (sbp('sbp/selectors/register', {
   // continuations never run against a torn-down mirror or a swapped-out
   // `kvLocalEchoCIDs`. `_loadSlot` syncs are drained through source #1;
   // if the contract is released before a queued load runs, `_loadSlot`'s
-  // subscription guard bails out before mutating state.
+  // subscription guard bails out before mutating state. Running height
+  // recovery syncs (`kvRecoveries`) are awaited too.
   // A lane that fails (e.g. an SBP filter vetoed it) doesn't stop the wait
   // for the others; once all have settled, this rejects with an
   // `AggregateError` of the failures, and `chelonia/reset` logs it.
@@ -1983,11 +1935,14 @@ export default (sbp('sbp/selectors/register', {
     })
     this.kvPendingWrites.forEach((_n, cID) => ids.add(cID))
     const contractIDs = Array.from(ids)
-    const results = await Promise.allSettled(
-      contractIDs.map(async (cID) => {
-        await sbp('chelonia/queueInvocation', cID, ['chelonia/private/noop'])
-      })
-    )
+    const [results] = await Promise.all([
+      Promise.allSettled(
+        contractIDs.map(async (cID) => {
+          await sbp('chelonia/queueInvocation', cID, ['chelonia/private/noop'])
+        })
+      ),
+      ...Array.from(this.kvRecoveries.values(), (sync) => sync.catch(() => {}))
+    ])
     const failed = contractIDs.filter((_cID, i) => results[i].status === 'rejected')
     if (failed.length) {
       throw new AggregateError(
@@ -2034,6 +1989,23 @@ export default (sbp('sbp/selectors/register', {
     height: number
   ): void {
     notifyContractHeight(this, contractID, height)
+  },
+
+  // Retries `attempt` (e.g. raw `kv/get` / `kv/set` calls) after syncing the
+  // contract when it rejects with `ChelErrorKvHeightAhead`
+  'chelonia/kv/withHeightRecovery': async function <T> (
+    this: CheloniaContext,
+    contractID: string,
+    attempt: (args: KvHeightRecoveryAttempt) => T | Promise<T>,
+    options?: KvHeightRecoveryOptions | null
+  ): Promise<T> {
+    if (typeof attempt !== 'function') {
+      throw new ChelErrorKvUpdateInvalid(
+        '[chelonia/kv] withHeightRecovery: `attempt` must be a function'
+      )
+    }
+    assertNotReentrant(this, contractID, undefined, 'withHeightRecovery')
+    return withHeightRecovery(this, contractID, attempt, options)
   },
 
   'chelonia/kv/_onContractResynced': function (this: CheloniaContext, contractID: string): void {
@@ -2673,7 +2645,7 @@ export default (sbp('sbp/selectors/register', {
         // already inside the per-contract serial queue. Resolving key IDs
         // here (not at call-site) ensures key rotation that landed before
         // this write is seen; the IDs are fixed for kv/set's retries.
-        const keyIds = resolveSlotKeyIds(contractID, key, slot, 'update')
+        const keyIds = resolveKvKeyIds(this, contractID, slot, `update: ${contractID}::${key}`)
         setResult = await sbp('chelonia/kv/set', contractID, key,
           nextValue,
           {
@@ -2902,7 +2874,7 @@ export default (sbp('sbp/selectors/register', {
     // Reject a re-entrant aggregate sync at the only point a deadlock
     // could occur (just before dispatching loads on the shared lane).
     // The early returns above can't deadlock — no load is dispatched.
-    assertNotReentrant(this, contractID, '*', 'sync')
+    assertNotReentrant(this, contractID, undefined, 'sync')
     const slots = Array.from(perKey.values())
     await Promise.all(slots.map((slot) =>
       sbp('chelonia/kv/_loadSlot', { contractID, slot, reason: KV_UPDATE_REASON.LOAD })
@@ -2999,7 +2971,7 @@ export default (sbp('sbp/selectors/register', {
       try {
         // Resolve key IDs inside the queue so rotations that landed
         // before this clear are seen; they stay fixed for kv/set's retries.
-        const keyIds = resolveSlotKeyIds(contractID, key, slot, 'clear')
+        const keyIds = resolveKvKeyIds(this, contractID, slot, `clear: ${contractID}::${key}`)
         setResult = await sbp('chelonia/kv/set', contractID, key,
           null,
           {

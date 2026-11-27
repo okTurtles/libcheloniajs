@@ -325,7 +325,7 @@ export const syncIfBehind = function (
 // that follows the new SUB. A new client's first connection lost nothing.
 export const reconcilePubsub = function (
   this: CheloniaContext,
-  trigger: 'connected' | 'reconnected' | 'periodic' | 'publish' | 'kv/set'
+  trigger: 'connected' | 'reconnected' | 'periodic' | 'publish' | 'kv/set' | 'kv recovery'
 ): void {
   if (trigger !== 'connected') {
     const { missing } = sbp('chelonia/pubsub/status') as ChelPubSubStatus
@@ -827,6 +827,10 @@ export default sbp('sbp/selectors/register', {
   },
   // used by, e.g. 'chelonia/contract/wait'
   'chelonia/private/noop': function () {},
+  // `reconcilePubsub` for the KV height recovery, which can't import this module
+  'chelonia/private/kv/reconcilePubsub': function (this: CheloniaContext) {
+    if (this.pubsub) reconcilePubsub.call(this, 'kv recovery')
+  },
   'chelonia/private/in/sync': function (
     this: CheloniaContext,
     contractIDs: string | string[],

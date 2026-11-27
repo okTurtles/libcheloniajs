@@ -218,7 +218,8 @@ See [`files.md`](./files.md) for the prose guide and full signatures.
 | `chelonia/kv/set` | `src/chelonia.ts` | `POST /kv/:contractID/:key`. Encrypts, signs, retries `412` conflicts through `onconflict` (up to `maxAttempts`) and re-signs after a `409` (stale height stamp). A `412` (or, with `data` undefined, a GET) whose value can't be read ends the call with a conflict error, whatever the attempts left. Rejects with `ChelErrorKvHeightAhead` / `ChelErrorKvHeightMalformed` for a conflict value it can't verify (unless `allowUnverifiedConflict`), and with `ChelErrorKvHeightAhead` (`exact: false`) when the contract doesn't reach the height a `409` asks for (after any running sync) within `heightWaitMs`, or after 5 re-signs. After a `409` it syncs the contract once per call, so never await it inside the contract's internal queue ([why](./kv.md#migration-notes-for-direct-cheloniakvset-callers)). For `heightWaitMs` and `allowUnverifiedConflict`, see [Raw `kv/get` and `kv/set`](./kv.md#raw-kvget-and-kvset). Resolves to `{ etag: string \| null }`. |
 | `chelonia/kv/get` | `src/chelonia.ts` | `GET /kv/:contractID/:key`. `(contractID, key, { signal }?)`: aborting `signal` (or `chelonia/reset`) aborts the request, also while the body downloads. Returns `ChelKvGetResult \| null`: the parsed encrypted/unencrypted message with `.data` and `.etag`, or `null` on 404. Rejects with `ChelErrorKvHeightAhead` / `ChelErrorKvHeightMalformed` for a value it can't verify, with `ChelErrorUnexpectedHttpResponseCode` (`cause`: the status) for another status, and with `ChelErrorUnexpected` (`cause`: the `SyntaxError`) for a body that isn't JSON; never waits or syncs. |
 | `chelonia/kv/setFilter` | `src/chelonia.ts` | Restrict the set of KV keys subscribed to over pubsub. |
-| `chelonia/kv/queuedSet` | `src/chelonia-utils.ts` | Wrapper around `chelonia/kv/set` that serializes concurrent updates via `okTurtles.eventQueue`. Prefer this over `kv/set` for typical writes. |
+| `chelonia/kv/queuedSet` | `src/chelonia-utils.ts` | Wrapper around `chelonia/kv/set` that serializes concurrent updates via `okTurtles.eventQueue` and recovers from height errors ([options](./kv.md#options-and-timings), plus `allowUnverifiedConflict`). Keys come from `encryptionKeyName` (default `'cek'`; `null` writes plaintext) and `signingKeyName` (default `'csk'`); a missing one rejects with `ChelErrorKvUpdateInvalid`. Conflicts reject with `ChelErrorKvConflict`. Prefer this over `kv/set` for typical writes. |
+| `chelonia/kv/withHeightRecovery` | `src/kv.ts` | `(contractID, attempt, options?)`. Runs `attempt({ recoveries, heightWaitMs, queue })`, syncing the contract and retrying when it throws `ChelErrorKvHeightAhead`. A non-function `attempt` or invalid options reject with `ChelErrorKvUpdateInvalid`. Wraps raw `kv/get` / `kv/set`: see [Raw `kv/get` and `kv/set`](./kv.md#raw-kvget-and-kvset). |
 
 ## KV slots
 
@@ -240,6 +241,10 @@ All slot selectors live in `src/kv.ts`.
 | `chelonia/kv/clear` | Reset a slot to its declared `defaultValue` by writing the internal clear sentinel (`null`), even over a value it can't verify; the mirror value becomes a cloned default and status returns to `'non-init'`. |
 | `chelonia/kv/status` | Report the `KvLoadStatus` of a single slot (`'non-init' \| 'loading' \| 'loaded' \| 'error'`) or the aggregate status of all slots for a contract. |
 | `chelonia/kv/refreshFilters` | Re-evaluate every slot's `match` predicate against the current root state. Call after login / logout transitions. |
+
+Never await `update`, `clear`, `queuedSet`, `sync` or
+`withHeightRecovery` from code running on the same
+contract's queue: see [Where not to await](./kv.md#where-not-to-await).
 
 ## External state sync
 
@@ -376,6 +381,7 @@ The most useful exported types and values (re-exported from the package root):
 | `KvLoadStatus` | `src/types.ts` | `'non-init' \| 'loading' \| 'loaded' \| 'error'` — status of a slot's mirror entry. |
 | `KvMirrorEntry` | `src/types.ts` | Shape of a single mirror entry at `rootState._kv[contractID][key]`: `{ value: JSONType \| undefined, etag: string \| null, status: KvLoadStatus, lastError?: { name, message } }`. `value` is canonical (always a server-confirmed payload or `undefined`); see [Consumer caveats](./kv.md#consumer-caveats). |
 | `KvHeightAheadCause` / `KvConflictCause` | `src/types.ts` | `.cause` of `ChelErrorKvHeightAhead` and of `ChelErrorKvConflict`. See [Contract heights](./kv.md#contract-heights). |
+| `KvHeightRecoveryOptions` / `KvHeightAheadMode` / `KvHeightRecoveryAttempt` | `src/types.ts` | Height-recovery options of `queuedSet` and `withHeightRecovery`, and the argument of a `withHeightRecovery` attempt. |
 | `KvServerValueStatus` / `KvConflictServerValue` | `src/types.ts` | `'present' \| 'absent' \| 'ahead' \| 'malformed'`, and the `currentStatus` / `currentValue` / `requiredHeight` fields `onconflict` receives. |
 | `KV_NOOP` | `src/kv.ts` | `Symbol.for('@chelonia/lib/KV_NOOP')` — return from an updater to abort the write. |
 | `DEFAULT_SNAPSHOT_INTERVAL` / `defaultJournalConfig` | `src/journal.ts` | Default snapshot cadence, and a fresh copy of the journal block Chelonia starts from. See [`configure.md`](./configure.md#journal-configuration). |
@@ -408,12 +414,12 @@ All errors are generated by `ChelErrorGenerator` in `src/errors.ts`.
 | `ChelErrorJournalCorrupt` | `chelonia/journal/reconstruct` could not apply a stored patch. Has `entryIndex` and `contractID`. |
 | `ChelErrorKvSlotUnknown` | Unknown/inactive slot or unsynced contract. Thrown by `read`, `update`, `clear`, and single-slot `sync`; aggregate `sync` and `status` do not throw for this. |
 | `ChelErrorKvSlotInvalid` | Malformed `KvSlotDefinition` (bad key, schema, or defaultValue). Thrown by `defineSlot`. |
-| `ChelErrorKvUpdateInvalid` | Invalid `update` arguments or reducer/`defaultUpdater` contract violations, including throws, non-function reducers, unexpected symbols, or `null`/`undefined` outputs. |
+| `ChelErrorKvUpdateInvalid` | Invalid `update` arguments or reducer/`defaultUpdater` contract violations, including throws, non-function reducers, unexpected symbols, or `null`/`undefined` outputs. Also invalid `maxAttempts` / height-recovery options, and keys of slot writes and `queuedSet` that can't be found (or, for the signing key, whose secret key isn't loaded). |
 | `ChelErrorKvValidation` | A slot value failed `schema.parse` or `assertJsonShape`. Thrown by `update` (reducer output or server `currentData` on conflict), `_loadSlotNow` (GET response decode/shape), and `revalidateMirrorEntry`. Companion event: `CHELONIA_KV_VALIDATION_ERROR` for load/remote/re-validate failures (local reducer-output failures reject the `update` promise instead). |
-| `ChelErrorKvConflict` | `update` or `clear` ran out of attempts on `412` conflicts, or got a conflict value it can't read. |
-| `ChelErrorKvHeightAhead` | A KV value (or the server) needs a contract height not reached locally. `.cause` is a `KvHeightAheadCause`. |
+| `ChelErrorKvConflict` | `update`, `clear` or `queuedSet` ran out of attempts on `412` conflicts, got a conflict value it can't read (or `queuedSet` got one without `onconflict`). `.cause` (`KvConflictCause`) describes the last `412`. |
+| `ChelErrorKvHeightAhead` | A KV value (or the server) needs a contract height not reached locally, and recovery (if any) gave up. `.cause` is a `KvHeightAheadCause`. |
 | `ChelErrorKvHeightMalformed` | A KV value's height stamp is missing or malformed, so it can never be verified. |
-| `ChelErrorKvReentrant` | A KV write selector (`update`/`clear`/`sync`) was called synchronously from within the same contract's `onUpdate` callback, which would deadlock the per-contract queue lane. Only synchronous re-entrancy is detected. |
+| `ChelErrorKvReentrant` | A KV selector that queues on the contract's lane (`update`/`clear`/`queuedSet`/`sync`/`withHeightRecovery`) was called synchronously from within the same contract's `onUpdate` callback, where awaiting it would deadlock the per-contract queue lane. Only synchronous re-entrancy is detected. |
 
 Check KV errors with the name-based predicates `isKvHeightAhead`,
 `isKvHeightMalformed` and `isKvConflict` (which also matches the internal

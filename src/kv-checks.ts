@@ -1,5 +1,28 @@
 // Checks shared by the KV selectors. Internal: not exported from the package root.
-import { ChelErrorKvUpdateInvalid } from './errors.js'
+import sbp from '@sbp/sbp'
+import { ChelErrorKvReentrant, ChelErrorKvUpdateInvalid } from './errors.js'
+import type { CheloniaContext } from './types.js'
+
+// The contract's lane is held while its `onUpdate` callbacks run, so a call
+// made synchronously from one of them, if awaited there, would never settle
+export function assertNotReentrant (
+  ctx: CheloniaContext,
+  contractID: string,
+  key: string | undefined,
+  operation: 'update' | 'clear' | 'sync' | 'withHeightRecovery' | 'queuedSet' | 'whenSettled'
+): void {
+  if ((ctx.kvOnUpdateActive.get(contractID) ?? 0) > 0) {
+    const target = key === undefined ? contractID : `${contractID}::${key}`
+    throw new ChelErrorKvReentrant(
+      `[chelonia/kv] ${operation} for ${target} was called ` +
+      'synchronously from within an onUpdate callback for the same ' +
+      'contract, where awaiting it would deadlock the contract lane. ' +
+      "Schedule the call off the synchronous stack instead (and don't " +
+      'await it in the callback), e.g. ' +
+      "queueMicrotask(() => sbp('chelonia/kv/" + operation + "', …))."
+    )
+  }
+}
 
 // `null` and `undefined` stand for the option's default
 export function assertIntegerOption (
@@ -12,4 +35,45 @@ export function assertIntegerOption (
   if (value != null && !(Number.isSafeInteger(value) && (value as number) >= min)) {
     throw new ErrorClass(`[chelonia/kv] ${label}: \`${name}\` must be a safe integer >= ${min}`)
   }
+}
+
+// Resolved right before each write, so that it uses keys rotated since the call
+export function resolveKvKeyIds (
+  ctx: CheloniaContext,
+  contractID: string,
+  names: { encryptionKeyName: string | null; signingKeyName: string },
+  label: string
+): { encryptionKeyId: string | null; signingKeyId: string } {
+  const { encryptionKeyName, signingKeyName } = names
+  const state = sbp(ctx.config.stateSelector)?.[contractID]
+  if (!state?._vm) {
+    throw new ChelErrorKvUpdateInvalid(`[chelonia/kv] ${label}: ${contractID} is not in local state`)
+  }
+  const keyId = (name: string, requireSecretKey?: boolean): string | null | undefined =>
+    sbp('chelonia/contract/currentKeyIdByName', state, name, requireSecretKey)
+  let encryptionKeyId: string | null = null
+  if (encryptionKeyName !== null) {
+    encryptionKeyId = keyId(encryptionKeyName) || null
+    if (!encryptionKeyId) {
+      throw new ChelErrorKvUpdateInvalid(
+        `[chelonia/kv] ${label}: encryption key '${encryptionKeyName}' not found on contract; ` +
+        'refusing to write plaintext'
+      )
+    }
+  }
+  const signingKeyId = keyId(signingKeyName)
+  if (!signingKeyId) {
+    throw new ChelErrorKvUpdateInvalid(
+      `[chelonia/kv] ${label}: signing key '${signingKeyName}' not found on contract`
+    )
+  }
+  // Only signing needs the secret key (encrypting uses the public one). Without
+  // it, signing would fail later with an error that suggests an unknown key.
+  if (!keyId(signingKeyName, true)) {
+    throw new ChelErrorKvUpdateInvalid(
+      `[chelonia/kv] ${label}: signing key '${signingKeyName}' (${signingKeyId}) is on the ` +
+      'contract, but its secret key is not available'
+    )
+  }
+  return { encryptionKeyId, signingKeyId }
 }

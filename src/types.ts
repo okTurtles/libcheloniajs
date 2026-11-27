@@ -596,6 +596,10 @@ export type CheloniaContext = {
   kvOnUpdateActive: Map<string, number>;
   // Callbacks waiting for a contract to commit a height (`kv-height.ts`)
   kvHeightListeners: Map<string, Set<KvHeightListener>>;
+  // Running height-recovery syncs, each shared by all its callers
+  kvRecoveries: Map<string, Promise<void>>;
+  // Survives `chelonia/reset`, which blocks recovery syncs while it drains
+  kvResetsInProgress: number;
   // Previous `kv` block per manifest, used by `defineContract`
   // replacement to diff against the new block.
   defContractKvByManifest: Map<string, Record<string, Omit<KvSlotDefinition, 'key' | 'contractType'>>>;
@@ -822,6 +826,22 @@ export type KvHeightAheadCause = {
   localHeight: number | undefined;
   etag: string | null;
   httpStatus: number;
+};
+
+export type KvHeightAheadMode = 'sync' | 'reject';
+
+// `null` means the default.
+export type KvHeightRecoveryOptions = {
+  onHeightAhead?: KvHeightAheadMode | null;
+  maxHeightRecoveries?: number | null;
+  signal?: AbortSignal | null;
+};
+
+export type KvHeightRecoveryAttempt = {
+  recoveries: number;
+  // `undefined`: let `chelonia/kv/set` wait for the height (default wait)
+  heightWaitMs: 0 | undefined;
+  queue: <T>(body: () => Promise<T>) => Promise<T>;
 };
 
 // Describes the server value of the final 412 only, or, for a `kv/set` without

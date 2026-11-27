@@ -15,7 +15,7 @@ import {
   retainedContract, sleep, staleContract, waitFor
 } from './pubsub/test-harness.js'
 import type { RelayRequest, TestContract } from './pubsub/test-harness.js'
-import type { ChelRootState } from './types.js'
+import type { ChelRootState, KvHeightRecoveryAttempt } from './types.js'
 
 const SLOT = 'hung'
 const server = createFakePubsubServer()
@@ -117,10 +117,9 @@ describe('chelonia/reset with a request that never settles', () => {
     })
   }
 
-  // A raw `kv/set` runs outside the queues, but after a 409 it waits for the
-  // sync of the contract, which hangs here
-  it('ends a raw kv/set that waits for the sync after a 409, without retrying or subscribing again', async (t) => {
-    t.mock.method(Math, 'random', () => 0) // No back-off
+  // A raw `kv/set` runs outside the queues, but after a 409 its height
+  // recovery waits for the sync of the contract, which hangs here
+  it('ends a raw kv/set whose recovery waits for the sync after a 409, without retrying or subscribing again', async () => {
     const { contract } = await staleContract(relay, pubsub)
     const { contractID } = contract
     let answer!: (response: Response) => void
@@ -132,28 +131,35 @@ describe('chelonia/reset with a request that never settles', () => {
       return hung
     }
     const data = { n: 1 }
-    let conflicts = 0
-    const work = sbp('chelonia/kv/set', contractID, 'raw', data, {
-      signingKeyId: contract.CSKid,
-      onconflict: async ({ etag }: { etag?: string | null }) => {
-        conflicts++
-        return [data, etag ?? undefined]
+    let attempts = 0
+    const posts = () => relay.requests.filter(
+      ({ method, path }) => method === 'POST' && path.startsWith(`/kv/${contractID}/`)).length
+    const work = sbp('chelonia/kv/withHeightRecovery', contractID,
+      ({ heightWaitMs }: KvHeightRecoveryAttempt) => {
+        attempts++
+        return sbp('chelonia/kv/set', contractID, 'raw', data, {
+          signingKeyId: contract.CSKid,
+          heightWaitMs
+        })
       }
-    }).then(() => 'no error', (e: unknown) => (e as Error)?.name)
+    ).then(() => 'no error', (e: unknown) => (e as Error)?.name)
     assert.ok(await waitFor(() => syncing), 'did not sync')
     const logged = logs.fromNow()
     const reset = sbp('chelonia/reset')
     try {
       assert.equal(await work, 'AbortError', 'the write did not reject with an AbortError')
-      assert.equal(conflicts, 0, 'tried to write again')
     } finally {
       answer(new Response('', { status: 500 }))
       relay.onRequest = undefined
       await reset
     }
-    // Neither "retrying anyway" after the failed sync, nor a pubsub reconcile
-    // for a contract that the reset drops
-    const lines = logged.grep(/\[kv\/set\]|pubsub reconcile/).map(({ text }) => text)
+    // Neither a retry (also one that the abort stops before it posts, or one
+    // after the reset) nor a pubsub reconcile for a contract that the reset
+    // drops
+    await sleep(300)
+    assert.equal(attempts, 1, 'tried to write again')
+    assert.equal(posts(), 1, 'posted the write again')
+    const lines = logged.grep(/\[chelonia\/kv\]|pubsub reconcile/).map(({ text }) => text)
     assert.deepEqual(lines, [])
   })
 

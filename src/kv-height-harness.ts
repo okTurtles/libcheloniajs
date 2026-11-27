@@ -92,6 +92,10 @@ export const update = (
 export const aheadAt = (height: number) => (e: unknown): boolean =>
   kvHeightAheadCause(e)?.requiredHeight === height
 
+// Height recoveries that gave up because their sync failed, from the warnings logged so far
+export const failedSyncGiveUps = (): number => logs.entries.filter(({ level, args }) =>
+  level === 'warn' && /gave up: its sync failed/.test(String(args[0]))).length
+
 // Like Node's `fetch`, a request rejects with its signal's reason as is (even one
 // that isn't an Error) as soon as it aborts, while the server carries on (a POST
 // may still be stored)

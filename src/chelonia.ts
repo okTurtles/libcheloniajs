@@ -821,6 +821,8 @@ export default sbp('sbp/selectors/register', {
         }
       })
     }
+    // Whether this reset is counted in `kvResetsInProgress`
+    let counted = false
     // The controller this reset aborts after its drain
     let ended: AbortController | undefined
     // Whether this reset is in the waits that follow its abort. The last reset
@@ -854,6 +856,9 @@ export default sbp('sbp/selectors/register', {
       // The waits above drained the queued KV writes (`kv/update`, `kv/clear`,
       // `kv/queuedSet`). Before `postCleanupFn` and the teardown, abort what runs
       // outside those queues (e.g. a raw `kv/set`) and drain what is still queued.
+      // No height-recovery syncs start meanwhile.
+      counted = true
+      this.kvResetsInProgress++
       ended = this.abortController
       ended.abort()
       waiting = true
@@ -914,6 +919,7 @@ export default sbp('sbp/selectors/register', {
       return result
     } finally {
       leaveWaits()
+      if (counted) this.kvResetsInProgress--
       clearInterval(drainTimer)
       // Leave no controller this reset aborted in place, unless another reset is
       // still in its waits: the last one to leave them replaces it
